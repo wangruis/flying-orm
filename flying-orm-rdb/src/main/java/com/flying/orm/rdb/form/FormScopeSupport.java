@@ -1,0 +1,135 @@
+package com.flying.orm.rdb.form;
+
+import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.StructuredConditionInput;
+import com.flying.orm.core.condition.StructuredConditionPolicy;
+import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.param.ParameterConditionCompiler;
+import com.flying.orm.core.param.ParameterConditionPackage;
+import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.rdb.lock.OptimisticLockOptions;
+import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
+import java.util.Map;
+import java.util.Objects;
+
+/**
+ * 统一处理动态表单的范围快照、前端结构化条件和写入字段保护。
+ *
+ * <p>真正的安全规则仍由既有 {@link FormScopeGuard} 执行；本类只把同一份合并后的范围传给
+ * 查询、写入和批量操作，避免不同入口各自拼接条件而出现租户或字段权限偏差。</p>
+ *
+ * @author wangr
+ * @date 2026-08-06
+ * @version v1.0
+ */
+final class FormScopeSupport {
+
+    private final FormDataSqlRenderer renderer;
+    private final FormScopeGuard guard;
+
+    FormScopeSupport(FormDataSqlRenderer renderer,
+                     StructuredConditionResolver resolver,
+                     DataScope defaultDataScope) {
+        this.renderer = Objects.requireNonNull(renderer, "form data sql renderer must not be null");
+        this.guard = new FormScopeGuard(renderer, Objects.requireNonNull(resolver,
+                                                                         "structured condition resolver must not be null"),
+                                        Objects.requireNonNull(defaultDataScope, "default data scope must not be null"));
+    }
+
+    DataScope effectiveScope(DataScope scope) {
+        return guard.effectiveScope(scope);
+    }
+
+    ConditionGroup scopedWhere(DynamicForm form, ConditionGroup where) {
+        return scopedWhere(form, where, DataScope.none());
+    }
+
+    ConditionGroup scopedWhere(DynamicForm form, ConditionGroup where, DataScope scope) {
+        return guard.scopedWhere(form, where, scope);
+    }
+
+    ScopedRead scopedRead(DynamicForm form, ConditionGroup where, DataScope scope) {
+        FormScopeGuard.ScopedRead read = guard.scopedRead(form, where, scope);
+        return new ScopedRead(read.form(), read.where(), read.scope());
+    }
+
+    ScopedRead scopedStructuredRead(DynamicForm form,
+                                    StructuredConditionInput input,
+                                    StructuredConditionPolicy policy) {
+        return scopedStructuredRead(form, input, policy, DataScope.none());
+    }
+
+    ScopedRead scopedStructuredRead(DynamicForm form,
+                                    StructuredConditionInput input,
+                                    StructuredConditionPolicy policy,
+                                    DataScope scope) {
+        FormScopeGuard.ScopedRead read = guard.scopedStructuredRead(form, input, policy, scope);
+        return new ScopedRead(read.form(), read.where(), read.scope());
+    }
+
+    ConditionGroup writableActiveWhere(DynamicForm form,
+                                       Map<String, Object> values,
+                                       ConditionGroup where,
+                                       DataScope scope) {
+        return guard.writableActiveWhere(form, values, where, scope);
+    }
+
+    ConditionGroup batchUpdateWhere(DynamicForm form,
+                                    BatchOptimisticUpdate update,
+                                    DataScope effectiveScope) {
+        return guard.batchUpdateWhere(form, update, effectiveScope);
+    }
+
+    PreparedBatchUpdate prepareBatchUpdate(DynamicForm form,
+                                           BatchOptimisticUpdate update,
+                                           DataScope effectiveScope) {
+        ConditionGroup where = batchUpdateWhere(form, update, effectiveScope);
+        ProtectedFieldRuntime.PreparedWrite write = renderer.protection().prepareWrite(
+                form, update.values(), effectiveScope);
+        ProtectedFieldRuntime.PreparedQuery query = renderer.protection().prepareQuery(
+                form, form, where, effectiveScope);
+        SqlRequest request = renderer.protection().update(write, query.where(), update.lock());
+        ProtectedFieldRuntime.PreparedQuery ownerQuery = renderer.protection().prepareQuery(
+                form, form, withExpectedVersion(where, update.lock()), effectiveScope);
+        return new PreparedBatchUpdate(
+                write.physicalForm(), write.values(), update.values(), query.where(), update.lock(),
+                request, ownerQuery);
+    }
+
+    SqlRequest renderBatchUpdate(DynamicForm form,
+                                 BatchOptimisticUpdate update,
+                                 DataScope effectiveScope) {
+        return prepareBatchUpdate(form, update, effectiveScope).request();
+    }
+
+    Map<String, Object> prepareWriteValues(DynamicForm form,
+                                           Map<String, Object> values,
+                                           DataScope effectiveScope) {
+        return guard.prepareWriteValues(form, values, effectiveScope);
+    }
+
+    ParameterConditionCompiler parameterCompiler(ParameterConditionPackage conditionPackage) {
+        ParameterConditionPackage safePackage = Objects.requireNonNull(conditionPackage,
+                                                                         "parameter condition package must not be null");
+        ParameterConditionCompiler.Builder builder = ParameterConditionCompiler.builder()
+                                                                                .terms(renderer.conditionTerms());
+        safePackage.specs().forEach(builder::add);
+        return builder.build();
+    }
+
+    private static ConditionGroup withExpectedVersion(ConditionGroup where, OptimisticLockOptions lock) {
+        ConditionGroup.Builder builder = ConditionGroup.and();
+        where.children().forEach(builder::add);
+        return builder.where(lock.field(), "=", lock.expectedValue()).build();
+    }
+
+    record PreparedBatchUpdate(DynamicForm form,
+                               Map<String, Object> values,
+                               Map<String, Object> logicalValues,
+                               ConditionGroup where,
+                               OptimisticLockOptions lock,
+                               SqlRequest request,
+                               ProtectedFieldRuntime.PreparedQuery ownerQuery) {
+    }
+}

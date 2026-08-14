@@ -1,0 +1,224 @@
+package com.flying.orm.rdb.form;
+
+import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.form.DynamicField;
+import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.rdb.lock.OptimisticLockMode;
+import com.flying.orm.rdb.lock.OptimisticLockOptions;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.StringJoiner;
+
+/**
+ * 动态表单单条写入的内部渲染器。
+ *
+ * <p>它只负责把 insert、update 和 delete 组织成参数化 SQL；字段识别、值转换、条件编译、计划缓存和
+ * 必须带 where 的安全校验仍统一交给 {@link FormSqlRenderSupport}。对象在门面创建时生成，之后不保存请求级状态，
+ * 因而可以被多个线程并发复用。</p>
+ *
+ * @author wangr
+ * @date 2026-08-06
+ * @version v1.0
+ */
+final class FormWriteSqlRenderer {
+
+    private final FormSqlRenderSupport support;
+
+    FormWriteSqlRenderer(FormSqlRenderSupport support) {
+        this.support = Objects.requireNonNull(support, "form SQL render support must not be null");
+    }
+
+    /**
+     * 渲染单条 insert，字段顺序沿用通用写入字段校验的结果。
+     */
+    SqlRequest insert(DynamicForm form, Map<String, Object> values) {
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        List<FormSqlRenderSupport.FieldValue> fieldValues = support.writeFields(safeForm, values, null);
+        List<Object> parameters = new ArrayList<>(fieldValues.size());
+        List<String> fields = new ArrayList<>(fieldValues.size());
+        for (FormSqlRenderSupport.FieldValue fieldValue : fieldValues) {
+            fields.add(fieldValue.field().name());
+            parameters.add(fieldValue.value());
+        }
+        return support.request("insert", safeForm, fields, FormSqlRenderSupport.ConditionSql.none(), "", "", "",
+                               parameters, List.of(), () -> {
+                                   StringJoiner columns = new StringJoiner(", ");
+                                   StringJoiner placeholders = new StringJoiner(", ");
+                                   for (FormSqlRenderSupport.FieldValue fieldValue : fieldValues) {
+                                       columns.add(support.identifier(fieldValue.field().name()));
+                                       placeholders.add(support.valueExpression(fieldValue.field()));
+                                   }
+                                   return "insert into " + support.identifier(safeForm.table()) + " (" + columns
+                                           + ") values (" + placeholders + ")";
+                               });
+    }
+
+    /**
+     * 渲染带业务 where 的更新。
+     */
+    SqlRequest update(DynamicForm form, Map<String, Object> values, ConditionGroup where) {
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        List<UpdateAssignment> fieldValues = updateAssignments(safeForm, values);
+        FormSqlRenderSupport.ConditionSql whereFragment = support.requiredWhere(where, "update");
+        List<Object> parameters = new ArrayList<>(fieldValues.size() + whereFragment.parameters().size());
+        List<String> fields = new ArrayList<>(fieldValues.size());
+        for (UpdateAssignment fieldValue : fieldValues) {
+            fields.add(fieldValue.field().name() + (fieldValue.arithmetic() ? ":add" : ":assign"));
+            parameters.add(fieldValue.value());
+        }
+        parameters.addAll(whereFragment.parameters());
+        return support.request("update", safeForm, fields, whereFragment, "", "", "",
+                               parameters, List.of(), () -> {
+                                   StringJoiner sets = new StringJoiner(", ");
+                                   fieldValues.forEach(fieldValue -> sets.add(updateExpression(fieldValue)));
+                                   return "update " + support.identifier(safeForm.table()) + " set " + sets + " where "
+                                           + whereFragment.sql();
+                               });
+    }
+
+    /**
+     * 渲染乐观锁更新。版本字段的 INCREMENT 和 ASSIGN 语义保持在 SQL 和参数顺序中。
+     */
+    SqlRequest update(DynamicForm form,
+                      Map<String, Object> values,
+                      ConditionGroup where,
+                      OptimisticLockOptions lock) {
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        OptimisticLockOptions safeLock = Objects.requireNonNull(lock, "optimistic lock options must not be null");
+        DynamicField lockField = support.field(safeForm, safeLock.field());
+        requireUnencryptedLockField(safeForm, lockField);
+        List<UpdateAssignment> fieldValues = updateAssignments(safeForm, values);
+        FormSqlRenderSupport.ConditionSql whereFragment = support.requiredWhere(where, "update");
+        List<Object> parameters = new ArrayList<>(fieldValues.size() + whereFragment.parameters().size() + 2);
+        List<String> fields = new ArrayList<>(fieldValues.size() + 1);
+        for (UpdateAssignment fieldValue : fieldValues) {
+            fields.add(fieldValue.field().name() + (fieldValue.arithmetic() ? ":add" : ":assign"));
+            parameters.add(fieldValue.value());
+        }
+        if (safeLock.mode() == OptimisticLockMode.INCREMENT) {
+            fields.add(lockField.name() + ":lock-increment");
+        } else {
+            fields.add(lockField.name() + ":lock-assign");
+            parameters.add(support.valueCodecs.write(safeLock.nextValue()));
+        }
+        parameters.addAll(whereFragment.parameters());
+        parameters.add(support.valueCodecs.write(safeLock.expectedValue()));
+        return support.request("update-optimistic", safeForm, fields, whereFragment, "", "", "",
+                               parameters, List.of(), () -> {
+                                   StringJoiner sets = new StringJoiner(", ");
+                                   fieldValues.forEach(fieldValue -> sets.add(updateExpression(fieldValue)));
+                                   if (safeLock.mode() == OptimisticLockMode.INCREMENT) {
+                                       sets.add(support.identifier(lockField.name()) + " = "
+                                                        + support.identifier(lockField.name()) + " + 1");
+                                   } else {
+                                       sets.add(support.identifier(lockField.name()) + " = ?");
+                                   }
+                                   return "update " + support.identifier(safeForm.table()) + " set " + sets + " where "
+                                           + whereFragment.sql() + " and " + support.identifier(lockField.name()) + " = ?";
+                               });
+    }
+
+    /**
+     * 根据已经渲染好的乐观锁更新请求固定后续批量行的参数类型和绑定布局。
+     */
+    BatchUpdatePlan optimisticUpdatePlan(DynamicForm form,
+                                         Map<String, Object> values,
+                                         ConditionGroup where,
+                                         OptimisticLockOptions lock,
+                                         SqlRequest request) {
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        OptimisticLockOptions safeLock = Objects.requireNonNull(lock, "optimistic lock options must not be null");
+        DynamicField lockField = support.field(safeForm, safeLock.field());
+        requireUnencryptedLockField(safeForm, lockField);
+        List<UpdateAssignment> fieldValues = updateAssignments(safeForm, values);
+        FormSqlRenderSupport.ConditionSql whereFragment = support.requiredWhere(where, "update");
+        SqlRequest safeRequest = Objects.requireNonNull(request, "optimistic update request must not be null");
+        List<Class<?>> parameterTypes = new ArrayList<>(safeRequest.parameters().size());
+        fieldValues.forEach(fieldValue -> parameterTypes.add(support.parameterType(fieldValue.field())));
+        if (safeLock.mode() == OptimisticLockMode.ASSIGN) {
+            parameterTypes.add(support.parameterType(lockField));
+        }
+        whereFragment.parameters().forEach(value -> parameterTypes.add(value == null ? Object.class : value.getClass()));
+        parameterTypes.add(support.parameterType(lockField));
+        return new BatchUpdatePlan(safeRequest.sql(), parameterTypes, safeRequest.bindMarkerStyle());
+    }
+
+    /**
+     * 渲染带必填业务 where 的物理删除。
+     */
+    SqlRequest delete(DynamicForm form, ConditionGroup where) {
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        FormSqlRenderSupport.ConditionSql whereFragment = support.requiredWhere(where, "delete");
+        return support.request("delete", safeForm, List.of(), whereFragment, "", "", "",
+                               whereFragment.parameters(), List.of(), () -> "delete from "
+                                       + support.identifier(safeForm.table()) + " where " + whereFragment.sql());
+    }
+
+    /**
+     * 渲染带乐观锁版本条件的删除，版本字段只参与 where，不会被修改。
+     */
+    SqlRequest delete(DynamicForm form, ConditionGroup where, OptimisticLockOptions lock) {
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        OptimisticLockOptions safeLock = Objects.requireNonNull(lock, "optimistic lock options must not be null");
+        DynamicField lockField = support.field(safeForm, safeLock.field());
+        requireUnencryptedLockField(safeForm, lockField);
+        FormSqlRenderSupport.ConditionSql whereFragment = support.requiredWhere(where, "delete");
+        List<Object> parameters = new ArrayList<>(whereFragment.parameters().size() + 1);
+        parameters.addAll(whereFragment.parameters());
+        parameters.add(support.valueCodecs.write(safeLock.expectedValue()));
+        return support.request("delete-optimistic", safeForm, List.of(lockField.name()), whereFragment, "", "", "",
+                               parameters, List.of(), () -> "delete from " + support.identifier(safeForm.table())
+                                       + " where " + whereFragment.sql() + " and "
+                                       + support.identifier(lockField.name()) + " = ?");
+    }
+
+    private List<UpdateAssignment> updateAssignments(DynamicForm form, Map<String, Object> values) {
+        Map<String, Object> safeValues = Objects.requireNonNull(values, "dynamic form values must not be null");
+        if (safeValues.isEmpty()) {
+            throw new IllegalArgumentException("dynamic form values must not be empty");
+        }
+        List<UpdateAssignment> assignments = new ArrayList<>(safeValues.size());
+        Map<String, String> sourceNames = new HashMap<>(Math.max(16, safeValues.size() * 2));
+        for (Map.Entry<String, Object> entry : safeValues.entrySet()) {
+            DynamicField field = support.field(form, entry.getKey());
+            String previousName = sourceNames.putIfAbsent(field.normalizedName(), entry.getKey());
+            if (previousName != null) {
+                throw new IllegalArgumentException("duplicate normalized dynamic update field");
+            }
+            if (entry.getValue() instanceof UpdateDelta delta) {
+                requireNumericUpdateField(field);
+                assignments.add(new UpdateAssignment(field, support.valueCodecs.write(delta.value()), true));
+            } else {
+                assignments.add(new UpdateAssignment(field, support.writeValue(field, entry.getValue()), false));
+            }
+        }
+        return assignments;
+    }
+
+    private static void requireUnencryptedLockField(DynamicForm form, DynamicField field) {
+        if (form.protections().encrypted(field.name()).isPresent()) {
+            // 密文不能参与数据库原子等值比较或递增，必须在 SQL 生成前拒绝。
+            throw new IllegalArgumentException("optimistic lock field must not be encrypted");
+        }
+    }
+
+    private String updateExpression(UpdateAssignment assignment) {
+        String column = support.identifier(assignment.field().name());
+        return assignment.arithmetic() ? column + " = " + column + " + ?"
+                : column + " = " + support.valueExpression(assignment.field());
+    }
+
+    private static void requireNumericUpdateField(DynamicField field) {
+        if (SqlTypeCategory.of(field.dataType()) != SqlTypeCategory.NUMERIC) {
+            throw new IllegalArgumentException("arithmetic update requires a numeric field: " + field.name());
+        }
+    }
+
+    private record UpdateAssignment(DynamicField field, Object value, boolean arithmetic) {
+    }
+}

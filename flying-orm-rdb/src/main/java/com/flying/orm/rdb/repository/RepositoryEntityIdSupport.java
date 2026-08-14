@@ -1,0 +1,294 @@
+package com.flying.orm.rdb.repository;
+
+import com.flying.orm.core.annotation.IdType;
+import com.flying.orm.rdb.execution.SqlWriteResult;
+import com.flying.orm.rdb.id.IdGenerator;
+import com.flying.orm.rdb.internal.ReflectionFailureSupport;
+import com.flying.orm.rdb.mapping.EntityFieldMetadata;
+import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.mapping.MappingException;
+import com.flying.orm.rdb.result.DynamicRow;
+
+import java.beans.IntrospectionException;
+import java.beans.Introspector;
+import java.beans.PropertyDescriptor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.util.Locale;
+import java.util.Objects;
+import java.util.UUID;
+
+/**
+ * 统一处理实体主键的插入前校验、应用侧 UUID 生成和数据库生成键回填。
+ *
+ * <p>反射成员只在 Repository 创建时解析一次，单次 insert 只做直接调用。AUTO 主键必须为空并交给数据库；
+ * NONE/INPUT 必须由调用方提供。ASSIGN_ID 只调用客户端显式配置的生成器；没有配置可靠节点生成器时会在 SQL 前失败，
+ * 绝不会为了“能运行”而偷偷使用一个可能重复的默认节点。</p>
+ */
+final class RepositoryEntityIdSupport<T> {
+
+    private final EntityFieldMetadata id;
+    private final ValueAccess access;
+    private final IdGenerator generator;
+
+    private RepositoryEntityIdSupport(EntityFieldMetadata id, ValueAccess access, IdGenerator generator) {
+        this.id = id;
+        this.access = access;
+        this.generator = generator;
+    }
+
+    static <T> RepositoryEntityIdSupport<T> create(EntityMetadata<T> metadata, IdGenerator generator) {
+        EntityMetadata<T> safeMetadata = Objects.requireNonNull(metadata, "entity metadata must not be null");
+        IdGenerator safeGenerator = Objects.requireNonNull(generator, "id generator must not be null");
+        EntityFieldMetadata id = safeMetadata.idField().orElse(null);
+        return id == null
+                ? new RepositoryEntityIdSupport<>(null, null, safeGenerator)
+                : new RepositoryEntityIdSupport<>(id, resolveAccess(safeMetadata.type(), id), safeGenerator);
+    }
+
+    /** SQL 生成前完成全部本地主键规则，失败时数据库还没有发生任何写入。 */
+    void prepare(T entity) {
+        if (id == null) {
+            return;
+        }
+        Object current = access.read(entity);
+        if (id.generation().generated()) {
+            requireNull(current, "database-generated primary key must be null before insert");
+            return;
+        }
+        switch (id.idType()) {
+            case AUTO -> throw new MappingException("AUTO primary key is missing database generation metadata");
+            case NONE, INPUT -> requirePresent(current, "INPUT primary key must be assigned before insert");
+            case ASSIGN_UUID -> {
+                if (current == null) {
+                    access.write(entity, uuidValue(access.valueType()));
+                }
+            }
+            case ASSIGN_ID -> {
+                if (current == null) {
+                    try {
+                        Object generated = generator.generate(entity.getClass(), id.name(), access.valueType());
+                        access.write(entity, convert(generated, access.valueType()));
+                    } catch (RuntimeException error) {
+                        ReflectionFailureSupport.rethrowVirtualMachineError(error);
+                        throw new MappingException("ASSIGN_ID generation failed: " + id.name(), error);
+                    }
+                }
+            }
+        }
+    }
+
+    boolean databaseGenerated() {
+        return id != null && id.generation().generated();
+    }
+
+    /**
+     * 读取数据库生成主键写回前的原值。批量执行器可能先拿到生成键，随后整批事务又回滚，
+     * Repository 需要保存这个值，才能把实体恢复到与数据库一致的状态。
+     */
+    Object currentGeneratedKey(T entity) {
+        if (!databaseGenerated()) {
+            throw new IllegalStateException("entity does not use a database-generated primary key");
+        }
+        return access.read(Objects.requireNonNull(entity, "repository entity must not be null"));
+    }
+
+    /** 回滚、UNKNOWN 或取消时撤销尚未提交的生成键，避免实体留下并不存在于数据库中的主键。 */
+    void restoreGeneratedKey(T entity, Object originalValue) {
+        if (!databaseGenerated()) {
+            throw new IllegalStateException("entity does not use a database-generated primary key");
+        }
+        access.write(Objects.requireNonNull(entity, "repository entity must not be null"), originalValue);
+    }
+
+    /**
+     * @return 执行内核请求生成键时使用的真实数据库列名
+     * @throws IllegalStateException 当前实体没有数据库生成主键
+     */
+    String generatedKeyColumn() {
+        if (!databaseGenerated()) {
+            throw new IllegalStateException("entity does not use a database-generated primary key");
+        }
+        return id.columnName();
+    }
+
+    /** 把驱动返回的唯一键写回原实体；缺失或多行结果都拒绝，不能猜测实体对应哪一行。 */
+    void applyGeneratedKey(T entity, SqlWriteResult result) {
+        if (!databaseGenerated()) {
+            return;
+        }
+        SqlWriteResult safeResult = Objects.requireNonNull(result, "generated key result must not be null");
+        if (safeResult.generatedKeys().size() != 1) {
+            throw new MappingException("database must return exactly one generated primary key");
+        }
+        applyGeneratedKey(entity, safeResult.generatedKeys().getFirst());
+    }
+
+    /**
+     * 按批量输入偏移收到一行生成键后复用单条 insert 的列匹配和类型转换规则。
+     */
+    void applyGeneratedKey(T entity, DynamicRow generatedKey) {
+        if (!databaseGenerated()) {
+            throw new MappingException("entity does not declare a database-generated primary key");
+        }
+        T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
+        DynamicRow safeKey = Objects.requireNonNull(generatedKey, "generated key row must not be null");
+        Object value = keyValue(safeKey);
+        access.write(safeEntity, convert(value, access.valueType()));
+    }
+
+    private Object keyValue(DynamicRow row) {
+        String expected = normalize(id.columnName());
+        Object matched = null;
+        int matches = 0;
+        for (int index = 0; index < row.columnCount(); index++) {
+            if (normalize(row.columnName(index)).equals(expected)) {
+                matched = row.value(index);
+                matches++;
+            }
+        }
+        if (matches == 1) {
+            return matched;
+        }
+        // MySQL 等驱动可能使用 GENERATED_KEY 一类标签；单列结果没有歧义，可以安全采用第一列。
+        if (matches == 0 && row.columnCount() == 1) {
+            return row.value(0);
+        }
+        throw new MappingException("generated primary key column is missing or ambiguous: " + id.columnName());
+    }
+
+    private static ValueAccess resolveAccess(Class<?> type, EntityFieldMetadata id) {
+        Method reader = null;
+        Method writer = null;
+        try {
+            for (PropertyDescriptor property : Introspector.getBeanInfo(type).getPropertyDescriptors()) {
+                if (property.getName().equals(id.name())) {
+                    reader = accessible(property.getReadMethod());
+                    writer = accessible(property.getWriteMethod());
+                    break;
+                }
+            }
+        } catch (IntrospectionException error) {
+            throw new MappingException("primary key property cannot be inspected: " + id.name(), error);
+        }
+        Field field = findField(type, id.name());
+        if (reader == null && field == null) {
+            throw new MappingException("primary key member cannot be read: " + id.name());
+        }
+        boolean mayWrite = id.generation().generated()
+                || id.idType() == IdType.ASSIGN_ID
+                || id.idType() == IdType.ASSIGN_UUID;
+        if (mayWrite && writer == null && (field == null || Modifier.isFinal(field.getModifiers()))) {
+            throw new MappingException("generated or assigned primary key needs a mutable bean property: " + id.name());
+        }
+        return new ValueAccess(reader, writer, field, reader != null ? reader.getReturnType() : field.getType());
+    }
+
+    private static Field findField(Class<?> type, String name) {
+        for (Class<?> current = type; current != null && current != Object.class; current = current.getSuperclass()) {
+            try {
+                Field field = current.getDeclaredField(name);
+                if (!field.trySetAccessible()) {
+                    throw new MappingException("primary key field is not accessible: " + field);
+                }
+                return field;
+            } catch (NoSuchFieldException ignored) {
+                // 继续到父类查找继承主键。
+            }
+        }
+        return null;
+    }
+
+    private static Method accessible(Method method) {
+        if (method == null) {
+            return null;
+        }
+        if (!method.trySetAccessible()) {
+            throw new MappingException("primary key method is not accessible: " + method);
+        }
+        return method;
+    }
+
+    private static Object uuidValue(Class<?> type) {
+        UUID uuid = UUID.randomUUID();
+        if (type == UUID.class) {
+            return uuid;
+        }
+        if (type == String.class) {
+            return uuid.toString().replace("-", "");
+        }
+        throw new MappingException("ASSIGN_UUID only supports String or UUID primary keys: " + type.getName());
+    }
+
+    private static Object convert(Object value, Class<?> type) {
+        if (value == null) {
+            throw new MappingException("database returned a null generated primary key");
+        }
+        if (type.isInstance(value)) {
+            return value;
+        }
+        if (type == String.class) {
+            return value.toString();
+        }
+        if (value instanceof Number number) {
+            try {
+                BigDecimal decimal = new BigDecimal(number.toString());
+                if (type == Long.class || type == long.class) return decimal.longValueExact();
+                if (type == Integer.class || type == int.class) return decimal.intValueExact();
+                if (type == Short.class || type == short.class) return decimal.shortValueExact();
+                if (type == Byte.class || type == byte.class) return decimal.byteValueExact();
+                if (type == BigInteger.class) return decimal.toBigIntegerExact();
+                if (type == BigDecimal.class) return decimal;
+            } catch (ArithmeticException error) {
+                throw new MappingException("generated primary key cannot be converted to " + type.getName(), error);
+            }
+        }
+        if (type == UUID.class) {
+            String text = value.toString();
+            try {
+                return UUID.fromString(text);
+            } catch (IllegalArgumentException ignored) {
+                // UUID 解析异常会把原始数据库值写入 message；映射边界只暴露稳定分类，避免日志泄露或放大。
+                throw new MappingException("generated primary key cannot be converted to " + type.getName());
+            }
+        }
+        throw new MappingException("generated primary key cannot be converted to " + type.getName());
+    }
+
+    private static void requireNull(Object value, String message) {
+        if (value != null) throw new MappingException(message);
+    }
+
+    private static void requirePresent(Object value, String message) {
+        if (value == null) throw new MappingException(message);
+    }
+
+    private static String normalize(String value) {
+        return value.replace("_", "").replace("-", "").toLowerCase(Locale.ROOT);
+    }
+
+    /** getter/setter 优先，缺少访问器时使用已经提前开放的字段。 */
+    private record ValueAccess(Method reader, Method writer, Field field, Class<?> valueType) {
+
+        private Object read(Object entity) {
+            try {
+                return reader != null ? reader.invoke(entity) : field.get(entity);
+            } catch (ReflectiveOperationException error) {
+                ReflectionFailureSupport.rethrowVirtualMachineError(error);
+                throw new MappingException("primary key cannot be read", error);
+            }
+        }
+
+        private void write(Object entity, Object value) {
+            try {
+                if (writer != null) writer.invoke(entity, value); else field.set(entity, value);
+            } catch (ReflectiveOperationException error) {
+                ReflectionFailureSupport.rethrowVirtualMachineError(error);
+                throw new MappingException("primary key cannot be written", error);
+            }
+        }
+    }
+}
