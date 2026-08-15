@@ -38,6 +38,17 @@ final class JdbcPerformanceTarget {
                                          "FLYING_ORM_PERFORMANCE_PG", "\"FLYING_ORM_PERFORMANCE_PG\"");
     }
 
+    static JdbcPerformanceTarget oracle(JdbcPerformanceArguments args) {
+        return new JdbcPerformanceTarget("oracle", "Oracle", args.oracleUrl, args.oracleUser, args.oraclePassword,
+                                         "FLYING_ORM_PERFORMANCE_ORACLE", "\"FLYING_ORM_PERFORMANCE_ORACLE\"");
+    }
+
+    static JdbcPerformanceTarget sqlserver(JdbcPerformanceArguments args) {
+        return new JdbcPerformanceTarget("sqlserver", "SQL Server", args.sqlserverUrl,
+                                         args.sqlserverUser, args.sqlserverPassword,
+                                         "FLYING_ORM_PERFORMANCE_SQLSERVER", "[FLYING_ORM_PERFORMANCE_SQLSERVER]");
+    }
+
     HikariDataSource openPool(int poolSize) {
         HikariConfig config = new HikariConfig();
         config.setPoolName("flying-orm-jdbc-" + key);
@@ -64,19 +75,33 @@ final class JdbcPerformanceTarget {
     String name() { return name; }
 
     String dropSql() {
+        if ("oracle".equals(key)) {
+            return "drop table " + quotedTable + " purge";
+        }
         return "drop table if exists " + quotedTable;
     }
 
     String createSql() {
+        if ("oracle".equals(key)) {
+            return "create table " + quotedTable
+                    + " (\"id\" number(19) primary key, \"name\" varchar2(128) not null, "
+                    + "\"value\" number(19) not null)";
+        }
         return "create table " + quotedTable
                 + " (id bigint primary key, name varchar(128) not null, value bigint not null)";
     }
 
     String querySql() {
+        if ("oracle".equals(key)) {
+            return "select \"id\", \"name\", \"value\" from " + quotedTable + " where \"id\" = ?";
+        }
         return "select id, name, value from " + quotedTable + " where id = ?";
     }
 
     String updateSql() {
+        if ("oracle".equals(key)) {
+            return "update " + quotedTable + " set \"value\" = \"value\" + 1 where \"id\" = ?";
+        }
         return "update " + quotedTable + " set value = value + 1 where id = ?";
     }
 }

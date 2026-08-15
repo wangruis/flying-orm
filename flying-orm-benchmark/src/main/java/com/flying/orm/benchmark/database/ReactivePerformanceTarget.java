@@ -6,5 +6,7 @@ record ReactivePerformanceTarget(String key,
                                  String url,
                                  String table,
                                  String dropSql,
+                                 String createSql,
+                                 String versionSql,
                                  String bindMarker) {
 }

@@ -11,6 +11,7 @@ import com.flying.orm.rdb.result.DynamicRow;
 import io.r2dbc.pool.ConnectionPool;
 import io.r2dbc.spi.Connection;
 import io.r2dbc.spi.ConnectionFactory;
+import io.r2dbc.spi.Statement;
 import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -68,6 +69,37 @@ final class ReactivePerformanceScenarioRunner {
                                "select ID, NAME, VALUE from " + table + " where ID = ?", List.of(id)), options)
                        .single()
                        .then();
+    }
+
+    /** 使用完整 R2DBC SPI 生命周期建立 ORM 查询路径的诊断对照，不进入 flying-orm 生产实现。 */
+    static Mono<Void> rawQueryById(ConnectionFactory connectionFactory,
+                                   String table,
+                                   String bindMarker,
+                                   AtomicLong sequence,
+                                   int seedRows,
+                                   int fetchSize) {
+        ConnectionFactory safeFactory = Objects.requireNonNull(
+                connectionFactory, "raw query connection factory must not be null");
+        String safeTable = Objects.requireNonNull(table, "raw query table must not be null");
+        String safeMarker = Objects.requireNonNull(bindMarker, "raw query bind marker must not be null");
+        AtomicLong safeSequence = Objects.requireNonNull(sequence, "raw query sequence must not be null");
+        if (seedRows <= 0 || fetchSize < 0) {
+            throw new IllegalArgumentException("raw query seed rows and fetch size are outside their safe range");
+        }
+        long id = Math.floorMod(safeSequence.getAndIncrement(), seedRows) + 1L;
+        String sql = "select ID, NAME, VALUE from " + safeTable + " where ID = " + safeMarker;
+        return Mono.usingWhen(
+                Mono.from(safeFactory.create()),
+                connection -> Mono.defer(() -> {
+                    Statement statement = connection.createStatement(sql).fetchSize(fetchSize).bind(0, id);
+                    return Flux.from(statement.execute())
+                               .concatMap(result -> Flux.from(result.map((row, metadata) -> 1L)), 1)
+                               .single()
+                               .then();
+                }),
+                connection -> Mono.from(connection.close()),
+                (connection, ignored) -> Mono.from(connection.close()),
+                connection -> Mono.from(connection.close()));
     }
 
     static Mono<Void> updateById(R2dbcSqlExecutor executor,

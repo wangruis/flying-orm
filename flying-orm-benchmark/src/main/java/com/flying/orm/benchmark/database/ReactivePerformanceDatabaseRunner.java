@@ -49,7 +49,7 @@ final class ReactivePerformanceDatabaseRunner {
         try {
             pool.warmup().block(CLOSE_TIMEOUT);
             prepareTable(executor, target, arguments.seedRows);
-            String databaseVersion = databaseVersion(executor);
+            String databaseVersion = databaseVersion(executor, target.versionSql());
             runScenarios(target, arguments, pool, executionFactory, executor, diagnostics, scenarios);
             awaitPoolIdle(pool);
             PoolMetrics finalMetrics = metrics(pool);
@@ -57,7 +57,9 @@ final class ReactivePerformanceDatabaseRunner {
                     .allMatch(result -> result.status() == DatabasePerformanceReport.Status.PASSED)
                     ? DatabasePerformanceReport.Status.PASSED : DatabasePerformanceReport.Status.FAILED;
             return new DatabasePerformanceReport.DatabaseResult(
-                    target.name(), databaseVersion, driver.getMetadata().getName(), poolVersion(), status,
+                    target.name(), databaseVersion, driver.getMetadata().getName(),
+                    BenchmarkRunIdentity.implementationVersion(driver.getClass()),
+                    BenchmarkRunIdentity.classSha256(driver.getClass()), poolVersion(), status,
                     finalMetrics.allocatedSize(), finalMetrics.acquiredSize(), finalMetrics.pendingAcquireSize(),
                     scenarios);
         } finally {
@@ -73,15 +75,21 @@ final class ReactivePerformanceDatabaseRunner {
                                      R2dbcSqlExecutor executor,
                                      R2dbcSqlExecutor diagnostics,
                                      List<DatabasePerformanceReport.ScenarioResult> scenarios) {
-        SqlExecutionOptions sqlOptions = SqlExecutionOptions.timeout(
-                ReactivePerformanceScenarioRunner.SQL_TIMEOUT).withConnectionAcquireTimeout(
-                        ReactivePerformanceScenarioRunner.ACQUIRE_TIMEOUT);
+        SqlExecutionOptions sqlOptions = queryOptions(arguments);
         if (arguments.includes(ReactivePerformanceScenario.QUERY_BY_ID)) {
             AtomicLong sequence = new AtomicLong();
             scenarios.add(runScenario(target, diagnostics, ReactivePerformanceScenario.QUERY_BY_ID,
                                       arguments.queryConcurrency, 1, arguments, pool,
                                       () -> ReactivePerformanceScenarioRunner.queryById(
-                                              executor, target.table(), sequence, arguments.seedRows, sqlOptions)));
+                                               executor, target.table(), sequence, arguments.seedRows, sqlOptions)));
+        }
+        if (arguments.includes(ReactivePerformanceScenario.RAW_QUERY_BY_ID)) {
+            AtomicLong sequence = new AtomicLong();
+            scenarios.add(runScenario(target, diagnostics, ReactivePerformanceScenario.RAW_QUERY_BY_ID,
+                                      arguments.queryConcurrency, 1, arguments, pool,
+                                      () -> ReactivePerformanceScenarioRunner.rawQueryById(
+                                              executionFactory, target.table(), target.bindMarker(), sequence,
+                                              arguments.seedRows, arguments.effectiveFetchSize())));
         }
         if (arguments.includes(ReactivePerformanceScenario.UPDATE_BY_ID)) {
             AtomicLong sequence = new AtomicLong();
@@ -120,6 +128,15 @@ final class ReactivePerformanceDatabaseRunner {
         }
     }
 
+    static SqlExecutionOptions queryOptions(ReactivePerformanceArguments arguments) {
+        ReactivePerformanceArguments safeArguments = Objects.requireNonNull(
+                arguments, "database performance arguments must not be null");
+        SqlExecutionOptions options = SqlExecutionOptions.timeout(ReactivePerformanceScenarioRunner.SQL_TIMEOUT)
+                .withConnectionAcquireTimeout(ReactivePerformanceScenarioRunner.ACQUIRE_TIMEOUT);
+        return safeArguments.fetchSize() == null
+                ? options : options.withFetchSize(safeArguments.fetchSize());
+    }
+
     private static DatabasePerformanceReport.ScenarioResult runBatchScenario(
             ReactivePerformanceTarget target,
             R2dbcSqlExecutor diagnostics,
@@ -153,10 +170,7 @@ final class ReactivePerformanceDatabaseRunner {
                                      ReactivePerformanceTarget target,
                                      int seedRows) {
         cleanup(executor, target.dropSql());
-        executor.rowsUpdated(SqlRequest.nativeSql(
-                "create table " + target.table()
-                        + " (ID bigint primary key, NAME varchar(128) not null, VALUE bigint not null)",
-                List.of())).block(CLOSE_TIMEOUT);
+        executor.rowsUpdated(SqlRequest.nativeSql(target.createSql(), List.of())).block(CLOSE_TIMEOUT);
         Flux<Object[]> rows = Flux.range(1, seedRows)
                                   .map(id -> new Object[]{(long) id, "seed-" + id, (long) id});
         executor.writeBatch(new BatchWriteRequest(
@@ -166,8 +180,8 @@ final class ReactivePerformanceDatabaseRunner {
                 .block(Duration.ofMinutes(2));
     }
 
-    private static String databaseVersion(R2dbcSqlExecutor executor) {
-        return executor.query(SqlRequest.nativeSql("select version() as FLYING_VERSION", List.of()))
+    private static String databaseVersion(R2dbcSqlExecutor executor, String versionSql) {
+        return executor.query(SqlRequest.nativeSql(versionSql, List.of()))
                        .map(row -> String.valueOf(row.values().iterator().next()))
                        .single().block(CLOSE_TIMEOUT);
     }

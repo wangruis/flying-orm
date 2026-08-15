@@ -1,5 +1,6 @@
 package com.flying.orm.benchmark.database;
 
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import io.r2dbc.spi.Connection;
 import io.r2dbc.spi.ConnectionFactory;
 import io.r2dbc.spi.Result;
@@ -10,9 +11,14 @@ import java.lang.reflect.Proxy;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Runner 单元测试只校验公开参数，普通构建不会尝试连接数据库。 */
 class RealDatabasePerformanceRunnerTest {
@@ -46,6 +52,77 @@ class RealDatabasePerformanceRunnerTest {
         assertEquals(true, arguments.phaseDiagnostics());
     }
 
+    /** 验证单变量诊断参数会进入真实查询执行选项，避免只记录参数却仍使用固定抓取大小。 */
+    @Test
+    void appliesExplicitFetchSizeToReactiveQueryOptions() {
+        ReactivePerformanceArguments arguments = ReactivePerformanceArguments.parse(new String[]{
+                "--postgresql-url", "r2dbc:postgresql://local/test",
+                "--output", "target/metrics.json",
+                "--summary", "target/summary.md",
+                "--git-commit", "abcdef1",
+                "--fetch-size", "256"
+        });
+
+        assertEquals(256, ReactivePerformanceDatabaseRunner.queryOptions(arguments).fetchSize());
+        assertEquals(256, arguments.reportParameters().fetchSizeOverride());
+        assertEquals(256, arguments.reportParameters().effectiveFetchSize());
+    }
+
+    /** 未声明诊断覆盖值时应测量项目真实默认值，不能由 benchmark 悄悄改写执行策略。 */
+    @Test
+    void keepsProductionFetchDefaultWhenBenchmarkOverrideIsAbsent() {
+        ReactivePerformanceArguments arguments = ReactivePerformanceArguments.parse(new String[]{
+                "--postgresql-url", "r2dbc:postgresql://local/test",
+                "--output", "target/metrics.json",
+                "--summary", "target/summary.md",
+                "--git-commit", "abcdef1"
+        });
+
+        assertEquals(SqlExecutionOptions.safeDefaults().fetchSize(),
+                     ReactivePerformanceDatabaseRunner.queryOptions(arguments).fetchSize());
+        assertEquals(null, arguments.reportParameters().fetchSizeOverride());
+        assertEquals(SqlExecutionOptions.safeDefaults().fetchSize(),
+                     arguments.reportParameters().effectiveFetchSize());
+    }
+
+    /** 四库性能门禁必须使用数据库自己的标识符、绑定标记和版本查询，不能依赖临时脚本。 */
+    @Test
+    void buildsOracleAndSqlServerPerformanceTargets() {
+        ReactivePerformanceArguments arguments = ReactivePerformanceArguments.parse(new String[]{
+                "--oracle-url", "r2dbc:oracle://local/test",
+                "--sqlserver-url", "r2dbc:mssql://local/test",
+                "--output", "target/metrics.json",
+                "--summary", "target/summary.md",
+                "--git-commit", "abcdef1"
+        });
+
+        List<ReactivePerformanceTarget> targets = arguments.targets();
+        assertEquals(List.of("oracle", "sqlserver"), targets.stream().map(ReactivePerformanceTarget::key).toList());
+        assertEquals("?", targets.get(0).bindMarker());
+        assertTrue(targets.get(0).createSql().contains("varchar2(128)"));
+        assertTrue(targets.get(0).versionSql().contains("product_component_version"));
+        assertFalse(targets.get(0).versionSql().contains("product like"));
+        assertEquals("@P0", targets.get(1).bindMarker());
+        assertTrue(targets.get(1).table().startsWith("["));
+        assertTrue(targets.get(1).versionSql().contains("serverproperty"));
+    }
+
+    /** 正式报告必须绑定当前 HEAD 和实际加载 class，调用方文本标签不能伪造候选身份。 */
+    @Test
+    void capturesVerifiableRunIdentityAndRejectsMismatchedCommitLabel() {
+        DatabasePerformanceReport.RunIdentity identity = BenchmarkRunIdentity.capture();
+
+        assertTrue(identity.gitHead().matches("[0-9a-f]{40}"));
+        assertTrue(identity.trackedDiffSha256().matches("[0-9a-f]{64}"));
+        assertTrue(identity.classpathSha256().matches("[0-9a-f]{64}"));
+        assertTrue(identity.benchmarkClassSha256().matches("[0-9a-f]{64}"));
+        assertTrue(identity.rdbClassSha256().matches("[0-9a-f]{64}"));
+        assertNotNull(identity.garbageCollectors());
+        BenchmarkRunIdentity.requireCommitLabel(identity, identity.gitHead().substring(0, 7));
+        assertThrows(IllegalArgumentException.class,
+                     () -> BenchmarkRunIdentity.requireCommitLabel(identity, "feature-2.0.0"));
+    }
+
     @Test
     void rejectsUnknownOptionsAndConcurrencyThatExceedsPool() {
         assertThrows(IllegalArgumentException.class,
@@ -74,10 +151,10 @@ class RealDatabasePerformanceRunnerTest {
                 "--output", "target/metrics.json",
                 "--summary", "target/summary.md",
                 "--git-commit", "abcdef1",
-                "--scenarios", "updateById,transactionalUpdateBatch,queryById"
+                "--scenarios", "updateById,transactionalUpdateBatch,rawQueryById,queryById"
         });
 
-        assertEquals(List.of("updateById", "transactionalUpdateBatch", "queryById"),
+        assertEquals(List.of("updateById", "transactionalUpdateBatch", "rawQueryById", "queryById"),
                      arguments.scenarioNames());
         assertThrows(IllegalArgumentException.class,
                      () -> ReactivePerformanceArguments.parse(new String[]{
@@ -87,6 +164,24 @@ class RealDatabasePerformanceRunnerTest {
                              "--git-commit", "abcdef1",
                              "--scenarios", "updateById,rawSql"
                      }));
+    }
+
+    /** 原生对照必须消费结果并归还同一个池连接，不能用不完整的驱动调用制造虚假优势。 */
+    @Test
+    void rawQueryByIdBindsFetchesConsumesAndCloses() {
+        AtomicReference<Object> bound = new AtomicReference<>();
+        AtomicInteger fetchSize = new AtomicInteger(-1);
+        AtomicInteger mapped = new AtomicInteger();
+        AtomicInteger closes = new AtomicInteger();
+        ConnectionFactory factory = rawQueryConnectionFactory(bound, fetchSize, mapped, closes);
+
+        ReactivePerformanceScenarioRunner.rawQueryById(
+                factory, "TEST_TABLE", "$1", new AtomicLong(4), 100, 0).block();
+
+        assertEquals(5L, bound.get());
+        assertEquals(0, fetchSize.get());
+        assertEquals(1, mapped.get());
+        assertEquals(1, closes.get());
     }
 
     @Test
@@ -179,6 +274,55 @@ class RealDatabasePerformanceRunnerTest {
             @Override
             public io.r2dbc.spi.ConnectionFactoryMetadata getMetadata() {
                 return () -> "transaction-test";
+            }
+        };
+    }
+
+    private static ConnectionFactory rawQueryConnectionFactory(AtomicReference<Object> bound,
+                                                               AtomicInteger fetchSize,
+                                                               AtomicInteger mapped,
+                                                               AtomicInteger closes) {
+        Result result = (Result) Proxy.newProxyInstance(
+                Result.class.getClassLoader(), new Class<?>[]{Result.class},
+                (proxy, method, arguments) -> {
+                    if ("map".equals(method.getName())) {
+                        mapped.incrementAndGet();
+                        return reactor.core.publisher.Mono.just(1L);
+                    }
+                    throw new UnsupportedOperationException("test result does not implement " + method.getName());
+                });
+        Statement statement = (Statement) Proxy.newProxyInstance(
+                Statement.class.getClassLoader(), new Class<?>[]{Statement.class},
+                (proxy, method, arguments) -> switch (method.getName()) {
+                    case "bind" -> {
+                        bound.set(arguments[1]);
+                        yield proxy;
+                    }
+                    case "fetchSize" -> {
+                        fetchSize.set((Integer) arguments[0]);
+                        yield proxy;
+                    }
+                    case "execute" -> reactor.core.publisher.Mono.just(result);
+                    default -> throw new UnsupportedOperationException(
+                            "test statement does not implement " + method.getName());
+                });
+        Connection connection = (Connection) Proxy.newProxyInstance(
+                Connection.class.getClassLoader(), new Class<?>[]{Connection.class},
+                (proxy, method, arguments) -> switch (method.getName()) {
+                    case "createStatement" -> statement;
+                    case "close" -> reactor.core.publisher.Mono.fromRunnable(closes::incrementAndGet);
+                    default -> throw new UnsupportedOperationException(
+                            "test connection does not implement " + method.getName());
+                });
+        return new ConnectionFactory() {
+            @Override
+            public reactor.core.publisher.Mono<? extends Connection> create() {
+                return reactor.core.publisher.Mono.just(connection);
+            }
+
+            @Override
+            public io.r2dbc.spi.ConnectionFactoryMetadata getMetadata() {
+                return () -> "raw-query-test";
             }
         };
     }

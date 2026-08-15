@@ -21,7 +21,7 @@ class SqlExecutionOptionsTest {
     void safeDefaultsBoundResourceCleanupToFiveSeconds() {
         assertEquals(Duration.ofSeconds(5), SqlExecutionOptions.safeDefaults().cleanupTimeout());
         assertEquals(64L * 1024 * 1024, SqlExecutionOptions.safeDefaults().maxResultBytes());
-        assertEquals(256, SqlExecutionOptions.safeDefaults().fetchSize());
+        assertEquals(0, SqlExecutionOptions.safeDefaults().fetchSize());
     }
 
     /** 显式 unlimited 同时解除普通 SQL 和资源清理时限。 */

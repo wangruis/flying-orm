@@ -1671,6 +1671,20 @@ class R2dbcSqlExecutorTest {
         assertEquals(37, factory.fetchSize);
     }
 
+    /** 普通查询应保留驱动默认抓取策略，避免小结果集被无差别切换到游标协议。 */
+    @Test
+    void keepsDriverFetchStrategyWhenFetchSizeIsNotExplicit() {
+        RecordingConnectionFactory factory = new RecordingConnectionFactory(
+                List.of(Map.of("id", "u1")), 0, "recording");
+        ReactiveSqlExecutor executor = R2dbcSqlExecutor.create(factory);
+
+        StepVerifier.create(executor.query(new SqlRequest("select id from Users", List.of())))
+                    .expectNextCount(1)
+                    .verifyComplete();
+
+        assertEquals(0, factory.fetchSize);
+    }
+
     /** 回执读取资源域保留的 cleanup wrapper 必须在 resolveUnknown 公共入口恢复为原 fatal。 */
     @Test
     void resolveUnknownRestoresFatalFromReceiptCleanupWrapper() {

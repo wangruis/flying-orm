@@ -1,12 +1,17 @@
 package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.rdb.execution.SqlExecutionTimeoutException;
+import org.reactivestreams.Publisher;
+import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Schedulers;
 
 import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Supplier;
 
 /**
  * 给多行结果流加绝对截止时间。普通 Flux timeout 会在每行到达后重新计时，只能发现“多久没有下一行”；
@@ -28,13 +33,33 @@ final class SqlExecutionTimeouts {
         Flux<T> safeSource = Objects.requireNonNull(source, "sql result source must not be null");
         Duration safeTimeout = Objects.requireNonNull(timeout, "sql execution timeout must not be null");
         return Flux.defer(() -> {
+            Sinks.One<Long> deadline = Sinks.one();
+            Disposable deadlineTask = Schedulers.parallel().schedule(
+                    () -> deadline.tryEmitValue(0L),
+                    safeTimeout.toNanos(),
+                    TimeUnit.NANOSECONDS);
+            return total(safeSource, safeTimeout, deadline::asMono)
+                    .doFinally(ignored -> deadlineTask.dispose());
+        });
+    }
+
+    /** 测试协作入口允许观察截止 Publisher 的取消；生产调用仍只接受 Duration。 */
+    static <T> Flux<T> total(Flux<T> source,
+                             Duration timeout,
+                             Supplier<? extends Publisher<?>> deadlineFactory) {
+        Flux<T> safeSource = Objects.requireNonNull(source, "sql result source must not be null");
+        Duration safeTimeout = Objects.requireNonNull(timeout, "sql execution timeout must not be null");
+        Supplier<? extends Publisher<?>> safeDeadlineFactory = Objects.requireNonNull(
+                deadlineFactory, "sql execution deadline factory must not be null");
+        return Flux.defer(() -> {
             /*
-             * timeout(first, next) 原本会在每行到达后换一个新计时器。这里把同一个 Mono.cache() 同时交给
-             * 首行和后续行：第一次监听时计时器开始运行，后面的监听只能接着等这一个截止点，不能重新计时。
-             * cache 还有一个关键作用：timeout 在切换监听时会取消旧订阅，但不会连带停掉已经启动的截止计时器。
-             * 截止后 timeout 会取消结果流上游，再把标准 TimeoutException 转成项目统一的执行超时异常。
+             * timeout 会在每行后切换截止订阅，因此生产入口使用同一个热 Sinks.One 保存绝对截止点。
+             * 正常完成、失败或取消时外层 doFinally 会撤销计时任务；不能使用 cache，否则高 QPS 查询
+             * 正常结束后仍会把定时任务保留到到期。超时仲裁与上游取消由 Reactor timeout 统一串行化，
+             * 不使用独立状态标志，避免正常完成与截止信号竞争时误判终态。
              */
-            Mono<Long> deadline = Mono.delay(safeTimeout).cache();
+            Publisher<?> deadline = Objects.requireNonNull(
+                    safeDeadlineFactory.get(), "sql execution deadline publisher must not be null");
             return safeSource.timeout(deadline, ignored -> deadline)
                              .onErrorMap(TimeoutException.class,
                                          error -> new SqlExecutionTimeoutException(safeTimeout, error));

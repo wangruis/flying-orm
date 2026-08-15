@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC
+        "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+        "https://checkstyle.org/dtds/configuration_1_3.dtd">
+<module name="Checker">
+    <property name="charset" value="UTF-8"/>
+
+    <!-- 400 行是禁止新增或继续扩张的硬线；300 行会提前触发设计审查。 -->
+    <module name="FileLength">
+        <property name="max" value="399"/>
+    </module>
+    <module name="SuppressionFilter">
+        <property name="file" value="${checkstyle.suppressions.file}"/>
+    </module>
+
+    <module name="TreeWalker">
+        <!-- 30 个方法是硬线，20 个方法是日常设计目标。 -->
+        <module name="MethodCount">
+            <property name="maxTotal" value="29"/>
+        </module>
+        <module name="JavadocType">
+            <property name="scope" value="public"/>
+            <property name="authorFormat" value="wangr"/>
+            <!-- Javadoc 版本写类型首次进入的版本，不应把 V2 新类型伪装成 v1.0。 -->
+            <property name="versionFormat" value="v[0-9]+\.[0-9]+(\.[0-9]+)?"/>
+            <property name="allowMissingParamTags" value="true"/>
+            <property name="allowUnknownTags" value="true"/>
+        </module>
+        <module name="AvoidStarImport"/>
+        <module name="IllegalImport"/>
+    </module>
+</module>

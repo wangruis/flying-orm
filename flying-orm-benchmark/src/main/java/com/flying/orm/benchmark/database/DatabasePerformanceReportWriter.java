@@ -35,6 +35,8 @@ final class DatabasePerformanceReportWriter {
         text.append("# flying-orm 真实数据库性能结果\n\n")
             .append("- 运行编号：`").append(report.runId()).append("`\n")
             .append("- Git commit：`").append(report.gitCommit()).append("`\n")
+            .append("- 实际 Git HEAD：`").append(report.runIdentity().gitHead()).append("`\n")
+            .append("- tracked dirty：`").append(report.runIdentity().trackedDirty()).append("`\n")
             .append("- 状态：**").append(report.status()).append("**\n")
             .append("- 时间：").append(report.startedAt()).append(" 至 ").append(report.completedAt()).append("\n\n")
             .append("## 固定参数\n\n")
@@ -43,12 +45,27 @@ final class DatabasePerformanceReportWriter {
             .append("，批量外层并发 ").append(report.parameters().batchConcurrency())
             .append("，每批 ").append(report.parameters().batchSize())
             .append(" 行，预热 ").append(report.parameters().warmupSeconds())
-            .append(" 秒，测量 ").append(report.parameters().measurementSeconds()).append(" 秒。\n\n");
+            .append(" 秒，测量 ").append(report.parameters().measurementSeconds()).append(" 秒。\n")
+            .append("查询 fetchSize：")
+            .append(fetchSize(report.parameters()))
+            .append("。\n\n");
+
+        text.append("## 运行产物身份\n\n")
+            .append("- tracked diff SHA-256：`").append(report.runIdentity().trackedDiffSha256()).append("`\n")
+            .append("- classpath SHA-256：`").append(report.runIdentity().classpathSha256()).append("`\n")
+            .append("- benchmark class SHA-256：`")
+            .append(report.runIdentity().benchmarkClassSha256()).append("`\n")
+            .append("- RDB class SHA-256：`").append(report.runIdentity().rdbClassSha256()).append("`\n")
+            .append("- JVM：").append(report.runIdentity().jvmName()).append(' ')
+            .append(report.runIdentity().jvmVersion()).append("；GC：")
+            .append(report.runIdentity().garbageCollectors()).append("。\n\n");
 
         for (DatabasePerformanceReport.DatabaseResult database : report.databases()) {
             text.append("## ").append(database.database()).append("\n\n")
                 .append("数据库版本：").append(database.databaseVersion()).append("；驱动：")
-                .append(database.driver()).append("；连接池：").append(database.poolVersion()).append("。\n\n")
+                .append(database.driver()).append(' ').append(database.driverVersion())
+                .append("；驱动 class SHA-256：`").append(database.driverClassSha256())
+                .append("`；连接池：").append(database.poolVersion()).append("。\n\n")
                 .append("| 场景 | 状态 | ops/s | rows/s | P50 ms | P95 ms | P99 ms | 错误率 | 峰值连接 | CPU | 峰值堆 |\n")
                 .append("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
             for (DatabasePerformanceReport.ScenarioResult scenario : database.scenarios()) {
@@ -130,5 +147,13 @@ final class DatabasePerformanceReportWriter {
 
     private static String bytes(long value) {
         return String.format(Locale.ROOT, "%.2f MiB", value / 1024.0 / 1024.0);
+    }
+
+    private static String fetchSize(DatabasePerformanceReport.Parameters parameters) {
+        if (parameters.effectiveFetchSize() == null) {
+            return "不适用";
+        }
+        return parameters.effectiveFetchSize() + (parameters.fetchSizeOverride() == null
+                ? "（生产默认）" : "（显式覆盖）");
     }
 }

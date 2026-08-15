@@ -114,6 +114,40 @@
                 </dependency>
             </dependencies>
         </profile>
+        <profile>
+            <id>oracle-compat</id>
+            <dependencies>
+                <dependency>
+                    <groupId>com.oracle.database.r2dbc</groupId>
+                    <artifactId>oracle-r2dbc</artifactId>
+                    <version>${r2dbc.oracle.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>com.oracle.database.jdbc</groupId>
+                    <artifactId>ojdbc11</artifactId>
+                    <version>${oracle.jdbc.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+            </dependencies>
+        </profile>
+        <profile>
+            <id>sqlserver-compat</id>
+            <dependencies>
+                <dependency>
+                    <groupId>io.r2dbc</groupId>
+                    <artifactId>r2dbc-mssql</artifactId>
+                    <version>${r2dbc.mssql.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+                <dependency>
+                    <groupId>com.microsoft.sqlserver</groupId>
+                    <artifactId>mssql-jdbc</artifactId>
+                    <version>${mssql.jdbc.version}</version>
+                    <scope>runtime</scope>
+                </dependency>
+            </dependencies>
+        </profile>
     </profiles>
 
     <build>

@@ -49,8 +49,8 @@ public record SqlExecutionOptions(Duration timeout,
     /** 数据库结果确定后默认最多等待资源清理五秒，防止关闭 Publisher 永久挂起。 */
     public static final Duration DEFAULT_CLEANUP_TIMEOUT = Duration.ofSeconds(5);
 
-    /** 响应式查询默认按二百五十六行分批向驱动取数，兼顾吞吐、背压和取消时的资源释放。 */
-    private static final int SAFE_FETCH_SIZE = 256;
+    /** 默认保留驱动抓取策略；大结果流可通过 {@link #withFetchSize(int)} 显式启用分批抓取。 */
+    private static final int SAFE_FETCH_SIZE = 0;
 
     /** 旧的七参数构造仍可继续使用，未声明 fetchSize 时交给驱动自己决定。 */
     public SqlExecutionOptions(Duration timeout,

@@ -26,6 +26,8 @@ public final class RealDatabasePerformanceRunner {
 
     public static void main(String[] args) throws Exception {
         ReactivePerformanceArguments arguments = ReactivePerformanceArguments.parse(args);
+        DatabasePerformanceReport.RunIdentity runIdentity = BenchmarkRunIdentity.capture();
+        BenchmarkRunIdentity.requireCommitLabel(runIdentity, arguments.gitCommit);
         Instant started = Instant.now();
         String runId = arguments.runId == null
                 ? RUN_ID_TIME.format(started) + "-" + arguments.gitCommit : arguments.runId;
@@ -41,7 +43,7 @@ public final class RealDatabasePerformanceRunner {
                 .allMatch(result -> result.status() == DatabasePerformanceReport.Status.PASSED)
                 ? DatabasePerformanceReport.Status.PASSED : DatabasePerformanceReport.Status.FAILED;
         DatabasePerformanceReport report = new DatabasePerformanceReport(
-                1, runId, arguments.gitCommit, started.toString(), Instant.now().toString(), status,
+                1, runId, arguments.gitCommit, runIdentity, started.toString(), Instant.now().toString(), status,
                 ReactivePerformanceReportSupport.environment(), arguments.reportParameters(), databases);
         DatabasePerformanceReportWriter.write(report, arguments.output, arguments.summary);
         if (status == DatabasePerformanceReport.Status.FAILED) {

@@ -18,7 +18,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * V2 原生 JDBC 的 MySQL/PostgreSQL 真实性能入口。
+ * V2 原生 JDBC 的四库真实性能入口。
  *
  * <p>只有明确配置 JDBC URL 的目标才会运行，未配置的数据库直接跳过，不会自行寻找或启动数据库。</p>
  *
@@ -41,17 +41,24 @@ public final class JdbcDatabasePerformanceRunner {
     }
 
     private static void run(JdbcPerformanceArguments arguments) throws Exception {
+        DatabasePerformanceReport.RunIdentity runIdentity = BenchmarkRunIdentity.capture();
+        BenchmarkRunIdentity.requireCommitLabel(runIdentity, arguments.gitCommit);
         Instant started = Instant.now();
         List<DatabasePerformanceReport.DatabaseResult> databases = new ArrayList<>();
         if (!arguments.mysqlUrl.isBlank()) databases.add(runTarget(JdbcPerformanceTarget.mysql(arguments), arguments));
         else System.out.println("JDBC target MySQL skipped: URL is not configured");
         if (!arguments.postgresqlUrl.isBlank()) databases.add(runTarget(JdbcPerformanceTarget.postgresql(arguments), arguments));
         else System.out.println("JDBC target PostgreSQL skipped: URL is not configured");
+        if (!arguments.oracleUrl.isBlank()) databases.add(runTarget(JdbcPerformanceTarget.oracle(arguments), arguments));
+        else System.out.println("JDBC target Oracle skipped: URL is not configured");
+        if (!arguments.sqlserverUrl.isBlank()) databases.add(runTarget(JdbcPerformanceTarget.sqlserver(arguments), arguments));
+        else System.out.println("JDBC target SQL Server skipped: URL is not configured");
         DatabasePerformanceReport.Status status = databases.stream().allMatch(result ->
                 result.status() == DatabasePerformanceReport.Status.PASSED)
                 ? DatabasePerformanceReport.Status.PASSED : DatabasePerformanceReport.Status.FAILED;
         DatabasePerformanceReport report = new DatabasePerformanceReport(
-                1, arguments.runId, arguments.gitCommit, started.toString(), Instant.now().toString(), status,
+                1, arguments.runId, arguments.gitCommit, runIdentity,
+                started.toString(), Instant.now().toString(), status,
                 JdbcPerformanceReportSupport.environment(), arguments.reportParameters(), databases);
         DatabasePerformanceReportWriter.write(report, arguments.output, arguments.summary);
         if (status == DatabasePerformanceReport.Status.FAILED) {
@@ -153,7 +160,11 @@ public final class JdbcDatabasePerformanceRunner {
                                 FlyingOrmClients clients,
                                 DynamicForm form,
                                 int seedRows) {
-        clients.syncExecutor().rowsUpdated(SqlRequest.nativeSql(target.dropSql(), List.of()));
+        try {
+            clients.syncExecutor().rowsUpdated(SqlRequest.nativeSql(target.dropSql(), List.of()));
+        } catch (RdbException ignored) {
+            // Oracle 没有跨版本稳定的 DROP TABLE IF EXISTS；缺表时继续，其他失败会在 CREATE 阶段明确暴露。
+        }
         System.out.printf("JDBC target=%s prepare=drop-complete%n", target.name());
         clients.syncExecutor().rowsUpdated(SqlRequest.nativeSql(target.createSql(), List.of()));
         System.out.printf("JDBC target=%s prepare=create-complete%n", target.name());

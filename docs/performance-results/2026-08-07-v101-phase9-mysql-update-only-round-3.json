@@ -1,0 +1,62 @@
+{
+  "schemaVersion" : 1,
+  "runId" : "v101-phase9-mysql-update-only-round-3",
+  "gitCommit" : "151ad3477d9d-working-tree",
+  "startedAt" : "2026-08-07T07:25:16.066908900Z",
+  "completedAt" : "2026-08-07T07:25:42.201722700Z",
+  "status" : "PASSED",
+  "environment" : {
+    "javaVersion" : "21.0.10",
+    "javaVendor" : "Oracle Corporation",
+    "os" : "Windows 10 10.0 amd64",
+    "cpu" : "Intel64 Family 6 Model 183 Stepping 1, GenuineIntel",
+    "logicalProcessors" : 20,
+    "maxHeapBytes" : 4238344192
+  },
+  "parameters" : {
+    "warmupSeconds" : 5,
+    "measurementSeconds" : 15,
+    "poolSize" : 16,
+    "queryConcurrency" : 16,
+    "batchConcurrency" : 4,
+    "batchSize" : 32,
+    "independentChunkSize" : 8,
+    "independentConcurrency" : 4,
+    "seedRows" : 10000
+  },
+  "databases" : [ {
+    "database" : "MySQL",
+    "databaseVersion" : "8.4.10",
+    "driver" : "MySQL",
+    "poolVersion" : "r2dbc-pool 1.0.2.RELEASE",
+    "status" : "PASSED",
+    "finalAllocatedConnections" : 16,
+    "finalAcquiredConnections" : 0,
+    "finalPendingAcquires" : 0,
+    "scenarios" : [ {
+      "scenario" : "updateById",
+      "status" : "PASSED",
+      "concurrency" : 16,
+      "operations" : 57030,
+      "succeeded" : 57030,
+      "failed" : 0,
+      "rows" : 57030,
+      "warmupFailures" : 0,
+      "elapsedMillis" : 15002,
+      "operationsPerSecond" : 3801.3619033908967,
+      "rowsPerSecond" : 3801.3619033908967,
+      "errorRate" : 0.0,
+      "p50Millis" : 4.085759,
+      "p95Millis" : 5.488639,
+      "p99Millis" : 9.576447,
+      "maxMillis" : 107.610111,
+      "failuresByType" : { },
+      "peakAllocatedConnections" : 16,
+      "peakAcquiredConnections" : 16,
+      "peakPendingAcquires" : 12,
+      "averageProcessCpuPercent" : 6.260285602409704,
+      "peakHeapBytes" : 257013688,
+      "phaseLatency" : null
+    } ]
+  } ]
+}

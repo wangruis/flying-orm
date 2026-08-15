@@ -17,6 +17,7 @@ import java.util.Objects;
 public record DatabasePerformanceReport(int schemaVersion,
                                         String runId,
                                         String gitCommit,
+                                        RunIdentity runIdentity,
                                         String startedAt,
                                         String completedAt,
                                         Status status,
@@ -30,6 +31,8 @@ public record DatabasePerformanceReport(int schemaVersion,
         }
         runId = requireText(runId, "database performance run id");
         gitCommit = requireText(gitCommit, "database performance git commit");
+        runIdentity = Objects.requireNonNull(runIdentity,
+                                             "database performance run identity must not be null");
         startedAt = requireText(startedAt, "database performance start time");
         completedAt = requireText(completedAt, "database performance completion time");
         status = Objects.requireNonNull(status, "database performance status must not be null");
@@ -43,6 +46,51 @@ public record DatabasePerformanceReport(int schemaVersion,
         boolean hasFailedDatabase = databases.stream().anyMatch(result -> result.status() == Status.FAILED);
         if ((status == Status.PASSED) == hasFailedDatabase) {
             throw new IllegalArgumentException("database performance overall status conflicts with database results");
+        }
+    }
+
+    /** 保留旧报告组装方式；正式 runner 会显式写入可验证的运行身份。 */
+    public DatabasePerformanceReport(int schemaVersion,
+                                     String runId,
+                                     String gitCommit,
+                                     String startedAt,
+                                     String completedAt,
+                                     Status status,
+                                     Environment environment,
+                                     Parameters parameters,
+                                     List<DatabaseResult> databases) {
+        this(schemaVersion, runId, gitCommit, RunIdentity.unverified(), startedAt, completedAt,
+             status, environment, parameters, databases);
+    }
+
+    /** 记录当前源码状态和实际加载字节码，避免用任意文本标签冒充候选产物。 */
+    public record RunIdentity(String gitHead,
+                              boolean trackedDirty,
+                              String trackedDiffSha256,
+                              String classpathSha256,
+                              String benchmarkClassSha256,
+                              String rdbClassSha256,
+                              String jvmName,
+                              String jvmVersion,
+                              String garbageCollectors) {
+
+        private static final String EMPTY_SHA256 =
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+        public RunIdentity {
+            gitHead = requireText(gitHead, "database performance Git HEAD");
+            trackedDiffSha256 = requireSha256(trackedDiffSha256, "tracked diff");
+            classpathSha256 = requireSha256(classpathSha256, "classpath");
+            benchmarkClassSha256 = requireSha256(benchmarkClassSha256, "benchmark class");
+            rdbClassSha256 = requireSha256(rdbClassSha256, "RDB class");
+            jvmName = requireText(jvmName, "database performance JVM name");
+            jvmVersion = requireText(jvmVersion, "database performance JVM version");
+            garbageCollectors = requireText(garbageCollectors, "database performance garbage collectors");
+        }
+
+        private static RunIdentity unverified() {
+            return new RunIdentity("unverified", true, EMPTY_SHA256, EMPTY_SHA256, EMPTY_SHA256,
+                                   EMPTY_SHA256, "unverified", "unverified", "unverified");
         }
     }
 
@@ -74,7 +122,39 @@ public record DatabasePerformanceReport(int schemaVersion,
                              int batchSize,
                              int independentChunkSize,
                              int independentConcurrency,
-                             int seedRows) {
+                             int seedRows,
+                             Integer fetchSizeOverride,
+                             Integer effectiveFetchSize) {
+
+        /** 保留未提供查询抓取覆盖值的旧构造方式。 */
+        public Parameters(long warmupSeconds,
+                          long measurementSeconds,
+                          int poolSize,
+                          int queryConcurrency,
+                          int batchConcurrency,
+                          int batchSize,
+                          int independentChunkSize,
+                          int independentConcurrency,
+                          int seedRows) {
+            this(warmupSeconds, measurementSeconds, poolSize, queryConcurrency, batchConcurrency,
+                 batchSize, independentChunkSize, independentConcurrency, seedRows, null, null);
+        }
+
+        /** 保留只记录显式覆盖值的旧构造方式。 */
+        public Parameters(long warmupSeconds,
+                          long measurementSeconds,
+                          int poolSize,
+                          int queryConcurrency,
+                          int batchConcurrency,
+                          int batchSize,
+                          int independentChunkSize,
+                          int independentConcurrency,
+                          int seedRows,
+                          Integer fetchSizeOverride) {
+            this(warmupSeconds, measurementSeconds, poolSize, queryConcurrency, batchConcurrency,
+                 batchSize, independentChunkSize, independentConcurrency, seedRows,
+                 fetchSizeOverride, fetchSizeOverride);
+        }
 
         public Parameters {
             if (warmupSeconds < 0 || measurementSeconds <= 0 || poolSize <= 0 || queryConcurrency <= 0
@@ -91,6 +171,12 @@ public record DatabasePerformanceReport(int schemaVersion,
             if ((long) batchConcurrency * independentConcurrency > poolSize) {
                 throw new IllegalArgumentException("independent batch concurrency must fit inside the connection pool");
             }
+            if (fetchSizeOverride != null && fetchSizeOverride < 0) {
+                throw new IllegalArgumentException("database performance fetch size override must not be negative");
+            }
+            if (effectiveFetchSize != null && effectiveFetchSize < 0) {
+                throw new IllegalArgumentException("database performance effective fetch size must not be negative");
+            }
         }
     }
 
@@ -98,6 +184,8 @@ public record DatabasePerformanceReport(int schemaVersion,
     public record DatabaseResult(String database,
                                  String databaseVersion,
                                  String driver,
+                                 String driverVersion,
+                                 String driverClassSha256,
                                  String poolVersion,
                                  Status status,
                                  int finalAllocatedConnections,
@@ -123,10 +211,45 @@ public record DatabasePerformanceReport(int schemaVersion,
                  Math.max(0, finalAllocatedConnections - finalAcquiredConnections), scenarios);
         }
 
+        /** 响应式 runner 记录驱动身份时仍可由池计数推导 idle。 */
+        public DatabaseResult(String database,
+                              String databaseVersion,
+                              String driver,
+                              String driverVersion,
+                              String driverClassSha256,
+                              String poolVersion,
+                              Status status,
+                              int finalAllocatedConnections,
+                              int finalAcquiredConnections,
+                              int finalPendingAcquires,
+                              List<ScenarioResult> scenarios) {
+            this(database, databaseVersion, driver, driverVersion, driverClassSha256, poolVersion, status,
+                 finalAllocatedConnections, finalAcquiredConnections, finalPendingAcquires,
+                 Math.max(0, finalAllocatedConnections - finalAcquiredConnections), scenarios);
+        }
+
+        /** 保留旧报告组装方式；正式响应式 runner 会写入驱动制品身份。 */
+        public DatabaseResult(String database,
+                              String databaseVersion,
+                              String driver,
+                              String poolVersion,
+                              Status status,
+                              int finalAllocatedConnections,
+                              int finalAcquiredConnections,
+                              int finalPendingAcquires,
+                              int finalIdleConnections,
+                              List<ScenarioResult> scenarios) {
+            this(database, databaseVersion, driver, "unverified", "unverified", poolVersion, status,
+                 finalAllocatedConnections, finalAcquiredConnections, finalPendingAcquires,
+                 finalIdleConnections, scenarios);
+        }
+
         public DatabaseResult {
             database = requireText(database, "database performance database name");
             databaseVersion = requireText(databaseVersion, "database performance database version");
             driver = requireText(driver, "database performance driver");
+            driverVersion = requireText(driverVersion, "database performance driver version");
+            driverClassSha256 = requireText(driverClassSha256, "database performance driver class SHA-256");
             poolVersion = requireText(poolVersion, "database performance pool version");
             status = Objects.requireNonNull(status, "database performance database status must not be null");
             scenarios = List.copyOf(Objects.requireNonNull(scenarios,
@@ -257,5 +380,13 @@ public record DatabasePerformanceReport(int schemaVersion,
         if (!Double.isFinite(value) || value < 0) {
             throw new IllegalArgumentException("database performance " + name + " must be finite and non-negative");
         }
+    }
+
+    private static String requireSha256(String value, String name) {
+        String safe = requireText(value, "database performance " + name + " SHA-256");
+        if (!safe.matches("[0-9a-f]{64}")) {
+            throw new IllegalArgumentException("database performance " + name + " SHA-256 is invalid");
+        }
+        return safe;
     }
 }

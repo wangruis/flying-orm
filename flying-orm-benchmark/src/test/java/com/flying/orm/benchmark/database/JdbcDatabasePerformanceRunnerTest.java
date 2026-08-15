@@ -40,6 +40,26 @@ class JdbcDatabasePerformanceRunnerTest {
         assertFalse(arguments.runId.contains("secret"));
     }
 
+    /** JDBC 性能入口必须原生接受四库凭据，并为 Oracle/SQL Server 生成各自合法的 DDL。 */
+    @Test
+    void parsesOracleAndSqlServerTargets() {
+        JdbcPerformanceArguments arguments = JdbcPerformanceArguments.parse(arguments(), Map.of(
+                JdbcPerformanceArguments.ORACLE_URL_ENV, "jdbc:oracle:thin:@localhost:1521/FREEPDB1",
+                JdbcPerformanceArguments.ORACLE_USER_ENV, "bench",
+                JdbcPerformanceArguments.ORACLE_PASSWORD_ENV, "secret",
+                JdbcPerformanceArguments.SQLSERVER_URL_ENV, "jdbc:sqlserver://localhost:1433;databaseName=bench",
+                JdbcPerformanceArguments.SQLSERVER_USER_ENV, "bench",
+                JdbcPerformanceArguments.SQLSERVER_PASSWORD_ENV, "secret"));
+
+        assertEquals("jdbc:oracle:thin:@localhost:1521/FREEPDB1", arguments.oracleUrl);
+        assertEquals("jdbc:sqlserver://localhost:1433;databaseName=bench", arguments.sqlserverUrl);
+        assertTrue(JdbcPerformanceTarget.oracle(arguments).createSql().contains("varchar2(128)"));
+        assertTrue(JdbcPerformanceTarget.oracle(arguments).createSql().contains("\"id\" number(19)"));
+        assertTrue(JdbcPerformanceTarget.oracle(arguments).querySql().contains("\"id\" = ?"));
+        assertTrue(JdbcPerformanceTarget.oracle(arguments).dropSql().endsWith(" purge"));
+        assertTrue(JdbcPerformanceTarget.sqlserver(arguments).createSql().contains("[FLYING_ORM_PERFORMANCE_SQLSERVER]"));
+    }
+
     @Test
     void rejectsMissingTargetsAndIncompleteCredentialsBeforeOpeningAConnection() {
         IllegalArgumentException missingTarget = assertThrows(IllegalArgumentException.class,
@@ -87,6 +107,8 @@ class JdbcDatabasePerformanceRunnerTest {
 
         String output = Files.readString(json) + Files.readString(markdown);
         assertTrue(output.contains("finalIdleConnections"));
+        assertTrue(output.contains("查询 fetchSize：不适用"));
+        assertFalse(output.contains("R2DBC fetchSize"));
         assertTrue(output.contains("最终池状态：allocated=1，acquired=0，idle=1，pending=0"));
         assertFalse(output.contains("jdbc:mysql://localhost"));
         assertFalse(output.toLowerCase().contains("secret"));

@@ -31,7 +31,16 @@ class DatabasePerformanceReportWriterTest {
         assertTrue(jsonText.contains("\"scenario\" : \"queryById\""));
         assertTrue(jsonText.contains("\"phaseLatency\""));
         assertTrue(jsonText.contains("\"executeAndCommit\""));
+        assertTrue(jsonText.contains("\"fetchSizeOverride\" : 256"));
+        assertTrue(jsonText.contains("\"effectiveFetchSize\" : 256"));
+        assertTrue(jsonText.contains("\"runIdentity\""));
+        assertTrue(jsonText.contains("\"gitHead\""));
+        assertTrue(jsonText.contains("\"rdbClassSha256\""));
+        assertTrue(jsonText.contains("\"benchmarkClassSha256\""));
+        assertTrue(jsonText.contains("\"driverVersion\""));
         assertTrue(markdownText.contains("真实数据库性能结果"));
+        assertTrue(markdownText.contains("查询 fetchSize：256（显式覆盖）"));
+        assertTrue(markdownText.contains("运行产物身份"));
         assertTrue(markdownText.contains("连接获取"));
         assertTrue(markdownText.contains("执行及提交"));
         assertFalse((jsonText + markdownText).contains("r2dbc:mysql"));
@@ -66,7 +75,7 @@ class DatabasePerformanceReportWriterTest {
                 1, "run-1", "abcdef1", "2026-08-02T00:00:00Z", "2026-08-02T00:01:00Z",
                 DatabasePerformanceReport.Status.PASSED,
                 new DatabasePerformanceReport.Environment("21", "Oracle", "Windows", "test cpu", 20, 1024),
-                new DatabasePerformanceReport.Parameters(1, 2, 4, 4, 1, 32, 8, 4, 1000),
+                new DatabasePerformanceReport.Parameters(1, 2, 4, 4, 1, 32, 8, 4, 1000, 256),
                 List.of(database));
     }
 
