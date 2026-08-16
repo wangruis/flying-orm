@@ -9,7 +9,6 @@ import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
-import com.flying.orm.rdb.execution.SqlExecutionTimeoutException;
 import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.observation.BatchExecutionObserver;
 import com.flying.orm.rdb.observation.SqlExecutionObserver;
@@ -18,8 +17,8 @@ import com.flying.orm.rdb.transaction.R2dbcTransactionContext;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.util.Objects;
-import java.util.concurrent.TimeoutException;
 
 /**
  * ReactiveSqlExecutor 是关系型数据库的响应式 SQL 执行契约，直接返回 Reactor 类型。
@@ -72,7 +71,9 @@ public interface ReactiveSqlExecutor {
     }
 
     /**
-     * 给任意执行器套一层默认执行保护。调用方显式传 options 时，显式值优先。
+     * 给任意执行器套一层默认执行保护。调用方显式传 options 时，显式值优先。原生执行器会在连接可用后实施
+     * SQL timeout；只实现单参数方法的自定义执行器仍保留查询结果容量保护，但不会给不可分阶段的 Publisher
+     * 叠加连接获取计时器。
      *
      * @param options 默认执行保护
      * @return 带默认执行保护的执行器
@@ -98,7 +99,8 @@ public interface ReactiveSqlExecutor {
     Flux<DynamicRow> query(SqlRequest request);
 
     /**
-     * 带执行保护的查询。超时会取消上游订阅，返回行数或累计估算字节超过上限会直接报错。
+     * 带执行保护的查询。接口默认实现无法区分外部事务解析、连接池排队与 SQL 阶段，因此只负责返回行数和
+     * 累计估算字节上限；能够识别连接可用边界的执行器必须覆盖本方法，并在连接可用后实施 SQL timeout。
      *
      * @param request SQL 请求
      * @param options 执行保护选项
@@ -106,7 +108,11 @@ public interface ReactiveSqlExecutor {
      */
     default Flux<DynamicRow> query(SqlRequest request, SqlExecutionOptions options) {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
-        return protectRows(query(safeRequest), safeRequest.sql(), options);
+        SqlExecutionOptions safeOptions = Objects.requireNonNull(
+                options, "sql execution options must not be null");
+        SqlExecutionOptions resultOptions = safeOptions.timeout().isZero()
+                ? safeOptions : safeOptions.withTimeout(Duration.ZERO);
+        return protectRows(query(safeRequest), safeRequest.sql(), resultOptions);
     }
 
     /**
@@ -118,15 +124,17 @@ public interface ReactiveSqlExecutor {
     Mono<Long> rowsUpdated(SqlRequest request);
 
     /**
-     * 带执行保护的写入。写入没有返回行集，所以只应用 timeout。
+     * 带执行选项的写入。接口默认实现无法知道连接何时可用，因此不会给整个自定义 Publisher 叠加 ORM timer；
+     * 能够识别连接可用边界的执行器必须覆盖本方法，并在连接可用后实施 SQL timeout。
      *
      * @param request SQL 请求
      * @param options 执行保护选项
      * @return 影响行数
      */
     default Mono<Long> rowsUpdated(SqlRequest request, SqlExecutionOptions options) {
-        Objects.requireNonNull(request, "sql request must not be null");
-        return protectMono(rowsUpdated(request), options);
+        SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
+        Objects.requireNonNull(options, "sql execution options must not be null");
+        return rowsUpdated(safeRequest);
     }
 
     /**
@@ -197,17 +205,6 @@ public interface ReactiveSqlExecutor {
     default Mono<BatchResolution> resolveUnknown(BatchChunkResult.RecoveryToken token) {
         Objects.requireNonNull(token, "batch recovery token must not be null");
         return Mono.error(new UnsupportedOperationException("reactive sql executor does not support batch recovery"));
-    }
-
-    private static <T> Mono<T> protectMono(Mono<T> source, SqlExecutionOptions options) {
-        SqlExecutionOptions safeOptions = Objects.requireNonNull(options,
-                                                                 "sql execution options must not be null");
-        if (safeOptions.timeout().isZero()) {
-            return source;
-        }
-        return source.timeout(safeOptions.timeout())
-                     .onErrorMap(TimeoutException.class,
-                                 error -> new SqlExecutionTimeoutException(safeOptions.timeout(), error));
     }
 
     private static Flux<DynamicRow> protectRows(Flux<DynamicRow> source,

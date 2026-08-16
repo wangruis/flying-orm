@@ -1,6 +1,6 @@
 # 元数据缓存观测与容量收口实施计划
 
-> 历史计划：其中 `MetadataCacheOptions` API 已被 v1.0.0 的 `CacheRegionPolicy` 取代；保留下文只用于追溯当时的设计过程。
+> 历史计划：其中 `MetadataCacheOptions` API 已被当前 `CacheRegionPolicy` 取代；保留下文只用于追溯当时的设计过程。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -118,7 +118,7 @@
 
 **Files:**
 - Modify: `docs/requirements/index.md`
-- Modify: `docs/v1-roadmap.md`
+- Modify: `docs/requirements/index.md`
 - Modify: `docs/target-api-examples.md`
 
 **Interfaces:**

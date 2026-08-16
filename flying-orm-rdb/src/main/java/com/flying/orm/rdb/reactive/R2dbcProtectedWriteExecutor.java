@@ -46,10 +46,9 @@ final class R2dbcProtectedWriteExecutor {
         ProtectedWriteWork safeWork = Objects.requireNonNull(work, "protected write work must not be null");
         SqlExecutionOptions safeOptions = Objects.requireNonNull(options, "sql execution options must not be null");
         BatchWriteOptions transactionOptions = BatchWriteOptions.defaults()
-                .withTimeout(safeOptions.timeout())
-                .withConnectionAcquireTimeout(safeOptions.connectionAcquireTimeout());
+                .withTimeout(safeOptions.timeout());
         Mono<SqlWriteResult> source = Mono.usingWhen(
-                connections.acquire(transactionOptions),
+                connections.acquire(transactionOptions, safeOptions.cleanupTimeout()),
                 resource -> execute(resource, safeWork, safeOptions),
                 resource -> connections.closeAfterOutcome(resource, SqlExecutionOperation.UPDATE),
                 (resource, ignored) -> connections.closeAfterOutcome(resource, SqlExecutionOperation.UPDATE),

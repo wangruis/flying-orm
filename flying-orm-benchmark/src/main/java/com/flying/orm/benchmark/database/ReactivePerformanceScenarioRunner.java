@@ -28,7 +28,6 @@ import java.util.function.Supplier;
 final class ReactivePerformanceScenarioRunner {
 
     static final Duration SQL_TIMEOUT = Duration.ofSeconds(10);
-    static final Duration ACQUIRE_TIMEOUT = Duration.ofSeconds(3);
     private static final Duration CLOSE_TIMEOUT = Duration.ofSeconds(20);
     private static final int TRANSACTION_UPDATE_BATCH_SIZE = 8;
     private static final String MYSQL_WAIT_SQL =
@@ -91,7 +90,11 @@ final class ReactivePerformanceScenarioRunner {
         return Mono.usingWhen(
                 Mono.from(safeFactory.create()),
                 connection -> Mono.defer(() -> {
-                    Statement statement = connection.createStatement(sql).fetchSize(fetchSize).bind(0, id);
+                    Statement statement = connection.createStatement(sql);
+                    if (fetchSize > 0) {
+                        statement = statement.fetchSize(fetchSize);
+                    }
+                    statement = statement.bind(0, id);
                     return Flux.from(statement.execute())
                                .concatMap(result -> Flux.from(result.map((row, metadata) -> 1L)), 1)
                                .single()

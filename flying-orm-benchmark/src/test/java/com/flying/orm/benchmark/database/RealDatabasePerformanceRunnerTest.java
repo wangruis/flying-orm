@@ -124,7 +124,7 @@ class RealDatabasePerformanceRunnerTest {
     }
 
     @Test
-    void rejectsUnknownOptionsAndConcurrencyThatExceedsPool() {
+    void rejectsUnknownOptionsAndAllowsBoundedPoolUnderHighRequestConcurrency() {
         assertThrows(IllegalArgumentException.class,
                      () -> ReactivePerformanceArguments.parse(new String[]{
                              "--mysql-url", "r2dbc:mysql://local/test",
@@ -133,15 +133,17 @@ class RealDatabasePerformanceRunnerTest {
                              "--git-commit", "abcdef1",
                              "--unknown", "value"
                      }));
-        assertThrows(IllegalArgumentException.class,
-                     () -> ReactivePerformanceArguments.parse(new String[]{
-                             "--mysql-url", "r2dbc:mysql://local/test",
-                             "--output", "target/metrics.json",
-                             "--summary", "target/summary.md",
-                             "--git-commit", "abcdef1",
-                             "--pool-size", "4",
-                             "--query-concurrency", "8"
-                     }));
+        ReactivePerformanceArguments highConcurrency = ReactivePerformanceArguments.parse(new String[]{
+                "--mysql-url", "r2dbc:mysql://local/test",
+                "--output", "target/metrics.json",
+                "--summary", "target/summary.md",
+                "--git-commit", "abcdef1",
+                "--pool-size", "64",
+                "--query-concurrency", "10001"
+        });
+
+        assertEquals(64, highConcurrency.reportParameters().poolSize());
+        assertEquals(10001, highConcurrency.reportParameters().queryConcurrency());
     }
 
     @Test
@@ -168,7 +170,7 @@ class RealDatabasePerformanceRunnerTest {
 
     /** 原生对照必须消费结果并归还同一个池连接，不能用不完整的驱动调用制造虚假优势。 */
     @Test
-    void rawQueryByIdBindsFetchesConsumesAndCloses() {
+    void rawQueryByIdKeepsDriverFetchDefaultAndCloses() {
         AtomicReference<Object> bound = new AtomicReference<>();
         AtomicInteger fetchSize = new AtomicInteger(-1);
         AtomicInteger mapped = new AtomicInteger();
@@ -179,9 +181,23 @@ class RealDatabasePerformanceRunnerTest {
                 factory, "TEST_TABLE", "$1", new AtomicLong(4), 100, 0).block();
 
         assertEquals(5L, bound.get());
-        assertEquals(0, fetchSize.get());
+        assertEquals(-1, fetchSize.get());
         assertEquals(1, mapped.get());
         assertEquals(1, closes.get());
+    }
+
+    /** 显式正数 fetchSize 必须继续传给驱动，保证大结果流诊断场景与 ORM 配置一致。 */
+    @Test
+    void rawQueryByIdAppliesPositiveFetchSize() {
+        AtomicReference<Object> bound = new AtomicReference<>();
+        AtomicInteger fetchSize = new AtomicInteger(-1);
+        ConnectionFactory factory = rawQueryConnectionFactory(
+                bound, fetchSize, new AtomicInteger(), new AtomicInteger());
+
+        ReactivePerformanceScenarioRunner.rawQueryById(
+                factory, "TEST_TABLE", "$1", new AtomicLong(), 100, 256).block();
+
+        assertEquals(256, fetchSize.get());
     }
 
     @Test

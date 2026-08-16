@@ -1,5 +1,7 @@
 package com.flying.orm.rdb.reactive;
 
+import com.flying.orm.rdb.internal.InternalApi;
+import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
@@ -8,42 +10,70 @@ import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Function;
+import java.util.function.Supplier;
 
 /**
  * 一次批量订阅共用的总截止时间。
  *
- * <p>连接获取、分片执行、回执读写和提交都从同一份总预算里扣时间。开始新分片不会重新计时，
- * 因而慢连接池或大量小分片不能把调用方设置的超时悄悄放大。</p>
+ * <p>连接池返回连接后才创建截止点；连接排队完全服从上层连接池。连接内的事务、分片 SQL、回执写入和提交
+ * 共用同一份预算，开始下一步不会重新计时。</p>
  *
  * @author wangr
  * @date 2026-08-06
  * @version v1.0
  */
-record R2dbcBatchDeadline(Duration timeout, long startedAtNanos) {
+@InternalApi
+public record R2dbcBatchDeadline(Duration timeout, long startedAtNanos) {
 
-    R2dbcBatchDeadline {
+    public R2dbcBatchDeadline {
         timeout = Objects.requireNonNull(timeout, "batch timeout must not be null");
     }
 
-    static R2dbcBatchDeadline start(Duration timeout) {
+    public static R2dbcBatchDeadline start(Duration timeout) {
         return new R2dbcBatchDeadline(timeout, nowNanos());
     }
 
     <T> Mono<T> protect(Mono<T> source) {
+        return protect(source, () -> new TimeoutException("r2dbc batch timed out before the next operation"));
+    }
+
+    /** 允许边界层给同一批量截止点选择稳定的公开异常，同时保留源 Publisher 自己的超时。 */
+    <T> Mono<T> protect(Mono<T> source, Supplier<? extends Throwable> timeoutFailure) {
         Mono<T> safeSource = Objects.requireNonNull(source, "batch mono must not be null");
+        Supplier<? extends Throwable> safeFailure = Objects.requireNonNull(
+                timeoutFailure, "batch timeout failure supplier must not be null");
         if (timeout.isZero()) {
             return safeSource;
         }
         return Mono.defer(() -> {
             Duration remaining = remaining();
             return remaining.isZero()
-                    ? Mono.<T>error(new TimeoutException("r2dbc batch timed out before the next operation"))
-                    : safeSource.timeout(remaining);
+                    ? Mono.error(Objects.requireNonNull(safeFailure.get(), "batch timeout failure must not be null"))
+                    : safeSource.timeout(remaining, Mono.defer(() -> Mono.error(Objects.requireNonNull(
+                            safeFailure.get(), "batch timeout failure must not be null"))));
         });
     }
 
     <T> Flux<T> protect(Flux<T> source) {
         Flux<T> safeSource = Objects.requireNonNull(source, "batch flux must not be null");
+        return protectFlux(safeSource, remaining -> SqlExecutionTimeouts.absolute(safeSource, remaining));
+    }
+
+    /** 测试协作入口允许观察批量截止 Publisher 的取消；生产调用仍只接受结果流。 */
+    <T> Flux<T> protect(Flux<T> source,
+                        Function<Duration, ? extends Publisher<?>> deadlineFactory) {
+        Flux<T> safeSource = Objects.requireNonNull(source, "batch flux must not be null");
+        Function<Duration, ? extends Publisher<?>> safeDeadlineFactory = Objects.requireNonNull(
+                deadlineFactory, "batch deadline factory must not be null");
+        return protectFlux(safeSource,
+                           remaining -> SqlExecutionTimeouts.absolute(
+                                   safeSource,
+                                   () -> safeDeadlineFactory.apply(remaining)));
+    }
+
+    private <T> Flux<T> protectFlux(Flux<T> safeSource,
+                                    Function<Duration, Flux<T>> protectionFactory) {
         if (timeout.isZero()) {
             return safeSource;
         }
@@ -52,13 +82,11 @@ record R2dbcBatchDeadline(Duration timeout, long startedAtNanos) {
             if (remaining.isZero()) {
                 return Flux.<T>error(new TimeoutException("r2dbc batch timed out before the next operation"));
             }
-            // cache 使同一个单调截止信号不受 timeout 在每个 onNext 后取消/重订阅的影响，持续数据也不能重置总预算。
-            Mono<Long> deadlineSignal = Mono.delay(remaining).cache();
-            return safeSource.timeout(deadlineSignal, ignored -> deadlineSignal);
+            return protectionFactory.apply(remaining);
         });
     }
 
-    private Duration remaining() {
+    public Duration remaining() {
         long remainingNanos = saturatingNanos(timeout) - (nowNanos() - startedAtNanos);
         return remainingNanos <= 0L ? Duration.ZERO : Duration.ofNanos(remainingNanos);
     }

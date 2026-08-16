@@ -17,6 +17,7 @@ import reactor.core.publisher.Mono;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 在同一条连接上依次执行 setup、work 和 cleanup。
@@ -42,44 +43,68 @@ final class R2dbcSequenceExecutor {
     }
 
     Mono<SqlExecutionSequenceResult> execute(SqlExecutionSequence sequence, SqlExecutionOptions options) {
+        SqlExecutionSequence safeSequence = Objects.requireNonNull(
+                sequence, "SQL execution sequence must not be null");
+        SqlExecutionOptions safeOptions = Objects.requireNonNull(
+                options, "sql execution options must not be null");
+        return executionSession.resolveTransaction()
+                .flatMap(resolution -> resolution.bind(executeResolved(safeSequence, safeOptions)));
+    }
+
+    private Mono<SqlExecutionSequenceResult> executeResolved(SqlExecutionSequence sequence,
+                                                              SqlExecutionOptions options) {
         return Mono.usingWhen(
-                executionSession.acquireConnection(options),
-                lease -> executionSession.protectMono(executeSequence(lease.connection(), sequence, options), options),
-                lease -> executionSession.closeAfterResult(lease, SqlExecutionOperation.UPDATE, options, true),
-                (lease, error) -> {
+                executionSession.acquireConnection().map(SequenceResource::new),
+                resource -> R2dbcSqlDeadline.start(options)
+                        .bind(executeSequence(resource, sequence, options)),
+                resource -> executionSession.closeAfterResult(
+                        resource.lease(), SqlExecutionOperation.UPDATE, options, true, resource.cleanupDeadline(options)),
+                (resource, error) -> {
                     Throwable cleanupFailure = sequenceCleanupFailure(error);
                     return cleanupFailure == null
-                            ? executionSession.closeAfterResult(lease, SqlExecutionOperation.UPDATE, options, false)
+                            ? executionSession.closeAfterResult(
+                                    resource.lease(), SqlExecutionOperation.UPDATE, options, false,
+                                    resource.cleanupDeadline(options))
                             : executionSession.invalidateAfterCleanupFailure(
-                            lease,
+                            resource.lease(),
                             SqlExecutionOperation.UPDATE,
                             ResourceCleanupObservation.Phase.SESSION_CLEANUP,
                             options,
                             false,
-                            cleanupFailure);
+                            cleanupFailure,
+                            resource.cleanupDeadline(options));
                 },
-                lease -> executeSequenceCleanup(lease.connection(), sequence.cleanup(), List.of(), options)
-                        .then(executionSession.closeAfterResult(lease, SqlExecutionOperation.UPDATE, options, false))
+                resource -> executeSequenceCleanup(
+                        resource.lease().connection(), sequence.cleanup(), List.of(), options,
+                        resource.cleanupDeadline(options))
+                        .then(executionSession.closeAfterResult(
+                                resource.lease(), SqlExecutionOperation.UPDATE, options, false,
+                                resource.cleanupDeadline(options)))
                         .onErrorResume(cleanupError -> executionSession.invalidateAfterCleanupFailure(
-                                lease,
+                                resource.lease(),
                                 SqlExecutionOperation.UPDATE,
                                 ResourceCleanupObservation.Phase.SESSION_CLEANUP,
                                 options,
                                 false,
-                                cleanupError)));
+                                cleanupError,
+                                 resource.cleanupDeadline(options))));
     }
 
-    private Mono<SqlExecutionSequenceResult> executeSequence(Connection connection,
-                                                             SqlExecutionSequence sequence,
-                                                             SqlExecutionOptions options) {
+    private Mono<SqlExecutionSequenceResult> executeSequence(SequenceResource resource,
+                                                              SqlExecutionSequence sequence,
+                                                              SqlExecutionOptions options) {
+        Connection connection = resource.lease().connection();
         List<SqlExecutionStepResult> completed = new ArrayList<>();
         Mono<SqlExecutionSequenceResult> work = executeSequencePhase(
-                connection, sequence.setup(), SqlExecutionPhase.SETUP, completed, false)
-                .thenMany(executeSequencePhase(connection, sequence.work(), SqlExecutionPhase.WORK, completed, true))
+                connection, sequence.setup(), SqlExecutionPhase.SETUP, completed, false, options)
+                .thenMany(executeSequencePhase(
+                        connection, sequence.work(), SqlExecutionPhase.WORK, completed, true, options))
                 .collectList()
                 .map(ignored -> new SqlExecutionSequenceResult(completed));
-        Mono<SqlExecutionSequenceResult> workWithFailureCleanup = work.onErrorResume(error ->
-                executeSequenceCleanup(connection, sequence.cleanup(), completed, options)
+        Mono<SqlExecutionSequenceResult> protectedWork = executionSession.protectMono(work, options);
+        Mono<SqlExecutionSequenceResult> workWithFailureCleanup = protectedWork.onErrorResume(error ->
+                executeSequenceCleanup(
+                        connection, sequence.cleanup(), completed, options, resource.cleanupDeadline(options))
                         .onErrorResume(cleanupError -> {
                             ReactiveSqlExecutionProtection.addSuppressedIfAcyclic(error, cleanupError);
                             return Mono.empty();
@@ -87,23 +112,27 @@ final class R2dbcSequenceExecutor {
                         .then(Mono.error(error)));
         // 成功后的 cleanup 失败直接向上返回，不能落入上面的失败补偿再执行第二次。
         return workWithFailureCleanup.flatMap(result ->
-                executeSequenceCleanup(connection, sequence.cleanup(), completed, options).thenReturn(result));
+                executeSequenceCleanup(
+                        connection, sequence.cleanup(), completed, options,
+                        resource.cleanupDeadline(options)).thenReturn(result));
     }
 
     private Mono<Void> executeSequenceCleanup(Connection connection,
-                                             List<SqlRequest> cleanup,
-                                             List<SqlExecutionStepResult> completed,
-                                             SqlExecutionOptions options) {
+                                              List<SqlRequest> cleanup,
+                                              List<SqlExecutionStepResult> completed,
+                                              SqlExecutionOptions options,
+                                              R2dbcCleanupDeadline deadline) {
         Mono<Void> execution = executeSequencePhase(
-                connection, cleanup, SqlExecutionPhase.CLEANUP, completed, false).then();
-        return options.cleanupTimeout().isZero() ? execution : execution.timeout(options.cleanupTimeout());
+                connection, cleanup, SqlExecutionPhase.CLEANUP, completed, false, options).then();
+        return deadline.protect(execution);
     }
 
     private Flux<SqlExecutionStepResult> executeSequencePhase(Connection connection,
                                                               List<SqlRequest> requests,
                                                               SqlExecutionPhase phase,
                                                               List<SqlExecutionStepResult> completed,
-                                                              boolean collectWork) {
+                                                              boolean collectWork,
+                                                              SqlExecutionOptions options) {
         return Flux.fromIterable(requests)
                    .index()
                    .concatMap(indexed -> Mono.defer(() -> {
@@ -115,8 +144,9 @@ final class R2dbcSequenceExecutor {
                                                             request.sql(),
                                                             request.parameters().size(),
                                                             0,
-                                                            request.parameters(),
-                                                            execution)
+                                                             request.parameters(),
+                                                             execution,
+                                                             options)
                                              .map(rows -> new SqlExecutionStepResult(
                                                      stepIndex, request, rows, System.nanoTime() - startedAt))
                                              .doOnNext(result -> {
@@ -158,5 +188,23 @@ final class R2dbcSequenceExecutor {
             }
         }
         return null;
+    }
+
+    /** 单次订阅内延迟创建清理截止时间，业务执行时间不会提前消耗清理预算。 */
+    private record SequenceResource(R2dbcExecutionSession.ConnectionLease lease,
+                                    AtomicReference<R2dbcCleanupDeadline> cleanupDeadline) {
+
+        private SequenceResource(R2dbcExecutionSession.ConnectionLease lease) {
+            this(Objects.requireNonNull(lease, "connection lease must not be null"), new AtomicReference<>());
+        }
+
+        private R2dbcCleanupDeadline cleanupDeadline(SqlExecutionOptions options) {
+            R2dbcCleanupDeadline current = cleanupDeadline.get();
+            if (current != null) {
+                return current;
+            }
+            R2dbcCleanupDeadline created = R2dbcCleanupDeadline.start(options.cleanupTimeout());
+            return cleanupDeadline.compareAndSet(null, created) ? created : cleanupDeadline.get();
+        }
     }
 }

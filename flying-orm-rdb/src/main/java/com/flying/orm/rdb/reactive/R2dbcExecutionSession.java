@@ -3,16 +3,15 @@ package com.flying.orm.rdb.reactive;
 import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.batch.BatchMemoryBudget;
-import com.flying.orm.rdb.exception.RdbErrorKind;
-import com.flying.orm.rdb.exception.RdbException;
-import com.flying.orm.rdb.exception.RdbExceptionTranslator;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.isolation.IsolationContexts;
 import com.flying.orm.rdb.isolation.R2dbcConnectionInvalidator;
 import com.flying.orm.rdb.observation.ResourceCleanupObservation;
 import com.flying.orm.rdb.observation.SqlExecutionObserver;
 import com.flying.orm.rdb.observation.SqlExecutionOperation;
+import com.flying.orm.rdb.observation.SqlTransactionSource;
 import com.flying.orm.rdb.result.DynamicRow;
+import com.flying.orm.rdb.transaction.R2dbcTransactionContext;
 import com.flying.orm.rdb.transaction.R2dbcTransactionParticipant;
 import io.r2dbc.spi.Connection;
 import io.r2dbc.spi.ConnectionFactory;
@@ -21,11 +20,10 @@ import io.r2dbc.spi.Statement;
 import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.util.context.ContextView;
 
-import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.TimeoutException;
 import java.util.function.Function;
 
 /**
@@ -43,9 +41,7 @@ final class R2dbcExecutionSession {
 
     private final R2dbcBindMarkers bindMarkers;
 
-    private final SqlExecutionObserver observer;
-
-    private final R2dbcConnectionInvalidator connectionInvalidator;
+    private final R2dbcConnectionLeaseCleanup leaseCleanup;
 
     private final R2dbcTransactionParticipant transactionParticipant;
 
@@ -57,9 +53,7 @@ final class R2dbcExecutionSession {
         this.connectionFactory = Objects.requireNonNull(connectionFactory,
                                                         "connection factory must not be null");
         this.bindMarkers = Objects.requireNonNull(bindMarkers, "bind marker adapter must not be null");
-        this.observer = Objects.requireNonNull(observer, "sql execution observer must not be null");
-        this.connectionInvalidator = Objects.requireNonNull(connectionInvalidator,
-                                                             "connection invalidator must not be null");
+        this.leaseCleanup = new R2dbcConnectionLeaseCleanup(observer, connectionInvalidator);
         this.transactionParticipant = Objects.requireNonNull(transactionParticipant,
                                                               "transaction participant must not be null");
     }
@@ -75,7 +69,7 @@ final class R2dbcExecutionSession {
                                                               "sql execution options must not be null");
         Function<Flux<T>, Flux<T>> safeProtection = Objects.requireNonNull(
                 operationProtection, "sql operation protection must not be null");
-        return Flux.usingWhen(acquireConnection(safeOptions),
+        return Flux.usingWhen(acquireConnection(),
                               lease -> {
                                   Statement statement = prepareStatement(lease.connection(),
                                                                        safeRequest.sql(),
@@ -86,11 +80,10 @@ final class R2dbcExecutionSession {
                                   return safeProtection.apply(Flux.from(
                                           operation.apply(statement, lease.largeObjects())));
                               },
-                              lease -> closeAfterResult(lease, operationType, safeOptions, true),
-                              (lease, error) -> closeAfterError(
+                              lease -> leaseCleanup.closeAfterResult(lease, operationType, safeOptions, true),
+                              (lease, error) -> leaseCleanup.closeAfterError(
                                       lease, operationType, safeOptions, error),
-                              // 查询取消不产生提交不确定性，但仍须先释放未消费的 LOB。
-                              lease -> closeAfterResult(lease, operationType, safeOptions, true));
+                              lease -> leaseCleanup.cancelAfterResult(lease, operationType, safeOptions));
     }
     <T> Mono<T> withStatementMono(SqlRequest request,
                                   SqlExecutionOptions options,
@@ -100,7 +93,7 @@ final class R2dbcExecutionSession {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
         SqlExecutionOptions safeOptions = Objects.requireNonNull(options,
                                                               "sql execution options must not be null");
-        return Mono.usingWhen(acquireConnection(safeOptions),
+        return Mono.usingWhen(acquireConnection(),
                              lease -> {
                                  Statement statement = prepareStatement(lease.connection(),
                                                                       safeRequest.sql(),
@@ -110,40 +103,75 @@ final class R2dbcExecutionSession {
                                  return protectMono(
                                          operation.apply(statement, lease.largeObjects()), safeOptions);
                              },
-                             lease -> closeAfterResult(lease, operationType, safeOptions, true),
-                             (lease, error) -> closeAfterError(lease, operationType, safeOptions, error),
-                             lease -> closeAfterResult(lease, operationType, safeOptions, false));
+                             lease -> leaseCleanup.closeAfterResult(lease, operationType, safeOptions, true),
+                             (lease, error) -> leaseCleanup.closeAfterError(lease, operationType, safeOptions, error),
+                             lease -> leaseCleanup.cancelAfterResult(lease, operationType, safeOptions));
     }
     Flux<DynamicRow> protectRows(Flux<DynamicRow> source, String sql, SqlExecutionOptions options) {
-        return ReactiveSqlExecutionProtection.protectRows(source, sql, options, BatchMemoryBudget::estimateRowBytes);
+        SqlExecutionOptions safeOptions = Objects.requireNonNull(options,
+                                                                  "sql execution options must not be null");
+        return Flux.deferContextual(context -> {
+            R2dbcSqlDeadline deadline = R2dbcSqlDeadline.currentOrStart(context, safeOptions);
+            Flux<DynamicRow> boundedRows = ReactiveSqlExecutionProtection.protectRows(
+                    source,
+                    sql,
+                    safeOptions.withTimeout(java.time.Duration.ZERO),
+                    BatchMemoryBudget::estimateRowBytes);
+            return deadline.protectExecution(boundedRows);
+        });
     }
     <T> Mono<T> protectMono(Mono<T> source, SqlExecutionOptions options) {
-        return ReactiveSqlExecutionProtection.protectMono(source, options);
-    }
-    Mono<ConnectionLease> acquireConnection(SqlExecutionOptions options) {
         SqlExecutionOptions safeOptions = Objects.requireNonNull(options,
-                                                             "sql execution options must not be null");
-        // 外部上下文中的 routingIdentity 已在事务开始时固定；校验后直接借用主库连接，不再经过路由工厂。
-        return Mono.deferContextual(context -> transactionParticipant.currentTransaction(
-                           IsolationContexts.currentDatabaseKey(context))
-                   .map(transaction -> new ConnectionLease(transaction.connection(), true,
-                                                           new R2dbcLargeObjectScope()))
-                   .switchIfEmpty(acquireOwnedConnection(safeOptions)));
+                                                                  "sql execution options must not be null");
+        return Mono.deferContextual(context -> R2dbcSqlDeadline.currentOrStart(context, safeOptions)
+                                                               .protectExecution(source));
     }
-    private Mono<ConnectionLease> acquireOwnedConnection(SqlExecutionOptions safeOptions) {
+    Mono<ConnectionLease> acquireConnection() {
+        return Mono.deferContextual(context -> {
+            ReactiveTransactionSourceResolver.Resolution bound = context.getOrDefault(
+                    ReactiveTransactionSourceResolver.Resolution.class, null);
+            if (bound != null) {
+                return bound.transaction() == null
+                        ? acquireOwnedConnection()
+                        : Mono.just(externalLease(bound.transaction()));
+            }
+            return currentTransaction(context)
+                    .map(this::externalLease)
+                    .switchIfEmpty(acquireOwnedConnection());
+        });
+    }
+
+    Mono<ReactiveTransactionSourceResolver.Resolution> resolveTransaction() {
+        return Mono.deferContextual(context -> context
+                .<ReactiveTransactionSourceResolver.Resolution>getOrEmpty(
+                        ReactiveTransactionSourceResolver.Resolution.class)
+                .map(Mono::just)
+                .orElseGet(() -> {
+                    return currentTransaction(context)
+                                   .map(transaction -> new ReactiveTransactionSourceResolver.Resolution(
+                                           SqlTransactionSource.EXTERNAL, transaction))
+                                   .defaultIfEmpty(new ReactiveTransactionSourceResolver.Resolution(
+                                           SqlTransactionSource.AUTO_COMMIT, null));
+                }));
+    }
+
+    /** 外部上下文中的路由身份已在事务开始时固定，执行会话只借用该连接。 */
+    private ConnectionLease externalLease(R2dbcTransactionContext transaction) {
+        return new ConnectionLease(transaction.connection(), true, new R2dbcLargeObjectScope());
+    }
+
+    /** 事务参与者解析由上层事务管理器控制，执行会话不叠加本地截止时间。 */
+    private Mono<R2dbcTransactionContext> currentTransaction(ContextView context) {
+        String databaseKey = IsolationContexts.currentDatabaseKey(context);
+        return Mono.defer(() -> Objects.requireNonNull(
+                transactionParticipant.currentTransaction(databaseKey),
+                "current transaction publisher must not be null"));
+    }
+
+    private Mono<ConnectionLease> acquireOwnedConnection() {
         // create() 也放进 defer：外部事务已给出连接时，备用连接工厂不应被调用。
-        Mono<Connection> connection = Mono.defer(() -> Mono.from(connectionFactory.create()));
-        if (safeOptions.connectionAcquireTimeout().isZero()) {
-            return connection.map(owned -> new ConnectionLease(
-                    owned, false, new R2dbcLargeObjectScope()));
-        }
-        return connection.timeout(safeOptions.connectionAcquireTimeout())
-                         .onErrorMap(TimeoutException.class,
-                                     error -> new com.flying.orm.rdb.exception.RdbConnectionAcquireTimeoutException(
-                                             safeOptions.connectionAcquireTimeout(),
-                                             error))
-                         .map(owned -> new ConnectionLease(
-                                 owned, false, new R2dbcLargeObjectScope()));
+        return Mono.defer(() -> Mono.from(connectionFactory.create()))
+                   .map(owned -> new ConnectionLease(owned, false, new R2dbcLargeObjectScope()));
     }
 
     Statement prepareStatement(Connection connection,
@@ -170,70 +198,15 @@ final class R2dbcExecutionSession {
                                SqlExecutionOperation operation,
                                SqlExecutionOptions options,
                                boolean outcomeConfirmed) {
-        ConnectionLease safeLease = Objects.requireNonNull(lease, "connection lease must not be null");
-        if (safeLease.external()) {
-            return safeLease.largeObjects().complete();
-        }
-        Connection connection = safeLease.connection();
-        Duration timeout = options.cleanupTimeout();
-        Mono<Void> cleanup = Mono.defer(() -> Mono.from(outcomeConfirmed
-                ? connectionInvalidator.close(connection)
-                : connectionInvalidator.invalidate(connection)));
-        if (!timeout.isZero()) {
-            cleanup = cleanup.timeout(timeout);
-        }
-        Mono<Void> connectionCleanup = cleanup;
-        Mono<Boolean> largeObjects = safeLease.largeObjects().complete().thenReturn(true)
-                .onErrorResume(error -> invalidateAfterCleanupFailure(
-                        safeLease, operation, ResourceCleanupObservation.Phase.CONNECTION_INVALIDATE,
-                        options, outcomeConfirmed, error).thenReturn(false));
-        if (!outcomeConfirmed) {
-            return largeObjects.flatMap(reusable -> reusable ? connectionCleanup.onErrorResume(error -> {
-                observer.onResourceCleanup(new ResourceCleanupObservation(
-                        operation,
-                        ResourceCleanupObservation.Phase.CONNECTION_INVALIDATE,
-                        false,
-                        error));
-                VirtualMachineError fatal = ReactiveSqlExecutionProtection.findVirtualMachineError(error);
-                return fatal == null ? Mono.empty() : Mono.error(fatal);
-            }) : Mono.empty());
-        }
-        return largeObjects.flatMap(reusable -> reusable
-                ? connectionCleanup.onErrorResume(error -> invalidateAfterCleanupFailure(safeLease,
-                        operation, ResourceCleanupObservation.Phase.CONNECTION_CLOSE,
-                        options, outcomeConfirmed, error))
-                : Mono.empty());
+        return leaseCleanup.closeAfterResult(lease, operation, options, outcomeConfirmed);
     }
 
-    private Mono<Void> closeAfterError(ConnectionLease lease,
-                                       SqlExecutionOperation operation,
-                                       SqlExecutionOptions options,
-                                       Throwable error) {
-        Mono<Void> largeObjectCleanup = lease.largeObjects().error(error)
-                .onErrorResume(cleanupError -> {
-                    VirtualMachineError fatal = ReactiveSqlExecutionProtection.promoteVirtualMachineError(
-                            error, cleanupError);
-                    if (fatal == null) {
-                        return Mono.empty();
-                    }
-                    return invalidateAfterCleanupFailure(
-                            lease, operation, ResourceCleanupObservation.Phase.CONNECTION_INVALIDATE,
-                            options, false, fatal).then(Mono.error(fatal));
-                });
-        return largeObjectCleanup.then(Mono.defer(() -> {
-            RuntimeException translated = RdbExceptionTranslator.translate(error);
-            boolean reusable = translated instanceof RdbException rdbException
-                    && reusableAfterError(rdbException.kind());
-            return closeAfterResult(lease, operation, options, reusable);
-        }));
-    }
-    private static boolean reusableAfterError(RdbErrorKind kind) {
-        return switch (kind) {
-            // 服务端已明确拒绝语句时，普通自动提交连接仍可安全 reset 后归池。
-            case DUPLICATE_KEY, CONSTRAINT, BAD_SQL, DEADLOCK, LOCK_TIMEOUT -> true;
-            // 连接、超时、取消或未知错误不能证明驱动会话已经干净。
-            case CONNECTION, TIMEOUT, CANCELLED, UNKNOWN -> false;
-        };
+    Mono<Void> closeAfterResult(ConnectionLease lease,
+                                SqlExecutionOperation operation,
+                                SqlExecutionOptions options,
+                                boolean outcomeConfirmed,
+                                R2dbcCleanupDeadline deadline) {
+        return leaseCleanup.closeAfterResult(lease, operation, options, outcomeConfirmed, deadline);
     }
     Mono<Void> invalidateAfterCleanupFailure(ConnectionLease lease,
                                             SqlExecutionOperation operation,
@@ -241,33 +214,19 @@ final class R2dbcExecutionSession {
                                             SqlExecutionOptions options,
                                             boolean outcomeConfirmed,
                                             Throwable primaryError) {
-        ConnectionLease safeLease = Objects.requireNonNull(lease, "connection lease must not be null");
-        if (safeLease.external()) {
-            return Mono.empty();
-        }
-        Connection connection = safeLease.connection();
-        Duration timeout = options.cleanupTimeout();
-        Mono<Void> invalidation = Mono.defer(() -> Mono.from(connectionInvalidator.invalidate(connection)));
-        if (!timeout.isZero()) {
-            invalidation = invalidation.timeout(timeout);
-        }
-        return invalidation.onErrorResume(invalidationError -> {
-            VirtualMachineError fatal = ReactiveSqlExecutionProtection.promoteVirtualMachineError(
-                    primaryError, invalidationError);
-            if (fatal != null) {
-                observer.onResourceCleanup(new ResourceCleanupObservation(
-                        operation, phase, outcomeConfirmed, fatal));
-                return Mono.error(fatal);
-            }
-            ReactiveSqlExecutionProtection.addSuppressedIfAcyclic(primaryError, invalidationError);
-            return Mono.empty();
-        }).then(Mono.defer(() -> {
-            VirtualMachineError fatal = ReactiveSqlExecutionProtection.findVirtualMachineError(primaryError);
-            Throwable observationError = fatal == null ? primaryError : fatal;
-            observer.onResourceCleanup(new ResourceCleanupObservation(
-                    operation, phase, outcomeConfirmed, observationError));
-            return fatal == null ? Mono.empty() : Mono.error(fatal);
-        }));
+        return leaseCleanup.invalidateAfterCleanupFailure(
+                lease, operation, phase, options, outcomeConfirmed, primaryError);
+    }
+
+    Mono<Void> invalidateAfterCleanupFailure(ConnectionLease lease,
+                                             SqlExecutionOperation operation,
+                                             ResourceCleanupObservation.Phase phase,
+                                             SqlExecutionOptions options,
+                                             boolean outcomeConfirmed,
+                                             Throwable primaryError,
+                                             R2dbcCleanupDeadline deadline) {
+        return leaseCleanup.invalidateAfterCleanupFailure(
+                lease, operation, phase, options, outcomeConfirmed, primaryError, deadline);
     }
 
     static Publisher<DynamicRow> mapRows(Result result,

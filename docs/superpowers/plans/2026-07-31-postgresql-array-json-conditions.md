@@ -71,7 +71,7 @@
 ### Task 4: 收口与交付
 
 **Files:**
-- Modify: `docs/flying-orm-phased-implementation-plan.md`
+- Modify: `docs/requirements/index.md`
 - Modify: `docs/source-feature-matrix.md`
 - Modify: `docs/requirements/index.md`
 - Modify: `docs/target-api-examples.md`

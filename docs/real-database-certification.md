@@ -9,7 +9,7 @@
 
 | 数据库 | 镜像 | R2DBC 驱动 |
 | --- | --- | --- |
-| MySQL | `mysql:8.4.10` | `io.asyncer:r2dbc-mysql:1.4.1` |
+| MySQL | `mysql:8.4.10` | `org.mariadb:r2dbc-mariadb:1.4.1` |
 | PostgreSQL | `postgres:17.10` | `org.postgresql:r2dbc-postgresql:1.1.2.RELEASE` |
 | Oracle | `gvenzl/oracle-free:23.26.0-slim-faststart` | `com.oracle.database.r2dbc:oracle-r2dbc:1.3.0` |
 | SQL Server | `mcr.microsoft.com/mssql/server:2022-CU22-GDR1-ubuntu-22.04` | `io.r2dbc:r2dbc-mssql:1.0.4.RELEASE` |
@@ -17,9 +17,9 @@
 
 版本标签用于稳定复跑，最终报告还要记录本机实际拉取的镜像 ID。镜像或驱动升级后必须重新执行相关批次，旧结果不能自动继承。
 
-MySQL 8.4 使用 `caching_sha2_password`。R2DBC 认证使用 `sslMode=REQUIRED`，避免容器重启后进入完整认证阶段时
-因没有 TLS 而被驱动拒绝；生产环境应进一步使用受信任证书校验。`allowPublicKeyRetrieval` 是 MySQL JDBC Connector
-在明确关闭 TLS 时的本地认证选项，不是 Asyncer R2DBC URL 的通用能力，也不能代替生产 TLS。
+MySQL 8.4 使用 `caching_sha2_password`。MariaDB Connector/R2DBC 同时支持 MariaDB 和 MySQL；生产认证应使用
+`sslMode=verify-full` 并校验证书。`allowPublicKeyRetrieval=true` 只用于明确关闭 TLS 的本地验证，不能代替生产 TLS，
+也不应成为线上默认值。
 
 ## 当前认证结果
 
@@ -81,25 +81,14 @@ SQL Server 在竞争会话设置 `LOCK_TIMEOUT 500` 后返回 1222；两者都�
 
 2026-08-02 又完成了一轮固定资源正式性能长跑。MySQL/PostgreSQL 的查询、更新、ATOMIC 和 INDEPENDENT 共
 8 个场景全部零错误，连接池最终零借出、零等待；吞吐、P50/P95/P99、CPU、堆和连接峰值均已归档。完整结果见
-[本机真实数据库性能基线](performance-database-baseline-2026-08-02.md)。这是一轮初始基线，企业版 V1 的 RC
-性能门禁仍要求相同参数至少三轮并比较中位数。
+[本机真实数据库性能基线](performance-database-baseline-2026-08-02.md)。这是一轮初始基线，正式性能门禁
+仍要求相同参数至少三轮并比较中位数。
 
 真实驱动认证发现并修复了方言标识符引用、元数据参数标记、PostgreSQL Array 类型推断、PostgreSQL JSON
 驱动包装值、MySQL 主键元数据重复/数字布尔值、MySQL TLS 连接配置差异、MySQL 8 的
 `ER_LOCK_NOWAIT(3572)` 分类缺口，以及真实断链时 PostgreSQL `57P0x` 和无 SQLState R2DBC 资源异常的
 连接分类缺口；预览认证又修复了 Oracle MERGE 的 BLOB/CLOB 非阻塞绑定和 SQL Server 认证 URL 在 Windows
 `mvn.cmd` 下的参数传递问题。
-
-## V1.0.1 最终认证
-
-2026-08-07 使用 MySQL 8.4.10 和 PostgreSQL 17.8 完成 V1.0.1 最终门禁。功能、事务、故障、取消、UNKNOWN、
-连接池恢复、慢消费者和有界并发共实际执行 33 个外部场景，0 失败、0 错误。平级 Spring 示例另有两种数据库
-各 1 个外部事务用例通过，覆盖普通提交/回滚、外部 ATOMIC 最终提交/回滚和 INDEPENDENT 预执行拒绝。
-
-两库随后完成固定参数三轮真实性能认证。每轮所有场景错误率为 0，结束时连接池借出和等待均为 0。MySQL
-完整序列受宿主机同步写抖动影响，updateById 又按同口径执行三轮单场景复核，吞吐、P95 和 P99 与既有稳定
-多轮参考持平。完整环境、结果和边界见
-[V1.0.1 真实数据库与性能认证](database-certification-2026-08-07-v1.0.1.md)。
 
 ## V2.0.0 当前认证
 

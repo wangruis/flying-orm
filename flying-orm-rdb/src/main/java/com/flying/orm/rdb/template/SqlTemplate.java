@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.template;
 
+import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.internal.template.SqlStatements;
 
 import java.util.Collections;
@@ -99,6 +100,21 @@ public final class SqlTemplate {
     }
 
     private static void requireReadOnlyQuery(String sql) {
+        requireReadOnlyQuery(sql, null);
+    }
+
+    /**
+     * 按实际方言复验只读模板。注册阶段尚不知道方言，因此只跳过全部受支持方言都可能使用的文本边界；
+     * 引擎装配后再按唯一方言收紧注释和引号规则，避免跨方言词法差异隐藏写操作。
+     */
+    static void requireReadOnlyQuery(String sql, RdbDialect dialect) {
+        String dialectName = dialect == null ? "" : dialect.name();
+        boolean generic = dialect == null;
+        boolean mysql = "mysql".equalsIgnoreCase(dialectName);
+        boolean oracle = generic || "oracle".equalsIgnoreCase(dialectName);
+        boolean postgresql = generic || "postgresql".equalsIgnoreCase(dialectName);
+        boolean sqlServer = "sqlserver".equalsIgnoreCase(dialectName)
+                || "sql-server".equalsIgnoreCase(dialectName);
         String firstKeyword = null;
         for (int index = 0; index < sql.length();) {
             char current = sql.charAt(index);
@@ -108,8 +124,12 @@ public final class SqlTemplate {
                 index++;
                 continue;
             }
-            if (current == '-' && next == '-') {
+            if (isLineCommentStart(sql, index, mysql)) {
                 index = skipLineComment(sql, index + 2);
+                continue;
+            }
+            if ((generic || mysql) && current == '#') {
+                index = skipLineComment(sql, index + 1);
                 continue;
             }
             if (current == '/' && next == '*') {
@@ -117,13 +137,15 @@ public final class SqlTemplate {
                     throw new IllegalArgumentException(
                             "SQL query template must not contain executable comments");
                 }
-                index = skipBlockComment(sql, index + 2);
+                index = skipBlockComment(sql, index + 2, generic || postgresql || sqlServer);
                 continue;
             }
-            int oracleQuoteEnd = SqlStatements.oracleAlternativeQuoteEnd(sql, index);
-            if (oracleQuoteEnd >= 0) {
-                index = oracleQuoteEnd;
-                continue;
+            if (oracle) {
+                int oracleQuoteEnd = SqlStatements.oracleAlternativeQuoteEnd(sql, index);
+                if (oracleQuoteEnd >= 0) {
+                    index = oracleQuoteEnd;
+                    continue;
+                }
             }
             if (current == '\'' || current == '\"' || current == '`' || current == '[') {
                 index = skipQuoted(sql, index, current == '[' ? ']' : current);
@@ -133,7 +155,7 @@ public final class SqlTemplate {
                 index = skipIdentifierSlot(sql, index + 2);
                 continue;
             }
-            if (current == '$') {
+            if (postgresql && current == '$') {
                 String delimiter = dollarQuoteDelimiterAt(sql, index);
                 if (delimiter != null) {
                     index = skipDollarQuoted(sql, index, delimiter);
@@ -187,12 +209,12 @@ public final class SqlTemplate {
         return index;
     }
 
-    private static int skipBlockComment(String sql, int index) {
+    private static int skipBlockComment(String sql, int index, boolean nested) {
         int depth = 1;
         while (index < sql.length()) {
             char current = sql.charAt(index);
             char next = index + 1 < sql.length() ? sql.charAt(index + 1) : '\0';
-            if (current == '/' && next == '*') {
+            if (nested && current == '/' && next == '*') {
                 depth++;
                 index += 2;
             } else if (current == '*' && next == '/') {
@@ -211,6 +233,11 @@ public final class SqlTemplate {
     private static int skipQuoted(String sql, int index, char closing) {
         index++;
         while (index < sql.length()) {
+            if (closing != ']' && sql.charAt(index) == '\\'
+                    && index + 1 < sql.length() && sql.charAt(index + 1) == closing) {
+                throw new IllegalArgumentException(
+                        "SQL query template must use doubled delimiters instead of backslash escapes");
+            }
             if (sql.charAt(index) != closing) {
                 index++;
                 continue;
@@ -222,6 +249,21 @@ public final class SqlTemplate {
             return index + 1;
         }
         throw new IllegalArgumentException("SQL query template contains an unclosed quoted value or identifier");
+    }
+
+    /**
+     * MySQL 只有在双减号后跟 ASCII 空格、控制字符或文本结束时才把它视为注释；其他受支持方言按
+     * 普通双减号注释处理。实际方言会在模板引擎创建时确定。
+     */
+    static boolean isLineCommentStart(String sql, int index, boolean mysql) {
+        if (index + 1 >= sql.length() || sql.charAt(index) != '-' || sql.charAt(index + 1) != '-') {
+            return false;
+        }
+        if (!mysql || index + 2 >= sql.length()) {
+            return true;
+        }
+        char following = sql.charAt(index + 2);
+        return following == ' ' || Character.isISOControl(following);
     }
 
     private static int skipIdentifierSlot(String sql, int index) {
@@ -241,7 +283,11 @@ public final class SqlTemplate {
         return end;
     }
 
-    private static String dollarQuoteDelimiterAt(String sql, int index) {
+    /** 返回当前位置的 PostgreSQL dollar quote 分隔符，不是合法起点时返回 {@code null}。 */
+    static String dollarQuoteDelimiterAt(String sql, int index) {
+        if (index > 0 && isPostgresqlIdentifierPart(sql.charAt(index - 1))) {
+            return null;
+        }
         int end = sql.indexOf('$', index + 1);
         if (end < 0) {
             return null;
@@ -256,6 +302,10 @@ public final class SqlTemplate {
             }
         }
         return sql.substring(index, end + 1);
+    }
+
+    private static boolean isPostgresqlIdentifierPart(char character) {
+        return Character.isLetterOrDigit(character) || character == '_' || character == '$';
     }
 
     private static int skipDollarQuoted(String sql, int index, String delimiter) {

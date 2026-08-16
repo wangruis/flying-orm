@@ -37,7 +37,7 @@ final class ReactivePerformanceDatabaseRunner {
                 .initialSize(arguments.poolSize)
                 .minIdle(arguments.poolSize)
                 .maxSize(arguments.poolSize)
-                .maxAcquireTime(ReactivePerformanceScenarioRunner.ACQUIRE_TIMEOUT)
+                .maxAcquireTime(ReactivePerformanceScenarioRunner.SQL_TIMEOUT)
                 .maxIdleTime(Duration.ofMinutes(5))
                 .build());
         ConnectionFactory executionFactory = arguments.phaseDiagnostics
@@ -111,8 +111,7 @@ final class ReactivePerformanceDatabaseRunner {
         if (arguments.includes(ReactivePerformanceScenario.ATOMIC_BATCH_INSERT)) {
             AtomicLong ids = new AtomicLong(1_000_000L);
             BatchWriteOptions options = BatchWriteOptions.atomic(arguments.batchSize)
-                    .withTimeout(ReactivePerformanceScenarioRunner.SQL_TIMEOUT)
-                    .withConnectionAcquireTimeout(ReactivePerformanceScenarioRunner.ACQUIRE_TIMEOUT);
+                    .withTimeout(ReactivePerformanceScenarioRunner.SQL_TIMEOUT);
             scenarios.add(runBatchScenario(target, diagnostics, ReactivePerformanceScenario.ATOMIC_BATCH_INSERT,
                                            arguments, pool, executor, ids, options));
         }
@@ -120,8 +119,7 @@ final class ReactivePerformanceDatabaseRunner {
             AtomicLong ids = new AtomicLong(1_000_000_000L);
             BatchWriteOptions options = BatchWriteOptions.independent(
                     arguments.independentChunkSize, arguments.independentConcurrency)
-                    .withTimeout(ReactivePerformanceScenarioRunner.SQL_TIMEOUT)
-                    .withConnectionAcquireTimeout(ReactivePerformanceScenarioRunner.ACQUIRE_TIMEOUT);
+                    .withTimeout(ReactivePerformanceScenarioRunner.SQL_TIMEOUT);
             scenarios.add(runBatchScenario(target, diagnostics,
                                            ReactivePerformanceScenario.INDEPENDENT_BATCH_INSERT,
                                            arguments, pool, executor, ids, options));
@@ -131,8 +129,7 @@ final class ReactivePerformanceDatabaseRunner {
     static SqlExecutionOptions queryOptions(ReactivePerformanceArguments arguments) {
         ReactivePerformanceArguments safeArguments = Objects.requireNonNull(
                 arguments, "database performance arguments must not be null");
-        SqlExecutionOptions options = SqlExecutionOptions.timeout(ReactivePerformanceScenarioRunner.SQL_TIMEOUT)
-                .withConnectionAcquireTimeout(ReactivePerformanceScenarioRunner.ACQUIRE_TIMEOUT);
+        SqlExecutionOptions options = SqlExecutionOptions.timeout(ReactivePerformanceScenarioRunner.SQL_TIMEOUT);
         return safeArguments.fetchSize() == null
                 ? options : options.withFetchSize(safeArguments.fetchSize());
     }

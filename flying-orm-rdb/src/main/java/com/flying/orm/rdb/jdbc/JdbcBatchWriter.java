@@ -137,9 +137,11 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
             try (JdbcConnectionProvider.JdbcConnectionLease lease = connections.acquire()) {
                 context.transactionSource(lease.transactionSource() == SqlTransactionSource.EXTERNAL
                         ? SqlTransactionSource.EXTERNAL : SqlTransactionSource.INTERNAL);
+                JdbcBatchSupport.BatchDeadline deadline = JdbcBatchSupport.BatchDeadline.start(
+                        request.options().timeout());
                 if (lease.transactionSource() == SqlTransactionSource.EXTERNAL) {
                     try {
-                        consumeAtomic(lease.connection(), request, rows, results);
+                        consumeAtomic(lease.connection(), request, rows, results, deadline);
                         return externalCompletion.enlist(lease.externalTransaction(), request, results, context);
                     } catch (BatchWriteException error) {
                         throw externalFailure(error);
@@ -153,7 +155,7 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
                                                             unknown(results, error)));
                     }
                 }
-                return executeOwnedAtomic(lease, request, rows, results);
+                return executeOwnedAtomic(lease, request, rows, results, deadline);
             }
         } catch (BatchWriteException error) {
             rethrowSuppressedVirtualMachineError(error);
@@ -166,9 +168,10 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
     }
 
     private BatchWriteResult executeOwnedAtomic(JdbcConnectionProvider.JdbcConnectionLease lease,
-                                                BatchWriteRequest request,
-                                                JdbcBatchRows rows,
-                                                List<BatchChunkResult> results) {
+                                                 BatchWriteRequest request,
+                                                 JdbcBatchRows rows,
+                                                 List<BatchChunkResult> results,
+                                                 JdbcBatchSupport.BatchDeadline deadline) {
         Connection connection = lease.connection();
         boolean restoreAutoCommit = false;
         boolean autoCommitStateKnown = false;
@@ -182,8 +185,9 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
                 restoreAutoCommit = true;
                 connection.setAutoCommit(false);
             }
-            consumeAtomic(connection, request, rows, results);
+            consumeAtomic(connection, request, rows, results, deadline);
             try {
+                deadline.remaining();
                 commitAttempted = true;
                 connection.commit();
                 transactionFinished = true;
@@ -276,8 +280,9 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
     private void consumeAtomic(Connection connection,
                                BatchWriteRequest request,
                                JdbcBatchRows rows,
-                               List<BatchChunkResult> results) throws SQLException, InterruptedException, TimeoutException {
-        JdbcBatchSupport.BatchDeadline deadline = JdbcBatchSupport.BatchDeadline.start(request.options().timeout());
+                               List<BatchChunkResult> results,
+                               JdbcBatchSupport.BatchDeadline deadline)
+            throws SQLException, InterruptedException, TimeoutException {
         long offset = 0L;
         int chunkIndex = 0;
         List<Object[]> chunk;

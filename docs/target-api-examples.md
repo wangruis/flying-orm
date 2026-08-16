@@ -97,7 +97,6 @@ FlyingOrmClients clients = FlyingOrmClients.builder(dataSource, connectionFactor
         .executionOptions(SqlExecutionOptions.maxRows(1000)
                 .withTimeout(Duration.ofSeconds(3)))
         .batchWriteOptions(BatchWriteOptions.atomic(500)
-                .withConnectionAcquireTimeout(Duration.ofSeconds(1))
                 .withTimeout(Duration.ofMinutes(2))
                 .withMaxRows(100_000))
         .cachePolicy(OrmCachePolicy.safeDefaults())
@@ -765,7 +764,6 @@ FlyingOrmConfiguration configuration = FlyingOrmConfiguration.defaults()
 
 ```java
 SqlExecutionOptions options = SqlExecutionOptions.unlimited()
-        .withConnectionAcquireTimeout(Duration.ofMillis(500))
         .withTimeout(Duration.ofSeconds(3))
         .withMaxRows(1000)
         .withMaxResultBytes(64L * 1024 * 1024);
@@ -785,10 +783,8 @@ Mono<Long> updated = executor.rowsUpdated(
 
 `timeout` 会取消上游响应式订阅并抛出 `SqlExecutionTimeoutException`，观测分类是 `TIMEOUT`。`safeDefaults()` 默认最多返回 100000 行、累计估算 64 MiB；只有明确接受无限结果风险时才使用 `unlimited()`。
 
-R2DBC 的 `connectionAcquireTimeout` 单独限制等待连接池的时间。超时会抛出
-`RdbConnectionAcquireTimeoutException`，错误种类和观测分类都是 `CONNECTION`。批量写入使用
-`BatchWriteOptions.withConnectionAcquireTimeout(...)`。JDBC 标准没有可靠的单次取连接超时入口，原生 JDBC
-必须在 DataSource/连接池上配置获取超时，ORM 不会为每次同步调用偷偷套线程池。
+JDBC/R2DBC 的连接排队、获取超时和健康检查都在 DataSource、r2dbc-pool 或其他上层连接池配置。
+flying-orm 不提供重复的连接等待选项，也不会为连接获取另起定时器或隐藏线程。
 
 真实环境做轻量并发检查时，可以在 testkit 中复用 `ReactiveConcurrencyProbe`。它只订阅调用方给出的响应式操作，不创建线程池、不包装数据源：
 
@@ -1261,7 +1257,7 @@ flying-orm 不会因为 `DEADLOCK`、`LOCK_TIMEOUT` 或 `CONNECTION` 就自动�
 testkit 分别提供外部 R2DBC 与 JDBC 认证入口。默认没有对应 URL 就跳过；正式认证 Profile 会要求目标库参数完整：
 
 ```text
-mvn -pl flying-orm-testkit -am -Pmysql-compat "-Dflying.orm.compat.mysql.url=r2dbc:mysql://user:password@localhost:3306/test?sslMode=REQUIRED" test
+mvn -pl flying-orm-testkit -am -Pmysql-compat "-Dflying.orm.compat.mysql.url=r2dbc:mariadb://user:password@localhost:3306/test?sslMode=verify-full" test
 
 mvn -pl flying-orm-testkit -am -Ppostgresql-compat -Dflying.orm.compat.postgresql.url=r2dbc:postgresql://user:password@localhost:5432/test test
 

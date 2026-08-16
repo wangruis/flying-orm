@@ -29,11 +29,19 @@ final class ReactiveTransactionSourceResolver {
 
     Mono<Resolution> resolve(SqlTransactionSource localSource) {
         SqlTransactionSource safeLocalSource = Objects.requireNonNull(localSource,
-                                                                      "local transaction source must not be null");
-        return Mono.defer(() -> Objects.requireNonNull(currentTransaction.get(),
-                                                       "current transaction publisher must not be null"))
-                   .map(transaction -> new Resolution(SqlTransactionSource.EXTERNAL, transaction))
-                   .defaultIfEmpty(new Resolution(safeLocalSource, null));
+                                                                       "local transaction source must not be null");
+        return Mono.deferContextual(context -> {
+            Resolution bound = context.getOrDefault(Resolution.class, null);
+            if (bound != null) {
+                return Mono.just(bound.transaction() == null
+                        ? new Resolution(safeLocalSource, null) : bound);
+            }
+            Mono<R2dbcTransactionContext> current = Mono.defer(() -> Objects.requireNonNull(
+                    currentTransaction.get(), "current transaction publisher must not be null"));
+            return current
+                    .map(transaction -> new Resolution(SqlTransactionSource.EXTERNAL, transaction))
+                    .defaultIfEmpty(new Resolution(safeLocalSource, null));
+        });
     }
 
     /**

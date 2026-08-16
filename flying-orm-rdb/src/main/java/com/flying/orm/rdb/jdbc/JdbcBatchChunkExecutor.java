@@ -58,6 +58,7 @@ final class JdbcBatchChunkExecutor {
             BatchChunkResult result = executeOwnerRestrictedUpdates(
                     safeConnection, safeRequest, chunkIndex, startOffset, safeRows, deadline, protectedRows);
             protectedSideIndex.complete(safeConnection, protectedRows, result, deadline);
+            deadline.remaining();
             return result;
         }
         BatchChunkResult result;
@@ -76,6 +77,7 @@ final class JdbcBatchChunkExecutor {
             result = result(safeRequest, chunkIndex, startOffset, safeRows.size(), counts);
         }
         protectedSideIndex.complete(safeConnection, protectedRows, result, deadline);
+        deadline.remaining();
         return result;
     }
 

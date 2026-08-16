@@ -34,7 +34,8 @@ import java.util.Objects;
  * 再按原参数顺序绑定。每次订阅独占自己的连接和局部计数器；执行器本身只保存线程安全或只读依赖，
  * 可以作为单例共享。</p>
  *
- * <p>执行保护分成连接获取超时、整次执行超时和最大返回行数。普通批量更新走一个 Statement，
+ * <p>连接排队和获取超时由上层连接池治理；连接可用后，执行保护限制整次 SQL 执行、返回行数、结果内存和 LOB。
+ * 普通批量更新走一个 Statement，
  * 带 ATOMIC/INDEPENDENT、回执恢复和乐观锁语义的批量请求交给 {@link R2dbcBatchWriter}。</p>
  *
  * @author wangr
@@ -224,9 +225,10 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
         return observationSupport.observeFlux(SqlExecutionOperation.QUERY,
                                               safeRequest.sql(),
                                               safeRequest.parameters().size(),
-                                              0,
-                                              safeRequest.parameters(),
-                                              source);
+                                               0,
+                                               safeRequest.parameters(),
+                                               source,
+                                               safeOptions);
     }
 
     @Override
@@ -236,9 +238,11 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
     @Override
     public Mono<Long> rowsUpdated(SqlRequest request, SqlExecutionOptions options) {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
+        SqlExecutionOptions safeOptions = Objects.requireNonNull(
+                options, "sql execution options must not be null");
         Mono<Long> source = executionSession.withStatementMono(
                 safeRequest,
-                options,
+                safeOptions,
                 SqlExecutionOperation.UPDATE,
                 (statement, ignored) -> Flux.from(statement.execute())
                                  .flatMap(Result::getRowsUpdated)
@@ -247,9 +251,10 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
         return observationSupport.observeMono(SqlExecutionOperation.UPDATE,
                                               safeRequest.sql(),
                                               safeRequest.parameters().size(),
-                                              0,
-                                              safeRequest.parameters(),
-                                              source);
+                                               0,
+                                               safeRequest.parameters(),
+                                               source,
+                                               safeOptions);
     }
 
     @Override
@@ -258,9 +263,10 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
         Mono<SqlWriteResult> source = generatedKeyWriter.write(safeRequest, options)
                                                         .onErrorMap(ReactiveSqlExecutionProtection::translate);
         return observationSupport.observeMono(SqlExecutionOperation.UPDATE,
-                                              safeRequest.sql(), safeRequest.parameters().size(), 0,
-                                              safeRequest.parameters(), source,
-                                              SqlWriteResult::affectedRows);
+                                               safeRequest.sql(), safeRequest.parameters().size(), 0,
+                                               safeRequest.parameters(), source,
+                                               SqlWriteResult::affectedRows,
+                                               options);
     }
     @Override
     public Mono<SqlWriteResult> atomicProtectedWrite(ProtectedWriteWork work, SqlExecutionOptions options) {
@@ -277,7 +283,8 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
                 0,
                 safeWork.writeRequest().parameters(),
                 source,
-                SqlWriteResult::affectedRows);
+                SqlWriteResult::affectedRows,
+                safeOptions);
     }
 
     /**

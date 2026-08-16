@@ -64,6 +64,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -97,7 +98,7 @@ class ReactiveFormClientTest {
                     .verifyComplete();
 
         assertEquals(List.of(defaults, defaults), executor.options());
-        assertEquals(BatchWriteOptions.defaults(), executor.writeRequest().options());
+        assertBatchOptionsPreserved(BatchWriteOptions.defaults(), executor.writeRequest().options());
         assertThrows(IllegalArgumentException.class,
                      () -> client.insert(WriteSpec.update(form(), orderedMap("name", "错误入口"), where)));
     }
@@ -293,7 +294,7 @@ class ReactiveFormClientTest {
 
         StepVerifier.create(result).expectNextCount(1).verifyComplete();
 
-        assertEquals(BatchWriteOptions.atomic(10), executor.writeRequest().options());
+        assertBatchOptionsPreserved(BatchWriteOptions.atomic(10), executor.writeRequest().options());
         assertArrayEquals(new Object[]{"u1", "王"}, executor.capturedParameterRows().getFirst());
     }
 
@@ -397,6 +398,95 @@ class ReactiveFormClientTest {
         assertArrayEquals(new Object[]{"u2", "李"}, executor.capturedParameterRows().get(1));
     }
 
+    /** 输入首行等待由上游负责，不能提前消费连接可用后才开始的批量 SQL 时限。 */
+    @Test
+    void delayedBatchInsertInputDoesNotConsumeSqlTimeout() {
+        RecordingSqlExecutor executor = new RecordingSqlExecutor();
+        ReactiveFormClient client = ReactiveFormClient.create(executor, renderer());
+        BatchWriteOptions options = BatchWriteOptions.atomic(1).withTimeout(Duration.ofMillis(10));
+
+        StepVerifier.withVirtualTime(() -> client.operations().batchInserts.insertBatch(
+                            form(), Mono.delay(Duration.ofMillis(20))
+                                        .map(ignored -> orderedMap("id", "u1", "name", "王")), options))
+                    .thenAwait(Duration.ofMillis(20))
+                    .assertNext(result -> assertEquals(BatchWriteResult.Status.COMMITTED, result.status()))
+                    .verifyComplete();
+
+        assertEquals(options, executor.writeRequest().options());
+    }
+
+    /** Form 规划不能缩短连接可用后才由执行器启动的完整事务 SQL 时限。 */
+    @Test
+    void passesOriginalTransactionTimeoutToCustomBatchExecutor() {
+        RecordingSqlExecutor executor = new RecordingSqlExecutor();
+        executor.keepBatchOpen = true;
+        ReactiveFormClient client = ReactiveFormClient.create(executor, renderer());
+        BatchWriteOptions options = BatchWriteOptions.atomic(1).withTimeout(Duration.ofMillis(100));
+
+        StepVerifier.withVirtualTime(() -> client.operations().batchInserts.insertBatch(
+                            form(),
+                            Mono.delay(Duration.ofMillis(90))
+                                .map(ignored -> orderedMap("id", "u1", "name", "王")),
+                            options))
+                    .thenAwait(Duration.ofMillis(91))
+                    .then(() -> assertEquals(options, executor.writeRequest().options()))
+                    .thenCancel()
+                    .verify();
+    }
+
+    /** 乐观锁批量更新等待首条输入时也不能提前消费事务 SQL 时限。 */
+    @Test
+    void delayedBatchUpdateInputDoesNotConsumeSqlTimeout() {
+        RecordingSqlExecutor executor = new RecordingSqlExecutor();
+        ReactiveFormClient client = ReactiveFormClient.create(executor, renderer());
+        BatchWriteOptions options = BatchWriteOptions.atomic(1).withTimeout(Duration.ofMillis(10));
+        BatchOptimisticUpdate update = new BatchOptimisticUpdate(
+                orderedMap("name", "Alice"),
+                ConditionGroup.and().where("id", "=", "u1").build(),
+                OptimisticLockOptions.increment("version", 1));
+
+        StepVerifier.withVirtualTime(() -> client.operations().batchUpdates.updateBatch(
+                            logicDeletedVersionedForm(),
+                            Mono.delay(Duration.ofMillis(20)).map(ignored -> update), options))
+                    .thenAwait(Duration.ofMillis(20))
+                    .assertNext(result -> assertEquals(BatchWriteResult.Status.COMMITTED, result.status()))
+                    .verifyComplete();
+
+        assertEquals(options, executor.writeRequest().options());
+    }
+
+    /** INDEPENDENT 分片入口等待首行时同样不占用连接可用后的 SQL 时限。 */
+    @Test
+    void delayedBatchChunksInputDoesNotConsumeSqlTimeout() {
+        RecordingSqlExecutor executor = new RecordingSqlExecutor();
+        ReactiveFormClient client = ReactiveFormClient.create(executor, renderer());
+        BatchWriteOptions options = BatchWriteOptions.independent(1).withTimeout(Duration.ofMillis(10));
+
+        StepVerifier.withVirtualTime(() -> client.operations().batchInserts.insertBatchChunks(
+                            form(), Mono.delay(Duration.ofMillis(20))
+                                        .map(ignored -> orderedMap("id", "u1", "name", "王")), options))
+                    .thenAwait(Duration.ofMillis(20))
+                    .assertNext(chunk -> assertEquals(BatchChunkResult.Status.COMMITTED, chunk.status()))
+                    .verifyComplete();
+
+        assertEquals(options, executor.writeRequest().options());
+    }
+
+    /** timeout=0 明确交给外部边界，等待首行时不得暗中恢复 ORM 定时器。 */
+    @Test
+    void zeroBatchTimeoutLeavesTheFirstInputSignalToTheExternalBoundary() {
+        RecordingSqlExecutor executor = new RecordingSqlExecutor();
+        ReactiveFormClient client = ReactiveFormClient.create(executor, renderer());
+
+        StepVerifier.withVirtualTime(() -> client.operations().batchInserts.insertBatch(
+                            form(), Flux.never(), BatchWriteOptions.unlimitedAtomic(1)))
+                    .thenAwait(Duration.ofSeconds(6))
+                    .thenCancel()
+                    .verify();
+
+        assertNull(executor.writeRequest());
+    }
+
     /**
      * 验证启动期设置的批量保护会被无 options 入口使用，并且套数据范围后不会丢失。
      */
@@ -415,7 +505,7 @@ class ReactiveFormClientTest {
                     .expectNextCount(1)
                     .verifyComplete();
 
-        assertEquals(options, executor.writeRequest().options());
+        assertBatchOptionsPreserved(options, executor.writeRequest().options());
 
         BatchWriteOptions explicit = BatchWriteOptions.independent(3, 1);
         StepVerifier.create(client.operations().batchInserts.insertBatch(form(),
@@ -424,7 +514,7 @@ class ReactiveFormClientTest {
                     .expectNextCount(1)
                     .verifyComplete();
 
-        assertEquals(explicit, executor.writeRequest().options());
+        assertBatchOptionsPreserved(explicit, executor.writeRequest().options());
     }
 
     /**
@@ -1477,6 +1567,11 @@ class ReactiveFormClientTest {
                           .build();
     }
 
+    /** Form 编排不能改写任何批量执行选项，SQL 时限由连接可用后的执行器负责启动。 */
+    private static void assertBatchOptionsPreserved(BatchWriteOptions expected, BatchWriteOptions actual) {
+        assertEquals(expected, actual);
+    }
+
     private static Map<String, Object> orderedMap(Object... pairs) {
         Map<String, Object> values = new LinkedHashMap<>();
         for (int i = 0; i < pairs.length; i += 2) {
@@ -1502,6 +1597,8 @@ class ReactiveFormClientTest {
         private Object countTotal = 3L;
 
         private List<Map<String, Object>> queryRows;
+
+        private boolean keepBatchOpen;
 
         @Override
         public Flux<DynamicRow> query(SqlRequest request) {
@@ -1546,6 +1643,9 @@ class ReactiveFormClientTest {
         @Override
         public Mono<BatchWriteResult> writeBatch(BatchWriteRequest request) {
             this.writeRequest = request;
+            if (keepBatchOpen) {
+                return Mono.never();
+            }
             return Flux.from(request.rows())
                        .doOnNext(capturedParameterRows::add)
                        .count()

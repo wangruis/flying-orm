@@ -158,6 +158,17 @@ class LargeObjectValueCodecTest {
         assertTrue(cancelled.get());
     }
 
+    /** 极远执行截止时间不能在 LOB 读取链装配时发生纳秒换算溢出。 */
+    @Test
+    void acceptsLobTimeoutWhoseNanosecondsDoNotFitInLong() {
+        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
+                                                         .withTimeout(Duration.ofSeconds(Long.MAX_VALUE));
+
+        StepVerifier.create(LargeObjectValueCodec.readReactive("content", "CLOB", options))
+                    .expectNext("content")
+                    .verifyComplete();
+    }
+
     private static final class TrackingBlob implements Blob {
 
         private final Flux<ByteBuffer> content;

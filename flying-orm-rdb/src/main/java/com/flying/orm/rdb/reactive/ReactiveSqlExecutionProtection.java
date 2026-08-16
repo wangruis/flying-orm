@@ -4,6 +4,7 @@ import com.flying.orm.rdb.exception.RdbExceptionTranslator;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlResultMemoryLimitExceededException;
 import com.flying.orm.rdb.execution.SqlRowLimitExceededException;
+import com.flying.orm.rdb.internal.ReactiveTimeouts;
 import com.flying.orm.rdb.observation.SqlStatementType;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -126,11 +127,11 @@ final class ReactiveSqlExecutionProtection {
         if (safeOptions.timeout().isZero()) {
             return source;
         }
-        return source.timeout(safeOptions.timeout())
-                     .onErrorMap(TimeoutException.class,
-                                 error -> new com.flying.orm.rdb.execution.SqlExecutionTimeoutException(
-                                         safeOptions.timeout(),
-                                         error));
+        return source.timeout(
+                ReactiveTimeouts.duration(safeOptions.timeout()),
+                Mono.error(new com.flying.orm.rdb.execution.SqlExecutionTimeoutException(
+                        safeOptions.timeout(),
+                        new TimeoutException("reactive SQL execution deadline elapsed"))));
     }
 
     static <T> Flux<T> protectRows(Flux<T> source, String sql, SqlExecutionOptions options) {

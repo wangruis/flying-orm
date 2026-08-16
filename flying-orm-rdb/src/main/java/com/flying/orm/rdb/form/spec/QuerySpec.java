@@ -175,7 +175,7 @@ public final class QuerySpec {
     /**
      * 返回使用显式执行保护的新规格。
      *
-     * @param options 超时、结果行数、LOB 和连接获取边界
+     * @param options 连接可用后的 SQL 超时、结果行数、结果内存和 LOB 边界
      * @return 新查询规格
      */
     public QuerySpec withExecutionOptions(SqlExecutionOptions options) {

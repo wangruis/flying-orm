@@ -21,7 +21,7 @@
         <module name="JavadocType">
             <property name="scope" value="public"/>
             <property name="authorFormat" value="wangr"/>
-            <!-- Javadoc 版本写类型首次进入的版本，不应把 V2 新类型伪装成 v1.0。 -->
+            <!-- Javadoc 版本写类型首次进入的版本；当前新增类型使用 v2.0。 -->
             <property name="versionFormat" value="v[0-9]+\.[0-9]+(\.[0-9]+)?"/>
             <property name="allowMissingParamTags" value="true"/>
             <property name="allowUnknownTags" value="true"/>

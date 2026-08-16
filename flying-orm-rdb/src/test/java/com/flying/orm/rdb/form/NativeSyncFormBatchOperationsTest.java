@@ -55,17 +55,17 @@ class NativeSyncFormBatchOperationsTest {
     }
 
     @Test
-    void preservesDurationBeyondNanosecondRangeDuringPlanning() {
+    void delayedFirstRowDoesNotConsumeSqlTransactionTimeout() {
         RecordingBatchExecutor executor = new RecordingBatchExecutor();
-        BatchWriteOptions options = BatchWriteOptions.atomic(2)
-                                                     .withTimeout(Duration.ofSeconds(Long.MAX_VALUE));
+        BatchWriteOptions options = BatchWriteOptions.atomic(2).withTimeout(Duration.ofMillis(10));
 
-        operations(executor).writeBatch(BatchSpec.insert(form(), Flux.just(row(1L, "first")))
+        operations(executor).writeBatch(BatchSpec.insert(
+                                                  form(),
+                                                  Flux.just(row(1L, "first"))
+                                                      .delaySubscription(Duration.ofMillis(50)))
                                                   .withOptions(options));
 
-        Duration remaining = executor.request.options().timeout();
-        assertTrue(remaining.isPositive());
-        assertTrue(remaining.compareTo(options.timeout()) <= 0);
+        assertEquals(options, executor.request.options());
     }
 
     /** 同步批量入口必须与单条及响应式入口共享字段加密和盲索引派生。 */

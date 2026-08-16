@@ -64,30 +64,30 @@ final class ReactiveFormBatchUpdateOperations extends ReactiveFormOperationSuppo
         Flux<BatchOptimisticUpdate> source = Flux.from(Objects.requireNonNull(updates,
                                                                              "batch updates must not be null"));
         return source.switchOnFirst((signal, replay) -> {
-            if (signal.isOnError()) {
-                return Mono.error(Objects.requireNonNull(signal.getThrowable()));
-            }
-            if (!signal.hasValue()) {
-                return Mono.just(BatchWriteResult.empty(safeOptions.mode()));
-            }
-            DataScope effectiveScope = scopes.effectiveScope(scope);
-            FormScopeSupport.PreparedBatchUpdate first = scopes.prepareBatchUpdate(
-                    safeForm, signal.get(), effectiveScope);
-            BatchUpdatePlan plan = renderer.optimisticUpdatePlan(first.form(),
-                                                                 first.values(),
-                                                                 first.where(),
-                                                                 first.lock(),
-                                                                 first.request());
-            Flux<Object[]> parameters = replay.index()
-                                              .map(indexed -> protectedParameters(
-                                                      safeForm, effectiveScope, first, plan,
-                                                      indexed.getT2(), indexed.getT1(), safeOptions));
-            com.flying.orm.rdb.batch.BatchWriteRequest request = plan.request(
-                    parameters, safeOptions, completion);
-            return FormProtectedBatchRows.requiresProtectedExecution(
-                    renderer.protection(), safeForm, safeOptions)
-                    ? executor.writeProtectedBatch(request) : executor.writeBatch(request);
-        }).single();
+                if (signal.isOnError()) {
+                    return Mono.error(Objects.requireNonNull(signal.getThrowable()));
+                }
+                if (!signal.hasValue()) {
+                    return Mono.just(BatchWriteResult.empty(safeOptions.mode()));
+                }
+                DataScope effectiveScope = scopes.effectiveScope(scope);
+                FormScopeSupport.PreparedBatchUpdate first = scopes.prepareBatchUpdate(
+                        safeForm, signal.get(), effectiveScope);
+                BatchUpdatePlan plan = renderer.optimisticUpdatePlan(first.form(),
+                                                                     first.values(),
+                                                                     first.where(),
+                                                                     first.lock(),
+                                                                     first.request());
+                Flux<Object[]> parameters = replay.index()
+                                                  .map(indexed -> protectedParameters(
+                                                          safeForm, effectiveScope, first, plan,
+                                                          indexed.getT2(), indexed.getT1(), safeOptions));
+                com.flying.orm.rdb.batch.BatchWriteRequest request = plan.request(
+                        parameters, safeOptions, completion);
+                return FormProtectedBatchRows.requiresProtectedExecution(
+                        renderer.protection(), safeForm, safeOptions)
+                        ? executor.writeProtectedBatch(request) : executor.writeBatch(request);
+            }).single();
     }
 
     /**
@@ -111,29 +111,29 @@ final class ReactiveFormBatchUpdateOperations extends ReactiveFormOperationSuppo
         Flux<BatchOptimisticUpdate> source = Flux.from(Objects.requireNonNull(updates,
                                                                              "batch updates must not be null"));
         return source.switchOnFirst((signal, replay) -> {
-            if (signal.isOnError()) {
-                return Flux.error(Objects.requireNonNull(signal.getThrowable()));
-            }
-            if (!signal.hasValue()) {
-                return Flux.empty();
-            }
-            DataScope effectiveScope = scopes.effectiveScope(scope);
-            FormScopeSupport.PreparedBatchUpdate first = scopes.prepareBatchUpdate(
-                    safeForm, signal.get(), effectiveScope);
-            BatchUpdatePlan plan = renderer.optimisticUpdatePlan(first.form(),
-                                                                 first.values(),
-                                                                 first.where(),
-                                                                 first.lock(),
-                                                                 first.request());
-            Flux<Object[]> parameters = replay.index()
-                                              .map(indexed -> protectedParameters(
-                                                      safeForm, effectiveScope, first, plan,
-                                                      indexed.getT2(), indexed.getT1(), safeOptions));
-            com.flying.orm.rdb.batch.BatchWriteRequest request = plan.request(parameters, safeOptions);
-            return FormProtectedBatchRows.requiresProtectedExecution(
-                    renderer.protection(), safeForm, safeOptions)
-                    ? executor.writeProtectedBatchChunks(request) : executor.writeBatchChunks(request);
-        });
+                if (signal.isOnError()) {
+                    return Flux.error(Objects.requireNonNull(signal.getThrowable()));
+                }
+                if (!signal.hasValue()) {
+                    return Flux.empty();
+                }
+                DataScope effectiveScope = scopes.effectiveScope(scope);
+                FormScopeSupport.PreparedBatchUpdate first = scopes.prepareBatchUpdate(
+                        safeForm, signal.get(), effectiveScope);
+                BatchUpdatePlan plan = renderer.optimisticUpdatePlan(first.form(),
+                                                                     first.values(),
+                                                                     first.where(),
+                                                                     first.lock(),
+                                                                     first.request());
+                Flux<Object[]> parameters = replay.index()
+                                                  .map(indexed -> protectedParameters(
+                                                          safeForm, effectiveScope, first, plan,
+                                                          indexed.getT2(), indexed.getT1(), safeOptions));
+                com.flying.orm.rdb.batch.BatchWriteRequest request = plan.request(parameters, safeOptions);
+                return FormProtectedBatchRows.requiresProtectedExecution(
+                        renderer.protection(), safeForm, safeOptions)
+                        ? executor.writeProtectedBatchChunks(request) : executor.writeBatchChunks(request);
+            });
     }
 
     private Object[] protectedParameters(DynamicForm form,

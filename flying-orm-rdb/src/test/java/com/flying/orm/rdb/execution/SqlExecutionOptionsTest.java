@@ -39,8 +39,15 @@ class SqlExecutionOptionsTest {
         assertEquals(Duration.ofMillis(300), options.timeout());
         assertEquals(Duration.ofMillis(300), options.cleanupTimeout());
         assertEquals(SqlExecutionOptions.DEFAULT_MAX_ROWS, options.maxRows());
-        assertEquals(SqlExecutionOptions.DEFAULT_CONNECTION_ACQUIRE_TIMEOUT,
-                     options.connectionAcquireTimeout());
+    }
+
+    /** 只关闭业务 SQL 总超时时，资源清理仍须保留安全默认边界。 */
+    @Test
+    void zeroExecutionTimeoutKeepsDefaultCleanupBoundary() {
+        SqlExecutionOptions options = SqlExecutionOptions.timeout(Duration.ZERO);
+
+        assertEquals(Duration.ZERO, options.timeout());
+        assertEquals(SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT, options.cleanupTimeout());
     }
 
     /** 负清理时限没有可执行语义，必须在配置构造边界立即拒绝。 */
@@ -52,7 +59,6 @@ class SqlExecutionOptionsTest {
                                                    0,
                                                    0,
                                                    0,
-                                                   Duration.ZERO,
                                                    Duration.ofNanos(-1)));
         assertThrows(IllegalArgumentException.class,
                      () -> SqlExecutionOptions.safeDefaults().withFetchSize(-1));

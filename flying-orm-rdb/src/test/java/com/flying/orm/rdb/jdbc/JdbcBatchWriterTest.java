@@ -569,6 +569,44 @@ class JdbcBatchWriterTest {
         assertEquals(0L, count(dataSource));
     }
 
+    /** INDEPENDENT 的事务时限从分片输入和连接均已可用后开始，不能重复治理上游等待或连接池排队。 */
+    @Test
+    void startsIndependentChunkTimeoutAfterInputAndConnectionAcquisition() throws Exception {
+        JdbcDataSource dataSource = dataSource("jdbc_independent_timeout_boundary");
+        createTable(dataSource);
+        BatchWriteOptions options = BatchWriteOptions.independent(1)
+                .withTimeout(Duration.ofMillis(100));
+
+        BatchWriteResult result = JdbcBatchWriter.create(delayedConnections(
+                dataSource, Duration.ofMillis(200))).writeBatch(request(
+                        delayedRows(Duration.ofMillis(200)), options));
+
+        assertEquals(BatchWriteResult.Status.COMMITTED, result.status());
+        assertEquals(1L, count(dataSource));
+    }
+
+    /** 普通 batch 的驱动回复晚于绝对截止点时必须拒绝，不能把过期结果交给事务提交。 */
+    @Test
+    void rejectsRegularBatchReplyThatArrivesAfterDeadline() throws Exception {
+        JdbcDataSource dataSource = dataSource("jdbc_batch_reply_after_deadline");
+        createTable(dataSource);
+        BatchWriteRequest request = request(new TrackingPublisher(List.<Object[]>of()),
+                                            BatchWriteOptions.atomic(1));
+
+        try (Connection delegate = dataSource.getConnection()) {
+            delegate.setAutoCommit(false);
+            Connection delayed = delayedBatchReplyConnection(delegate, Duration.ofMillis(80));
+
+            assertThrows(java.util.concurrent.TimeoutException.class,
+                    () -> new JdbcBatchChunkExecutor().execute(
+                            delayed, request, 0, 0L, List.<Object[]>of(new Object[]{"late"}),
+                            JdbcBatchSupport.BatchDeadline.start(Duration.ofMillis(20))));
+            delegate.rollback();
+        }
+
+        assertEquals(0L, count(dataSource));
+    }
+
     /**
      * 普通 JDBC 批量在绑定完成后收到线程中断时，不能再调用驱动的 executeBatch；否则已知取消仍可能写入数据。
      */
@@ -1677,6 +1715,68 @@ class JdbcBatchWriterTest {
         return dataSource;
     }
 
+    private static Publisher<Object[]> delayedRows(Duration delay) {
+        return subscriber -> subscriber.onSubscribe(new Subscription() {
+            private boolean emitted;
+
+            @Override
+            public void request(long requested) {
+                if (emitted || requested <= 0L) {
+                    return;
+                }
+                emitted = true;
+                try {
+                    Thread.sleep(delay.toMillis());
+                    subscriber.onNext(new Object[]{"delayed"});
+                    subscriber.onComplete();
+                } catch (InterruptedException error) {
+                    Thread.currentThread().interrupt();
+                    subscriber.onError(error);
+                }
+            }
+
+            @Override
+            public void cancel() {
+                // 同步测试 Publisher 没有额外资源需要释放。
+            }
+        });
+    }
+
+    private static DataSource delayedConnections(DataSource delegate, Duration delay) {
+        return new DataSource() {
+            @Override
+            public Connection getConnection() throws SQLException {
+                delayConnectionAcquisition(delay);
+                return delegate.getConnection();
+            }
+
+            @Override
+            public Connection getConnection(String username, String password) throws SQLException {
+                delayConnectionAcquisition(delay);
+                return delegate.getConnection(username, password);
+            }
+
+            @Override public PrintWriter getLogWriter() throws SQLException { return delegate.getLogWriter(); }
+            @Override public void setLogWriter(PrintWriter out) throws SQLException { delegate.setLogWriter(out); }
+            @Override public void setLoginTimeout(int seconds) throws SQLException { delegate.setLoginTimeout(seconds); }
+            @Override public int getLoginTimeout() throws SQLException { return delegate.getLoginTimeout(); }
+            @Override public Logger getParentLogger() { return Logger.getGlobal(); }
+            @Override public <T> T unwrap(Class<T> type) throws SQLException { return delegate.unwrap(type); }
+            @Override public boolean isWrapperFor(Class<?> type) throws SQLException {
+                return delegate.isWrapperFor(type);
+            }
+        };
+    }
+
+    private static void delayConnectionAcquisition(Duration delay) throws SQLException {
+        try {
+            Thread.sleep(delay.toMillis());
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            throw new SQLException("delayed connection acquisition was interrupted", "HY008", error);
+        }
+    }
+
     private static void createTable(DataSource dataSource) throws SQLException {
         try (Connection connection = dataSource.getConnection(); Statement statement = connection.createStatement()) {
             statement.execute("create table device (id bigint generated by default as identity primary key, "
@@ -1751,6 +1851,24 @@ class JdbcBatchWriterTest {
                         if (method.getName().equals("prepareStatement") && result instanceof PreparedStatement statement
                                 && (arguments == null || arguments.length == 1)) {
                             return interruptingBatchStatement(statement, executeBatchCalls, cancellationCalls);
+                        }
+                        return result;
+                    } catch (InvocationTargetException error) {
+                        throw error.getCause();
+                    }
+                });
+    }
+
+    private static Connection delayedBatchReplyConnection(Connection delegate, Duration delay) {
+        return (Connection) Proxy.newProxyInstance(
+                JdbcBatchWriterTest.class.getClassLoader(), new Class[]{Connection.class},
+                (proxy, method, arguments) -> {
+                    try {
+                        Object result = method.invoke(delegate, arguments);
+                        if (method.getName().equals("prepareStatement")
+                                && result instanceof PreparedStatement statement
+                                && (arguments == null || arguments.length == 1)) {
+                            return delayedBatchReplyStatement(statement, delay);
                         }
                         return result;
                     } catch (InvocationTargetException error) {
@@ -1904,6 +2022,22 @@ class JdbcBatchWriterTest {
                         Object result = method.invoke(delegate, arguments);
                         if (method.getName().equals("addBatch")) {
                             Thread.currentThread().interrupt();
+                        }
+                        return result;
+                    } catch (InvocationTargetException error) {
+                        throw error.getCause();
+                    }
+                });
+    }
+
+    private static PreparedStatement delayedBatchReplyStatement(PreparedStatement delegate, Duration delay) {
+        return (PreparedStatement) Proxy.newProxyInstance(
+                JdbcBatchWriterTest.class.getClassLoader(), new Class[]{PreparedStatement.class},
+                (proxy, method, arguments) -> {
+                    try {
+                        Object result = method.invoke(delegate, arguments);
+                        if (method.getName().equals("executeBatch")) {
+                            Thread.sleep(delay.toMillis());
                         }
                         return result;
                     } catch (InvocationTargetException error) {

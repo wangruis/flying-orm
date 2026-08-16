@@ -1,7 +1,6 @@
 package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.rdb.batch.BatchWriteOptions;
-import com.flying.orm.rdb.exception.RdbConnectionAcquireTimeoutException;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.isolation.IsolationContexts;
 import com.flying.orm.rdb.isolation.R2dbcConnectionInvalidator;
@@ -15,8 +14,8 @@ import io.r2dbc.spi.Connection;
 import io.r2dbc.spi.ConnectionFactory;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.util.Objects;
-import java.util.concurrent.TimeoutException;
 
 /**
  * 批量事务共用的连接获取、取消清理、关闭和物理淘汰边界。
@@ -48,12 +47,19 @@ final class R2dbcBatchConnectionLifecycle {
     }
 
     Mono<R2dbcBatchConnectionHandle> acquire(BatchWriteOptions options) {
+        return acquire(options, SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT);
+    }
+
+    Mono<R2dbcBatchConnectionHandle> acquire(BatchWriteOptions options, Duration cleanupTimeout) {
         BatchWriteOptions safeOptions = Objects.requireNonNull(options, "batch write options must not be null");
+        Duration safeCleanupTimeout = Objects.requireNonNull(cleanupTimeout,
+                                                              "cleanup timeout must not be null");
         // 自定义事务参与者可能不是 Reactor Context 实现，所以不能假设入口校验和真正取连接时一定看到同一结果。
         // 在使用外部连接前再做一次同样的限制，避免 INDEPENDENT 或回执恢复误入上层事务。
         return currentTransaction()
-                .flatMap(transaction -> validateExternalOptions(safeOptions).thenReturn(externalHandle(transaction)))
-                .switchIfEmpty(acquireOwned(safeOptions));
+                .flatMap(transaction -> validateExternalOptions(safeOptions)
+                        .thenReturn(externalHandle(transaction, safeCleanupTimeout)))
+                .switchIfEmpty(acquireOwned(safeCleanupTimeout));
     }
 
     /** INDEPENDENT 需要自行提交分片，回执重放也会在业务写入前额外取连接；两者都不能绕过外部事务。 */
@@ -76,8 +82,9 @@ final class R2dbcBatchConnectionLifecycle {
 
     /** 每次订阅都用当前隔离上下文核对事务路由，事务期间改库会在连接和输入流被使用前失败。 */
     private Mono<R2dbcTransactionContext> currentTransaction() {
-        return Mono.deferContextual(context -> transactionParticipant.currentTransaction(
-                IsolationContexts.currentDatabaseKey(context)));
+        return Mono.deferContextual(context -> Mono.defer(() -> Objects.requireNonNull(
+                transactionParticipant.currentTransaction(IsolationContexts.currentDatabaseKey(context)),
+                "current transaction publisher must not be null")));
     }
 
     Mono<Void> begin(R2dbcBatchConnectionHandle resource) {
@@ -101,8 +108,7 @@ final class R2dbcBatchConnectionLifecycle {
         }
         // 回滚属于清理动作，不能因为驱动不再响应就让调用永久挂住。超时后状态保持 ACTIVE，
         // closeAfterOutcome 会把结果未确认的连接直接淘汰，避免它重新进入连接池。
-        return Mono.from(resource.connection().rollbackTransaction())
-                   .timeout(SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT)
+        return resource.cleanupDeadline().protect(Mono.from(resource.connection().rollbackTransaction()))
                    .doOnSuccess(ignored -> resource.markRolledBack());
     }
 
@@ -110,23 +116,17 @@ final class R2dbcBatchConnectionLifecycle {
         return Objects.requireNonNull(resource, "batch connection must not be null").external();
     }
 
-    private R2dbcBatchConnectionHandle externalHandle(R2dbcTransactionContext transaction) {
+    private R2dbcBatchConnectionHandle externalHandle(R2dbcTransactionContext transaction,
+                                                       Duration cleanupTimeout) {
         R2dbcTransactionContext safeTransaction = Objects.requireNonNull(transaction,
                                                                            "transaction context must not be null");
-        return new R2dbcBatchConnectionHandle(safeTransaction);
+        return new R2dbcBatchConnectionHandle(safeTransaction, cleanupTimeout);
     }
 
-    private Mono<R2dbcBatchConnectionHandle> acquireOwned(BatchWriteOptions safeOptions) {
+    private Mono<R2dbcBatchConnectionHandle> acquireOwned(Duration cleanupTimeout) {
         // 外部事务命中时不能提前触发备用连接池，尤其不能让 eager Publisher 偷跑一次连接获取。
         Mono<Connection> connection = Mono.defer(() -> Mono.from(connectionFactory.create()));
-        if (safeOptions.connectionAcquireTimeout().isZero()) {
-            return connection.map(R2dbcBatchConnectionHandle::new);
-        }
-        return connection.timeout(safeOptions.connectionAcquireTimeout())
-                         .onErrorMap(TimeoutException.class,
-                                     error -> new RdbConnectionAcquireTimeoutException(
-                                             safeOptions.connectionAcquireTimeout(), error))
-                         .map(R2dbcBatchConnectionHandle::new);
+        return connection.map(owned -> new R2dbcBatchConnectionHandle(owned, cleanupTimeout));
     }
 
     Mono<Void> cancel(R2dbcBatchConnectionHandle resource, String modeName) {
@@ -142,9 +142,10 @@ final class R2dbcBatchConnectionLifecycle {
         SqlExecutionOperation safeOperation = Objects.requireNonNull(
                 operation, "cleanup SQL operation must not be null");
         if (isExternal(safeResource)) {
-            return safeResource.largeObjects().cancel().then(releaseExternal(safeResource));
+            return safeResource.largeObjects().cancel(safeResource.cleanupDeadline())
+                    .then(releaseExternal(safeResource));
         }
-        return safeResource.largeObjects().cancel()
+        return safeResource.largeObjects().cancel(safeResource.cleanupDeadline())
                 .thenReturn(true)
                 .onErrorResume(error -> invalidateUncertainConnection(
                         safeResource,
@@ -162,8 +163,8 @@ final class R2dbcBatchConnectionLifecycle {
             if (safeResource.state() != BatchTransactionState.ACTIVE) {
                 return closeAfterOutcome(safeResource, safeOperation);
             }
-            return Mono.from(safeResource.connection().rollbackTransaction())
-                       .timeout(SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT)
+            return safeResource.cleanupDeadline().protect(
+                            Mono.from(safeResource.connection().rollbackTransaction()))
                        .doOnSuccess(ignored -> safeResource.markRolledBack())
                        .then(closeAfterOutcome(safeResource, safeOperation))
                        .onErrorResume(error -> invalidateUncertainConnection(
@@ -183,7 +184,8 @@ final class R2dbcBatchConnectionLifecycle {
         SqlExecutionOperation safeOperation = Objects.requireNonNull(
                 operation, "cleanup SQL operation must not be null");
         if (isExternal(safeResource)) {
-            return safeResource.largeObjects().complete().then(releaseExternal(safeResource));
+            return safeResource.largeObjects().complete(safeResource.cleanupDeadline())
+                    .then(releaseExternal(safeResource));
         }
         // defer 很重要：取消清理中的 rollback 真正结束后，才能读取最终状态。
         return releaseLargeObjects(safeResource, safeOperation).flatMap(reusable -> {
@@ -199,8 +201,8 @@ final class R2dbcBatchConnectionLifecycle {
                         ResourceCleanupObservation.Phase.CONNECTION_INVALIDATE,
                         new IllegalStateException("batch connection outcome is not reusable: state=" + state));
             }
-            return Mono.from(connectionInvalidator.close(safeResource.connection()))
-                       .timeout(SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT)
+            return safeResource.cleanupDeadline().protect(
+                            Mono.from(connectionInvalidator.close(safeResource.connection())))
                        .onErrorResume(closeError -> invalidateAfterCloseFailure(
                                safeResource, safeOperation, closeError));
             });
@@ -210,7 +212,7 @@ final class R2dbcBatchConnectionLifecycle {
     /** LOB 清理失败时先淘汰连接；事务终态已确认时不得用普通清理错误覆盖结果。 */
     private Mono<Boolean> releaseLargeObjects(R2dbcBatchConnectionHandle resource,
                                               SqlExecutionOperation operation) {
-        return resource.largeObjects().complete().thenReturn(true).onErrorResume(error -> {
+        return resource.largeObjects().complete(resource.cleanupDeadline()).thenReturn(true).onErrorResume(error -> {
             BatchTransactionState state = resource.state();
             Mono<Void> invalidation = state == BatchTransactionState.COMMITTED
                     || state == BatchTransactionState.ROLLED_BACK
@@ -225,16 +227,16 @@ final class R2dbcBatchConnectionLifecycle {
                                                       SqlExecutionOperation operation,
                                                       ResourceCleanupObservation.Phase phase,
                                                       Throwable cleanupError) {
-        Mono<Void> invalidation = Mono.defer(() -> Mono.from(connectionInvalidator.invalidate(resource.connection())))
-                                       .timeout(SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT);
+        Mono<Void> invalidation = resource.cleanupDeadline().protectInvalidation(
+                Mono.defer(() -> Mono.from(connectionInvalidator.invalidate(resource.connection()))));
         return finishInvalidation(invalidation, operation, phase, false, cleanupError);
     }
 
     private Mono<Void> invalidateAfterCloseFailure(R2dbcBatchConnectionHandle resource,
                                                    SqlExecutionOperation operation,
                                                    Throwable closeError) {
-        Mono<Void> invalidation = Mono.defer(() -> Mono.from(connectionInvalidator.invalidate(resource.connection())))
-                                       .timeout(SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT);
+        Mono<Void> invalidation = resource.cleanupDeadline().protectInvalidation(
+                Mono.defer(() -> Mono.from(connectionInvalidator.invalidate(resource.connection()))));
         boolean outcomeConfirmed = resource.state() == BatchTransactionState.COMMITTED
                 || resource.state() == BatchTransactionState.ROLLED_BACK;
         return finishInvalidation(invalidation,

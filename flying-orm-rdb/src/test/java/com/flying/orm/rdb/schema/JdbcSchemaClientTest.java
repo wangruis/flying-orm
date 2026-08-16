@@ -26,6 +26,7 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -234,6 +235,28 @@ class JdbcSchemaClientTest {
         assertEquals(List.of("Users"), invalidated);
     }
 
+    /** JDBC 会话 cleanup 必须使用 cleanupTimeout，不能继续沿用业务 DDL 的执行时限。 */
+    @Test
+    void usesCleanupTimeoutForJdbcSessionCleanupPhase() {
+        RecordingExecutor executor = new RecordingExecutor();
+        JdbcTransactionParticipant participant = () -> Optional.of(
+                JdbcTransactionContext.external(connectionProxy(), "primary"));
+        SqlExecutionOptions sqlOptions = SqlExecutionOptions.unlimited()
+                                                         .withCleanupTimeout(Duration.ofSeconds(17));
+        SchemaMigrationExecutionOptions migrationOptions = new SchemaMigrationExecutionOptions(
+                sqlOptions, null, Duration.ofSeconds(1));
+        JdbcSchemaClient client = JdbcSchemaClient.create(executor, RdbDialect.postgresql(), participant)
+                                                   .withDefaultMigrationExecutionOptions(migrationOptions);
+
+        client.executeReviewed(reviewedPlan(
+                new SqlRequest("alter table Users add column email VARCHAR", List.of())));
+
+        assertEquals(3, executor.options().size());
+        assertEquals(Duration.ZERO, executor.options().get(0).timeout());
+        assertEquals(Duration.ZERO, executor.options().get(1).timeout());
+        assertEquals(Duration.ofSeconds(17), executor.options().get(2).timeout());
+    }
+
     /** JDBC DDL work 直接抛出 VM 错误时，已进入的 lock-timeout 会话仍必须先 cleanup。 */
     @Test
     void cleansUpJdbcSessionBeforeRethrowingVirtualMachineErrorFromWork() {
@@ -331,6 +354,7 @@ class JdbcSchemaClientTest {
 
     private static final class RecordingExecutor implements SyncSqlExecutor {
         private final List<SqlRequest> requests = new ArrayList<>();
+        private final List<SqlExecutionOptions> options = new ArrayList<>();
         private final List<Long> affectedRows = new ArrayList<>();
         private int affectedRowIndex;
 
@@ -347,6 +371,7 @@ class JdbcSchemaClientTest {
 
         @Override
         public long rowsUpdated(SqlRequest request, SqlExecutionOptions options) {
+            this.options.add(options);
             return rowsUpdated(request);
         }
 
@@ -357,6 +382,10 @@ class JdbcSchemaClientTest {
 
         private List<String> sqlTexts() {
             return requests.stream().map(SqlRequest::sql).toList();
+        }
+
+        private List<SqlExecutionOptions> options() {
+            return List.copyOf(options);
         }
 
         private void withAffectedRows(long... rows) {

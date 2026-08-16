@@ -8,8 +8,13 @@ import reactor.test.StepVerifier;
 import java.time.Duration;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** 验证总超时已耗尽时不会再订阅下一段批量操作。 */
 class R2dbcBatchDeadlineTest {
@@ -49,5 +54,56 @@ class R2dbcBatchDeadlineTest {
                     .expectNextCount(6)
                     .expectError(TimeoutException.class)
                     .verify();
+    }
+
+    /** 批量流正常完成后必须立刻撤销截止任务，不能把计时器保留到超时。 */
+    @Test
+    void cancelsFluxDeadlineWhenBatchCompletesNormally() {
+        AtomicInteger subscriptions = new AtomicInteger();
+        AtomicInteger cancellations = new AtomicInteger();
+
+        assertEquals(1,
+                     R2dbcBatchDeadline.start(Duration.ofSeconds(30))
+                                         .protect(Flux.just(1), ignored -> Mono.defer(() -> {
+                                             subscriptions.incrementAndGet();
+                                             return Mono.never().doOnCancel(cancellations::incrementAndGet);
+                                         }))
+                                         .single()
+                                         .block());
+
+        assertTrue(subscriptions.get() > 0);
+        assertEquals(subscriptions.get(), cancellations.get());
+    }
+
+    /** 批量流先失败时必须撤销截止任务，并保留原始失败对象。 */
+    @Test
+    void cancelsFluxDeadlineWhenBatchFails() {
+        AtomicInteger cancellations = new AtomicInteger();
+        IllegalStateException primary = new IllegalStateException("batch failed");
+
+        assertSame(primary,
+                   assertThrows(IllegalStateException.class,
+                                () -> R2dbcBatchDeadline.start(Duration.ofSeconds(30))
+                                                          .protect(Flux.error(primary), ignored -> Mono.never()
+                                                                                                        .doOnCancel(
+                                                                                                                cancellations::incrementAndGet))
+                                                          .blockLast()));
+
+        assertEquals(1, cancellations.get());
+    }
+
+    /** 下游取消批量输入时必须同时撤销截止任务。 */
+    @Test
+    void cancelsFluxDeadlineWhenDownstreamCancels() {
+        AtomicInteger cancellations = new AtomicInteger();
+
+        StepVerifier.create(R2dbcBatchDeadline.start(Duration.ofSeconds(30))
+                                               .protect(Flux.never(), ignored -> Mono.never()
+                                                                                         .doOnCancel(
+                                                                                                 cancellations::incrementAndGet)))
+                    .thenCancel()
+                    .verify();
+
+        assertEquals(1, cancellations.get());
     }
 }

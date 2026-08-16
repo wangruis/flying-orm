@@ -24,8 +24,8 @@ import java.util.function.Supplier;
  * 读多写少时就少打数据库字典表；结构真变了，也不会靠“等 TTL 到期”硬撑。调用方即使也使用 Caffeine，
  * 两边仍是独立 cache 实例：本类只管理 ORM 元数据，不接管上层业务缓存。</p>
  *
- * <p>缓存值是已经 {@code cache()} 的冷 Mono，同一个 key 并发 miss 时 Caffeine 只创建一条加载链，所有订阅者
- * 共享同一次字典查询。失败结果立即逐 key 驱逐，下次请求可以重试，不会把临时数据库故障缓存到 TTL 结束。</p>
+ * <p>缓存值是同一个 key 的共享 Mono，并发 miss 时 Caffeine 只创建一条加载链，所有订阅者共享同一次字典查询。
+ * 最后一个等待者取消时底层查询也会取消并逐 key 驱逐；成功结果继续复用，失败结果立即驱逐。</p>
  *
  * @author wangr
  * @date 2026-07-30
@@ -223,15 +223,17 @@ final class CachedReactiveFormMetadataReader implements ReactiveFormMetadataCach
             throw error;
         }
         /*
-         * 成功/失败计数必须放在 cache() 前面。放在后面时，共享同一次加载的每个订阅者都会各记一次；
-         * 放在前面则只统计真正访问 delegate 的源订阅。失败后的删除仍放在 cache() 后，确保缓存值引用已就绪。
+         * 成功/失败计数必须放在 share() 前面。放在后面时，共享同一次加载的每个订阅者都会各记一次；
+         * 放在前面则只统计真正访问 delegate 的源订阅。最后一个等待者取消时，share 会取消源并让占位条目失效，
+         * 避免已经没有调用方的元数据查询继续占连接；成功终态仍会向后续订阅者重放。
          */
         Mono<T> value = source.doOnSuccess(result -> {
                                   stats.success(System.nanoTime() - startedAt);
                                   reweigh(key, holder.get(), valueHolder.get(), result);
                               })
                               .doOnError(error -> stats.failure(System.nanoTime() - startedAt))
-                              .cache()
+                              .doOnCancel(() -> entries.asMap().remove(key, holder.get()))
+                              .share()
                               .doOnError(error -> entries.asMap().remove(key, holder.get()));
         valueHolder.set(value);
         MetadataCachedValue<T> cachedValue = new MetadataCachedValue<>(value, 1);

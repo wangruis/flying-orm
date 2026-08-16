@@ -1,6 +1,6 @@
 # Metadata Cache Benchmark Implementation Plan
 
-> 历史计划：其中 `MetadataCacheOptions` API 已被 v1.0.0 的 `CacheRegionPolicy` 统一权重缓存设计取代；当前实现与用法以需求索引和 v1.0.0 加固计划为准。
+> 历史计划：其中 `MetadataCacheOptions` API 已被当前 `CacheRegionPolicy` 统一权重缓存设计取代；当前实现与用法以需求索引和 V2.0.0 文档为准。
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -35,7 +35,7 @@
 - Modify `docs/requirements/index.md`
   - Updates R-016 progress.
 
-- Modify `docs/flying-orm-phased-implementation-plan.md`
+- Modify `docs/requirements/index.md`
   - Marks focused benchmark/stress entry as done for the first pass.
 
 ---
@@ -227,7 +227,7 @@ Expected: all tests in the class pass.
 **Files:**
 - Modify: `docs/source-feature-matrix.md`
 - Modify: `docs/requirements/index.md`
-- Modify: `docs/flying-orm-phased-implementation-plan.md`
+- Modify: `docs/requirements/index.md`
 
 **Interfaces:**
 - Produces: docs that mention metadata cache benchmark entry exists.
@@ -249,7 +249,7 @@ Mark first-pass metadata cache benchmark/stress task as complete, leaving real d
 Run:
 
 ```bash
-rg -n "MetadataCacheBenchmark|Caffeine|并发" docs/source-feature-matrix.md docs/requirements/index.md docs/flying-orm-phased-implementation-plan.md
+rg -n "MetadataCacheBenchmark|Caffeine|并发" docs/source-feature-matrix.md docs/requirements/index.md
 ```
 
 Expected: the new benchmark and remaining follow-up are visible.

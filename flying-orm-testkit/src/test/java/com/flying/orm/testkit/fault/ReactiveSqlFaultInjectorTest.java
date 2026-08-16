@@ -9,17 +9,17 @@ import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
 import com.flying.orm.rdb.exception.RdbErrorKind;
 import com.flying.orm.rdb.exception.RdbException;
-import com.flying.orm.rdb.execution.SqlExecutionOptions;
-import com.flying.orm.rdb.execution.SqlExecutionTimeoutException;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.test.StepVerifier;
 
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -54,15 +54,15 @@ class ReactiveSqlFaultInjectorTest {
     }
 
     @Test
-    void hangingQueryIsCancelledByExecutionTimeout() {
+    void hangingQueryCanBeCancelledByCallerTimeout() {
         ReactiveSqlFaultInjector injector = ReactiveSqlFaultInjector.builder(new RecordingExecutor())
                                                                      .hang(ReactiveSqlFaultInjector.Operation.QUERY, 1)
                                                                      .build();
 
-        assertThrows(SqlExecutionTimeoutException.class,
-                     () -> injector.query(new SqlRequest("select id from device", List.of()),
-                                          SqlExecutionOptions.timeout(Duration.ofMillis(10)))
-                                   .blockLast(Duration.ofSeconds(1)));
+        StepVerifier.create(injector.query(new SqlRequest("select id from device", List.of()))
+                                    .timeout(Duration.ofMillis(10)))
+                    .expectError(TimeoutException.class)
+                    .verify(Duration.ofSeconds(1));
 
         assertEquals(1, injector.cancellations(ReactiveSqlFaultInjector.Operation.QUERY));
     }

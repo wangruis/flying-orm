@@ -119,7 +119,6 @@ public record BatchWriteOptions(Mode mode,
                                 int concurrency,
                                 long maxRows,
                                 Duration timeout,
-                                Duration connectionAcquireTimeout,
                                 Recovery recovery) {
     public static final int DEFAULT_CHUNK_SIZE = 500;
 

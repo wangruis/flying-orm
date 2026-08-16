@@ -34,16 +34,15 @@ public record SchemaMigrationExecutionOptions(SqlExecutionOptions sqlExecutionOp
     }
 
     /**
-     * 创建带执行、连接获取和数据库锁等待上限且不携带危险计划批准的默认配置。
-     * DDL 允许比普通 SQL 更长的 60 秒执行时间，但最多等待连接和数据库锁各 10 秒；
+     * 创建带执行和数据库锁等待上限且不携带危险计划批准的默认配置。
+     * DDL 允许比普通 SQL 更长的 60 秒执行时间，并最多等待数据库锁 10 秒；连接等待由上层连接池控制，
      * 有回滚缺口的计划仍会在执行前被拒绝。
      *
      * @return 默认 DDL 执行配置
      */
     public static SchemaMigrationExecutionOptions defaults() {
         SqlExecutionOptions ddlOptions = SqlExecutionOptions.safeDefaults()
-                                                           .withTimeout(Duration.ofSeconds(60))
-                                                           .withConnectionAcquireTimeout(Duration.ofSeconds(10));
+                                                           .withTimeout(Duration.ofSeconds(60));
         return new SchemaMigrationExecutionOptions(ddlOptions, null, Duration.ofSeconds(10));
     }
 

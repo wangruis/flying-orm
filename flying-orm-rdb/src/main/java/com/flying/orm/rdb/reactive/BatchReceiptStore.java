@@ -6,7 +6,6 @@ import com.flying.orm.rdb.batch.BatchChunkResult;
 import com.flying.orm.rdb.batch.BatchReceiptIntegrityException;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
-import com.flying.orm.rdb.exception.RdbConnectionAcquireTimeoutException;
 import com.flying.orm.rdb.isolation.R2dbcConnectionInvalidator;
 import com.flying.orm.rdb.observation.ResourceCleanupObservation;
 import com.flying.orm.rdb.observation.SqlExecutionObserver;
@@ -24,7 +23,6 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.TimeoutException;
 
 /**
  * BatchReceiptStore 读写批量回执表，UNKNOWN 恢复只相信这里能确认到的事实。
@@ -61,12 +59,14 @@ final class BatchReceiptStore {
      * @return 回执内容
      */
     Mono<Receipt> find(BatchChunkResult.RecoveryToken token) {
-        return find(token, SqlExecutionOptions.DEFAULT_CONNECTION_ACQUIRE_TIMEOUT);
+        return find(token, Duration.ZERO);
     }
 
-    Mono<Receipt> find(BatchChunkResult.RecoveryToken token, Duration acquireTimeout) {
+    /** 查询连接由连接池决定等待时间；连接可用后，SQL 可选择独立的执行兜底时限。 */
+    Mono<Receipt> find(BatchChunkResult.RecoveryToken token, Duration timeout) {
         BatchChunkResult.RecoveryToken safeToken = Objects.requireNonNull(token,
                                                                           "batch recovery token must not be null");
+        Duration safeTimeout = requireTimeout(timeout);
         if (!safeToken.hasCompleteEvidence()) {
             // 只有 operation id/plan hash 不能证明流式输入已经完整写入；恢复入口必须保持 UNKNOWN。
             return Mono.empty();
@@ -74,13 +74,15 @@ final class BatchReceiptStore {
         String sql = "select row_count, affected_rows from " + safeToken.receiptTable()
                 + " where operation_id = ? and chunk_index = ? and plan_hash = ? and payload_hash = ?"
                 + " and status = 'COMMITTED'";
-        Flux<Receipt> receipts = Flux.usingWhen(acquireConnection(acquireTimeout),
-                                                connection -> Flux.from(bind(connection.createStatement(sqlForDriver(sql, 4)),
-                                                                             List.of(safeToken.operationId(),
-                                                                                     safeToken.chunkIndex(),
-                                                                                     safeToken.planHash(),
-                                                                                     safeToken.payloadHash())).execute())
-                                                                          .flatMap(result -> result.map(this::receipt)),
+        Flux<Receipt> receipts = Flux.usingWhen(acquireConnection(),
+                                                connection -> protectRead(
+                                                        Flux.from(bind(connection.createStatement(sqlForDriver(sql, 4)),
+                                                                       List.of(safeToken.operationId(),
+                                                                               safeToken.chunkIndex(),
+                                                                               safeToken.planHash(),
+                                                                               safeToken.payloadHash())).execute())
+                                                            .flatMap(result -> result.map(this::receipt)),
+                                                        safeTimeout),
                                                 this::closeAfterConfirmedRead,
                                                 this::invalidateAfterUnconfirmedRead,
                                                 connection -> invalidateAfterUnconfirmedRead(
@@ -96,30 +98,39 @@ final class BatchReceiptStore {
      */
     Mono<Receipt> findOperation(BatchWriteOptions.Recovery recovery,
                                 int chunkIndex,
+                                String planHash) {
+        return findOperation(recovery, chunkIndex, planHash, Duration.ZERO);
+    }
+
+    /** 回执连接排队不计入 SQL 执行时限。 */
+    Mono<Receipt> findOperation(BatchWriteOptions.Recovery recovery,
+                                int chunkIndex,
                                 String planHash,
-                                Duration acquireTimeout) {
+                                Duration timeout) {
         BatchWriteOptions.Recovery safeRecovery = Objects.requireNonNull(recovery,
                                                                           "batch recovery must not be null");
         return findOperation(safeRecovery.operationId(),
                              safeRecovery.receiptTable(),
                              chunkIndex,
                              planHash,
-                             acquireTimeout);
+                             requireTimeout(timeout));
     }
 
     private Mono<Receipt> findOperation(String operationId,
                                         String receiptTable,
                                         int chunkIndex,
                                         String planHash,
-                                        Duration acquireTimeout) {
+                                        Duration timeout) {
         String sql = "select payload_hash, row_count, affected_rows from " + receiptTable
                 + " where operation_id = ? and chunk_index = ? and plan_hash = ? and status = 'COMMITTED'";
-        Flux<Receipt> receipts = Flux.usingWhen(acquireConnection(acquireTimeout),
-                                                connection -> Flux.from(bind(connection.createStatement(sqlForDriver(sql, 3)),
-                                                                             List.of(operationId,
-                                                                                     chunkIndex,
-                                                                                     planHash)).execute())
-                                                                          .flatMap(result -> result.map(this::receiptWithPayload)),
+        Flux<Receipt> receipts = Flux.usingWhen(acquireConnection(),
+                                                connection -> protectRead(
+                                                        Flux.from(bind(connection.createStatement(sqlForDriver(sql, 3)),
+                                                                       List.of(operationId,
+                                                                               chunkIndex,
+                                                                               planHash)).execute())
+                                                            .flatMap(result -> result.map(this::receiptWithPayload)),
+                                                        timeout),
                                                 this::closeAfterConfirmedRead,
                                                 this::invalidateAfterUnconfirmedRead,
                                                 connection -> invalidateAfterUnconfirmedRead(
@@ -296,39 +307,47 @@ final class BatchReceiptStore {
         return bindMarkers.adapt(sql, parameterCount, SqlBindMarkerStyle.CANONICAL);
     }
 
-    private Mono<Connection> acquireConnection(Duration acquireTimeout) {
-        Duration safeTimeout = Objects.requireNonNull(
-                acquireTimeout, "connection acquisition timeout must not be null");
+    private Mono<Connection> acquireConnection() {
+        // 排队和获取超时由上层连接池负责；SQL 时限只在连接可用后保护回执查询。
+        return Mono.defer(() -> Mono.from(connectionFactory.create()));
+    }
+
+    private static <T> Flux<T> protectRead(Flux<T> source, Duration timeout) {
+        return timeout.isZero() ? source : SqlExecutionTimeouts.absolute(source, timeout);
+    }
+
+    private static Duration requireTimeout(Duration timeout) {
+        Duration safeTimeout = Objects.requireNonNull(timeout, "receipt SQL timeout must not be null");
         if (safeTimeout.isNegative()) {
-            throw new IllegalArgumentException("connection acquisition timeout must not be negative");
+            throw new IllegalArgumentException("receipt SQL timeout must not be negative");
         }
-        Mono<Connection> connection = Mono.defer(() -> Mono.from(connectionFactory.create()));
-        if (safeTimeout.isZero()) {
-            return connection;
-        }
-        return connection.timeout(safeTimeout)
-                         .onErrorMap(TimeoutException.class,
-                                     error -> new RdbConnectionAcquireTimeoutException(safeTimeout, error));
+        return safeTimeout;
     }
 
     private Mono<Void> closeAfterConfirmedRead(Connection connection) {
-        return Mono.defer(() -> Mono.from(connectionInvalidator.close(connection)))
-                   .timeout(SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT)
+        R2dbcCleanupDeadline deadline = R2dbcCleanupDeadline.start(
+                SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT);
+        return deadline.protect(Mono.defer(() -> Mono.from(connectionInvalidator.close(connection))))
                    .onErrorResume(error -> finishInvalidation(
-                           connection, error, ResourceCleanupObservation.Phase.CONNECTION_CLOSE, true));
+                           connection, error, ResourceCleanupObservation.Phase.CONNECTION_CLOSE, true, deadline));
     }
 
     private Mono<Void> invalidateAfterUnconfirmedRead(Connection connection, Throwable cause) {
         return finishInvalidation(
-                connection, cause, ResourceCleanupObservation.Phase.CONNECTION_INVALIDATE, false);
+                connection,
+                cause,
+                ResourceCleanupObservation.Phase.CONNECTION_INVALIDATE,
+                false,
+                R2dbcCleanupDeadline.start(SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT));
     }
 
     private Mono<Void> finishInvalidation(Connection connection,
                                           Throwable primaryError,
                                           ResourceCleanupObservation.Phase phase,
-                                          boolean outcomeConfirmed) {
-        Mono<Void> invalidation = Mono.defer(() -> Mono.from(connectionInvalidator.invalidate(connection)))
-                                       .timeout(SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT);
+                                          boolean outcomeConfirmed,
+                                          R2dbcCleanupDeadline deadline) {
+        Mono<Void> invalidation = deadline.protectInvalidation(
+                Mono.defer(() -> Mono.from(connectionInvalidator.invalidate(connection))));
         return invalidation.onErrorResume(invalidationError -> {
             VirtualMachineError fatal = ReactiveSqlExecutionProtection.promoteVirtualMachineError(
                     primaryError, invalidationError);

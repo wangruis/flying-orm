@@ -46,12 +46,11 @@ final class NativeSyncFormBatchOperations {
     BatchWriteResult writeBatch(BatchSpec spec) {
         BatchSpec safeSpec = Objects.requireNonNull(spec, "batch spec must not be null");
         BatchWriteOptions options = safeSpec.options().orElse(defaultOptions);
-        long startedAt = System.nanoTime();
-        try (SyncBatchHead<Object> rows = open(safeSpec, options.timeout())) {
+        try (SyncBatchHead<Object> rows = open(safeSpec)) {
             if (rows.isEmpty()) {
                 return BatchWriteResult.empty(options.mode());
             }
-            BatchWriteRequest request = request(safeSpec, rows, remaining(options, startedAt));
+            BatchWriteRequest request = request(safeSpec, rows, options);
             return renderer.protection().hasContainsIndex(safeSpec.form())
                     ? executor.writeProtectedBatch(request) : executor.writeBatch(request);
         }
@@ -63,12 +62,11 @@ final class NativeSyncFormBatchOperations {
         if (options.mode() != BatchWriteOptions.Mode.INDEPENDENT) {
             throw new IllegalArgumentException("batch chunks require independent mode");
         }
-        long startedAt = System.nanoTime();
-        try (SyncBatchHead<Object> rows = open(safeSpec, options.timeout())) {
+        try (SyncBatchHead<Object> rows = open(safeSpec)) {
             if (rows.isEmpty()) {
                 return List.of();
             }
-            BatchWriteRequest request = request(safeSpec, rows, remaining(options, startedAt));
+            BatchWriteRequest request = request(safeSpec, rows, options);
             return renderer.protection().hasContainsIndex(safeSpec.form())
                     ? executor.writeProtectedBatchChunks(request) : executor.writeBatchChunks(request);
         }
@@ -154,9 +152,9 @@ final class NativeSyncFormBatchOperations {
     }
 
     @SuppressWarnings("unchecked")
-    private static SyncBatchHead<Object> open(BatchSpec spec, Duration timeout) {
+    private static SyncBatchHead<Object> open(BatchSpec spec) {
         try {
-            return SyncBatchHead.open((Publisher<Object>) spec.rows(), timeout);
+            return SyncBatchHead.open((Publisher<Object>) spec.rows(), Duration.ZERO);
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("batch input was interrupted before planning", error);
@@ -165,23 +163,4 @@ final class NativeSyncFormBatchOperations {
         }
     }
 
-    private static BatchWriteOptions remaining(BatchWriteOptions options, long startedAt) {
-        if (options.timeout().isZero()) {
-            return options;
-        }
-        long elapsed = Math.max(0L, System.nanoTime() - startedAt);
-        long timeoutNanos = saturatingNanos(options.timeout());
-        if (elapsed >= timeoutNanos) {
-            throw new IllegalStateException("batch input timed out before JDBC execution started");
-        }
-        return options.withTimeout(options.timeout().minusNanos(elapsed));
-    }
-
-    private static long saturatingNanos(Duration duration) {
-        try {
-            return duration.toNanos();
-        } catch (ArithmeticException ignored) {
-            return Long.MAX_VALUE;
-        }
-    }
 }

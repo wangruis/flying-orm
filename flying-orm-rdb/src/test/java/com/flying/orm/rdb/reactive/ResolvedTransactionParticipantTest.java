@@ -1,5 +1,8 @@
 package com.flying.orm.rdb.reactive;
 
+import com.flying.orm.rdb.batch.BatchWriteOptions;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.observation.SqlTransactionSource;
 import com.flying.orm.rdb.transaction.R2dbcTransactionContext;
 import com.flying.orm.rdb.transaction.R2dbcTransactionParticipant;
 import com.flying.orm.rdb.transaction.R2dbcTransactionParticipationException;
@@ -10,10 +13,13 @@ import reactor.test.StepVerifier;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
+import java.time.Duration;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 /**
  * 验证已绑定的事务上下文在一次订阅内不会被上层适配器再次查询或替换。
@@ -63,6 +69,82 @@ class ResolvedTransactionParticipantTest {
                     .verify();
 
         assertEquals(0, delegateSubscriptions.get());
+    }
+
+    /** 已解析的事务事实不能再经过已经耗尽的业务期限，否则会话 cleanup 会在执行 SQL 前被阻断。 */
+    @Test
+    void resolverReusesBoundResolutionAfterExecutionDeadlineExpires() {
+        R2dbcTransactionContext transaction = R2dbcTransactionContext.external(connection(), "tenant-primary");
+        ReactiveTransactionSourceResolver.Resolution resolution =
+                new ReactiveTransactionSourceResolver.Resolution(SqlTransactionSource.EXTERNAL, transaction);
+        AtomicInteger delegateSubscriptions = new AtomicInteger();
+        ReactiveTransactionSourceResolver resolver = new ReactiveTransactionSourceResolver(() -> Mono.defer(() -> {
+            delegateSubscriptions.incrementAndGet();
+            return Mono.empty();
+        }));
+        SqlExecutionOptions options = SqlExecutionOptions.timeout(Duration.ofNanos(1));
+        R2dbcSqlDeadline expired = R2dbcSqlDeadline.start(options);
+
+        StepVerifier.create(resolver.resolve(SqlTransactionSource.AUTO_COMMIT)
+                                    .contextWrite(context -> context
+                                            .put(ReactiveTransactionSourceResolver.Resolution.class, resolution)
+                                            .put(R2dbcSqlDeadline.class, expired)))
+                    .assertNext(actual -> assertSame(resolution, actual))
+                    .verifyComplete();
+
+        assertEquals(0, delegateSubscriptions.get());
+    }
+
+    /** 无外部事务只缓存事务事实，普通 SQL 仍须报告当前操作自己的自动提交来源。 */
+    @Test
+    void resolverKeepsCurrentSqlLocalSourceWhenBoundResolutionHasNoExternalTransaction() {
+        ReactiveTransactionSourceResolver.Resolution bound =
+                new ReactiveTransactionSourceResolver.Resolution(SqlTransactionSource.INTERNAL, null);
+        AtomicInteger delegateSubscriptions = new AtomicInteger();
+        ReactiveTransactionSourceResolver resolver = resolverWithoutTransaction(delegateSubscriptions);
+        SqlExecutionOptions options = SqlExecutionOptions.timeout(Duration.ofNanos(1));
+
+        StepVerifier.create(resolver.resolve(SqlTransactionSource.AUTO_COMMIT)
+                                    .contextWrite(context -> context
+                                            .put(ReactiveTransactionSourceResolver.Resolution.class, bound)
+                                            .put(R2dbcSqlDeadline.class, R2dbcSqlDeadline.start(options))))
+                    .assertNext(actual -> {
+                        assertEquals(SqlTransactionSource.AUTO_COMMIT, actual.source());
+                        assertNull(actual.transaction());
+                    })
+                    .verifyComplete();
+
+        assertEquals(0, delegateSubscriptions.get());
+    }
+
+    /** 无外部事务只缓存事务事实，批量写仍须报告当前操作自己的内部事务来源。 */
+    @Test
+    void resolverKeepsCurrentBatchLocalSourceWhenBoundResolutionHasNoExternalTransaction() {
+        ReactiveTransactionSourceResolver.Resolution bound =
+                new ReactiveTransactionSourceResolver.Resolution(SqlTransactionSource.AUTO_COMMIT, null);
+        AtomicInteger delegateSubscriptions = new AtomicInteger();
+        ReactiveTransactionSourceResolver resolver = resolverWithoutTransaction(delegateSubscriptions);
+        BatchWriteOptions options = BatchWriteOptions.atomic(1).withTimeout(Duration.ofNanos(1));
+
+        StepVerifier.create(resolver.resolve(SqlTransactionSource.INTERNAL)
+                                    .contextWrite(context -> context
+                                            .put(ReactiveTransactionSourceResolver.Resolution.class, bound)
+                                            .put(R2dbcBatchDeadline.class,
+                                                 R2dbcBatchDeadline.start(options.timeout()))))
+                    .assertNext(actual -> {
+                        assertEquals(SqlTransactionSource.INTERNAL, actual.source());
+                        assertNull(actual.transaction());
+                    })
+                    .verifyComplete();
+
+        assertEquals(0, delegateSubscriptions.get());
+    }
+
+    private static ReactiveTransactionSourceResolver resolverWithoutTransaction(AtomicInteger subscriptions) {
+        return new ReactiveTransactionSourceResolver(() -> Mono.defer(() -> {
+            subscriptions.incrementAndGet();
+            return Mono.empty();
+        }));
     }
 
     @SuppressWarnings("unchecked")

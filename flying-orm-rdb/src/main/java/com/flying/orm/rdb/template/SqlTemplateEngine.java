@@ -34,6 +34,9 @@ public final class SqlTemplateEngine {
         this.dialect = Objects.requireNonNull(dialect, "RDB dialect must not be null");
         this.valueCodecs = Objects.requireNonNull(valueCodecs, "value codec registry must not be null");
         this.jdbcBindMarkers = jdbcBindMarkers;
+        for (SqlTemplate template : registry.templates()) {
+            SqlTemplate.requireReadOnlyQuery(template.sql(), dialect);
+        }
     }
     public static SqlTemplateEngine create(SqlTemplateRegistry registry, RdbDialect dialect,
                                            ValueCodecRegistry valueCodecs) {
@@ -121,6 +124,7 @@ public final class SqlTemplateEngine {
                              boolean jdbcBindMarkers) {
         String source = template.sql();
         String dialectName = Objects.requireNonNull(dialect, "RDB dialect must not be null").name();
+        boolean mysql = "mysql".equalsIgnoreCase(dialectName);
         boolean oracle = "oracle".equalsIgnoreCase(dialectName);
         boolean postgresql = "postgresql".equalsIgnoreCase(dialectName);
         boolean sqlServer = "sqlserver".equalsIgnoreCase(dialectName)
@@ -144,7 +148,7 @@ public final class SqlTemplateEngine {
                 continue;
             }
             if (state == ScanState.BLOCK_COMMENT) {
-                if (current == '/' && next == '*') {
+                if ((postgresql || sqlServer) && current == '/' && next == '*') {
                     blockCommentDepth++;
                     sql.append(current).append(next);
                     index += 2;
@@ -186,10 +190,16 @@ public final class SqlTemplateEngine {
                 }
                 continue;
             }
-            if (current == '-' && next == '-') {
+            if (SqlTemplate.isLineCommentStart(source, index, mysql)) {
                 state = ScanState.LINE_COMMENT;
                 sql.append(current).append(next);
                 index += 2;
+                continue;
+            }
+            if (mysql && current == '#') {
+                state = ScanState.LINE_COMMENT;
+                sql.append(current);
+                index++;
                 continue;
             }
             if (current == '/' && next == '*') {
@@ -232,7 +242,7 @@ public final class SqlTemplateEngine {
                 continue;
             }
             if (postgresql && current == '$') {
-                String delimiter = dollarQuoteDelimiterAt(source, index);
+                String delimiter = SqlTemplate.dollarQuoteDelimiterAt(source, index);
                 if (delimiter != null) {
                     dollarQuoteDelimiter = delimiter;
                     state = ScanState.DOLLAR_QUOTE;
@@ -281,31 +291,6 @@ public final class SqlTemplateEngine {
         if (state != ScanState.PLAIN && state != ScanState.LINE_COMMENT) {
             throw new IllegalArgumentException("SQL template contains an unclosed quoted value or block comment");
         }
-    }
-
-    /**
-     * 识别 PostgreSQL 的 {@code $$} 和 {@code $tag$} 文本边界。
-     * {@code $1} 是驱动参数，{@code ${name}} 是本类的标识符槽位，这两种都不能当成 dollar quote。
-     */
-    private static String dollarQuoteDelimiterAt(String source, int offset) {
-        int end = source.indexOf('$', offset + 1);
-        if (end < 0) {
-            return null;
-        }
-        if (end == offset + 1) {
-            return "$$";
-        }
-        char first = source.charAt(offset + 1);
-        if (!(Character.isLetter(first) || first == '_')) {
-            return null;
-        }
-        for (int index = offset + 2; index < end; index++) {
-            char character = source.charAt(index);
-            if (!(Character.isLetterOrDigit(character) || character == '_')) {
-                return null;
-            }
-        }
-        return source.substring(offset, end + 1);
     }
 
     /** 模板扫描只关心会包住占位符的 SQL 文本区域，不在这里尝试解析完整 SQL 语法。 */

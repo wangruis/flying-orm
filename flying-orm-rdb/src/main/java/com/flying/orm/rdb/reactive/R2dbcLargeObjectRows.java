@@ -41,9 +41,11 @@ final class R2dbcLargeObjectRows {
         AtomicReference<Mapper> mapper = new AtomicReference<>();
         Flux<Object> mappedRows = Flux.from(result.map((row, metadata) ->
                 mapper(row, metadata, safeOptions, safeScope, mapper).mapValue(row)));
-        Publisher<DynamicRow> demandAwareRows = R2dbcDemandAwareRows.map(mappedRows);
-        return R2dbcCancellationDrain.drain(
-                demandAwareRows, safeScope, safeOptions.cleanupTimeout());
+        Flux<DynamicRow> rows = mappedRows.concatMap(R2dbcLargeObjectRows::materializedRow, 1);
+        return rows.onErrorResume(failure -> {
+            VirtualMachineError fatal = ReactiveSqlExecutionProtection.findVirtualMachineError(failure);
+            return fatal == null ? Flux.error(failure) : Flux.error(fatal);
+        });
     }
 
     static Mono<DynamicRow> map(Result.RowSegment segment,
@@ -117,7 +119,18 @@ final class R2dbcLargeObjectRows {
         return false;
     }
 
-    /** 每个 Result 只创建一次的映射计划，普通标量行不进入响应式内层发布器。 */
+    @SuppressWarnings("unchecked")
+    private static Mono<DynamicRow> materializedRow(Object value) {
+        if (value instanceof DynamicRow direct) {
+            return Mono.just(direct);
+        }
+        if (value instanceof Mono<?> materialized) {
+            return (Mono<DynamicRow>) materialized;
+        }
+        return Mono.error(new IllegalStateException("row mapper returned an unsupported value"));
+    }
+
+    /** 每个 Result 只创建一次映射计划；行级发布器只负责顺序物化和背压传递。 */
     static final class Mapper {
 
         private final DynamicRowFactory factory;

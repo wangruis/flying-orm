@@ -2,6 +2,7 @@ package com.flying.orm.rdb.migration;
 
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.internal.ReactiveTimeouts;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -157,7 +158,7 @@ public final class ReactiveDataMigration {
         if (timeout.isZero()) {
             return rollback;
         }
-        return rollback.timeout(timeout)
+        return rollback.timeout(ReactiveTimeouts.duration(timeout))
                        .onErrorResume(TimeoutException.class, failure -> {
                            int index = activeIndex.get();
                            if (index >= 0 && index < results.size()

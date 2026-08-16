@@ -18,6 +18,7 @@ import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * 按 Reactor Context 选择数据库，并统一管理 schema/RLS 会话的连接工厂。
@@ -210,18 +211,33 @@ public final class RoutingConnectionFactory implements ConnectionFactory {
                                     R2dbcSessionCustomizer customizer,
                                     R2dbcConnectionInvalidator invalidator) {
             this.delegate = delegate;
+            AtomicBoolean terminal = new AtomicBoolean();
             /*
              * R2DBC 的 close() 返回冷 Publisher，调用方法本身不等于已经关闭。整个流程包在 defer 里，
-             * 避免调用方只拿到 Publisher 却没有订阅时就把连接误标成已关闭。cache() 让并发或重复 close
-             * 共享同一次 reset + close；第一个订阅者取消，也不会把底层清理链一起取消掉。
+             * 避免调用方只拿到 Publisher 却没有订阅时就把连接误标成已关闭。并发 close 共享同一次
+             * reset + close；最后一个订阅者取消时 usingWhen 会先物理失效连接，不能留下永久后台 reset。
              */
-            this.close = Mono.defer(() -> Mono.from(customizer.reset(delegate, context)))
-                             .onErrorResume(resetError -> invalidateAndPreserve(
-                                     delegate, invalidator, resetError))
-                             .then(Mono.defer(() -> Mono.from(invalidator.close(delegate)))
-                                       .onErrorResume(closeError -> invalidateAndPreserve(
-                                               delegate, invalidator, closeError)))
-                             .cache();
+            Mono<Void> operation = Mono.defer(() -> Mono.from(customizer.reset(delegate, context)))
+                    .onErrorResume(resetError -> invalidateAndPreserve(delegate, invalidator, resetError))
+                    .then(Mono.defer(() -> Mono.from(invalidator.close(delegate)))
+                              .onErrorResume(closeError -> invalidateAndPreserve(
+                                      delegate, invalidator, closeError)))
+                    .doOnSuccess(ignored -> terminal.set(true))
+                    .doOnError(ignored -> terminal.set(true));
+            Mono<Void> shared = Mono.usingWhen(
+                    Mono.just(delegate),
+                    ignored -> operation,
+                    ignored -> Mono.empty(),
+                    (ignored, error) -> Mono.empty(),
+                    ignored -> {
+                        terminal.set(true);
+                        return Mono.defer(() -> Mono.from(invalidator.invalidate(delegate)));
+                    })
+                    .flux()
+                    .replay(1)
+                    .refCount(1)
+                    .then();
+            this.close = Mono.defer(() -> terminal.get() ? Mono.empty() : shared);
         }
 
         @Override

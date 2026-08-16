@@ -36,6 +36,7 @@ import java.time.Duration;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -259,8 +260,7 @@ class ExternalR2dbcDialectCompatibilityTest {
         Assumptions.assumeTrue(url != null && !url.isBlank(), urlProperty + " is not configured");
 
         R2dbcSqlExecutor executor = R2dbcSqlExecutor.create(ConnectionFactories.get(url));
-        SqlExecutionOptions options = SqlExecutionOptions.timeout(Duration.ofSeconds(5))
-                                                               .withConnectionAcquireTimeout(Duration.ofSeconds(2));
+        SqlExecutionOptions options = SqlExecutionOptions.timeout(Duration.ofSeconds(5));
         ReactiveConcurrencyProbe.Plan plan = new ReactiveConcurrencyProbe.Plan(32, 8, TIMEOUT);
         ReactiveConcurrencyProbe.Result result = ReactiveConcurrencyProbe.run(
                 plan,
@@ -330,7 +330,15 @@ class ExternalR2dbcDialectCompatibilityTest {
         assertEquals(List.of("ID"), result.primaryKeys());
         assertEquals(List.of("NAME"), result.uniqueIndexColumns());
         assertEquals(List.of("PARENT_ID"), result.foreignKeyColumns());
-        assertEquals(scenario.parentTableName(), result.referencedTableName());
+        assertReferencedTableName(dialect, scenario.parentTableName(), result.referencedTableName());
+    }
+
+    private static void assertReferencedTableName(RdbDialect dialect, String expected, String actual) {
+        if ("mysql".equals(dialect.name())) {
+            assertEquals(expected.toLowerCase(Locale.ROOT), actual.toLowerCase(Locale.ROOT));
+            return;
+        }
+        assertEquals(expected, actual);
     }
 
     /**

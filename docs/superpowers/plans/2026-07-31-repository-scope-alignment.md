@@ -68,7 +68,7 @@
 **Files:**
 - Modify: `docs/requirements/index.md`
 - Modify: `docs/source-feature-matrix.md`
-- Modify: `docs/flying-orm-phased-implementation-plan.md`
+- Modify: `docs/requirements/index.md`
 - Modify: `docs/target-api-examples.md`
 
 - [ ] Document that Repository forwards complete scope and does not understand business-specific authorization models.

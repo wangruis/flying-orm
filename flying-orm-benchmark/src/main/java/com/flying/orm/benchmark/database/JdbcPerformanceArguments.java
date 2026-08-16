@@ -178,9 +178,6 @@ final class JdbcPerformanceArguments {
                 || batchConcurrency <= 0 || batchSize <= 0 || independentChunkSize <= 0 || seedRows <= 0) {
             throw new IllegalArgumentException("JDBC benchmark numeric options are outside their safe range");
         }
-        if (queryConcurrency > poolSize || batchConcurrency > poolSize) {
-            throw new IllegalArgumentException("JDBC benchmark concurrency must fit inside pool size");
-        }
         if (independentChunkSize > batchSize || batchSize % independentChunkSize != 0) {
             throw new IllegalArgumentException("JDBC independent chunk size must divide batch size");
         }

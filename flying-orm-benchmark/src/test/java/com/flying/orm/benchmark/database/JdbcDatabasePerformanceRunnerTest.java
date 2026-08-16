@@ -7,6 +7,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -38,6 +39,29 @@ class JdbcDatabasePerformanceRunnerTest {
         assertEquals(2, arguments.independentChunkSize);
         assertEquals(List.of(JdbcPerformanceScenario.QUERY_BY_ID), arguments.scenarios);
         assertFalse(arguments.runId.contains("secret"));
+    }
+
+    /** 海量并发测试限制的是数据库连接，不应强迫调用方为每个在途请求建立物理连接。 */
+    @Test
+    void allowsVirtualRequestConcurrencyAboveTheJdbcPoolSize() {
+        String[] highConcurrency = arguments().clone();
+        highConcurrency[15] = "10001";
+
+        JdbcPerformanceArguments arguments = JdbcPerformanceArguments.parse(highConcurrency, Map.of(
+                JdbcPerformanceArguments.MYSQL_URL_ENV, "jdbc:mysql://localhost:3306/bench",
+                JdbcPerformanceArguments.MYSQL_USER_ENV, "bench",
+                JdbcPerformanceArguments.MYSQL_PASSWORD_ENV, "secret"));
+
+        assertEquals(2, arguments.poolSize);
+        assertEquals(10001, arguments.queryConcurrency);
+    }
+
+    /** JDBC 海量在途请求使用 Java 21 虚拟线程，不能为每个请求长期占用一个平台线程。 */
+    @Test
+    void usesVirtualThreadsForJdbcLoadWorkers() throws Exception {
+        try (ExecutorService workers = JdbcPerformanceScenarioRunner.newWorkerExecutor()) {
+            assertTrue(workers.submit(() -> Thread.currentThread().isVirtual()).get());
+        }
     }
 
     /** JDBC 性能入口必须原生接受四库凭据，并为 Oracle/SQL Server 生成各自合法的 DDL。 */

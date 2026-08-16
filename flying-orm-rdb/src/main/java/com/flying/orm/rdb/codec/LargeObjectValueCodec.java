@@ -4,6 +4,7 @@ import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlExecutionTimeoutException;
 import com.flying.orm.rdb.execution.SqlLargeObjectLimitExceededException;
+import com.flying.orm.rdb.internal.ReactiveTimeouts;
 import io.r2dbc.spi.Blob;
 import io.r2dbc.spi.Clob;
 import reactor.core.publisher.Flux;
@@ -146,7 +147,7 @@ public final class LargeObjectValueCodec {
         if (safeOptions.timeout().isZero()) {
             return decoded;
         }
-        return decoded.timeout(safeOptions.timeout())
+        return decoded.timeout(ReactiveTimeouts.duration(safeOptions.timeout()))
                       .onErrorMap(TimeoutException.class,
                                   error -> new SqlExecutionTimeoutException(safeOptions.timeout(), error));
     }

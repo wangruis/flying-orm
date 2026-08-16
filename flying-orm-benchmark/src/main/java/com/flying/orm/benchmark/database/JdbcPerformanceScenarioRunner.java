@@ -15,7 +15,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.atomic.LongAdder;
 
-/** 用固定数量的普通工作线程压测阻塞 JDBC，线程数和 Hikari 最大连接数都由参数明确控制。 */
+/** 用固定数量的 Java 21 虚拟线程压测阻塞 JDBC，Hikari 最大连接数继续独立限制数据库资源。 */
 final class JdbcPerformanceScenarioRunner {
 
     private static final long HIGHEST_TRACKABLE_NANOS = 120L * 1_000_000_000L;
@@ -32,7 +32,7 @@ final class JdbcPerformanceScenarioRunner {
         Recorder latency = new Recorder(HIGHEST_TRACKABLE_NANOS, 3);
         RunCounters counters = new RunCounters();
         JdbcPoolSampler sampler = new JdbcPoolSampler();
-        ExecutorService workers = Executors.newFixedThreadPool(concurrency);
+        ExecutorService workers = newWorkerExecutor();
         CountDownLatch ready = new CountDownLatch(concurrency);
         CountDownLatch start = new CountDownLatch(1);
         List<Future<?>> futures = new ArrayList<>(concurrency);
@@ -58,6 +58,11 @@ final class JdbcPerformanceScenarioRunner {
         } finally {
             workers.shutdownNow();
         }
+    }
+
+    /** 每个在途 JDBC 请求独占一个虚拟线程，物理数据库并发仍由 Hikari 有界池控制。 */
+    static ExecutorService newWorkerExecutor() {
+        return Executors.newVirtualThreadPerTaskExecutor();
     }
 
     private static void runWorker(CountDownLatch ready,

@@ -1,23 +1,16 @@
 package com.flying.orm.rdb.reactive;
 
-import com.flying.orm.rdb.codec.LargeObjectValueCodec;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.result.DynamicRow;
-import io.r2dbc.spi.Blob;
-import io.r2dbc.spi.Clob;
-import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.IdentityHashMap;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicReference;
-import java.util.function.Function;
+import java.util.function.BiFunction;
 
 /**
  * 跟随一个 R2DBC 连接租约管理行内大字段句柄，确保连接归还前完成未订阅句柄的异步释放。
@@ -27,20 +20,28 @@ import java.util.function.Function;
  * @version v1.0
  */
 final class R2dbcLargeObjectScope {
-    private final List<RowState> rows = new ArrayList<>();
-    private final List<Drain> drains = new ArrayList<>();
+    private final List<R2dbcLargeObjectRow> rows = new ArrayList<>();
+    private R2dbcCleanupDeadline activeCleanup;
+    private boolean rowsClosed;
 
     Mono<DynamicRow> materialize(DynamicRow row, SqlExecutionOptions options) {
         DynamicRow safeRow = Objects.requireNonNull(row, "dynamic row must not be null");
-        RowState state = RowState.from(safeRow, Objects.requireNonNull(
+        R2dbcLargeObjectRow state = R2dbcLargeObjectRow.from(safeRow, Objects.requireNonNull(
                 options, "sql execution options must not be null"));
-        if (state.slots().isEmpty()) {
+        if (state.isEmpty()) {
             return Mono.just(safeRow);
         }
-        register(state);
+        R2dbcCleanupDeadline cleanup = register(state);
+        if (cleanup != null) {
+            return state.discardPending(cleanup)
+                        .doFinally(ignored -> unregister(state))
+                        .then(Mono.error(new IllegalStateException(
+                                "R2DBC large object scope is already closing")));
+        }
         return state.read()
                     .doOnSuccess(ignored -> unregister(state))
-                    .onErrorResume(primary -> state.discardAfterError(primary)
+                    .onErrorResume(primary -> state.discardAfterError(
+                                                           primary, cleanupDeadline(state.cleanupTimeout()))
                                                    .doFinally(ignored -> unregister(state))
                                                    .then(Mono.defer(() -> {
                                                        VirtualMachineError fatal =
@@ -53,9 +54,12 @@ final class R2dbcLargeObjectScope {
     Mono<Void> discardCaptured(List<Object> locators,
                                SqlExecutionOptions options,
                                Throwable primary) {
-        RowState state = RowState.captured(locators, options);
-        register(state);
-        return state.discardAfterError(primary)
+        R2dbcLargeObjectRow state = R2dbcLargeObjectRow.captured(locators, options);
+        R2dbcCleanupDeadline cleanup = register(state);
+        R2dbcCleanupDeadline sharedDeadline = cleanup == null
+                ? cleanupDeadline(state.cleanupTimeout()) : cleanup;
+        Mono<Void> discard = state.discardAfterError(primary, sharedDeadline);
+        return discard
                     .doFinally(ignored -> unregister(state))
                     .then(Mono.defer(() -> {
                         VirtualMachineError fatal =
@@ -65,235 +69,87 @@ final class R2dbcLargeObjectScope {
     }
 
     Mono<Void> complete() {
-        return cleanup(RowState::discardPending);
+        return complete(cleanupDeadline(cleanupTimeout()));
+    }
+    Mono<Void> complete(R2dbcCleanupDeadline deadline) {
+        return cleanup((row, sharedDeadline) -> row.discardPending(sharedDeadline), deadline);
     }
     Mono<Void> cancel() {
-        return cleanup(RowState::discardPending);
+        return cancel(cleanupDeadline(cleanupTimeout()));
+    }
+    Mono<Void> cancel(R2dbcCleanupDeadline deadline) {
+        return cleanup((row, sharedDeadline) -> row.discardPending(sharedDeadline), deadline);
     }
     Mono<Void> error(Throwable primary) {
+        return error(primary, cleanupDeadline(cleanupTimeout()));
+    }
+    Mono<Void> error(Throwable primary, R2dbcCleanupDeadline deadline) {
         Objects.requireNonNull(primary, "large object primary error must not be null");
-        return cleanup(row -> row.discardAfterError(primary));
+        return cleanup((row, sharedDeadline) -> row.discardAfterError(primary, sharedDeadline), deadline);
     }
 
-    synchronized void registerDrain(Mono<Void> completion, Runnable abort, Duration timeout) {
-        drains.add(new Drain(Objects.requireNonNull(completion, "result drain completion must not be null"),
-                             Objects.requireNonNull(abort, "result drain abort action must not be null"),
-                             Objects.requireNonNull(timeout, "result drain timeout must not be null")));
-    }
-
-    synchronized boolean hasActiveRows() {
-        return !rows.isEmpty();
-    }
-    private synchronized void register(RowState row) {
+    private synchronized R2dbcCleanupDeadline register(R2dbcLargeObjectRow row) {
         rows.add(Objects.requireNonNull(row, "large object row state must not be null"));
+        return rowsClosed ? activeCleanup : null;
     }
 
-    private synchronized void unregister(RowState row) {
+    private synchronized void unregister(R2dbcLargeObjectRow row) {
         rows.remove(row);
     }
-    private Mono<Void> cleanup(Function<RowState, Mono<Void>> action) {
-        List<Drain> drainSnapshot;
-        synchronized (this) {
-            drainSnapshot = List.copyOf(drains);
+
+    /** 首个清理动作建立连接级绝对截止点，后续阶段只能继续消费同一份预算。 */
+    synchronized R2dbcCleanupDeadline cleanupDeadline(Duration timeout) {
+        if (activeCleanup == null) {
+            activeCleanup = R2dbcCleanupDeadline.start(Objects.requireNonNull(
+                    timeout, "large object cleanup timeout must not be null"));
         }
-        AtomicReference<Throwable> cleanupFailure = new AtomicReference<>();
-        Mono<Void> awaitDrains = Flux.fromIterable(drainSnapshot)
-                                     .concatMap(drain -> drain.await().onErrorResume(error -> {
-                                         RowState.merge(cleanupFailure, error);
-                                         return Mono.empty();
-                                     }), 1)
-                                     .then();
-        return awaitDrains.then(Mono.defer(() -> {
-            List<RowState> rowSnapshot;
+        return activeCleanup;
+    }
+
+    synchronized R2dbcCleanupDeadline shareCleanupDeadline(R2dbcCleanupDeadline candidate) {
+        if (activeCleanup == null) {
+            activeCleanup = Objects.requireNonNull(
+                    candidate, "large object cleanup deadline must not be null");
+        }
+        return activeCleanup;
+    }
+
+    private Mono<Void> cleanup(BiFunction<R2dbcLargeObjectRow, R2dbcCleanupDeadline, Mono<Void>> action,
+                               R2dbcCleanupDeadline deadline) {
+        R2dbcCleanupDeadline safeDeadline = shareCleanupDeadline(deadline);
+        return Mono.defer(() -> {
+            AtomicReference<Throwable> cleanupFailure = new AtomicReference<>();
+            List<R2dbcLargeObjectRow> rowSnapshot;
             synchronized (this) {
+                rowsClosed = true;
                 rowSnapshot = List.copyOf(rows);
             }
             return Flux.fromIterable(rowSnapshot)
-                       .concatMap(row -> action.apply(row)
+                       .concatMap(row -> action.apply(row, safeDeadline)
                                .onErrorResume(error -> {
-                                   RowState.merge(cleanupFailure, error);
+                                   R2dbcLargeObjectRow.merge(cleanupFailure, error);
                                    return Mono.empty();
                                })
                                .doFinally(ignored -> unregister(row)), 1)
-                       .then();
-        }))
-                   .then(Mono.defer(() -> cleanupFailure.get() == null
-                           ? Mono.empty() : Mono.error(cleanupFailure.get())));
+                       .then()
+                       .then(Mono.defer(() -> cleanupFailure.get() == null
+                               ? Mono.empty() : Mono.error(cleanupFailure.get())));
+        });
     }
 
-    private record Drain(Mono<Void> completion, Runnable abort, Duration timeout) {
-
-        private Mono<Void> await() {
-            if (timeout.isZero()) {
-                return completion;
-            }
-            return completion.timeout(timeout).doOnError(ignored -> abort.run());
+    private synchronized Duration cleanupTimeout() {
+        Duration selected = Duration.ZERO;
+        for (R2dbcLargeObjectRow row : rows) {
+            selected = tighter(selected, row.cleanupTimeout());
         }
+        return selected;
     }
 
-    private enum State {
-        PENDING,
-        STREAMING,
-        RELEASED,
-        DISCARDING,
-        DISCARDED
-    }
-    private static final class RowState {
-
-        private final DynamicRow row;
-        private final SqlExecutionOptions options;
-        private final List<LobSlot> slots;
-        private final Map<Integer, Object> replacements = new LinkedHashMap<>();
-
-        private RowState(DynamicRow row, SqlExecutionOptions options, List<LobSlot> slots) {
-            this.row = row;
-            this.options = options;
-            this.slots = slots;
+    private static Duration tighter(Duration current, Duration candidate) {
+        if (current.isZero()) {
+            return candidate;
         }
-
-        static RowState from(DynamicRow row, SqlExecutionOptions options) {
-            List<LobSlot> slots = new ArrayList<>();
-            Map<Object, LobSlot> unique = new IdentityHashMap<>();
-            for (int index = 0; index < row.columnCount(); index++) {
-                Object value = row.value(index);
-                if (value instanceof Blob || value instanceof Clob) {
-                    LobSlot slot = unique.get(value);
-                    if (slot == null) {
-                        slot = new LobSlot(index, value, options);
-                        unique.put(value, slot);
-                        slots.add(slot);
-                    } else {
-                        slot.addIndex(index);
-                    }
-                }
-            }
-            return new RowState(row, options, List.copyOf(slots));
-        }
-
-        static RowState captured(List<Object> locators, SqlExecutionOptions options) {
-            List<LobSlot> slots = new ArrayList<>(locators.size());
-            Map<Object, Boolean> unique = new IdentityHashMap<>();
-            for (Object locator : locators) {
-                if (unique.put(locator, Boolean.TRUE) == null) {
-                    slots.add(new LobSlot(-1, locator, options));
-                }
-            }
-            return new RowState(null, options, List.copyOf(slots));
-        }
-
-        List<LobSlot> slots() {
-            return slots;
-        }
-
-        Mono<DynamicRow> read() {
-            return Flux.fromIterable(slots)
-                       .concatMap(slot -> slot.read().doOnNext(value ->
-                               slot.indexes().forEach(index -> replacements.put(index, value))), 1)
-                       .then(Mono.fromSupplier(() -> row.withValues(replacements)));
-        }
-
-        Mono<Void> discardPending() {
-            AtomicReference<Throwable> cleanupFailure = new AtomicReference<>();
-            Mono<Void> cleanup = Flux.fromIterable(slots)
-                                     .concatMap(slot -> slot.discard().onErrorResume(error -> {
-                                         merge(cleanupFailure, error);
-                                         return Mono.empty();
-                                     }), 1)
-                                     .then();
-            Duration timeout = options.cleanupTimeout();
-            if (!timeout.isZero()) {
-                cleanup = cleanup.timeout(timeout).onErrorResume(error -> {
-                    merge(cleanupFailure, error);
-                    return Mono.empty();
-                });
-            }
-            return cleanup.then(Mono.defer(() -> cleanupFailure.get() == null
-                    ? Mono.empty() : Mono.error(cleanupFailure.get())));
-        }
-
-        Mono<Void> discardAfterError(Throwable primary) {
-            return discardPending().onErrorResume(cleanup -> {
-                VirtualMachineError fatal = ReactiveSqlExecutionProtection.promoteVirtualMachineError(
-                        primary, cleanup);
-                if (fatal != null) {
-                    return Mono.error(fatal);
-                }
-                ReactiveSqlExecutionProtection.addSuppressedIfAcyclic(primary, cleanup);
-                return Mono.empty();
-            });
-        }
-
-        private static void merge(AtomicReference<Throwable> target, Throwable failure) {
-            Throwable current = target.get();
-            if (current == null && target.compareAndSet(null, failure)) {
-                return;
-            }
-            current = target.get();
-            VirtualMachineError fatal = ReactiveSqlExecutionProtection.promoteVirtualMachineError(current, failure);
-            if (fatal != null && fatal != current) {
-                target.set(fatal);
-            } else if (fatal == null) {
-                ReactiveSqlExecutionProtection.addSuppressedIfAcyclic(current, failure);
-            }
-        }
+        return candidate.isZero() || current.compareTo(candidate) <= 0 ? current : candidate;
     }
 
-    private static final class LobSlot {
-
-        private final List<Integer> indexes = new ArrayList<>();
-        private final Object locator;
-        private final SqlExecutionOptions options;
-        private final AtomicReference<State> state = new AtomicReference<>(State.PENDING);
-
-        private LobSlot(int index, Object locator, SqlExecutionOptions options) {
-            indexes.add(index);
-            this.locator = locator;
-            this.options = options;
-        }
-
-        List<Integer> indexes() {
-            return indexes;
-        }
-
-        void addIndex(int index) {
-            indexes.add(index);
-        }
-
-        Mono<Object> read() {
-            return Mono.defer(() -> {
-                if (!state.compareAndSet(State.PENDING, State.STREAMING)) {
-                    return Mono.error(new IllegalStateException("R2DBC large object has already been consumed"));
-                }
-                try {
-                    String dataType = locator instanceof Blob ? "BLOB" : "CLOB";
-                    return LargeObjectValueCodec.readReactive(locator, dataType, options)
-                                                .doFinally(ignored -> state.set(State.RELEASED));
-                } catch (Throwable failure) {
-                    state.compareAndSet(State.STREAMING, State.PENDING);
-                    return Mono.error(failure);
-                }
-            });
-        }
-
-        Mono<Void> discard() {
-            return Mono.defer(() -> {
-                if (!state.compareAndSet(State.PENDING, State.DISCARDING)) {
-                    return Mono.empty();
-                }
-                Publisher<Void> cleanup;
-                try {
-                    cleanup = locator instanceof Blob blob ? blob.discard() : ((Clob) locator).discard();
-                } catch (Throwable failure) {
-                    state.set(State.DISCARDED);
-                    return Mono.error(failure);
-                }
-                if (cleanup == null) {
-                    state.set(State.DISCARDED);
-                    return Mono.error(new NullPointerException(
-                            "R2DBC large object discard publisher must not be null"));
-                }
-                return Mono.from(cleanup).doFinally(ignored -> state.set(State.DISCARDED));
-            });
-        }
-    }
 }

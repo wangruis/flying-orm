@@ -48,8 +48,8 @@ final class JdbcBatchRows implements Subscriber<Object[]>, AutoCloseable {
     }
 
     /**
-     * 领取下一行；返回 {@code null} 代表上游正常结束。等待时间使用整批统一的剩余时间，
-     * 因而读取输入本身也不会绕过批量超时保护。
+     * 领取下一行；返回 {@code null} 代表上游正常结束。ATOMIC 可传入整批剩余时间，把持有事务连接时的
+     * 输入等待纳入事务时限；INDEPENDENT 在形成分片时传 0，避免 ORM 重复治理上游生产和连接池排队。
      */
     Object[] next(Duration remaining) throws InterruptedException, TimeoutException {
         startIfNeeded();

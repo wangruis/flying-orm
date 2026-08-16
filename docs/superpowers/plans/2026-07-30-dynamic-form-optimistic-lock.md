@@ -83,7 +83,7 @@
 **Files:**
 - Modify: `docs/requirements/index.md`
 - Modify: `docs/source-feature-matrix.md`
-- Modify: `docs/flying-orm-phased-implementation-plan.md`
+- Modify: `docs/requirements/index.md`
 
 **Verification:**
 - `mvn -pl flying-orm-rdb -am -DskipTests compile`

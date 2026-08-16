@@ -40,7 +40,6 @@ class BatchWriteOptionsTest {
         assertEquals(32L * 1024 * 1024, defaults.maxBufferedBytes());
         assertEquals(4_096, defaults.maxResultChunks());
         assertTrue(defaults.timeout().isPositive());
-        assertTrue(defaults.connectionAcquireTimeout().isPositive());
         assertEquals(BatchWriteOptions.RecoveryMode.NONE, defaults.recovery().mode());
         assertThrows(IllegalArgumentException.class, () -> BatchWriteOptions.atomic(0));
         assertThrows(IllegalArgumentException.class, () -> BatchWriteOptions.independent(100, 0));
@@ -51,7 +50,6 @@ class BatchWriteOptionsTest {
         BatchWriteOptions unlimited = BatchWriteOptions.unlimitedAtomic(100);
 
         assertEquals(Duration.ZERO, unlimited.timeout());
-        assertEquals(Duration.ZERO, unlimited.connectionAcquireTimeout());
     }
 
     @Test
@@ -74,13 +72,11 @@ class BatchWriteOptionsTest {
         BatchWriteOptions source = BatchWriteOptions.atomic(100);
         BatchWriteOptions configured = source.withMaxRows(1_000)
                                              .withTimeout(Duration.ofSeconds(5))
-                                             .withConnectionAcquireTimeout(Duration.ofMillis(200))
                                              .withReceipt("order-import-1");
 
         assertEquals(100_000L, source.maxRows());
         assertEquals(1_000, configured.maxRows());
         assertEquals(Duration.ofSeconds(5), configured.timeout());
-        assertEquals(Duration.ofMillis(200), configured.connectionAcquireTimeout());
         assertEquals(BatchWriteOptions.RecoveryMode.RECEIPT, configured.recovery().mode());
         assertEquals("order-import-1", configured.recovery().operationId());
         assertThrows(IllegalArgumentException.class, () -> source.withReceipt(" "));

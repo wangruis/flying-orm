@@ -11,10 +11,8 @@ import java.util.regex.Pattern;
  * @param chunkSize   每个分片最多包含多少行
  * @param concurrency 独立分片最多同时执行多少个
  * @param maxRows     本次任务允许接收的最大行数，必须是正数
- * @param timeout                  整个批量任务的超时时间，0 表示不限制
- * @param connectionAcquireTimeout R2DBC 每个批量事务最多等待连接多久，0 表示交给连接池控制；JDBC
- *                                 由 DataSource/连接池配置连接等待上限
- * @param recovery                 提交结果不确定时使用的恢复策略
+ * @param timeout     连接可用后，每个自有批量事务执行 SQL 和提交的兜底时限；0 表示不限制
+ * @param recovery    提交结果不确定时使用的恢复策略
  * @author wangr
  * @date 2026-07-31
  * @version v1.0
@@ -26,7 +24,6 @@ public record BatchWriteOptions(Mode mode,
                                 long maxBufferedBytes,
                                 int maxResultChunks,
                                 Duration timeout,
-                                Duration connectionAcquireTimeout,
                                 Recovery recovery) {
 
     /** 默认分片大小。 */
@@ -34,11 +31,8 @@ public record BatchWriteOptions(Mode mode,
     public static final long DEFAULT_MAX_ROWS = 100_000L;
     public static final long DEFAULT_MAX_BUFFERED_BYTES = 32L * 1024 * 1024;
     public static final int DEFAULT_MAX_RESULT_CHUNKS = 4_096;
-    /** 普通批量任务默认最多运行五分钟。 */
+    /** 普通批量事务在连接可用后默认最多执行五分钟。 */
     public static final Duration DEFAULT_TIMEOUT = Duration.ofMinutes(5);
-    /** R2DBC 每个批量事务默认最多等待连接五秒；JDBC 使用 DataSource/连接池自己的等待上限。 */
-    public static final Duration DEFAULT_CONNECTION_ACQUIRE_TIMEOUT = Duration.ofSeconds(5);
-
     /**
      * 检查配置，错误参数在拿数据库连接前就直接报出来。
      */
@@ -63,8 +57,6 @@ public record BatchWriteOptions(Mode mode,
             throw new IllegalArgumentException("batch max result chunks must be greater than zero");
         }
         timeout = requireNonNegative(timeout, "batch timeout");
-        connectionAcquireTimeout = requireNonNegative(connectionAcquireTimeout,
-                                                       "batch connection acquisition timeout");
         recovery = Objects.requireNonNull(recovery, "batch recovery must not be null");
     }
 
@@ -91,7 +83,6 @@ public record BatchWriteOptions(Mode mode,
                                      DEFAULT_MAX_BUFFERED_BYTES,
                                      DEFAULT_MAX_RESULT_CHUNKS,
                                      DEFAULT_TIMEOUT,
-                                     DEFAULT_CONNECTION_ACQUIRE_TIMEOUT,
                                      Recovery.none());
     }
 
@@ -120,22 +111,21 @@ public record BatchWriteOptions(Mode mode,
                                      DEFAULT_MAX_BUFFERED_BYTES,
                                      DEFAULT_MAX_RESULT_CHUNKS,
                                      DEFAULT_TIMEOUT,
-                                     DEFAULT_CONNECTION_ACQUIRE_TIMEOUT,
                                      Recovery.none());
     }
 
     /**
-     * 显式创建不限制任务和连接等待时间的原子批量配置；只应在外部资源已经提供等价边界时使用。
+     * 显式创建不限制任务执行时间的原子批量配置；只应在外部资源已经提供等价边界时使用。
      *
      * @param chunkSize 每个分片的最大行数
      * @return 无超时边界的原子批量配置
      */
     public static BatchWriteOptions unlimitedAtomic(int chunkSize) {
-        return atomic(chunkSize).withTimeout(Duration.ZERO).withConnectionAcquireTimeout(Duration.ZERO);
+        return atomic(chunkSize).withTimeout(Duration.ZERO);
     }
 
     /**
-     * 显式创建不限制任务和连接等待时间的独立分片配置。
+     * 显式创建不限制任务执行时间的独立分片配置。
      *
      * @param chunkSize 每个分片的最大行数
      * @param concurrency 最大并发分片数
@@ -143,8 +133,7 @@ public record BatchWriteOptions(Mode mode,
      */
     public static BatchWriteOptions unlimitedIndependent(int chunkSize, int concurrency) {
         return independent(chunkSize, concurrency)
-                .withTimeout(Duration.ZERO)
-                .withConnectionAcquireTimeout(Duration.ZERO);
+                .withTimeout(Duration.ZERO);
     }
 
     /**
@@ -161,7 +150,6 @@ public record BatchWriteOptions(Mode mode,
                                      maxBufferedBytes,
                                      maxResultChunks,
                                      timeout,
-                                     connectionAcquireTimeout,
                                      recovery);
     }
 
@@ -176,14 +164,15 @@ public record BatchWriteOptions(Mode mode,
                                      maxBufferedBytes,
                                      maxResultChunks,
                                      timeout,
-                                     connectionAcquireTimeout,
                                      recovery);
     }
 
     /**
-     * 返回带任务超时的新配置。
+     * 返回带批量事务 SQL 兜底时限的新配置。连接排队仍完全服从上层连接池；
+     * {@code INDEPENDENT} 模式下每个自有分片事务分别计时。JDBC 会在进入提交前检查同一截止点，
+     * 但标准 JDBC 没有单独限制 {@code Connection.commit()} 阻塞时长的 API，提交调用本身仍受驱动和网络配置约束。
      *
-     * @param timeout 整个批量任务的超时时间，0 表示不限制
+     * @param timeout 连接可用后的事务执行时限，0 表示不限制
      * @return 新配置
      */
     public BatchWriteOptions withTimeout(Duration timeout) {
@@ -194,27 +183,6 @@ public record BatchWriteOptions(Mode mode,
                                      maxBufferedBytes,
                                      maxResultChunks,
                                      timeout,
-                                     connectionAcquireTimeout,
-                                     recovery);
-    }
-
-    /**
-     * 限制 R2DBC 每个批量事务等待连接的时间。独立分片并发时，每个分片都受这个上限保护。
-     * 标准 JDBC 没有可靠的单次 {@code DataSource.getConnection()} 超时 API，因此 JDBC 调用方要在
-     * HikariCP 等 DataSource 上配置同类边界；ORM 不会另起隐藏线程来伪造无法可靠取消的超时。
-     *
-     * @param connectionAcquireTimeout 最多等待连接多久，0 表示交给连接池控制
-     * @return 带新限制的不可变配置
-     */
-    public BatchWriteOptions withConnectionAcquireTimeout(Duration connectionAcquireTimeout) {
-        return new BatchWriteOptions(mode,
-                                     chunkSize,
-                                     concurrency,
-                                     maxRows,
-                                     maxBufferedBytes,
-                                     maxResultChunks,
-                                     timeout,
-                                     connectionAcquireTimeout,
                                      recovery);
     }
 
@@ -232,7 +200,7 @@ public record BatchWriteOptions(Mode mode,
      * 使用默认回执表开启 UNKNOWN 恢复，并指定主动确认等待时间。
      *
      * @param operationId    稳定且唯一的操作编号
-     * @param confirmTimeout 主动确认最多等待多久
+     * @param confirmTimeout 确认连接可用后，回执查询最多执行多久
      * @return 新配置
      */
     public BatchWriteOptions withReceipt(String operationId, Duration confirmTimeout) {
@@ -247,7 +215,6 @@ public record BatchWriteOptions(Mode mode,
                                      maxBufferedBytes,
                                      maxResultChunks,
                                      timeout,
-                                     connectionAcquireTimeout,
                                      configured);
     }
 
@@ -281,7 +248,7 @@ public record BatchWriteOptions(Mode mode,
      * @param mode           恢复方式
      * @param operationId    调用方提供的稳定操作编号
      * @param receiptTable   回执表名
-     * @param confirmTimeout 主动确认最多等待多久
+     * @param confirmTimeout 确认连接可用后，回执查询最多执行多久
      */
     public record Recovery(RecoveryMode mode,
                            String operationId,

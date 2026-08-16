@@ -67,6 +67,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class R2dbcBatchWriterTest {
 
+    /** 业务执行时间不能提前消耗结果确定后才开始计算的资源清理预算。 */
+    @Test
+    void startsBatchCleanupBudgetWhenCleanupActuallyBegins() {
+        StepVerifier.withVirtualTime(() -> {
+            Connection connection = proxy(Connection.class, (ignored, method, ignoredArgs) ->
+                    defaultValue(method));
+            R2dbcBatchConnectionHandle handle = new R2dbcBatchConnectionHandle(
+                    connection, Duration.ofMillis(50));
+            return Mono.delay(Duration.ofSeconds(1))
+                       .then(Mono.defer(() -> handle.cleanupDeadline()
+                                                   .protect(Mono.delay(Duration.ofMillis(20)).then())));
+        })
+                    .thenAwait(Duration.ofMillis(1020))
+                    .verifyComplete();
+    }
+
     /** R2DBC 受保护批量更新必须把预读 owner 重新附加到实际业务 SQL。 */
     @Test
     void restrictsProtectedBatchUpdateToTheOwnerReadBeforeTheWrite() {
@@ -536,25 +552,25 @@ class R2dbcBatchWriterTest {
                     .verify();
     }
 
-    /**
-     * 批量 timeout 是绝对截止时间。输入源中途来过新数据，也不能把整批任务的时限重新续满。
-     */
+    /** 批量输入等待由 Publisher 或上层控制，SQL 兜底时间不覆盖连接获取前的输入阶段。 */
     @Test
-    void independentInputPublisherCannotResetTotalDeadline() {
+    void independentInputWaitingIsLeftToPublisherAndUpperLayer() {
         ControlledConnectionFactory factory = new ControlledConnectionFactory();
         ReactiveSqlExecutor executor = R2dbcSqlExecutor.create(factory);
-        Publisher<Object[]> rows = Flux.concat(Mono.just(new Object[]{"u1"}),
-                                                Mono.delay(Duration.ofSeconds(8))
-                                                    .map(ignored -> new Object[]{"u2"}),
-                                                Mono.never());
-        BatchWriteRequest request = request(BatchWriteOptions.independent(1)
-                                                             .withTimeout(Duration.ofSeconds(10)),
-                                            rows);
-
-        StepVerifier.withVirtualTime(() -> executor.writeBatch(request))
+        StepVerifier.withVirtualTime(() -> {
+            Publisher<Object[]> rows = Flux.concat(Mono.just(new Object[]{"u1"}),
+                                                    Mono.delay(Duration.ofSeconds(8))
+                                                        .map(ignored -> new Object[]{"u2"}),
+                                                    Mono.never());
+            BatchWriteRequest request = request(BatchWriteOptions.independent(1)
+                                                                 .withTimeout(Duration.ofSeconds(10)),
+                                                rows);
+            return executor.writeBatch(request);
+        })
                     .thenAwait(Duration.ofSeconds(11))
-                    .expectError(BatchWriteException.class)
+                    .thenCancel()
                     .verify(Duration.ofSeconds(1));
+        assertEquals(2, factory.commitAttempts.get());
     }
 
     /**
@@ -574,28 +590,57 @@ class R2dbcBatchWriterTest {
                     .verifyComplete();
     }
 
-    /**
-     * 输入源持续在单次空闲超时内送数据，也不能把整批绝对截止时间一直往后推。
-     */
+    /** 持续输入可以跨越 SQL 兜底时长，只要每个已获连接的独立分片都在自己的时限内完成。 */
     @Test
-    void continuouslyEmittingInputStillStopsAtTotalDeadline() {
+    void continuouslyEmittingInputCanOutlivePerTransactionFallback() {
         ControlledConnectionFactory factory = new ControlledConnectionFactory();
         ReactiveSqlExecutor executor = R2dbcSqlExecutor.create(factory);
-        Publisher<Object[]> rows = Flux.interval(Duration.ZERO, Duration.ofSeconds(8))
-                                             .take(3)
-                                             .map(index -> new Object[]{"u" + index});
-        BatchWriteRequest request = request(BatchWriteOptions.independent(1)
-                                                             .withTimeout(Duration.ofSeconds(10)),
-                                            rows);
-
-        StepVerifier.withVirtualTime(() -> executor.writeBatch(request))
-                    .thenAwait(Duration.ofSeconds(11))
-                    .expectError(BatchWriteException.class)
-                    .verify(Duration.ofSeconds(1));
+        StepVerifier.withVirtualTime(() -> {
+            Publisher<Object[]> rows = Flux.interval(Duration.ZERO, Duration.ofSeconds(8))
+                                                 .take(3)
+                                                 .map(index -> new Object[]{"u" + index});
+            BatchWriteRequest request = request(BatchWriteOptions.independent(1)
+                                                                 .withTimeout(Duration.ofSeconds(10)),
+                                                rows);
+            return executor.writeBatch(request);
+        })
+                    .thenAwait(Duration.ofSeconds(17))
+                    .assertNext(result -> {
+                        assertEquals(BatchWriteResult.Status.COMMITTED, result.status());
+                        assertEquals(3, result.inputCount());
+                    })
+                    .verifyComplete();
+        assertEquals(3, factory.commitAttempts.get());
     }
 
+    /** 外部事务解析与输入等待不消耗 ORM 的 SQL 兜底时间，连接可用后才开始事务执行计时。 */
     @Test
-    void receiptLookupCannotResetAtomicTotalDeadline() {
+    void batchTimeoutStartsAfterTransactionResolutionAndInputConsumption() {
+        ControlledConnectionFactory factory = new ControlledConnectionFactory();
+        AtomicInteger transactionLookups = new AtomicInteger();
+        ReactiveSqlExecutor executor = R2dbcSqlExecutor.create(factory)
+                .withTransactionParticipant(() -> {
+                    transactionLookups.incrementAndGet();
+                    return Mono.delay(Duration.ofMillis(60)).then(Mono.empty());
+                });
+        StepVerifier.withVirtualTime(() -> {
+            Publisher<Object[]> rows = Mono.delay(Duration.ofMillis(60))
+                                           .map(ignored -> new Object[]{"u1"});
+            BatchWriteRequest request = request(BatchWriteOptions.atomic(1)
+                                                                 .withTimeout(Duration.ofMillis(100)),
+                                                rows);
+            return executor.writeBatch(request);
+        })
+                    .thenAwait(Duration.ofMillis(121))
+                    .assertNext(result -> assertEquals(BatchWriteResult.Status.COMMITTED, result.status()))
+                    .verifyComplete();
+        assertEquals(1, transactionLookups.get());
+        assertEquals(1, factory.commitAttempts.get());
+    }
+
+    /** 回执 SQL 完成后，下一次连接池排队仍由连接池或上层控制，不继承 ORM 的 SQL 兜底时间。 */
+    @Test
+    void receiptLookupLeavesFollowupConnectionWaitingToPool() {
         ControlledConnectionFactory factory = new ControlledConnectionFactory();
         factory.receiptLookupDelay = Duration.ofSeconds(8);
         factory.hangAfterFirstConnection = true;
@@ -606,8 +651,30 @@ class R2dbcBatchWriterTest {
 
         StepVerifier.withVirtualTime(() -> executor.writeBatch(request))
                     .thenAwait(Duration.ofSeconds(11))
-                    .expectError(BatchWriteException.class)
+                    .thenCancel()
                     .verify(Duration.ofSeconds(1));
+        assertEquals(2, factory.connections.get());
+    }
+
+    /** 已提交回执的 payload 重放只消费输入，不应把批量 SQL 兜底时限错误套到 Publisher 等待阶段。 */
+    @Test
+    void atomicReceiptReplayLeavesInputWaitingToPublisher() {
+        Object[] row = new Object[]{"u1"};
+        ControlledConnectionFactory factory = new ControlledConnectionFactory();
+        factory.preexistingReceiptPayload = new BatchPayloadHasher().hashRows(List.<Object[]>of(row));
+        ReactiveSqlExecutor executor = R2dbcSqlExecutor.create(factory);
+        BatchWriteOptions options = BatchWriteOptions.atomic(1)
+                                                     .withReceipt("existing-receipt")
+                                                     .withTimeout(Duration.ofMillis(10));
+
+        StepVerifier.withVirtualTime(() -> executor.writeBatch(request(
+                        options,
+                        Mono.delay(Duration.ofMillis(100)).map(ignored -> row))))
+                    .thenAwait(Duration.ofMillis(101))
+                    .assertNext(result -> assertEquals(BatchWriteResult.Status.COMMITTED, result.status()))
+                    .verifyComplete();
+
+        assertEquals(0, factory.commitAttempts.get());
     }
 
     @Test
@@ -1157,6 +1224,7 @@ class R2dbcBatchWriterTest {
         private Long ownerId;
         private Duration receiptLookupDelay = Duration.ZERO;
         private boolean committedReceiptAfterCommitFailure;
+        private String preexistingReceiptPayload;
         private boolean confirmationStartedAfterCleanup;
 
         @Override
@@ -1252,6 +1320,9 @@ class R2dbcBatchWriterTest {
                 confirmationStartedAfterCleanup = activeConnections.get() == 1;
                 return Flux.just(receiptResult(1L, 1L));
             }
+            if (sql.startsWith("select payload_hash") && preexistingReceiptPayload != null) {
+                return Flux.just(receiptResult(preexistingReceiptPayload, 1L, 1L));
+            }
             Flux<Result> execution = Flux.just(result(
                     sql.startsWith("select "), zeroRowsSql != null && zeroRowsSql.equals(sql) ? 0L : 1L));
             return sql.startsWith("select ") && !receiptLookupDelay.isZero()
@@ -1279,6 +1350,33 @@ class R2dbcBatchWriterTest {
                             return defaultValue(method);
                         }
                         return index == 0 ? rowCount : affectedRows;
+                    });
+            return proxy(Result.class, (ignored, method, args) -> {
+                if (!method.getName().equals("map")) {
+                    return defaultValue(method);
+                }
+                java.util.function.BiFunction<io.r2dbc.spi.Row, io.r2dbc.spi.RowMetadata, Object> mapper =
+                        (java.util.function.BiFunction<io.r2dbc.spi.Row, io.r2dbc.spi.RowMetadata, Object>) args[0];
+                return Flux.just(mapper.apply(row, metadata));
+            });
+        }
+
+        @SuppressWarnings("unchecked")
+        private Result receiptResult(String payloadHash, long rowCount, long affectedRows) {
+            io.r2dbc.spi.RowMetadata metadata = proxy(
+                    io.r2dbc.spi.RowMetadata.class,
+                    (ignored, method, args) -> defaultValue(method));
+            io.r2dbc.spi.Row row = proxy(
+                    io.r2dbc.spi.Row.class,
+                    (ignored, method, args) -> {
+                        if (!method.getName().equals("get") || !(args[0] instanceof Integer index)) {
+                            return defaultValue(method);
+                        }
+                        return switch (index) {
+                            case 0 -> payloadHash;
+                            case 1 -> rowCount;
+                            default -> affectedRows;
+                        };
                     });
             return proxy(Result.class, (ignored, method, args) -> {
                 if (!method.getName().equals("map")) {

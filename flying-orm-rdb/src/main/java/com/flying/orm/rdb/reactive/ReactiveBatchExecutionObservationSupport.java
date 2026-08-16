@@ -20,7 +20,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * 批量执行的分片、汇总和普通 SQL 摘要观测。
  *
  * <p>批量没有外部事务时一定由 flying-orm 管理事务，因此本地来源为 {@code INTERNAL}；检测到外部事务时
- * 自动改为 {@code EXTERNAL}。这里不保存 rows Publisher，也不会为了日志重新订阅输入。</p>
+ * 自动改为 {@code EXTERNAL}。事务解析服从上层事务管理器，不受 ORM 的 SQL 时限取消；这里不保存 rows
+ * Publisher，也不会为了日志重新订阅输入。</p>
  *
  * @author wangr
  * @date 2026-08-07
@@ -44,11 +45,11 @@ final class ReactiveBatchExecutionObservationSupport {
     }
 
     Mono<BatchWriteResult> observeResult(BatchWriteRequest request, Mono<BatchWriteResult> source) {
-        return Mono.defer(() -> {
+        return Mono.deferContextual(context -> {
             long startedAt = System.nanoTime();
             AtomicBoolean observed = new AtomicBoolean();
             BatchExecutionObservation.BatchWriteRequestView batchView = batchView(request);
-            return transactionSources.resolve(SqlTransactionSource.INTERNAL)
+            Mono<BatchWriteResult> observedSource = transactionSources.resolve(SqlTransactionSource.INTERNAL)
                     .flatMap(resolution -> resolution.bind(source)
                             .doOnSuccess(result -> sql.observe(
                                     observed,
@@ -119,16 +120,17 @@ final class ReactiveBatchExecutionObservationSupport {
                             null,
                             null,
                             SqlTransactionSource.INTERNAL));
+            return observedSource;
         });
     }
 
     Flux<BatchChunkResult> observeChunks(BatchWriteRequest request, Flux<BatchChunkResult> source) {
-        return Flux.defer(() -> {
+        return Flux.deferContextual(context -> {
             long startedAt = System.nanoTime();
             BatchObservationAccumulator summary = new BatchObservationAccumulator(request.options().mode());
             AtomicBoolean observed = new AtomicBoolean();
             BatchExecutionObservation.BatchWriteRequestView batchView = batchView(request);
-            return transactionSources.resolve(SqlTransactionSource.INTERNAL)
+            Flux<BatchChunkResult> observedSource = transactionSources.resolve(SqlTransactionSource.INTERNAL)
                     .flatMapMany(resolution -> resolution.bind(source)
                             .doOnNext(chunk -> {
                                 summary.add(chunk);
@@ -200,6 +202,7 @@ final class ReactiveBatchExecutionObservationSupport {
                             null,
                             null,
                             SqlTransactionSource.INTERNAL));
+            return observedSource;
         });
     }
 
@@ -249,4 +252,5 @@ final class ReactiveBatchExecutionObservationSupport {
     private static int cappedInt(long value) {
         return value > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) value;
     }
+
 }

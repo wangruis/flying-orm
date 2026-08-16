@@ -153,7 +153,7 @@ final class JdbcSchemaMigrationExecutor {
         }
         state.phase = SqlExecutionPhase.CLEANUP;
         try {
-            executePhase(guard.cleanup(), options, state);
+            executePhase(guard.cleanup(), options.withTimeout(options.cleanupTimeout()), state);
         } catch (RuntimeException cleanupFailure) {
             SqlExecutionSequenceException sequenceFailure = sequenceFailure(state, cleanupFailure);
             VirtualMachineError primaryFatal = SchemaMigrationObservers.findVirtualMachineError(primaryFailure);

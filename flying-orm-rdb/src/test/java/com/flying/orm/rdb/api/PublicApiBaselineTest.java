@@ -1,8 +1,8 @@
 package com.flying.orm.rdb.api;
 
 import com.flying.orm.core.condition.ConditionNode;
-import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.internal.InternalApi;
+import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
@@ -39,38 +39,24 @@ import java.util.stream.Stream;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * 保存历史 V1 公开签名，并锁定 V2.0.0 正式公开 API。
+ * 锁定 V2.0.0 正式公开 API。
  *
- * <p>历史文件只作为迁移和审查证据，不会被 V2 新增入口覆盖。V2.0.0 快照同样只读；后续版本如需调整
- * 公开签名，应新建对应版本的基线，不能覆盖已经交付的版本证据。</p>
+ * <p>快照在正式发布前锁定目标 API；只有经过明确审查的 2.0.0 API 决策才能同步它。
+ * 版本发布后如需调整，应新建下一版本基线。</p>
  *
  * @author wangr
- * @date 2026-08-03
- * @version v1.0
+ * @date 2026-08-16
+ * @version v2.0
  */
-class V1PublicApiBaselineTest {
-
-    private static final String BASELINE_RESOURCE = "/api/v1.0.0-public-api.txt";
+class PublicApiBaselineTest {
 
     private static final String V2_BASELINE_RESOURCE = "/api/v2.0.0-public-api.txt";
 
     private static final Map<String, Class<?>> MODULE_MARKERS = moduleMarkers();
 
     @Test
-    void v100BaselineRemainsArchivedForMigrationReview() throws Exception {
-        try (InputStream input = V1PublicApiBaselineTest.class.getResourceAsStream(BASELINE_RESOURCE)) {
-            if (input == null) {
-                fail("V1.0.0 public API archive is missing");
-            }
-            if (normalize(new String(input.readAllBytes(), StandardCharsets.UTF_8)).isBlank()) {
-                fail("V1.0.0 public API archive must not be empty");
-            }
-        }
-    }
-
-    @Test
     void v200BaselineRemainsAvailableForReleaseReview() throws Exception {
-        try (InputStream input = V1PublicApiBaselineTest.class.getResourceAsStream(V2_BASELINE_RESOURCE)) {
+        try (InputStream input = PublicApiBaselineTest.class.getResourceAsStream(V2_BASELINE_RESOURCE)) {
             if (input == null || normalize(new String(input.readAllBytes(), StandardCharsets.UTF_8)).isBlank()) {
                 fail("V2.0.0 public API baseline is missing");
             }
@@ -80,15 +66,30 @@ class V1PublicApiBaselineTest {
     @Test
     void coreAndRdbPublicApiMatchesV200Baseline() throws Exception {
         String actual = normalize(PublicApiSnapshot.capture(MODULE_MARKERS));
-        try (InputStream input = V1PublicApiBaselineTest.class.getResourceAsStream(V2_BASELINE_RESOURCE)) {
+        try (InputStream input = PublicApiBaselineTest.class.getResourceAsStream(V2_BASELINE_RESOURCE)) {
             if (input == null) {
                 fail("V2.0.0 public API baseline is missing");
             }
             String expected = normalize(new String(input.readAllBytes(), StandardCharsets.UTF_8));
             if (!expected.equals(actual)) {
-                fail("V2.0.0 public API changed; create a new version baseline instead of rewriting this archive");
+                fail("V2.0.0 public API differs from its reviewed release baseline; "
+                             + firstDifference(expected, actual));
             }
         }
+    }
+
+    /** 给 API 快照失败提供首个差异，避免靠肉眼比较整份清单。 */
+    private static String firstDifference(String expected, String actual) {
+        List<String> expectedLines = expected.lines().toList();
+        List<String> actualLines = actual.lines().toList();
+        int commonLength = Math.min(expectedLines.size(), actualLines.size());
+        for (int index = 0; index < commonLength; index++) {
+            if (!expectedLines.get(index).equals(actualLines.get(index))) {
+                return "line " + (index + 1) + " expected <" + expectedLines.get(index)
+                        + "> but was <" + actualLines.get(index) + ">";
+            }
+        }
+        return "line count expected " + expectedLines.size() + " but was " + actualLines.size();
     }
 
     private static Map<String, Class<?>> moduleMarkers() {

@@ -554,11 +554,9 @@ class H2R2dbcBatchIntegrationTest {
                     .verifyComplete();
     }
 
-    /**
-     * 超时也是任务级失败，上层仍然要拿到批量结果，而不是只看到裸异常。
-     */
+    /** 批量输入等待由 Publisher 或上层控制，连接可用后的 SQL 兜底时间不能提前截断输入。 */
     @Test
-    void atomicBatchTimeoutCarriesBatchResult() {
+    void atomicBatchInputWaitingIsNotCutOffBySqlFallback() {
         H2ConnectionFactory connectionFactory = new H2ConnectionFactory(H2ConnectionConfiguration.builder()
                                                                                                    .inMemory("batch_atomic_timeout")
                                                                                                    .property("DB_CLOSE_DELAY",
@@ -566,21 +564,26 @@ class H2R2dbcBatchIntegrationTest {
                                                                                                    .build());
         ReactiveSqlExecutor executor = R2dbcSqlExecutor.create(connectionFactory);
 
+        StepVerifier.create(executor.rowsUpdated(SqlRequest.nativeSql(
+                            "create table Users (id varchar(32) primary key, name varchar(64))", List.of())))
+                    .expectNext(0L)
+                    .verifyComplete();
+
         BatchWriteRequest request = new BatchWriteRequest(
                 "insert into Users (id, name) values (?, ?)",
                 2,
                 List.of(String.class, String.class),
                 SqlBindMarkerStyle.CANONICAL,
-                Flux.never(),
-                BatchWriteOptions.atomic(2).withTimeout(Duration.ofMillis(10)));
+                Mono.delay(Duration.ofMillis(450)).map(ignored -> new Object[]{"u1", "Alice"}),
+                BatchWriteOptions.atomic(2).withTimeout(Duration.ofMillis(300)));
 
         StepVerifier.create(executor.writeBatch(request))
-                    .expectErrorSatisfies(error -> {
-                        BatchWriteException batchError = assertInstanceOf(BatchWriteException.class, error);
-                        assertEquals(BatchWriteResult.Status.ROLLED_BACK, batchError.result().status());
-                        assertEquals(0L, batchError.result().inputCount());
+                    .assertNext(result -> {
+                        assertEquals(BatchWriteResult.Status.COMMITTED, result.status());
+                        assertEquals(1L, result.inputCount());
+                        assertEquals(1L, result.affectedRows());
                     })
-                    .verify();
+                    .verifyComplete();
     }
 
     /**

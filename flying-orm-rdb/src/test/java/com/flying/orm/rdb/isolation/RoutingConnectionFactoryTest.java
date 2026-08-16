@@ -5,6 +5,7 @@ import io.r2dbc.spi.ConnectionFactory;
 import io.r2dbc.spi.ConnectionFactoryMetadata;
 import org.junit.jupiter.api.Test;
 import org.reactivestreams.Publisher;
+import reactor.core.Disposable;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
@@ -207,6 +208,44 @@ class RoutingConnectionFactoryTest {
         StepVerifier.create(connection.close()).verifyComplete();
         assertEquals(1, resets.get());
         assertEquals(1, closes.get());
+    }
+
+    /** reset 永久挂起时，关闭订阅被上层清理时限取消后必须物理失效，不能留下后台 reset 订阅。 */
+    @Test
+    void invalidatesConnectionWhenPendingSessionResetIsCancelled() {
+        AtomicInteger activeResets = new AtomicInteger();
+        AtomicInteger reusableCloses = new AtomicInteger();
+        AtomicInteger invalidations = new AtomicInteger();
+        ConnectionFactory delegate = factory(new AtomicInteger(), reusableCloses);
+        R2dbcSessionCustomizer customizer = new R2dbcSessionCustomizer() {
+            @Override
+            public Mono<Void> initialize(Connection connection, IsolationContext context) {
+                return Mono.empty();
+            }
+
+            @Override
+            public Mono<Void> reset(Connection connection, IsolationContext context) {
+                return Mono.<Void>never()
+                        .doOnSubscribe(ignored -> activeResets.incrementAndGet())
+                        .doFinally(ignored -> activeResets.decrementAndGet());
+            }
+        };
+        RoutingConnectionFactory routing = new RoutingConnectionFactory(
+                delegate,
+                key -> delegate,
+                customizer,
+                invalidator(reusableCloses, invalidations, null));
+        Connection connection = Mono.from(routing.create()).block();
+
+        Disposable close = Mono.from(connection.close()).subscribe();
+        assertEquals(1, activeResets.get());
+        close.dispose();
+
+        assertEquals(0, activeResets.get());
+        assertEquals(1, invalidations.get());
+        assertEquals(0, reusableCloses.get());
+        StepVerifier.create(Mono.from(connection.close())).verifyComplete();
+        assertEquals(1, invalidations.get());
     }
 
     /** reset 在返回 Publisher 前同步失败时也必须失效连接，不能绕过已经装配的异步错误边界。 */

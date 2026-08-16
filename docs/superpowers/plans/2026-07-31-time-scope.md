@@ -28,7 +28,7 @@
 - Modify: `flying-orm-core/src/test/java/com/flying/orm/core/scope/DataScopeTest.java`，验证租户、时间和字段范围组合。
 - Modify: `flying-orm-core/src/test/java/com/flying/orm/core/sql/render/SqlRendererTest.java`，验证新比较 term 的参数化 SQL。
 - Modify: `flying-orm-rdb/src/test/java/com/flying/orm/rdb/form/ReactiveFormClientTest.java`，验证动态表单最终 SQL、字段裁剪和参数顺序。
-- Modify: `docs/flying-orm-phased-implementation-plan.md`、`docs/requirements/index.md`、`docs/source-feature-matrix.md`、`docs/target-api-examples.md`，同步 R-020 状态和使用示例。
+- Modify: `docs/requirements/index.md`、`docs/source-feature-matrix.md`、`docs/target-api-examples.md`，同步 R-020 状态和使用示例。
 
 ---
 
@@ -152,7 +152,7 @@ git commit -m "Add inclusive comparison terms"
 
 - [ ] **Step 1: 写 TimeScope 行为和非法区间测试**
 
-创建 `TimeScopeTest.java`，类型 Javadoc 使用 `@author wangr`、`@date 2026-07-31`、`@version v1.0`。核心测试如下：
+创建 `TimeScopeTest.java`，类型 Javadoc 使用 `@author wangr`、`@date 2026-07-31` 和当前版本号。核心测试如下：
 
 ```java
 @Test
@@ -281,7 +281,7 @@ import java.util.Objects;
  * @param endBoundary   结束边界类型；没有结束边界时为 null
  * @author wangr
  * @date 2026-07-31
- * @version v1.0
+ * @version v2.0
  */
 public record TimeScope(String field,
                         Object start,
@@ -420,7 +420,7 @@ git commit -m "Add composable time scopes"
 ### Task 3: R-020 文档收口与全模块验证
 
 **Files:**
-- Modify: `docs/flying-orm-phased-implementation-plan.md`
+- Modify: `docs/requirements/index.md`
 - Modify: `docs/requirements/index.md`
 - Modify: `docs/source-feature-matrix.md`
 - Modify: `docs/target-api-examples.md`
@@ -479,7 +479,7 @@ Expected: flying-orm、core、rdb、testkit、benchmark 五个模块全部 `SUCC
 分别执行 `git diff --check`、`git status --short` 和 `git diff --stat`。只应看到本计划列出的文档变更，然后提交：
 
 ```powershell
-git add docs/flying-orm-phased-implementation-plan.md docs/requirements/index.md docs/source-feature-matrix.md docs/target-api-examples.md
+git add docs/requirements/index.md docs/source-feature-matrix.md docs/target-api-examples.md
 git commit -m "Document TimeScope usage"
 ```
 

@@ -452,9 +452,7 @@ class ObservedReactiveSqlExecutorTest {
                 return Mono.just(1L);
             }
         };
-        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
-                                                         .withConnectionAcquireTimeout(
-                                                                 java.time.Duration.ofMillis(250));
+        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults();
         ReactiveSqlExecutor observed = delegate.withObserver(ignored -> { });
         SqlRequest request = new SqlRequest("select 1 where ? = ?", List.of(1, 1));
 
@@ -519,6 +517,92 @@ class ObservedReactiveSqlExecutorTest {
                     .expectNext(0L)
                     .verifyComplete();
         assertEquals(SqlTransactionSource.EXTERNAL, observedSource.get());
+    }
+
+    /** 观测需要事务来源时，等待策略仍由上层事务管理器负责。 */
+    @Test
+    void observedTransactionResolutionRemainsOwnedByTheUpperLayer() {
+        AtomicInteger transactionLookups = new AtomicInteger();
+        ReactiveSqlExecutor delegate = new ReactiveSqlExecutor() {
+            @Override
+            public Flux<DynamicRow> query(SqlRequest request) {
+                return Flux.empty();
+            }
+
+            @Override
+            public Mono<Long> rowsUpdated(SqlRequest request) {
+                return Mono.just(1L);
+            }
+
+            @Override
+            public Mono<R2dbcTransactionContext> currentTransaction() {
+                transactionLookups.incrementAndGet();
+                return Mono.never();
+            }
+        };
+        SqlExecutionObserver observer = new SqlExecutionObserver() {
+            @Override
+            public boolean requiresTransactionSource() {
+                return true;
+            }
+
+            @Override
+            public void onExecution(SqlExecutionObservation observation) {
+                // 本测试只验证解析边界。
+            }
+        };
+        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
+                                                         .withTimeout(java.time.Duration.ofMillis(10));
+
+        StepVerifier.withVirtualTime(() -> delegate.withObserver(observer).rowsUpdated(
+                            new SqlRequest("update Users set enabled = ?", List.of(true)), options))
+                    .thenAwait(java.time.Duration.ofSeconds(1))
+                    .thenCancel()
+                    .verify();
+        assertEquals(1, transactionLookups.get());
+    }
+
+    /** 连接获取兼容配置不能让观测层接管上层事务查找。 */
+    @Test
+    void observedQueryDoesNotApplyConnectionTimeoutToTransactionResolution() {
+        AtomicInteger transactionLookups = new AtomicInteger();
+        ReactiveSqlExecutor delegate = new ReactiveSqlExecutor() {
+            @Override
+            public Flux<DynamicRow> query(SqlRequest request) {
+                return Flux.empty();
+            }
+
+            @Override
+            public Mono<Long> rowsUpdated(SqlRequest request) {
+                return Mono.just(0L);
+            }
+
+            @Override
+            public Mono<R2dbcTransactionContext> currentTransaction() {
+                transactionLookups.incrementAndGet();
+                return Mono.never();
+            }
+        };
+        SqlExecutionObserver observer = new SqlExecutionObserver() {
+            @Override
+            public boolean requiresTransactionSource() {
+                return true;
+            }
+
+            @Override
+            public void onExecution(SqlExecutionObservation observation) {
+                // 本测试只验证查询事务解析使用调用方边界。
+            }
+        };
+        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
+                                                         .withTimeout(java.time.Duration.ofSeconds(1));
+
+        StepVerifier.withVirtualTime(() -> delegate.withObserver(observer).query(
+                            new SqlRequest("select id from Users", List.of()), options))
+                    .thenAwait(java.time.Duration.ofSeconds(1))
+                    .thenCancel()
+                    .verify();
+        assertEquals(1, transactionLookups.get());
     }
 
     private static BatchWriteRequest request(BatchWriteOptions options) {

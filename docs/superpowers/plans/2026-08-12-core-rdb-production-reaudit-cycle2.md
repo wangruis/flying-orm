@@ -98,5 +98,5 @@
 
 - [ ] 复算最终 128/500 清单、哈希和大类门禁。
 - [ ] 运行 `D:\apache-maven-3.9.16\bin\mvn.cmd -Dmaven.repo.local=D:\MavenRepository -Pquality -pl flying-orm-core,flying-orm-rdb -am verify`。
-- [ ] 确认 `PublicApiClosureTest`、`V1PublicApiBaselineTest` 和 `git diff --check` 全绿。
+- [ ] 确认 `PublicApiClosureTest`、`PublicApiBaselineTest` 和 `git diff --check` 全绿。
 - [ ] 报告已修复、已拒绝、未验证外部边界和未触碰的范围外 dirty worktree。

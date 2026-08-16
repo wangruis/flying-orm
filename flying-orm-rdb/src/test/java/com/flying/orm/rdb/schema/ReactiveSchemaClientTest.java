@@ -260,7 +260,6 @@ class ReactiveSchemaClientTest {
         assertEquals(100_000L, options.maxRows());
         assertEquals(16L * 1024 * 1024, options.maxLargeObjectBytes());
         assertEquals(16_000_000L, options.maxLargeObjectChars());
-        assertEquals(Duration.ofSeconds(5), options.connectionAcquireTimeout());
     }
 
     @Test
@@ -271,7 +270,6 @@ class ReactiveSchemaClientTest {
         assertEquals(0L, options.maxRows());
         assertEquals(0L, options.maxLargeObjectBytes());
         assertEquals(0L, options.maxLargeObjectChars());
-        assertEquals(Duration.ZERO, options.connectionAcquireTimeout());
     }
 
     @Test
@@ -279,7 +277,6 @@ class ReactiveSchemaClientTest {
         SchemaMigrationExecutionOptions options = SchemaMigrationExecutionOptions.defaults();
 
         assertEquals(Duration.ofSeconds(60), options.sqlExecutionOptions().timeout());
-        assertEquals(Duration.ofSeconds(10), options.sqlExecutionOptions().connectionAcquireTimeout());
         assertEquals(Duration.ofSeconds(10), options.lockTimeout());
     }
 

@@ -4,8 +4,7 @@ import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
-import com.flying.orm.rdb.exception.RdbConnectionAcquireTimeoutException;
-import com.flying.orm.rdb.exception.RdbErrorKind;
+import com.flying.orm.rdb.exception.RdbException;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.reactive.R2dbcSqlExecutor;
 import com.flying.orm.testkit.concurrent.ReactiveConcurrencyProbe;
@@ -14,6 +13,7 @@ import io.r2dbc.pool.ConnectionPoolConfiguration;
 import io.r2dbc.pool.PoolMetrics;
 import io.r2dbc.spi.Connection;
 import io.r2dbc.spi.ConnectionFactories;
+import io.r2dbc.spi.R2dbcTimeoutException;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
@@ -28,6 +28,7 @@ import java.util.function.BooleanSupplier;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -59,7 +60,7 @@ class ExternalR2dbcConcurrencyStabilityCompatibilityTest {
         verifyPoolExhaustionAndRecovery("flying.orm.compat.postgresql.url", "postgresql-real-pool");
     }
 
-    /** Oracle 驱动也必须服从 ORM 的连接获取超时，池恢复后同一个执行器应能继续使用。 */
+    /** Oracle 连接池也必须在自己的等待上限后失败，池恢复后同一个执行器应能继续使用。 */
     @Test
     void verifiesOraclePoolExhaustionTimeoutAndRecoveryWhenConfigured() {
         verifyPoolExhaustionAndRecovery("flying.orm.compat.oracle.url", "oracle-real-pool");
@@ -133,12 +134,13 @@ class ExternalR2dbcConcurrencyStabilityCompatibilityTest {
     }
 
     /**
-     * 先借走池里全部连接，再让 ORM 自己的连接等待上限先于连接池上限触发。这样既能确认统一异常类型，
-     * 也能确认 Reactor 的 timeout 取消了连接池中的等待申请，而不是留下一个日后偷偷拿走连接的请求。
+     * 先借走池里全部连接，再确认连接池自己的等待上限会结束申请。ORM 只借用连接，不在池外重复管理
+     * 排队超时；失败后还要确认等待申请被清除，而不是日后偷偷拿走连接。
      */
     private static void verifyPoolExhaustionAndRecovery(String urlProperty, String poolName) {
         String url = configuredUrl(urlProperty);
-        ConnectionPool pool = newPool(url, poolName, 2);
+        Duration acquireTimeout = Duration.ofMillis(250);
+        ConnectionPool pool = newPool(url, poolName, 2, acquireTimeout);
         Connection first = null;
         Connection second = null;
         try {
@@ -149,15 +151,12 @@ class ExternalR2dbcConcurrencyStabilityCompatibilityTest {
             assertEquals(2, metrics(pool).acquiredSize());
 
             R2dbcSqlExecutor executor = R2dbcSqlExecutor.create(pool);
-            Duration acquireTimeout = Duration.ofMillis(250);
-            SqlExecutionOptions options = SqlExecutionOptions.unlimited()
-                                                               .withConnectionAcquireTimeout(acquireTimeout);
-            RdbConnectionAcquireTimeoutException error = assertThrows(
-                    RdbConnectionAcquireTimeoutException.class,
+            SqlExecutionOptions options = SqlExecutionOptions.unlimited();
+            RdbException failure = assertThrows(
+                    RdbException.class,
                     () -> executor.query(oneRowQuery(), options).collectList().block(TIMEOUT));
+            assertInstanceOf(R2dbcTimeoutException.class, failure.getCause());
 
-            assertEquals(acquireTimeout, error.timeout());
-            assertEquals(RdbErrorKind.CONNECTION, error.kind());
             awaitPool(pool,
                       () -> metrics(pool).pendingAcquireSize() == 0,
                       "连接获取超时后，连接池等待队列没有及时清空");
@@ -206,8 +205,8 @@ class ExternalR2dbcConcurrencyStabilityCompatibilityTest {
                     Flux.fromIterable(seedRows).map(List::toArray),
                     BatchWriteOptions.atomic(seedRows.size()))).block(TIMEOUT);
 
-            SqlExecutionOptions options = SqlExecutionOptions.timeout(Duration.ofSeconds(5))
-                                                               .withConnectionAcquireTimeout(Duration.ofSeconds(2));
+            // 本场景只认证背压取消和连接归还，不能让完整结果总时限混入同一个失败边界。
+            SqlExecutionOptions options = SqlExecutionOptions.unlimited();
             StepVerifier.create(executor.query(SqlRequest.nativeSql(
                                                "select ID, VALUE from " + table + " order by ID",
                                                List.of()), options),
@@ -248,8 +247,7 @@ class ExternalR2dbcConcurrencyStabilityCompatibilityTest {
         R2dbcSqlExecutor executor = R2dbcSqlExecutor.create(pool);
         PoolCurve curve = new PoolCurve();
         try {
-            SqlExecutionOptions options = SqlExecutionOptions.timeout(Duration.ofSeconds(5))
-                                                               .withConnectionAcquireTimeout(Duration.ofSeconds(2));
+            SqlExecutionOptions options = SqlExecutionOptions.timeout(Duration.ofSeconds(5));
             ReactiveConcurrencyProbe.Plan plan = new ReactiveConcurrencyProbe.Plan(96, poolSize, TIMEOUT);
             ReactiveConcurrencyProbe.Result result = ReactiveConcurrencyProbe.run(
                     plan,
@@ -284,17 +282,22 @@ class ExternalR2dbcConcurrencyStabilityCompatibilityTest {
         return url;
     }
 
-    /**
-     * 池自身等 10 秒才报错，ORM 只等 250 毫秒或 2 秒。两层时间差能明确看出是哪一层执行了保护。
-     */
     private static ConnectionPool newPool(String url, String name, int maxSize) {
+        return newPool(url, name, maxSize, Duration.ofSeconds(10));
+    }
+
+    /** 连接排队上限属于连接池配置，测试可按场景使用不同边界。 */
+    private static ConnectionPool newPool(String url,
+                                          String name,
+                                          int maxSize,
+                                          Duration acquireTimeout) {
         ConnectionPoolConfiguration configuration = ConnectionPoolConfiguration
                 .builder(ConnectionFactories.get(url))
                 .name(name)
                 .initialSize(0)
                 .minIdle(0)
                 .maxSize(maxSize)
-                .maxAcquireTime(Duration.ofSeconds(10))
+                .maxAcquireTime(acquireTimeout)
                 .maxIdleTime(Duration.ofMinutes(1))
                 .build();
         return new ConnectionPool(configuration);

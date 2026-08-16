@@ -72,24 +72,26 @@ final class R2dbcIndependentBatchWriter {
             return Flux.error(new IllegalArgumentException("batch chunks require independent mode"));
         }
         return Flux.defer(() -> {
-            R2dbcBatchDeadline deadline = R2dbcBatchDeadline.start(safeRequest.options().timeout());
             // prefetch=1 配合分片内存预算，最多只保留 concurrency 个正在执行的分片。
-            return deadline.protect(chunks.chunks(safeRequest))
-                            .flatMap(chunk -> executeChunk(safeRequest, chunk, deadline)
-                                                      .onErrorMap(error -> wrapChunkFailure(chunk, error)),
-                                    safeRequest.options().concurrency(),
-                                    1);
+            return chunks.chunks(safeRequest)
+                            .flatMap(chunk -> executeChunk(safeRequest, chunk)
+                                                       .onErrorMap(error -> wrapChunkFailure(chunk, error)),
+                                     safeRequest.options().concurrency(),
+                                     1);
         });
     }
 
     private Mono<BatchChunkResult> executeChunk(BatchWriteRequest request,
-                                                R2dbcBatchWriterChunks.BatchChunk chunk,
-                                                R2dbcBatchDeadline deadline) {
+                                                R2dbcBatchWriterChunks.BatchChunk chunk) {
         if (request.options().recovery().mode() == BatchWriteOptions.RecoveryMode.RECEIPT) {
-            return executeChunkWithReceipt(request, chunk, deadline);
+            return executeChunkWithReceipt(request, chunk);
         }
-        return Mono.usingWhen(deadline.protect(connections.acquire(request.options())),
-                               resource -> deadline.protect(Mono.from(resource.connection().beginTransaction())
+        return Mono.usingWhen(connections.acquire(request.options()),
+                               resource -> {
+                                   R2dbcBatchDeadline deadline = R2dbcBatchDeadline.start(
+                                           request.options().timeout());
+                                   return deadline.protect(
+                                           Mono.from(resource.connection().beginTransaction())
                                                .doOnSuccess(ignored -> resource.markActive())
                                                .then(chunks.executeChunk(resource, request, chunk))
                                                .flatMap(result -> commit(resource, result, null))
@@ -97,16 +99,16 @@ final class R2dbcIndependentBatchWriter {
                                                        == BatchTransactionState.COMMITTING
                                                                ? Mono.error(error)
                                                                : rollback(resource, chunk, error, null)))
-                                               .onErrorResume(TimeoutException.class,
-                                                              error -> timeout(resource, chunk, error, null)),
+                                                  .onErrorResume(TimeoutException.class,
+                                                                 error -> timeout(resource, chunk, error, null));
+                               },
                                connections::closeAfterOutcome,
                               (resource, ignored) -> connections.closeAfterOutcome(resource),
                               resource -> connections.cancel(resource, "independent"));
     }
 
     private Mono<BatchChunkResult> executeChunkWithReceipt(BatchWriteRequest request,
-                                                           R2dbcBatchWriterChunks.BatchChunk chunk,
-                                                           R2dbcBatchDeadline deadline) {
+                                                           R2dbcBatchWriterChunks.BatchChunk chunk) {
         String planHash = receipts.planHash(request);
         String payloadHash = receipts.chunkPayloadHash(chunk);
         AtomicReference<BatchChunkResult.RecoveryToken> token = new AtomicReference<>(
@@ -116,22 +118,26 @@ final class R2dbcIndependentBatchWriter {
                                        payloadHash,
                                        (long) chunk.rows().size(),
                                        null));
-        return deadline.protect(receiptStore.find(token.get(), request.options().connectionAcquireTimeout()))
+        return receiptStore.find(token.get(), request.options().timeout())
                            .map(receipt -> BatchChunkResult.committed(chunk.chunkIndex(),
                                                                       chunk.startOffset(),
                                                                       receipt.exactInputRowCount(),
                                                                       receipt.affectedRows()))
-                           .switchIfEmpty(Mono.usingWhen(
-                                    deadline.protect(connections.acquire(request.options())),
-                                    resource -> executeReceiptTransaction(
-                                            resource, request, chunk, planHash, payloadHash, token, deadline),
+                            .switchIfEmpty(Mono.usingWhen(
+                                    connections.acquire(request.options()),
+                                    resource -> {
+                                        R2dbcBatchDeadline deadline = R2dbcBatchDeadline.start(
+                                                request.options().timeout());
+                                        return executeReceiptTransaction(
+                                                resource, request, chunk, planHash, payloadHash, token, deadline);
+                                    },
                                    connections::closeAfterOutcome,
                                    (resource, ignored) -> connections.closeAfterOutcome(resource),
                                    resource -> connections.cancel(resource, "independent")))
                            // 事务连接的 usingWhen 清理完成后才查询回执，避免单连接池自锁。
-                           .flatMap(result -> confirmer.confirmChunk(request, result, deadline))
-                           .onErrorResume(R2dbcBatchChunkWriteFailure.class,
-                                          failure -> confirmer.confirmChunkFailure(request, failure, deadline));
+                            .flatMap(result -> confirmer.confirmChunk(request, result))
+                            .onErrorResume(R2dbcBatchChunkWriteFailure.class,
+                                           failure -> confirmer.confirmChunkFailure(request, failure));
     }
 
     private Mono<BatchChunkResult> executeReceiptTransaction(

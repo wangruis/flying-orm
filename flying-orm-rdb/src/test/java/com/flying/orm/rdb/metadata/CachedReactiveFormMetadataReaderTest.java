@@ -17,6 +17,7 @@ import com.flying.orm.rdb.transaction.R2dbcTransactionParticipationException;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import io.r2dbc.spi.Connection;
 import org.junit.jupiter.api.Test;
+import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
@@ -467,6 +468,36 @@ class CachedReactiveFormMetadataReaderTest {
 
         assertEquals(16, results.size());
         assertEquals(1, delegate.formReads());
+    }
+
+    /** 最后一个等待者取消后必须停止底层加载并移除占位，不能让失去调用方的数据库查询继续占用连接。 */
+    @Test
+    void cancelsAbandonedLoadAndRetriesWithFreshSource() {
+        AtomicInteger attempts = new AtomicInteger();
+        AtomicInteger cancellations = new AtomicInteger();
+        ReactiveFormMetadataReader delegate = new ReactiveFormMetadataReader() {
+            @Override
+            public Mono<DynamicForm> readForm(String formId, String table) {
+                if (attempts.getAndIncrement() == 0) {
+                    return Mono.<DynamicForm>never().doOnCancel(cancellations::incrementAndGet);
+                }
+                return Mono.just(CountingMetadataReader.form(formId, table, attempts.get()));
+            }
+
+            @Override
+            public Mono<DynamicForm> readForm(String formId, String schema, String table) {
+                return readForm(formId, schema + "." + table);
+            }
+        };
+        CachedReactiveFormMetadataReader reader = CachedReactiveFormMetadataReader.create(delegate);
+
+        Disposable abandoned = reader.readForm("users", "Users").subscribe();
+        abandoned.dispose();
+
+        assertEquals(1, cancellations.get());
+        DynamicForm fresh = reader.readForm("users", "Users").block();
+        assertEquals("users", fresh.id());
+        assertEquals(2, attempts.get());
     }
 
     /**

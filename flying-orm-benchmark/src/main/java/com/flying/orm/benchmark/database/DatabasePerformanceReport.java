@@ -162,15 +162,10 @@ public record DatabasePerformanceReport(int schemaVersion,
                     || independentConcurrency <= 0 || seedRows <= 0) {
                 throw new IllegalArgumentException("database performance parameters are outside their safe range");
             }
-            if (queryConcurrency > poolSize || batchConcurrency > poolSize) {
-                throw new IllegalArgumentException("database performance outer concurrency must not exceed pool size");
-            }
             if (independentChunkSize > batchSize || batchSize % independentChunkSize != 0) {
                 throw new IllegalArgumentException("independent chunk size must divide batch size");
             }
-            if ((long) batchConcurrency * independentConcurrency > poolSize) {
-                throw new IllegalArgumentException("independent batch concurrency must fit inside the connection pool");
-            }
+            // 外层并发是应用在途请求数，连接池才是数据库资源上限；两者相等会掩盖排队与背压能力。
             if (fetchSizeOverride != null && fetchSizeOverride < 0) {
                 throw new IllegalArgumentException("database performance fetch size override must not be negative");
             }

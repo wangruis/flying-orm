@@ -111,4 +111,49 @@ class SqlExecutionTimeoutsTest {
 
         assertEquals(1, deadlineCancellations.get());
     }
+
+    /** 生产调度任务必须跟随结果流终态释放，不能只取消对截止信号的订阅。 */
+    @Test
+    void disposesScheduledTaskAfterEveryTerminalPath() {
+        AtomicInteger scheduled = new AtomicInteger();
+        AtomicInteger disposed = new AtomicInteger();
+
+        SqlExecutionTimeouts.absolute(
+                Flux.just(1),
+                Duration.ofSeconds(30),
+                (task, delay) -> {
+                    scheduled.incrementAndGet();
+                    return disposed::incrementAndGet;
+                }).blockLast();
+        assertThrows(IllegalStateException.class,
+                     () -> SqlExecutionTimeouts.absolute(
+                                     Flux.error(new IllegalStateException("query failed")),
+                                     Duration.ofSeconds(30),
+                                     (task, delay) -> {
+                                         scheduled.incrementAndGet();
+                                         return disposed::incrementAndGet;
+                                     }).blockLast());
+        StepVerifier.create(SqlExecutionTimeouts.absolute(
+                                    Flux.never(),
+                                    Duration.ofSeconds(30),
+                                    (task, delay) -> {
+                                        scheduled.incrementAndGet();
+                                        return disposed::incrementAndGet;
+                                    }))
+                    .thenCancel()
+                    .verify();
+
+        assertEquals(3, scheduled.get());
+        assertEquals(scheduled.get(), disposed.get());
+    }
+
+    /** 合法但纳秒数超出 long 的超时应视为极远截止时间，不能在调度前算术溢出。 */
+    @Test
+    void acceptsValidDurationWhoseNanosecondsDoNotFitInLong() {
+        StepVerifier.create(SqlExecutionTimeouts.total(
+                                    Flux.just("ok"),
+                                    Duration.ofSeconds(Long.MAX_VALUE)))
+                    .expectNext("ok")
+                    .verifyComplete();
+    }
 }

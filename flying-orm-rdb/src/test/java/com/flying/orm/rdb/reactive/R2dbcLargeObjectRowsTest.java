@@ -15,9 +15,12 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
+import java.time.Duration;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -36,73 +39,22 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class R2dbcLargeObjectRowsTest {
 
-    /** 下游提前结束后仍要排空已取得的结果段，再允许连接级清理完成。 */
+    /** 下游提前结束时直接取消驱动结果，不由 ORM 继续请求并排空剩余行。 */
     @Test
-    void drainsRemainingRowsBeforeConnectionCleanupAfterCancellation() {
-        R2dbcLargeObjectScope scope = new R2dbcLargeObjectScope();
+    void cancelsDriverRowsWithoutOrmManagedDrain() {
+        RowMetadata metadata = metadata("id");
         AtomicInteger consumed = new AtomicInteger();
-
-        StepVerifier.create(Flux.from(R2dbcCancellationDrain.drain(
-                            Flux.range(1, 3).doOnNext(ignored -> consumed.incrementAndGet()),
-                            scope,
-                            java.time.Duration.ofSeconds(1))).take(1))
-                    .expectNext(1)
-                    .verifyComplete();
-        StepVerifier.create(scope.complete()).verifyComplete();
-
-        assertEquals(3, consumed.get());
-    }
-
-    /** 排空超过清理时限时必须取消驱动结果并让连接清理转入失效路径。 */
-    @Test
-    void abortsResultDrainWhenCleanupTimeoutExpires() {
-        R2dbcLargeObjectScope scope = new R2dbcLargeObjectScope();
         AtomicBoolean cancelled = new AtomicBoolean();
-        Publisher<Integer> source = subscriber -> subscriber.onSubscribe(new org.reactivestreams.Subscription() {
-            private boolean emitted;
+        Result result = cancellableResult(consumed, cancelled,
+                row(metadata, 1L), row(metadata, 2L), row(metadata, 3L));
 
-            @Override
-            public void request(long demand) {
-                if (!emitted) {
-                    emitted = true;
-                    subscriber.onNext(1);
-                }
-            }
-
-            @Override
-            public void cancel() {
-                cancelled.set(true);
-            }
-        });
-
-        StepVerifier.create(Flux.from(R2dbcCancellationDrain.drain(
-                            source, scope, java.time.Duration.ofMillis(10))).take(1))
-                    .expectNext(1)
+        StepVerifier.create(Flux.from(R2dbcLargeObjectRows.map(
+                            result, SqlExecutionOptions.safeDefaults(), new R2dbcLargeObjectScope())).take(1))
+                    .assertNext(mapped -> assertEquals(1L, mapped.get("id")))
                     .verifyComplete();
-        StepVerifier.create(scope.complete())
-                    .expectError(java.util.concurrent.TimeoutException.class)
-                    .verify();
 
+        assertEquals(1, consumed.get());
         assertTrue(cancelled.get());
-    }
-
-    /** 排空等待期间才登记的 LOB 行也必须在中止后释放同行未开始的 locator。 */
-    @Test
-    void discardsLargeObjectsRegisteredWhileResultDrainIsStopping() {
-        R2dbcLargeObjectScope scope = new R2dbcLargeObjectScope();
-        AtomicInteger discards = new AtomicInteger();
-        AtomicReference<reactor.core.Disposable> materialization = new AtomicReference<>();
-        scope.registerDrain(Mono.never(), () -> materialization.get().dispose(),
-                java.time.Duration.ofMillis(10));
-
-        StepVerifier.create(scope.complete())
-                    .then(() -> materialization.set(scope.materialize(
-                            row(Blob.from(Flux.never()), trackingClob(discards)),
-                            SqlExecutionOptions.safeDefaults()).subscribe()))
-                    .expectError(java.util.concurrent.TimeoutException.class)
-                    .verify();
-
-        assertEquals(1, discards.get());
     }
 
     /** 元数据明确为普通标量时，映射计划直接产生 DynamicRow。 */
@@ -138,9 +90,9 @@ class R2dbcLargeObjectRowsTest {
                     .verifyComplete();
     }
 
-    /** 消费完一行且没有剩余 demand 时，不得预取下一驱动行。 */
+    /** 消费完一行且没有剩余 demand 时，Reactor 只允许保留一个有界预取。 */
     @Test
-    void doesNotRequestNextDriverRowWithoutRemainingDemand() {
+    void boundsDriverPrefetchWithoutRemainingDemand() {
         RowMetadata metadata = metadata("id");
         AtomicInteger requests = new AtomicInteger();
         Result result = trackingResult(requests, null, row(metadata, 1L), row(metadata, 2L));
@@ -149,24 +101,25 @@ class R2dbcLargeObjectRowsTest {
                             result, SqlExecutionOptions.safeDefaults(), new R2dbcLargeObjectScope())), 0)
                     .thenRequest(1)
                     .assertNext(mapped -> assertEquals(1L, mapped.get("id")))
-                    .then(() -> assertEquals(1, requests.get()))
+                    .then(() -> assertTrue(requests.get() >= 1 && requests.get() <= 2))
                     .thenCancel()
                     .verify();
     }
 
-    /** 首行 LOB 尚未结束时，即使 demand 充足也不能取得下一驱动行。 */
+    /** 首行 LOB 尚未结束时，Reactor 最多预取一个后续驱动行，不能继续无界读取。 */
     @Test
-    void doesNotRequestNextDriverRowWhileLargeObjectIsActive() {
+    void boundsDriverPrefetchWhileLargeObjectIsActive() {
         RowMetadata metadata = metadataWithFirstType(R2dbcType.BLOB, "payload");
         AtomicInteger requests = new AtomicInteger();
         Result result = trackingResult(requests, null,
                 row(metadata, Blob.from(Flux.never())),
-                row(metadata, Blob.from(Flux.just(java.nio.ByteBuffer.wrap(new byte[]{1})))));
+                row(metadata, Blob.from(Flux.just(java.nio.ByteBuffer.wrap(new byte[]{1})))),
+                row(metadata, Blob.from(Flux.just(java.nio.ByteBuffer.wrap(new byte[]{2})))));
 
         StepVerifier.create(Flux.from(R2dbcLargeObjectRows.map(
                             result, SqlExecutionOptions.safeDefaults(), new R2dbcLargeObjectScope())), 2)
                     .expectSubscription()
-                    .then(() -> assertEquals(1, requests.get()))
+                    .then(() -> assertEquals(2, requests.get()))
                     .thenCancel()
                     .verify();
     }
@@ -177,9 +130,12 @@ class R2dbcLargeObjectRowsTest {
         RowMetadata metadata = metadataWithFirstType(R2dbcType.BLOB, "payload");
         AtomicBoolean lobCancelled = new AtomicBoolean();
         OutOfMemoryError fatal = new OutOfMemoryError("driver fatal");
-        Result result = trackingResult(new AtomicInteger(), new IllegalStateException("wrapper", fatal),
-                row(metadata, Blob.from(Flux.<java.nio.ByteBuffer>never()
-                        .doOnCancel(() -> lobCancelled.set(true)))));
+        AtomicReference<Runnable> driverFailure = new AtomicReference<>();
+        Blob blob = Blob.from(Flux.<java.nio.ByteBuffer>never()
+                .doOnRequest(ignored -> driverFailure.get().run())
+                .doOnCancel(() -> lobCancelled.set(true)));
+        Result result = activeFailureResult(
+                driverFailure, new IllegalStateException("wrapper", fatal), row(metadata, blob));
 
         StepVerifier.create(Flux.from(R2dbcLargeObjectRows.map(
                             result, SqlExecutionOptions.safeDefaults(), new R2dbcLargeObjectScope())), 1)
@@ -280,6 +236,28 @@ class R2dbcLargeObjectRowsTest {
                     .verify();
 
         assertEquals(1, discards.get());
+    }
+
+    /** 行内错误释放与随后连接级释放只能共用一份清理预算，后续阶段不能重新获得完整时限。 */
+    @Test
+    void sharesOneDeadlineBetweenRowFailureAndScopeCleanup() {
+        R2dbcLargeObjectScope scope = new R2dbcLargeObjectScope();
+        SqlExecutionOptions options = SqlExecutionOptions.unlimited()
+                .withCleanupTimeout(Duration.ofSeconds(10));
+        AssertionError primary = new AssertionError("row failed");
+
+        StepVerifier.withVirtualTime(() -> {
+            scope.materialize(DynamicRow.copyOf(Map.of("pending", neverDiscardBlob())), options);
+
+            return scope.discardCaptured(
+                                List.of(delayedDiscardBlob(Duration.ofSeconds(8))), options, primary)
+                        .then(Mono.defer(() -> scope.error(primary)));
+        }).thenAwait(Duration.ofSeconds(11))
+          .expectComplete()
+          .verify(Duration.ofSeconds(2));
+
+        assertTrue(Arrays.stream(primary.getSuppressed())
+                         .anyMatch(TimeoutException.class::isInstance));
     }
 
     /** 下游取消活动 LOB 时，活动流由取消释放，后续未开始 locator 仍须 discard。 */
@@ -480,6 +458,55 @@ class R2dbcLargeObjectRowsTest {
                 });
     }
 
+    private static Result activeFailureResult(AtomicReference<Runnable> failureTrigger,
+                                              Throwable terminalFailure,
+                                              Row row) {
+        return (Result) java.lang.reflect.Proxy.newProxyInstance(
+                Result.class.getClassLoader(), new Class<?>[]{Result.class}, (ignored, method, arguments) -> {
+                    if (!"map".equals(method.getName())) {
+                        throw new UnsupportedOperationException(method.getName());
+                    }
+                    @SuppressWarnings("unchecked")
+                    java.util.function.BiFunction<Row, RowMetadata, Object> mapper =
+                            (java.util.function.BiFunction<Row, RowMetadata, Object>) arguments[0];
+                    return (Publisher<Object>) subscriber -> subscriber.onSubscribe(
+                            new org.reactivestreams.Subscription() {
+                                private boolean done;
+
+                                @Override
+                                public void request(long demand) {
+                                    if (done || demand <= 0L) {
+                                        return;
+                                    }
+                                    done = true;
+                                    failureTrigger.set(() -> subscriber.onError(terminalFailure));
+                                    subscriber.onNext(mapper.apply(row, row.getMetadata()));
+                                }
+
+                                @Override
+                                public void cancel() {
+                                    done = true;
+                                }
+                            });
+                });
+    }
+
+    private static Result cancellableResult(AtomicInteger consumed, AtomicBoolean cancelled, Row... rows) {
+        return (Result) java.lang.reflect.Proxy.newProxyInstance(
+                Result.class.getClassLoader(), new Class<?>[]{Result.class}, (ignored, method, arguments) -> {
+                    if (!"map".equals(method.getName())) {
+                        throw new UnsupportedOperationException(method.getName());
+                    }
+                    @SuppressWarnings("unchecked")
+                    java.util.function.BiFunction<Row, RowMetadata, Object> mapper =
+                            (java.util.function.BiFunction<Row, RowMetadata, Object>) arguments[0];
+                    return Flux.fromArray(rows)
+                               .doOnNext(row -> consumed.incrementAndGet())
+                               .doOnCancel(() -> cancelled.set(true))
+                               .map(row -> mapper.apply(row, row.getMetadata()));
+                });
+    }
+
     private static Result.RowSegment segment(Row row) {
         return () -> row;
     }
@@ -515,6 +542,34 @@ class R2dbcLargeObjectRowsTest {
             @Override
             public Publisher<Void> discard() {
                 return Mono.fromRunnable(discards::incrementAndGet);
+            }
+        };
+    }
+
+    private static Blob delayedDiscardBlob(Duration delay) {
+        return new Blob() {
+            @Override
+            public Publisher<java.nio.ByteBuffer> stream() {
+                return Flux.never();
+            }
+
+            @Override
+            public Publisher<Void> discard() {
+                return Mono.delay(delay).then();
+            }
+        };
+    }
+
+    private static Blob neverDiscardBlob() {
+        return new Blob() {
+            @Override
+            public Publisher<java.nio.ByteBuffer> stream() {
+                return Flux.never();
+            }
+
+            @Override
+            public Publisher<Void> discard() {
+                return Mono.never();
             }
         };
     }

@@ -55,6 +55,11 @@ public final class SqlTemplateRegistry {
         return serverParameters.getOrDefault(key, Set.of());
     }
 
+    /** 仅供同包模板引擎在装配期按实际方言复验全部只读模板。 */
+    Iterable<SqlTemplate> templates() {
+        return templates.values();
+    }
+
     private static String normalize(String id) {
         return Objects.requireNonNull(id, "SQL template id must not be null").trim().toLowerCase(Locale.ROOT);
     }

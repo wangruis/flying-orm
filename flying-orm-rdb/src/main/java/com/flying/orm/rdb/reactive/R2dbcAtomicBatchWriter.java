@@ -53,23 +53,26 @@ final class R2dbcAtomicBatchWriter {
 
     Mono<BatchWriteResult> write(BatchWriteRequest request) {
         BatchWriteRequest safeRequest = Objects.requireNonNull(request, "batch write request must not be null");
-        return Mono.defer(() -> write(safeRequest,
-                                     R2dbcBatchDeadline.start(safeRequest.options().timeout())));
+        return Mono.defer(() -> writeResolved(safeRequest));
     }
-    private Mono<BatchWriteResult> write(BatchWriteRequest request, R2dbcBatchDeadline deadline) {
+    private Mono<BatchWriteResult> writeResolved(BatchWriteRequest request) {
         if (request.options().recovery().mode() == BatchWriteOptions.RecoveryMode.RECEIPT) {
-            return writeWithReceipt(request, deadline);
+            return writeWithReceipt(request);
         }
         // 空输入不拿连接。有了第一个分片后才开始事务，减少连接池无效占用。
-        return deadline.protect(chunks.chunks(request)).switchOnFirst((signal, chunkFlux) -> {
+        return chunks.chunks(request).switchOnFirst((signal, chunkFlux) -> {
             if (signal.hasError()) {
                 return Flux.error(signal.getThrowable());
             }
             if (!signal.hasValue()) {
                 return Flux.just(BatchWriteResult.empty(BatchWriteOptions.Mode.ATOMIC));
             }
-            return Flux.usingWhen(deadline.protect(connections.acquire(request.options())),
-                                  resource -> execute(resource, request, chunkFlux, deadline),
+            return Flux.usingWhen(connections.acquire(request.options()),
+                                  resource -> {
+                                      R2dbcBatchDeadline deadline = R2dbcBatchDeadline.start(
+                                              request.options().timeout());
+                                      return execute(resource, request, chunkFlux, deadline);
+                                  },
                                   connections::closeAfterOutcome,
                                   (resource, ignored) -> connections.closeAfterOutcome(resource),
                                   resource -> connections.cancel(resource, "atomic"));
@@ -100,12 +103,12 @@ final class R2dbcAtomicBatchWriter {
                            : rollback(resource, completed, error, null));
     }
 
-    private Mono<BatchWriteResult> writeWithReceipt(BatchWriteRequest request, R2dbcBatchDeadline deadline) {
+    private Mono<BatchWriteResult> writeWithReceipt(BatchWriteRequest request) {
         String planHash = receipts.planHash(request);
         BatchWriteOptions.Recovery recovery = request.options().recovery();
-        Mono<BatchWriteResult> replay = deadline.protect(receiptStore.findOperation(
-                recovery, 0, planHash, request.options().connectionAcquireTimeout()))
-                .flatMap(receipt -> receipts.hashPayload(request, deadline, chunks).flatMap(payloadHash -> {
+        Mono<BatchWriteResult> replay = receiptStore.findOperation(
+                recovery, 0, planHash, request.options().timeout())
+                .flatMap(receipt -> receipts.hashPayload(request, chunks).flatMap(payloadHash -> {
                     if (!receipt.payloadHash().equals(payloadHash)) {
                         return Mono.error(new BatchReceiptMismatchException(recovery.operationId()));
                     }
@@ -115,29 +118,32 @@ final class R2dbcAtomicBatchWriter {
                                                                          receipt.affectedRows());
                     return Mono.just(BatchWriteResult.from(BatchWriteOptions.Mode.ATOMIC, List.of(result)));
                 }));
-        return replay.switchIfEmpty(Mono.defer(() -> writeStreamingWithReceipt(request, planHash, deadline)
+        return replay.switchIfEmpty(Mono.defer(() -> writeStreamingWithReceipt(request, planHash)
                 // usingWhen 已经先完成未知事务连接的淘汰，再允许确认器获取第二条连接。
                 .onErrorResume(BatchWriteException.class,
-                               failure -> confirmer.confirmAtomic(request, failure, deadline))))
+                               failure -> confirmer.confirmAtomic(request, failure))))
                      .onErrorMap(TimeoutException.class, error -> timeoutBeforeTransaction(error));
     }
 
     private Mono<BatchWriteResult> writeStreamingWithReceipt(BatchWriteRequest request,
-                                                              String planHash,
-                                                              R2dbcBatchDeadline deadline) {
-        return deadline.protect(chunks.chunks(request)).switchOnFirst((signal, chunkFlux) -> {
+                                                              String planHash) {
+        return chunks.chunks(request).switchOnFirst((signal, chunkFlux) -> {
             if (signal.hasError()) {
                 return Flux.error(signal.getThrowable());
             }
             if (!signal.hasValue()) {
                 return Flux.just(BatchWriteResult.empty(BatchWriteOptions.Mode.ATOMIC));
             }
-            return Flux.usingWhen(deadline.protect(connections.acquire(request.options())),
-                                  resource -> executeWithReceipt(resource,
-                                                                 request,
-                                                                 chunkFlux,
-                                                                 planHash,
-                                                                 deadline),
+            return Flux.usingWhen(connections.acquire(request.options()),
+                                  resource -> {
+                                      R2dbcBatchDeadline deadline = R2dbcBatchDeadline.start(
+                                              request.options().timeout());
+                                      return executeWithReceipt(resource,
+                                                                request,
+                                                                chunkFlux,
+                                                                planHash,
+                                                                deadline);
+                                  },
                                   connections::closeAfterOutcome,
                                   (resource, ignored) -> connections.closeAfterOutcome(resource),
                                   resource -> connections.cancel(resource, "atomic"));

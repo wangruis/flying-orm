@@ -81,10 +81,11 @@ final class ObservedReactiveSqlExecutor implements ReactiveSqlExecutor, Connecti
         return observationSupport.observeFlux(SqlExecutionOperation.QUERY,
                            safeRequest.sql(),
                            safeRequest.parameters().size(),
-                           0,
-                           safeRequest.parameters(),
-                           Flux.defer(() -> delegate.query(safeRequest, safeOptions)
-                                                   .onErrorMap(ReactiveSqlExecutionProtection::translate)));
+                            0,
+                            safeRequest.parameters(),
+                            Flux.defer(() -> delegate.query(safeRequest, safeOptions)
+                                                    .onErrorMap(ReactiveSqlExecutionProtection::translate)),
+                            safeOptions);
     }
 
     @Override
@@ -107,10 +108,11 @@ final class ObservedReactiveSqlExecutor implements ReactiveSqlExecutor, Connecti
         return observationSupport.observeMono(SqlExecutionOperation.UPDATE,
                            safeRequest.sql(),
                            safeRequest.parameters().size(),
-                           0,
-                           safeRequest.parameters(),
-                           Mono.defer(() -> delegate.rowsUpdated(safeRequest, safeOptions)
-                                                   .onErrorMap(ReactiveSqlExecutionProtection::translate)));
+                            0,
+                            safeRequest.parameters(),
+                            Mono.defer(() -> delegate.rowsUpdated(safeRequest, safeOptions)
+                                                    .onErrorMap(ReactiveSqlExecutionProtection::translate)),
+                            safeOptions);
     }
 
     @Override
@@ -121,9 +123,10 @@ final class ObservedReactiveSqlExecutor implements ReactiveSqlExecutor, Connecti
         Mono<SqlWriteResult> source = Mono.defer(() -> delegate.rowsUpdatedReturningKeys(safeRequest, safeOptions)
                                                               .onErrorMap(ReactiveSqlExecutionProtection::translate));
         return observationSupport.observeMono(SqlExecutionOperation.UPDATE,
-                                              safeRequest.sql(), safeRequest.parameters().size(), 0,
-                                              safeRequest.parameters(), source,
-                                              SqlWriteResult::affectedRows);
+                                               safeRequest.sql(), safeRequest.parameters().size(), 0,
+                                               safeRequest.parameters(), source,
+                                               SqlWriteResult::affectedRows,
+                                               safeOptions);
     }
 
     /** 原子保护写入作为一个事务工作单元观测，侧索引内部参数不单独暴露。 */
@@ -141,7 +144,8 @@ final class ObservedReactiveSqlExecutor implements ReactiveSqlExecutor, Connecti
                 0,
                 safeWork.writeRequest().parameters(),
                 source,
-                SqlWriteResult::affectedRows);
+                SqlWriteResult::affectedRows,
+                safeOptions);
     }
 
     @Override

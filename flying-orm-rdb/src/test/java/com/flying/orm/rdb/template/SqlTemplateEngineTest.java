@@ -107,6 +107,124 @@ class SqlTemplateEngineTest {
                      () -> SqlTemplate.query("drop-table", "drop table users", Set.of()));
     }
 
+    /** 依赖方言模式的反斜杠引号不能让真实写关键字落入校验器误判的字符串区间。 */
+    @Test
+    void rejectsWritesHiddenByBackslashQuotedValues() {
+        assertThrows(IllegalArgumentException.class,
+                     () -> createEngine(SqlTemplate.query(
+                             "mysql-backslash-write",
+                             "with x as (select 'a\\'b') delete from users "
+                                     + "where id = 1 and 'c\\'d' is not null",
+                             Set.of()), RdbDialect.mysql()));
+        assertThrows(IllegalArgumentException.class,
+                     () -> createEngine(SqlTemplate.query(
+                             "postgresql-escape-write",
+                             "with x as (select E'a\\'b') delete from users "
+                                     + "where id = 1 and E'c\\'d' is not null",
+                             Set.of()), RdbDialect.postgresql()));
+        assertThrows(IllegalArgumentException.class,
+                     () -> createEngine(SqlTemplate.query(
+                             "mysql-double-quote-write",
+                             "with x as (select \"a\\\"b\") delete from users "
+                                     + "where id = 1 and \"c\\\"d\" is not null",
+                             Set.of()), RdbDialect.mysql()));
+    }
+
+    /** MySQL 中双减号后没有空白时不是注释，后续写关键字仍必须参与只读校验。 */
+    @Test
+    void rejectsWritesAfterMySqlDoubleMinusExpression() {
+        assertThrows(IllegalArgumentException.class,
+                     () -> createEngine(SqlTemplate.query(
+                             "mysql-double-minus-write",
+                             "with x as (select 1--1) delete from users where id = 1",
+                             Set.of()), RdbDialect.mysql()));
+        assertThrows(IllegalArgumentException.class,
+                     () -> createEngine(SqlTemplate.query(
+                             "mysql-non-ascii-space-write",
+                             "with x as (select 1)--\u2003delete from users where id = 1",
+                             Set.of()), RdbDialect.mysql()));
+    }
+
+    /** MySQL 块注释不嵌套，不能用第二个注释起点把首个结束符之后的写语句藏起来。 */
+    @Test
+    void rejectsWritesHiddenByNestedBlockCommentAssumption() {
+        assertThrows(IllegalArgumentException.class,
+                     () -> createEngine(SqlTemplate.query(
+                             "mysql-nested-comment-write",
+                             "with x as (select 1 /* outer /* inner */) "
+                                     + "delete from users where id = 1 -- */",
+                             Set.of()), RdbDialect.mysql()));
+    }
+
+    /** PostgreSQL dollar quote 在 MySQL 中可以成为标识符，注册期不能借方言未知的语法隐藏写操作。 */
+    @Test
+    void rejectsMySqlWriteBetweenDollarIdentifiers() {
+        assertThrows(IllegalArgumentException.class,
+                     () -> createEngine(SqlTemplate.query(
+                             "mysql-dollar-identifier-write",
+                             "with $tag$ as (select 1) delete from users "
+                                     + "where id in (select * from $tag$)",
+                             Set.of()), RdbDialect.mysql()));
+    }
+
+    /** PostgreSQL 标识符内部的 dollar tag 不是字符串边界，不能借此隐藏写关键字。 */
+    @Test
+    void rejectsPostgresqlWriteBetweenDollarIdentifiers() {
+        assertThrows(IllegalArgumentException.class,
+                     () -> createEngine(SqlTemplate.query(
+                             "postgresql-dollar-identifier-write",
+                             "with x as (select 1 as foo$tag$) delete from users "
+                                     + "where id = 1 returning id as end$tag$",
+                             Set.of()), RdbDialect.postgresql()));
+    }
+
+    /** SQL Server 嵌套块注释内的模板符号必须保持不透明。 */
+    @Test
+    void keepsSqlServerNestedBlockCommentsOpaque() {
+        SqlTemplateEngine engine = createEngine(SqlTemplate.query(
+                "sqlserver-nested-comment",
+                "select 1 /* outer /* inner */ :ignored */ where id = :id",
+                Set.of()), RdbDialect.sqlServer());
+
+        SqlRequest request = engine.render("sqlserver-nested-comment", Map.of("id", 7L), Map.of());
+
+        assertEquals("select 1 /* outer /* inner */ :ignored */ where id = @P0", request.sql());
+        assertEquals(java.util.List.of(7L), request.parameters());
+    }
+
+    /** MySQL 井号行注释中的参数和写关键字都只是注释文本。 */
+    @Test
+    void keepsMySqlHashCommentsOpaque() {
+        SqlTemplateEngine engine = createEngine(SqlTemplate.query(
+                "mysql-hash-comment",
+                "select 1 # delete from audit_log :ignored\nfrom users where id = :id",
+                Set.of()), RdbDialect.mysql());
+
+        SqlRequest request = engine.render("mysql-hash-comment", Map.of("id", 7L), Map.of());
+
+        assertEquals("select 1 # delete from audit_log :ignored\nfrom users where id = ?", request.sql());
+        assertEquals(java.util.List.of(7L), request.parameters());
+    }
+
+    /** MySQL 双减号表达式和非嵌套块注释之后的参数仍应被正常绑定。 */
+    @Test
+    void rendersParametersAfterMySqlCommentBoundaries() {
+        SqlTemplateEngine engine = SqlTemplateEngine.create(
+                SqlTemplateRegistry.builder()
+                                   .register(SqlTemplate.query(
+                                           "mysql-comment-boundaries",
+                                           "select 1--1, /* outer /* inner */ + :value",
+                                           Set.of()))
+                                   .build(),
+                RdbDialect.mysql(),
+                ValueCodecRegistry.standard());
+
+        SqlRequest request = engine.render("mysql-comment-boundaries", Map.of("value", 7L), Map.of());
+
+        assertEquals("select 1--1, /* outer /* inner */ + ?", request.sql());
+        assertEquals(java.util.List.of(7L), request.parameters());
+    }
+
     /** MySQL 可执行注释不是普通注释，注册查询不能借它隐藏写入关键字。 */
     @Test
     void rejectsExecutableCommentsInReadOnlyTemplates() {
@@ -309,5 +427,11 @@ class SqlTemplateEngineTest {
 
     private enum State {
         ACTIVE
+    }
+
+    private static SqlTemplateEngine createEngine(SqlTemplate template, RdbDialect dialect) {
+        return SqlTemplateEngine.create(SqlTemplateRegistry.builder().register(template).build(),
+                                        dialect,
+                                        ValueCodecRegistry.standard());
     }
 }

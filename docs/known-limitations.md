@@ -21,7 +21,7 @@
 
 - H2 用于内嵌开发和测试，不代表生产数据库行为。
 - V2 已使用当前代码重新认证 MySQL 8.4.10、PostgreSQL 17.8 + pgvector 0.8.1、Oracle Free 23.26.0 和
-  SQL Server 2022 CU22 GDR1；四库功能、事务、故障、取消和并发批次连续复跑三轮，结论不再沿用 V1 结果。
+  SQL Server 2022 CU22 GDR1；四库功能、事务、故障、取消和并发批次连续复跑三轮，结论只基于当前版本证据。
 - MySQL、PostgreSQL 已完成 JDBC/R2DBC 三轮固定参数性能门禁。Oracle、SQL Server 已完成功能、事务、故障和并发
   边界认证；专门吞吐基线不作为 V2 阻断项。
 - SQL Server 的强制断连恢复用例结束后，`r2dbc-mssql` 偶尔会在驱动后台记录 `onErrorDropped(Connection closed)`。业务 Publisher、连接池归零和测试结果均正常；内核不会安装全局 Reactor Hook 去吞掉应用错误。
@@ -37,9 +37,9 @@
 - 内核不会自动重试写操作，避免无幂等保障时重复写入。
 - JDBC 的 `INDEPENDENT` 批量当前按分片顺序执行，`concurrency` 必须为 `1`。每个分片仍独立提交并返回自己的结果；
   需要并行分片时优先使用 R2DBC，避免同步内核私自创建线程池或突破连接池上限。
-- JDBC 标准没有可靠的单次 `DataSource.getConnection()` 超时 API。R2DBC 的连接获取上限由 ORM 执行；
-  JDBC 必须在 HikariCP 等 DataSource 上配置连接获取超时。SQL 执行超时仍会写入 JDBC Statement，
-  驱动 socket 超时也应由上层数据源统一配置。
+- JDBC/R2DBC 的连接排队、获取超时和健康检查由 HikariCP、r2dbc-pool 或其他上层连接池配置。
+  ORM 只借用、归还连接，并在取消、污染或结果不确定时请求失效；SQL 执行兜底和驱动 socket 超时分别由
+  flying-orm 执行选项与上层数据源配置协作。
 
 ## 动态表结构
 

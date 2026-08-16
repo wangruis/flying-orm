@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.internal.sync;
 
+import com.flying.orm.rdb.internal.ReactiveTimeouts;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
@@ -31,7 +32,8 @@ public final class SyncBlockingGuard {
     public static <T> T nullable(Mono<T> operation, Duration timeout) {
         rejectNonBlockingThread();
         return Objects.requireNonNull(operation, "sync lifecycle operation must not be null")
-                      .block(requirePositiveTimeout(timeout, "sync lifecycle timeout"));
+                      .block(ReactiveTimeouts.duration(
+                              requirePositiveTimeout(timeout, "sync lifecycle timeout")));
     }
 
     /** 同步等待必须有明确上限。 */

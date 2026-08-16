@@ -1,8 +1,10 @@
 package com.flying.orm.rdb.reactive;
 
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.transaction.R2dbcTransactionContext;
 import io.r2dbc.spi.Connection;
 
+import java.time.Duration;
 import java.util.Objects;
 
 /**
@@ -25,6 +27,8 @@ final class R2dbcBatchConnectionHandle {
     private final R2dbcLargeObjectScope largeObjects =
             new R2dbcLargeObjectScope();
 
+    private final Duration cleanupTimeout;
+
     private volatile BatchTransactionState state = BatchTransactionState.NEW;
 
     /**
@@ -33,14 +37,24 @@ final class R2dbcBatchConnectionHandle {
      * @param connection 当前批量操作独占的 R2DBC 连接
      */
     R2dbcBatchConnectionHandle(Connection connection) {
+        this(connection, SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT);
+    }
+
+    R2dbcBatchConnectionHandle(Connection connection, Duration cleanupTimeout) {
         this.connection = Objects.requireNonNull(connection, "batch connection must not be null");
         this.externalTransaction = null;
+        this.cleanupTimeout = Objects.requireNonNull(cleanupTimeout, "cleanup timeout must not be null");
     }
 
     /** 创建外部事务连接句柄，连接、路由身份和完成通知在一次订阅内保持一致。 */
     R2dbcBatchConnectionHandle(R2dbcTransactionContext transaction) {
+        this(transaction, SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT);
+    }
+
+    R2dbcBatchConnectionHandle(R2dbcTransactionContext transaction, Duration cleanupTimeout) {
         this.externalTransaction = Objects.requireNonNull(transaction, "transaction context must not be null");
         this.connection = externalTransaction.connection();
+        this.cleanupTimeout = Objects.requireNonNull(cleanupTimeout, "cleanup timeout must not be null");
     }
 
     /** 返回当前批量操作持有的连接。 */
@@ -64,6 +78,11 @@ final class R2dbcBatchConnectionHandle {
     /** @return 当前批量连接租约内等待释放的 R2DBC 大字段句柄作用域 */
     R2dbcLargeObjectScope largeObjects() {
         return largeObjects;
+    }
+
+    /** @return 当前连接从首次清理动作开始共用的绝对清理截止时间 */
+    R2dbcCleanupDeadline cleanupDeadline() {
+        return largeObjects.cleanupDeadline(cleanupTimeout);
     }
 
     /** 返回最新可见的事务状态。 */

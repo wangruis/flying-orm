@@ -160,34 +160,35 @@ final class ReactiveFormBatchInsertOperations extends ReactiveFormOperationSuppo
                 generatedKeys, "batch generated keys must not be null");
         Flux<Map<String, Object>> source = Flux.from(Objects.requireNonNull(rows, "batch rows must not be null"));
         return source.switchOnFirst((signal, replay) -> {
-            if (signal.isOnError()) {
-                return Mono.error(Objects.requireNonNull(signal.getThrowable()));
-            }
-            if (!signal.hasValue()) {
-                return Mono.just(BatchWriteResult.empty(safeOptions.mode()));
-            }
-            DataScope scope = scopes.effectiveScope(requestedScope);
-            Map<String, Object> firstValues = scopes.prepareWriteValues(safeForm, signal.get(), scope);
-            ProtectedFieldRuntime.PreparedWrite firstWrite = renderer.protection().prepareWrite(
-                    safeForm, firstValues, scope);
-            BatchInsertPlan plan = upsert
-                    ? renderer.upsertPlan(firstWrite.physicalForm(), firstWrite.values())
-                    : renderer.insertPlan(firstWrite.physicalForm(), firstWrite.values());
-            Flux<Object[]> parameters = replay.index().map(indexed -> {
-                Map<String, Object> logical = indexed.getT1() == 0
-                        ? firstValues : scopes.prepareWriteValues(safeForm, indexed.getT2(), scope);
-                ProtectedFieldRuntime.PreparedWrite write = indexed.getT1() == 0
-                        ? firstWrite : renderer.protection().prepareWrite(safeForm, logical, scope);
-                Object[] row = plan.parameters(write.values(), indexed.getT1());
-                return FormProtectedBatchRows.insert(
-                        renderer.protection(), safeForm, logical, scope, write, plan, row,
-                        indexed.getT1(), safeOptions, upsert);
-            });
-            BatchWriteRequest request = plan.request(parameters, safeOptions, safeGeneratedKeys, completion);
-            return FormProtectedBatchRows.requiresProtectedExecution(
-                    renderer.protection(), safeForm, safeOptions)
-                    ? executor.writeProtectedBatch(request) : executor.writeBatch(request);
-        }).single();
+                if (signal.isOnError()) {
+                    return Mono.error(Objects.requireNonNull(signal.getThrowable()));
+                }
+                if (!signal.hasValue()) {
+                    return Mono.just(BatchWriteResult.empty(safeOptions.mode()));
+                }
+                DataScope scope = scopes.effectiveScope(requestedScope);
+                Map<String, Object> firstValues = scopes.prepareWriteValues(safeForm, signal.get(), scope);
+                ProtectedFieldRuntime.PreparedWrite firstWrite = renderer.protection().prepareWrite(
+                        safeForm, firstValues, scope);
+                BatchInsertPlan plan = upsert
+                        ? renderer.upsertPlan(firstWrite.physicalForm(), firstWrite.values())
+                        : renderer.insertPlan(firstWrite.physicalForm(), firstWrite.values());
+                Flux<Object[]> parameters = replay.index().map(indexed -> {
+                    Map<String, Object> logical = indexed.getT1() == 0
+                            ? firstValues : scopes.prepareWriteValues(safeForm, indexed.getT2(), scope);
+                    ProtectedFieldRuntime.PreparedWrite write = indexed.getT1() == 0
+                            ? firstWrite : renderer.protection().prepareWrite(safeForm, logical, scope);
+                    Object[] row = plan.parameters(write.values(), indexed.getT1());
+                    return FormProtectedBatchRows.insert(
+                            renderer.protection(), safeForm, logical, scope, write, plan, row,
+                            indexed.getT1(), safeOptions, upsert);
+                });
+                BatchWriteRequest request = plan.request(
+                        parameters, safeOptions, safeGeneratedKeys, completion);
+                return FormProtectedBatchRows.requiresProtectedExecution(
+                        renderer.protection(), safeForm, safeOptions)
+                        ? executor.writeProtectedBatch(request) : executor.writeBatch(request);
+            }).single();
     }
 
     /**
@@ -236,35 +237,35 @@ final class ReactiveFormBatchInsertOperations extends ReactiveFormOperationSuppo
         }
         Flux<Map<String, Object>> source = Flux.from(Objects.requireNonNull(rows, "batch rows must not be null"));
         return source.switchOnFirst((signal, replay) -> {
-            if (signal.isOnError()) {
-                return Flux.error(Objects.requireNonNull(signal.getThrowable()));
-            }
-            if (!signal.hasValue()) {
-                return Flux.empty();
-            }
-            DataScope scope = scopes.effectiveScope(requestedScope);
-            Map<String, Object> firstValues = scopes.prepareWriteValues(safeForm, signal.get(), scope);
-            ProtectedFieldRuntime.PreparedWrite firstWrite = renderer.protection().prepareWrite(
-                    safeForm, firstValues, scope);
-            BatchInsertPlan plan = upsert
-                    ? renderer.upsertPlan(firstWrite.physicalForm(), firstWrite.values())
-                    : renderer.insertPlan(firstWrite.physicalForm(), firstWrite.values());
-            Flux<Object[]> parameters = replay.index().map(indexed -> {
-                Map<String, Object> logical = indexed.getT1() == 0
-                        ? firstValues : scopes.prepareWriteValues(safeForm, indexed.getT2(), scope);
-                ProtectedFieldRuntime.PreparedWrite write = indexed.getT1() == 0
-                        ? firstWrite : renderer.protection().prepareWrite(safeForm, logical, scope);
-                Object[] row = plan.parameters(write.values(), indexed.getT1());
-                return FormProtectedBatchRows.insert(
-                        renderer.protection(), safeForm, logical, scope, write, plan, row,
-                        indexed.getT1(), safeOptions, upsert);
+                if (signal.isOnError()) {
+                    return Flux.error(Objects.requireNonNull(signal.getThrowable()));
+                }
+                if (!signal.hasValue()) {
+                    return Flux.empty();
+                }
+                DataScope scope = scopes.effectiveScope(requestedScope);
+                Map<String, Object> firstValues = scopes.prepareWriteValues(safeForm, signal.get(), scope);
+                ProtectedFieldRuntime.PreparedWrite firstWrite = renderer.protection().prepareWrite(
+                        safeForm, firstValues, scope);
+                BatchInsertPlan plan = upsert
+                        ? renderer.upsertPlan(firstWrite.physicalForm(), firstWrite.values())
+                        : renderer.insertPlan(firstWrite.physicalForm(), firstWrite.values());
+                Flux<Object[]> parameters = replay.index().map(indexed -> {
+                    Map<String, Object> logical = indexed.getT1() == 0
+                            ? firstValues : scopes.prepareWriteValues(safeForm, indexed.getT2(), scope);
+                    ProtectedFieldRuntime.PreparedWrite write = indexed.getT1() == 0
+                            ? firstWrite : renderer.protection().prepareWrite(safeForm, logical, scope);
+                    Object[] row = plan.parameters(write.values(), indexed.getT1());
+                    return FormProtectedBatchRows.insert(
+                            renderer.protection(), safeForm, logical, scope, write, plan, row,
+                            indexed.getT1(), safeOptions, upsert);
+                });
+                BatchWriteRequest request = plan.request(parameters, safeOptions,
+                                                         safeGeneratedKeys, BatchWriteCompletion.noop());
+                return FormProtectedBatchRows.requiresProtectedExecution(
+                        renderer.protection(), safeForm, safeOptions)
+                        ? executor.writeProtectedBatchChunks(request) : executor.writeBatchChunks(request);
             });
-            BatchWriteRequest request = plan.request(parameters, safeOptions,
-                                                     safeGeneratedKeys, BatchWriteCompletion.noop());
-            return FormProtectedBatchRows.requiresProtectedExecution(
-                    renderer.protection(), safeForm, safeOptions)
-                    ? executor.writeProtectedBatchChunks(request) : executor.writeBatchChunks(request);
-        });
     }
 
     /**

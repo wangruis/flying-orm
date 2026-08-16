@@ -58,8 +58,7 @@ public final class EntityEnumValueCodec {
                 }
                 Enum<?> previous = values.putIfAbsent(databaseValue, enumValue);
                 if (previous != null) {
-                    throw new MappingException("duplicate @EnumValue " + databaseValue + " in "
-                                                       + safeType.getName() + ": "
+                    throw new MappingException("duplicate @EnumValue in " + safeType.getName() + ": "
                                                        + previous.name() + " and " + enumValue.name());
                 }
             }

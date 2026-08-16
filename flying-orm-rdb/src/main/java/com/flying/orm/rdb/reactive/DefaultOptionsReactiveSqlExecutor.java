@@ -20,6 +20,8 @@ import java.util.Objects;
 /**
  * 给执行器补一份默认保护。调用方不传 options 时用默认值，显式传入时以本次配置为准。
  * 这是包内装饰器，统一从 {@link ReactiveSqlExecutor#withDefaultExecutionOptions(SqlExecutionOptions)} 进入。
+ * 原生执行器在连接可用后实施 SQL timeout；只实现单参数方法的自定义执行器由接口默认逻辑保留结果容量保护，
+ * 不会越权给可能包含连接池排队的整个 Publisher 计时。
  * 对象创建后字段不再变化，可以和底层执行器一样被多个请求并发复用。
  *
  * @author wangr

@@ -9,6 +9,7 @@ import com.flying.orm.rdb.transaction.JdbcTransactionParticipant;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -54,14 +55,14 @@ final class JdbcIndependentBatchExecutor {
             throw new IllegalArgumentException("jdbc independent batch currently supports concurrency=1");
         }
         List<BatchChunkResult> results = new ArrayList<>();
-        JdbcBatchSupport.BatchDeadline deadline = JdbcBatchSupport.BatchDeadline.start(request.options().timeout());
+        JdbcBatchSupport.BatchDeadline inputDeadline = JdbcBatchSupport.BatchDeadline.start(Duration.ZERO);
         try (JdbcBatchRows rows = new JdbcBatchRows(
                 request.rows(), request.parameterCount(), request.options().maxBufferedBytes())) {
             long offset = 0L;
             int chunkIndex = 0;
             List<Object[]> chunk;
-            while (!(chunk = readChunk(rows, request, offset, chunkIndex, deadline)).isEmpty()) {
-                results.add(executeChunk(request, chunkIndex, offset, chunk, deadline, context));
+            while (!(chunk = readChunk(rows, request, offset, chunkIndex, inputDeadline)).isEmpty()) {
+                results.add(executeChunk(request, chunkIndex, offset, chunk, context));
                 offset += chunk.size();
                 chunkIndex++;
             }
@@ -91,11 +92,10 @@ final class JdbcIndependentBatchExecutor {
     }
 
     private BatchChunkResult executeChunk(BatchWriteRequest request,
-                                          int chunkIndex,
-                                          long offset,
-                                          List<Object[]> rows,
-                                          JdbcBatchSupport.BatchDeadline deadline,
-                                          JdbcBatchExecutionObservationSupport.BatchContext context)
+                                           int chunkIndex,
+                                           long offset,
+                                           List<Object[]> rows,
+                                           JdbcBatchExecutionObservationSupport.BatchContext context)
             throws TimeoutException {
         try (JdbcConnectionProvider.JdbcConnectionLease lease = connections.acquire()) {
             context.transactionSource(lease.transactionSource() == SqlTransactionSource.EXTERNAL
@@ -104,6 +104,8 @@ final class JdbcIndependentBatchExecutor {
                 throw new JdbcExternalTransactionModeException(
                         "INDEPENDENT batch cannot use an external jdbc transaction connection");
             }
+            JdbcBatchSupport.BatchDeadline deadline = JdbcBatchSupport.BatchDeadline.start(
+                    request.options().timeout());
             Connection connection = lease.connection();
             boolean restoreAutoCommit = false;
             boolean autoCommitStateKnown = false;
@@ -132,6 +134,7 @@ final class JdbcIndependentBatchExecutor {
                     }
                     return BatchChunkResult.unknown(chunkIndex, offset, rows.size(), uncertainty);
                 }
+                deadline.remaining();
                 commitAttempted = true;
                 connection.commit();
                 transactionFinished = true;

@@ -47,13 +47,12 @@ final class R2dbcBatchReceiptSupport {
         return payloadHasher.finish(digest);
     }
 
-    Mono<String> hashPayload(BatchWriteRequest request,
-                             R2dbcBatchDeadline deadline,
-                             R2dbcBatchWriterChunks chunks) {
+    /** 已提交回执重放不持有事务连接，输入等待由 Publisher 或上层负责，不能复用批量 SQL 截止时间。 */
+    Mono<String> hashPayload(BatchWriteRequest request, R2dbcBatchWriterChunks chunks) {
         MessageDigest digest = newPayloadDigest();
-        return deadline.protect(chunks.chunks(request))
-                       .doOnNext(chunk -> updatePayload(digest, chunk))
-                       .then(Mono.fromSupplier(() -> finishPayload(digest)));
+        return chunks.chunks(request)
+                     .doOnNext(chunk -> updatePayload(digest, chunk))
+                     .then(Mono.fromSupplier(() -> finishPayload(digest)));
     }
 
     BatchChunkResult.RecoveryToken recoveryToken(BatchWriteRequest request,

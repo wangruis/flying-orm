@@ -76,21 +76,28 @@ flying-orm
 严格 `where(...)` 保留调用者明确表达的 null 语义；可选筛选使用 `whereIfPresent(...)`，并按 operator 规则处理
 null、空字符串和去掉前后空格后的空值。
 
-## 7. 执行内核演进
+## 7. 执行内核
 
-V1.x 以 R2DBC/Reactor 为唯一执行内核，下面内容只用于说明历史演进：
-
-- 数据库 I/O 不调用 `block()`，不手动 `subscribe()`，也不把阻塞 JDBC 包装成响应式。
-- 查询保持流式和背压语义，取消会进入连接清理路径。
-- 连接获取、SQL 执行、最大返回行数和批量输入都有统一上限。
-- 同步 API 只在最外层通过 `SyncSqlExecutor` 等待同一条响应式执行链，并带明确超时。
-- Reactor 非阻塞线程上会拒绝同步等待；普通线程和虚拟线程可以作为显式同步边界。
-
-V2.0.0 已在真响应式边界之外增加真正的 `DataSource + java.sql.Connection` 同步执行内核。JDBC 和 R2DBC
+V2.0.0 同时提供真正的 `DataSource + java.sql.Connection` 同步执行内核和原生 R2DBC 响应式执行内核。JDBC 和 R2DBC
 共享条件 AST、SQL 渲染、方言、参数顺序、Scope、codec、执行保护、错误、批量结果和事务状态；同步 JDBC
 热路径不经过 Reactor，响应式路径也不会包装 JDBC。业务层继续使用同一套 FormClient、Repository、Operator、
-DDL/DML 和安全原生 SQL。V1 的 R2DBC 阻塞同步桥已经删除，不提供兼容开关或自动退回；具体实施与验收边界见
+DDL/DML 和安全原生 SQL。项目不提供 R2DBC 阻塞同步桥、兼容开关或自动退回；具体实施与验收边界见
 [`v2.0.0-roadmap.md`](v2.0.0-roadmap.md)。
+
+### 7.1 执行职责边界
+
+| 能力 | 真正负责人 | flying-orm 的边界 |
+| --- | --- | --- |
+| 连接池大小、排队、健康检查、获取超时 | 上层应用和连接池 | 借用、归还；状态污染或结果不确定时通知失效 |
+| SQL 执行和协议取消 | JDBC/R2DBC 驱动 | 组合调用或 Publisher，不实现驱动协议 |
+| 外部事务 | 上层事务管理器 | 识别并复用连接，不自行提交、回滚或关闭外部连接 |
+| 无外部事务的 `ATOMIC` 批量 | flying-orm | 为自己承诺的整批原子性管理内部事务 |
+| SQL 总执行超时 | 上层为主 | 提供一个可关闭的兜底截止，不覆盖连接池等待策略 |
+| 行数、结果内存和 LOB 上限 | flying-orm | 防止 ORM 物化结果时拖垮应用 |
+| SQL、映射、Scope 和安全校验 | flying-orm | 作为 ORM 核心职责统一实现 |
+
+普通 SQL 使用标准 JDBC/R2DBC 调用链；批量、LOB 和 ORM 自有事务才进入对应的专用保护。不得为了兜底能力在每个
+阶段重复创建超时、取消或连接状态机，也不得用后台 drain 模拟驱动消费协议。
 
 ## 8. 事务一致性
 

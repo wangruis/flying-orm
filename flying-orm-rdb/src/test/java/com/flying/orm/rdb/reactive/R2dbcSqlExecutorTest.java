@@ -8,7 +8,6 @@ import com.flying.orm.rdb.batch.BatchWriteException;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
-import com.flying.orm.rdb.exception.RdbConnectionAcquireTimeoutException;
 import com.flying.orm.rdb.exception.RdbErrorKind;
 import com.flying.orm.rdb.exception.RdbException;
 import com.flying.orm.rdb.exception.RdbExceptionTranslator;
@@ -74,6 +73,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BiFunction;
@@ -219,6 +219,59 @@ class R2dbcSqlExecutorTest {
         assertEquals(0, factory.commitCount());
         assertEquals(1, factory.rollbackCount());
         assertEquals(1, factory.closedCount());
+    }
+
+    /** 显式无限清理必须传到保护写回滚，不能被内部固定五秒边界改写为 UNKNOWN。 */
+    @Test
+    void protectedWriteHonorsUnlimitedCleanupTimeoutDuringRollback() {
+        AssertionError operationFailure = new AssertionError("protected write failed");
+        RecordingConnectionFactory factory = new RecordingConnectionFactory(
+                List.of(), 1, "recording", operationFailure).delayRollback(Duration.ofSeconds(6));
+        ProtectedWriteWork work = new ProtectedWriteWork(
+                ProtectedWriteWork.Kind.INSERT,
+                new SqlRequest("insert into protected_customer(id, contact) values (?, ?)",
+                               List.of(1L, new byte[]{9, 8, 7})),
+                null,
+                List.of("id"),
+                Map.of("id", 1L),
+                "id = ?",
+                "delete from protected_customer_tokens where id = ? and field_tag = ?",
+                "insert into protected_customer_tokens(id, field_tag, token_hash) values (?, ?, ?)",
+                List.of(new ProtectedWriteWork.FieldTokens("contact", List.of(new byte[]{1, 2, 3}))));
+        SqlExecutionOptions options = SqlExecutionOptions.unlimited().withCleanupTimeout(Duration.ZERO);
+
+        StepVerifier.withVirtualTime(() -> R2dbcSqlExecutor.create(factory).atomicProtectedWrite(work, options))
+                    .thenAwait(Duration.ofSeconds(6))
+                    .expectErrorSatisfies(error -> {
+                        RdbException translated = assertInstanceOf(RdbException.class, error);
+                        assertEquals("database operation failed", translated.getMessage());
+                        assertSame(operationFailure, translated.getCause());
+                    })
+                    .verify(Duration.ofSeconds(1));
+
+        assertEquals(1, factory.rollbackCount());
+    }
+
+    /** 受保护写在拿到连接前也只服从连接池等待策略。 */
+    @Test
+    void delegatesProtectedWriteConnectionWaitingToThePool() {
+        ProtectedWriteWork work = new ProtectedWriteWork(
+                ProtectedWriteWork.Kind.INSERT,
+                new SqlRequest("insert into protected_customer(id, contact) values (?, ?)",
+                               List.of(1L, new byte[]{9})),
+                null, List.of("id"), Map.of("id", 1L),
+                "id = ?",
+                "delete from protected_customer_tokens where id = ? and field_tag = ?",
+                "insert into protected_customer_tokens(id, field_tag, token_hash) values (?, ?, ?)",
+                List.of(new ProtectedWriteWork.FieldTokens("contact", List.of(new byte[]{1}))));
+        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
+                                                         .withTimeout(Duration.ofMillis(10));
+
+        StepVerifier.withVirtualTime(() -> R2dbcSqlExecutor.create(neverConnectionFactory())
+                                                           .atomicProtectedWrite(work, options))
+                    .thenAwait(Duration.ofSeconds(1))
+                    .thenCancel()
+                    .verify();
     }
 
     /** 回滚 VME 即使已经引用业务错误，也必须在资源清理后原样出站且不能形成反向异常环。 */
@@ -572,16 +625,19 @@ class R2dbcSqlExecutorTest {
     @Test
     void completesSuccessfulUpdateWhenConnectionCloseNeverCompletes() {
         List<ResourceCleanupObservation> cleanupObservations = new ArrayList<>();
+        AtomicInteger reusableCloses = new AtomicInteger();
+        AtomicInteger invalidations = new AtomicInteger();
         RecordingConnectionFactory factory = new RecordingConnectionFactory(
                 List.of(), 1, "recording", null, Duration.ZERO, null, null, Duration.ZERO, true);
         ReactiveSqlExecutor executor = R2dbcSqlExecutor.create(factory)
+                .withConnectionInvalidator(recordingInvalidator(reusableCloses, invalidations))
                 .withObserver(cleanupObserver(cleanupObservations));
         SqlExecutionOptions options = SqlExecutionOptions.unlimited()
                                                          .withCleanupTimeout(Duration.ofMillis(50));
 
         StepVerifier.withVirtualTime(() -> executor.rowsUpdated(
                             new SqlRequest("update Users set enabled = true", List.of()), options))
-                    .thenAwait(Duration.ofMillis(50))
+                    .thenAwait(Duration.ofMillis(51))
                     .expectNext(1L)
                     .expectComplete()
                     .verify(Duration.ofSeconds(1));
@@ -591,6 +647,8 @@ class R2dbcSqlExecutorTest {
         assertEquals(SqlExecutionOperation.UPDATE, observation.operation());
         assertTrue(observation.outcomeConfirmed());
         assertEquals(ResourceCleanupObservation.FailureKind.TIMEOUT, observation.failureKind());
+        assertEquals(1, reusableCloses.get());
+        assertEquals(1, invalidations.get());
     }
 
     /** 成功查询的行已经成为数据库事实，后续关闭失败只能进入资源观测。 */
@@ -1258,6 +1316,88 @@ class R2dbcSqlExecutorTest {
         assertEquals(1, invalidations.get());
     }
 
+    /** 外部事务中的 work 总超时仍必须执行会话 cleanup，不能把 lock-timeout 状态留给后续 SQL。 */
+    @Test
+    void totalTimeoutRunsSequenceCleanupInsideExternalTransaction() {
+        String workSql = "alter table users add column email varchar(255)";
+        RecordingConnectionFactory factory = new RecordingConnectionFactory(
+                List.of(), 0, "PostgreSQL", null, Duration.ZERO, workSql);
+        Connection external = factory.connection();
+        AtomicInteger transactionLookups = new AtomicInteger();
+        SqlExecutionObserver observer = new SqlExecutionObserver() {
+            @Override
+            public boolean requiresTransactionSource() {
+                return true;
+            }
+
+            @Override
+            public void onExecution(SqlExecutionObservation observation) {
+                // 本测试只验证事务感知观测不会让已过期的业务期限阻断 cleanup。
+            }
+        };
+        ConnectionScopedReactiveSqlExecutor executor = R2dbcSqlExecutor.create(factory)
+                .withTransactionParticipant(() -> {
+                    transactionLookups.incrementAndGet();
+                    return Mono.just(R2dbcTransactionContext.external(external, "primary"));
+                })
+                .withObserver(observer);
+        SqlExecutionSequence sequence = new SqlExecutionSequence(
+                List.of(new SqlRequest("set lock_timeout = '1500ms'", List.of())),
+                List.of(new SqlRequest(workSql, List.of())),
+                List.of(new SqlRequest("reset lock_timeout", List.of())));
+        SqlExecutionOptions options = SqlExecutionOptions.timeout(Duration.ofMillis(50))
+                                                         .withCleanupTimeout(Duration.ofMillis(100));
+
+        StepVerifier.withVirtualTime(() -> executor.executeInConnection(sequence, options))
+                    .thenAwait(Duration.ofMillis(50))
+                    .expectError(SqlExecutionTimeoutException.class)
+                    .verify(Duration.ofSeconds(1));
+
+        assertEquals(List.of("set lock_timeout = '1500ms'", workSql, "reset lock_timeout"),
+                     factory.sqlHistory());
+        assertEquals(1, transactionLookups.get());
+        assertEquals(0, factory.closedCount());
+    }
+
+    /** 同连接序列的 setup、work、cleanup 必须复用首次解析的外部事务事实。 */
+    @Test
+    void resolvesExternalTransactionOnlyOnceForObservedSequence() {
+        RecordingConnectionFactory factory = new RecordingConnectionFactory(List.of(), 1, "PostgreSQL");
+        Connection external = factory.connection();
+        AtomicInteger transactionLookups = new AtomicInteger();
+        SqlExecutionObserver observer = new SqlExecutionObserver() {
+            @Override
+            public boolean requiresTransactionSource() {
+                return true;
+            }
+
+            @Override
+            public void onExecution(SqlExecutionObservation observation) {
+                // 本测试只验证整个 Sequence 复用同一事务解析结果。
+            }
+        };
+        ConnectionScopedReactiveSqlExecutor executor = R2dbcSqlExecutor.create(factory)
+                .withTransactionParticipant(() -> {
+                    transactionLookups.incrementAndGet();
+                    return Mono.just(R2dbcTransactionContext.external(external, "primary"));
+                })
+                .withObserver(observer);
+        SqlExecutionSequence sequence = new SqlExecutionSequence(
+                List.of(new SqlRequest("set lock_timeout = '1500ms'", List.of())),
+                List.of(new SqlRequest("alter table users add column email varchar(255)", List.of())),
+                List.of(new SqlRequest("reset lock_timeout", List.of())));
+
+        StepVerifier.create(executor.executeInConnection(sequence, SqlExecutionOptions.safeDefaults()))
+                    .expectNextCount(1)
+                    .verifyComplete();
+
+        assertEquals(1, transactionLookups.get());
+        assertEquals(List.of("set lock_timeout = '1500ms'",
+                             "alter table users add column email varchar(255)",
+                             "reset lock_timeout"),
+                     factory.sqlHistory());
+    }
+
     /** 同连接序列会先完成 usingWhen 清理，再在公共入口恢复被阶段异常封装的 VM Error。 */
     @Test
     void preservesVirtualMachineErrorFromR2dbcSequenceAfterCleanup() {
@@ -1419,14 +1559,9 @@ class R2dbcSqlExecutorTest {
         assertEquals(1, invalidations.get());
     }
 
-    /**
-     * 查询返回太多行时会被执行保护挡住，并进入观测分类，方便上层识别大结果集问题。
-     */
-    /**
-     * 查询取消只结束剩余结果消费，连接必须执行正常 close/reset 后归还连接池；写入取消仍走失效路径。
-     */
+    /** 查询取消交给驱动，LOB 清理完成后正常归还连接池。 */
     @Test
-    void closesReusableConnectionAfterQueryCancellation() {
+    void returnsOwnedConnectionAfterQueryCancellation() {
         AtomicInteger reusableCloses = new AtomicInteger();
         AtomicInteger invalidations = new AtomicInteger();
         RecordingConnectionFactory factory = new RecordingConnectionFactory(
@@ -1518,11 +1653,9 @@ class R2dbcSqlExecutorTest {
         assertEquals(3L, observation.rows());
     }
 
-    /**
-     * 接口默认保护对自定义执行器也生效，慢调用会在超时后取消。
-     */
+    /** 自定义执行器的未知阶段可能包含连接池排队，接口默认方法不得越权给整个 Publisher 计时。 */
     @Test
-    void defaultExecutionOptionsTimeoutSlowCustomExecutor() {
+    void defaultWriteDoesNotTimeOpaqueCustomExecutorPhase() {
         ReactiveSqlExecutor delegate = new ReactiveSqlExecutor() {
 
             @Override
@@ -1532,27 +1665,26 @@ class R2dbcSqlExecutorTest {
 
             @Override
             public Mono<Long> rowsUpdated(SqlRequest request) {
-                return Mono.never();
+                return Mono.delay(Duration.ofMillis(20)).thenReturn(1L);
             }
         };
 
-        StepVerifier.create(delegate.rowsUpdated(new SqlRequest("update Users set name = ?", List.of("王")),
-                                                 SqlExecutionOptions.timeout(Duration.ofMillis(10))))
-                    .expectError(SqlExecutionTimeoutException.class)
-                    .verify();
+        StepVerifier.withVirtualTime(() -> delegate.rowsUpdated(
+                            new SqlRequest("update Users set name = ?", List.of("王")),
+                            SqlExecutionOptions.timeout(Duration.ofMillis(10))))
+                    .thenAwait(Duration.ofMillis(20))
+                    .expectNext(1L)
+                    .verifyComplete();
     }
 
-    /**
-     * 自定义执行器走接口默认保护时也必须使用总时限，持续返回行不能刷新 timeout。
-     */
+    /** 查询默认方法保留结果保护，但不能把 SQL timeout 套在自定义执行器不可分阶段的 Publisher 外。 */
     @Test
-    void defaultQueryProtectionUsesOneTotalDeadline() {
+    void defaultQueryDoesNotTimeOpaqueCustomExecutorPhase() {
         DynamicRow first = row("id", "u1");
-        DynamicRow second = row("id", "u2");
         ReactiveSqlExecutor delegate = new ReactiveSqlExecutor() {
             @Override
             public Flux<DynamicRow> query(SqlRequest request) {
-                return Flux.just(first, second, row("id", "u3")).delayElements(Duration.ofSeconds(1));
+                return Mono.delay(Duration.ofMillis(20)).thenMany(Flux.just(first));
             }
 
             @Override
@@ -1561,13 +1693,12 @@ class R2dbcSqlExecutorTest {
             }
         };
 
-        StepVerifier.withVirtualTime(() -> delegate.query(new SqlRequest("select id from Users", List.of()),
-                                                           SqlExecutionOptions.timeout(
-                                                                   Duration.ofMillis(2500))))
-                    .thenAwait(Duration.ofSeconds(3))
-                    .expectNext(first, second)
-                    .expectError(SqlExecutionTimeoutException.class)
-                    .verify();
+        StepVerifier.withVirtualTime(() -> delegate.query(
+                            new SqlRequest("select id from Users", List.of()),
+                            SqlExecutionOptions.timeout(Duration.ofMillis(10))))
+                    .thenAwait(Duration.ofMillis(20))
+                    .expectNext(first)
+                    .verifyComplete();
     }
 
     /**
@@ -1594,36 +1725,114 @@ class R2dbcSqlExecutorTest {
                     .verify();
     }
 
-    /**
-     * 连接池一直拿不到连接时要按连接故障快速失败，不能混成慢 SQL。
-     */
+    /** 普通 SQL 的连接排队与获取超时由上层连接池负责。 */
     @Test
-    void timesOutWhileAcquiringConnectionAndReportsConnectionFailure() {
-        List<SqlExecutionObservation> observations = new ArrayList<>();
+    void delegatesOrdinaryConnectionWaitingToThePool() {
         ConnectionFactory factory = neverConnectionFactory();
-        ReactiveSqlExecutor executor = R2dbcSqlExecutor.create(factory).withObserver(observations::add);
-        SqlExecutionOptions options = SqlExecutionOptions.unlimited()
-                                                                 .withConnectionAcquireTimeout(
-                                                                         Duration.ofMillis(10));
+        ReactiveSqlExecutor executor = R2dbcSqlExecutor.create(factory);
+        SqlExecutionOptions options = SqlExecutionOptions.unlimited();
 
-        StepVerifier.create(executor.query(new SqlRequest("select id from Users", List.of()), options))
-                    .expectError(RdbConnectionAcquireTimeoutException.class)
+        StepVerifier.withVirtualTime(() -> executor.query(
+                            new SqlRequest("select id from Users", List.of()), options))
+                    .thenAwait(Duration.ofSeconds(1))
+                    .thenCancel()
                     .verify();
-
-        assertEquals(1, observations.size());
-        assertEquals(SqlFailureCategory.CONNECTION, observations.getFirst().failureCategory());
-        assertEquals(SqlExecutionResultKind.CONNECTION, observations.getFirst().resultKind());
     }
 
-    /**
-     * ATOMIC 批量同样不能无限等待连接，超时发生在开事务前，所以不会产生 UNKNOWN 提交状态。
-     */
+    /** 外部事务查找由上层事务管理器控制，ORM 的 SQL 时限不能越权终止它。 */
     @Test
-    void timesOutBeforeAtomicBatchAcquiresConnection() {
+    void delegatesTransactionResolutionWaitingToTheUpperLayer() {
+        RecordingConnectionFactory factory = new RecordingConnectionFactory(List.of(), 1);
+        AtomicInteger transactionLookups = new AtomicInteger();
+        ReactiveSqlExecutor executor = R2dbcSqlExecutor.create(factory).withTransactionParticipant(() -> {
+            transactionLookups.incrementAndGet();
+            return Mono.never();
+        });
+        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
+                                                         .withTimeout(Duration.ofMillis(10));
+
+        StepVerifier.withVirtualTime(() -> executor.rowsUpdated(
+                            new SqlRequest("update Users set enabled = ?", List.of(true)), options))
+                    .thenAwait(Duration.ofSeconds(1))
+                    .thenCancel()
+                    .verify();
+
+        assertEquals(1, transactionLookups.get());
+        assertEquals(0, factory.createdCount());
+    }
+
+    /** SQL 总时限从连接可用后开始，不能把上层事务查找耗时算进数据库执行。 */
+    @Test
+    void startsSqlTimeoutAfterTransactionResolutionAndConnectionAcquisition() {
+        RecordingConnectionFactory factory = new RecordingConnectionFactory(
+                List.of(row("id", "u1")), 0L, "recording", null, Duration.ofMillis(60));
+        R2dbcSqlExecutor executor = R2dbcSqlExecutor.create(factory)
+                .withTransactionParticipant(() -> Mono.delay(Duration.ofMillis(60)).then(Mono.empty()));
+        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
+                                                         .withTimeout(Duration.ofMillis(100));
+
+        StepVerifier.withVirtualTime(() -> executor.query(
+                            new SqlRequest("select id from Users", List.of()), options).collectList())
+                    .thenAwait(Duration.ofMillis(121))
+                    .assertNext(rows -> assertEquals(1, rows.size()))
+                    .verifyComplete();
+    }
+
+    /** 同连接 SQL 序列也必须在事务解析和连接获取完成后才启动 SQL 时限。 */
+    @Test
+    void startsSequenceTimeoutAfterTransactionResolutionAndConnectionAcquisition() {
+        RecordingConnectionFactory factory = new RecordingConnectionFactory(
+                List.of(), 1L, "recording", null, Duration.ofMillis(60));
+        R2dbcSqlExecutor executor = R2dbcSqlExecutor.create(factory)
+                .withTransactionParticipant(() -> Mono.delay(Duration.ofMillis(60)).then(Mono.empty()));
+        SqlExecutionSequence sequence = new SqlExecutionSequence(
+                List.of(),
+                List.of(new SqlRequest("update Users set enabled = true", List.of())),
+                List.of());
+        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
+                                                         .withTimeout(Duration.ofMillis(100));
+
+        StepVerifier.withVirtualTime(() -> executor.executeInConnection(sequence, options))
+                    .thenAwait(Duration.ofMillis(121))
+                    .assertNext(result -> assertEquals(1L, result.rowsUpdated()))
+                    .verifyComplete();
+    }
+
+    /** 批量读取外部事务时服从上层事务管理器，ORM 的 SQL 时限不能取消事务解析。 */
+    @Test
+    void delegatesBatchTransactionResolutionToTheUpperTransactionManager() {
+        RecordingConnectionFactory factory = new RecordingConnectionFactory(List.of(), 1);
+        AtomicInteger transactionLookups = new AtomicInteger();
+        ReactiveSqlExecutor executor = R2dbcSqlExecutor.create(factory).withTransactionParticipant(() -> {
+            transactionLookups.incrementAndGet();
+            return Mono.never();
+        });
+        BatchWriteOptions options = BatchWriteOptions.atomic(1)
+                                                     .withTimeout(Duration.ofMillis(10));
+        BatchWriteRequest request = new BatchWriteRequest(
+                "insert into Users(id) values(?)",
+                1,
+                List.of(String.class),
+                SqlBindMarkerStyle.CANONICAL,
+                Mono.just(new Object[]{"u1"}),
+                options);
+
+        StepVerifier.withVirtualTime(() -> executor.writeBatch(request))
+                    .thenAwait(Duration.ofSeconds(1))
+                    .thenCancel()
+                    .verify();
+
+        assertTrue(transactionLookups.get() <= 1);
+        assertEquals(0, factory.createdCount());
+    }
+
+    /** ATOMIC 批量连接排队完全服从连接池，ORM 的批量 SQL 时限不能取消获取连接。 */
+    @Test
+    void delegatesAtomicBatchConnectionWaitingToThePool() {
         ConnectionFactory factory = neverConnectionFactory();
         ReactiveSqlExecutor executor = R2dbcSqlExecutor.create(factory);
         BatchWriteOptions options = BatchWriteOptions.atomic(100)
-                                                     .withConnectionAcquireTimeout(Duration.ofMillis(10));
+                                                     .withTimeout(Duration.ofMillis(10));
         BatchWriteRequest request = new BatchWriteRequest("insert into Users(id) values(?)",
                                                           1,
                                                           List.of(String.class),
@@ -1631,8 +1840,9 @@ class R2dbcSqlExecutorTest {
                                                           Mono.just(new Object[]{"u1"}),
                                                           options);
 
-        StepVerifier.create(executor.writeBatch(request))
-                    .expectError(RdbConnectionAcquireTimeoutException.class)
+        StepVerifier.withVirtualTime(() -> executor.writeBatch(request))
+                    .thenAwait(Duration.ofSeconds(1))
+                    .thenCancel()
                     .verify();
     }
 
@@ -1820,6 +2030,7 @@ class R2dbcSqlExecutorTest {
         private boolean beginNever;
         private boolean commitNever;
         private Throwable rollbackError;
+        private Duration rollbackDelay = Duration.ZERO;
         private String zeroRowsSql;
         private String sql;
         private int fetchSize;
@@ -1970,6 +2181,11 @@ class R2dbcSqlExecutorTest {
             return this;
         }
 
+        private RecordingConnectionFactory delayRollback(Duration delay) {
+            this.rollbackDelay = Objects.requireNonNull(delay, "rollback delay must not be null");
+            return this;
+        }
+
         private RecordingConnectionFactory zeroRowsFor(String targetSql) {
             this.zeroRowsSql = targetSql;
             return this;
@@ -2002,7 +2218,10 @@ class R2dbcSqlExecutorTest {
                 }
                 case "rollbackTransaction" -> {
                     rollbackCount.incrementAndGet();
-                    yield rollbackError == null ? Mono.empty() : rawError(rollbackError);
+                    if (rollbackError != null) {
+                        yield rawError(rollbackError);
+                    }
+                    yield rollbackDelay.isZero() ? Mono.empty() : Mono.delay(rollbackDelay).then();
                 }
                 case "validate" -> Mono.just(true);
                 case "isAutoCommit" -> true;

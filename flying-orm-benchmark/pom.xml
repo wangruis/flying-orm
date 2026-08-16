@@ -84,9 +84,9 @@
             <id>mysql-compat</id>
             <dependencies>
                 <dependency>
-                    <groupId>io.asyncer</groupId>
-                    <artifactId>r2dbc-mysql</artifactId>
-                    <version>${r2dbc.mysql.version}</version>
+                    <groupId>org.mariadb</groupId>
+                    <artifactId>r2dbc-mariadb</artifactId>
+                    <version>${r2dbc.mariadb.version}</version>
                     <scope>runtime</scope>
                 </dependency>
                 <dependency>

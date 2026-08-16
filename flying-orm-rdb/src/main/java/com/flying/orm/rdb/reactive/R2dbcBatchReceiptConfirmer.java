@@ -30,11 +30,9 @@ final class R2dbcBatchReceiptConfirmer {
     }
 
     Mono<BatchWriteResult> confirmAtomic(BatchWriteRequest request,
-                                         BatchWriteException unknown,
-                                         R2dbcBatchDeadline deadline) {
+                                         BatchWriteException unknown) {
         BatchWriteRequest safeRequest = Objects.requireNonNull(request, "batch write request must not be null");
         BatchWriteException safeUnknown = Objects.requireNonNull(unknown, "unknown batch failure must not be null");
-        R2dbcBatchDeadline safeDeadline = Objects.requireNonNull(deadline, "batch deadline must not be null");
         VirtualMachineError fatal = ReactiveSqlExecutionProtection.findVirtualMachineError(safeUnknown);
         if (fatal != null) {
             return Mono.error(fatal);
@@ -43,7 +41,7 @@ final class R2dbcBatchReceiptConfirmer {
         if (!canConfirm(safeRequest.options().recovery(), safeUnknown.result().status(), token)) {
             return Mono.error(safeUnknown);
         }
-        return lookup(safeRequest, token, safeDeadline)
+        return lookup(safeRequest, token)
                 .map(receipt -> BatchWriteResult.from(
                         BatchWriteOptions.Mode.ATOMIC,
                         List.of(BatchChunkResult.committed(0,
@@ -55,11 +53,9 @@ final class R2dbcBatchReceiptConfirmer {
     }
 
     Mono<BatchChunkResult> confirmChunk(BatchWriteRequest request,
-                                        BatchChunkResult unknown,
-                                        R2dbcBatchDeadline deadline) {
+                                        BatchChunkResult unknown) {
         BatchWriteRequest safeRequest = Objects.requireNonNull(request, "batch write request must not be null");
         BatchChunkResult safeUnknown = Objects.requireNonNull(unknown, "unknown batch chunk must not be null");
-        R2dbcBatchDeadline safeDeadline = Objects.requireNonNull(deadline, "batch deadline must not be null");
         BatchChunkResult.RecoveryToken token = safeUnknown.recoveryToken();
         if (!canConfirm(safeRequest.options().recovery(),
                         safeUnknown.status() == BatchChunkResult.Status.UNKNOWN
@@ -67,15 +63,14 @@ final class R2dbcBatchReceiptConfirmer {
                         token)) {
             return Mono.just(safeUnknown);
         }
-        return lookup(safeRequest, token, safeDeadline)
+        return lookup(safeRequest, token)
                 .map(receipt -> committedChunk(safeUnknown, receipt))
                 .onErrorResume(confirmError -> propagateFatalOrReturn(safeUnknown, confirmError))
                 .switchIfEmpty(Mono.just(safeUnknown));
     }
 
     Mono<BatchChunkResult> confirmChunkFailure(BatchWriteRequest request,
-                                               R2dbcBatchChunkWriteFailure unknown,
-                                               R2dbcBatchDeadline deadline) {
+                                               R2dbcBatchChunkWriteFailure unknown) {
         R2dbcBatchChunkWriteFailure safeUnknown = Objects.requireNonNull(
                 unknown, "unknown batch chunk failure must not be null");
         VirtualMachineError fatal = ReactiveSqlExecutionProtection.findVirtualMachineError(safeUnknown);
@@ -87,7 +82,6 @@ final class R2dbcBatchReceiptConfirmer {
             return Mono.error(safeUnknown);
         }
         BatchWriteRequest safeRequest = Objects.requireNonNull(request, "batch write request must not be null");
-        R2dbcBatchDeadline safeDeadline = Objects.requireNonNull(deadline, "batch deadline must not be null");
         BatchChunkResult.RecoveryToken token = exactResult.recoveryToken();
         if (!canConfirm(safeRequest.options().recovery(),
                         exactResult.status() == BatchChunkResult.Status.UNKNOWN
@@ -95,20 +89,16 @@ final class R2dbcBatchReceiptConfirmer {
                         token)) {
             return Mono.error(safeUnknown);
         }
-        return lookup(safeRequest, token, safeDeadline)
+        return lookup(safeRequest, token)
                 .map(receipt -> committedChunk(exactResult, receipt))
                 .onErrorResume(confirmError -> preserveUnknown(safeUnknown, confirmError))
                 .switchIfEmpty(Mono.error(safeUnknown));
     }
 
     private Mono<BatchReceiptStore.Receipt> lookup(BatchWriteRequest request,
-                                                   BatchChunkResult.RecoveryToken token,
-                                                   R2dbcBatchDeadline deadline) {
+                                                   BatchChunkResult.RecoveryToken token) {
         Duration confirmTimeout = request.options().recovery().confirmTimeout();
-        Duration acquireTimeout = shorterPositive(request.options().connectionAcquireTimeout(), confirmTimeout);
-        Mono<BatchReceiptStore.Receipt> lookup = receiptStore.find(token, acquireTimeout)
-                                                             .timeout(confirmTimeout);
-        return deadline.protect(lookup);
+        return receiptStore.find(token, confirmTimeout);
     }
 
     private static BatchChunkResult committedChunk(BatchChunkResult unknown, BatchReceiptStore.Receipt receipt) {
@@ -138,10 +128,6 @@ final class R2dbcBatchReceiptConfirmer {
                 && status == BatchWriteResult.Status.UNKNOWN
                 && token != null
                 && token.hasCompleteEvidence();
-    }
-
-    private static Duration shorterPositive(Duration configured, Duration confirmation) {
-        return configured.isZero() || confirmation.compareTo(configured) < 0 ? confirmation : configured;
     }
 
     private static <T> Mono<T> preserveUnknown(Throwable unknown, Throwable confirmationError) {

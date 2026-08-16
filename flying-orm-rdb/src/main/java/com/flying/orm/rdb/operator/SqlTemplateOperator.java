@@ -89,7 +89,7 @@ public final class SqlTemplateOperator {
         return this;
     }
 
-    /** 给本次执行设置连接等待、查询超时、最大行数和 LOB 上限。 */
+    /** 给本次执行设置查询超时、最大行数、结果内存和 LOB 上限；连接等待由上层连接池治理。 */
     public SqlTemplateOperator options(SqlExecutionOptions options) {
         state.options(options);
         return this;

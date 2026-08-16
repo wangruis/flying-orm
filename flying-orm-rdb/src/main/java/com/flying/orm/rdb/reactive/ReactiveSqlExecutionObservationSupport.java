@@ -3,6 +3,7 @@ package com.flying.orm.rdb.reactive;
 import com.flying.orm.rdb.batch.BatchChunkResult;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.observation.BatchExecutionObservation;
 import com.flying.orm.rdb.observation.BatchExecutionObserver;
 import com.flying.orm.rdb.observation.SqlExecutionObservation;
@@ -81,7 +82,19 @@ final class ReactiveSqlExecutionObservationSupport {
                             int batchSize,
                             List<Object> parameters,
                             Flux<T> source) {
-        return Flux.defer(() -> {
+        return observeFlux(operation, sql, parameterCount, batchSize, parameters, source,
+                           SqlExecutionOptions.safeDefaults());
+    }
+
+    <T> Flux<T> observeFlux(SqlExecutionOperation operation,
+                            String sql,
+                            int parameterCount,
+                            int batchSize,
+                            List<Object> parameters,
+                            Flux<T> source,
+                            SqlExecutionOptions options) {
+        Objects.requireNonNull(options, "sql execution options must not be null");
+        return Flux.deferContextual(context -> {
             long startedAt = System.nanoTime();
             AtomicLong rows = new AtomicLong();
             AtomicBoolean observed = new AtomicBoolean();
@@ -109,7 +122,18 @@ final class ReactiveSqlExecutionObservationSupport {
                            List<Object> parameters,
                            Mono<Long> source) {
         return observeMono(operation, sql, parameterCount, batchSize, parameters, source,
-                           rows -> rows == null ? 0L : rows);
+                           rows -> rows == null ? 0L : rows, SqlExecutionOptions.safeDefaults());
+    }
+
+    Mono<Long> observeMono(SqlExecutionOperation operation,
+                           String sql,
+                           int parameterCount,
+                           int batchSize,
+                           List<Object> parameters,
+                           Mono<Long> source,
+                           SqlExecutionOptions options) {
+        return observeMono(operation, sql, parameterCount, batchSize, parameters, source,
+                           rows -> rows == null ? 0L : rows, options);
     }
 
     /** 让生成键等复合写入结果复用完全相同的计时、事务来源和异常观测，不重复订阅数据库 Publisher。 */
@@ -120,7 +144,20 @@ final class ReactiveSqlExecutionObservationSupport {
                             List<Object> parameters,
                             Mono<T> source,
                             ToLongFunction<T> affectedRows) {
-        return Mono.defer(() -> {
+        return observeMono(operation, sql, parameterCount, batchSize, parameters, source,
+                           affectedRows, SqlExecutionOptions.safeDefaults());
+    }
+
+    <T> Mono<T> observeMono(SqlExecutionOperation operation,
+                            String sql,
+                            int parameterCount,
+                            int batchSize,
+                            List<Object> parameters,
+                            Mono<T> source,
+                            ToLongFunction<T> affectedRows,
+                            SqlExecutionOptions options) {
+        Objects.requireNonNull(options, "sql execution options must not be null");
+        return Mono.deferContextual(context -> {
             long startedAt = System.nanoTime();
             AtomicBoolean observed = new AtomicBoolean();
             if (!needsTransactionSource) {

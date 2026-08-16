@@ -33,7 +33,7 @@
 - Modify: `ParameterConditionCompiler.java`，删除私有空值分支并复用归一化器。
 - Modify: `StructuredConditionPolicy.java`、`StructuredConditionCompiler.java`、`StructuredConditionErrorCode.java`，共享 term 元数据并保持前端稳定错误码和 path。
 - Modify: 条件、参数、SQL renderer、operator 的现有测试类，只增加代表性用例。
-- Modify: `docs/requirements/index.md`、`docs/source-feature-matrix.md`、`docs/flying-orm-phased-implementation-plan.md`、`docs/target-api-examples.md`，记录行为和迁移方式。
+- Modify: `docs/requirements/index.md`、`docs/source-feature-matrix.md`、`docs/target-api-examples.md`，记录行为和迁移方式。
 
 ---
 
@@ -319,7 +319,7 @@ git commit -m "Unify external condition values"
 - Modify: `flying-orm-core/src/test/java/com/flying/orm/core/scope/DataScopeTest.java`
 - Modify: `docs/requirements/index.md`
 - Modify: `docs/source-feature-matrix.md`
-- Modify: `docs/flying-orm-phased-implementation-plan.md`
+- Modify: `docs/requirements/index.md`
 - Modify: `docs/target-api-examples.md`
 
 **Interfaces:**

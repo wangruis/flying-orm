@@ -95,6 +95,6 @@
 
 - [ ] **Step 1:** 运行聚焦回归并读取失败/错误/跳过数量。
 - [ ] **Step 2:** 运行 `-Pquality -pl flying-orm-core,flying-orm-rdb -am verify`。
-- [ ] **Step 3:** 核对 PublicApiClosure、V1PublicApiBaseline、JaCoCo、SpotBugs、Checkstyle 和 `git diff --check`。
+- [ ] **Step 3:** 核对 PublicApiClosure、PublicApiBaseline、JaCoCo、SpotBugs、Checkstyle 和 `git diff --check`。
 - [ ] **Step 4:** 重新计算最终 628 文件清单、行数和 400 行门禁。
 - [ ] **Step 5:** 报告已验证内容、未运行的实库边界和保留的既有工作区变更；不执行 Git 操作。

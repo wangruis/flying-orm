@@ -131,6 +131,17 @@ class ReactiveSqlExecutionProtectionTest {
                 .verify(Duration.ofSeconds(1));
     }
 
+    /** 合法的极远截止时间不能因 Reactor 的纳秒换算上限而让 Mono 在装配期失败。 */
+    @Test
+    void protectMonoAcceptsDurationWhoseNanosecondsDoNotFitInLong() {
+        StepVerifier.create(ReactiveSqlExecutionProtection.protectMono(
+                                    Mono.just("ok"),
+                                    SqlExecutionOptions.safeDefaults()
+                                                       .withTimeout(Duration.ofSeconds(Long.MAX_VALUE))))
+                    .expectNext("ok")
+                    .verifyComplete();
+    }
+
     /** 清理错误已持有主错误时，补充上下文不能反向建立 Throwable 环。 */
     @Test
     void doesNotCreateSuppressedCycleWhenCleanupAlreadyReferencesPrimary() {

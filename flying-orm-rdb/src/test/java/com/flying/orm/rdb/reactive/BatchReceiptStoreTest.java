@@ -2,7 +2,7 @@ package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.rdb.batch.BatchReceiptIntegrityException;
 import com.flying.orm.rdb.batch.BatchChunkResult;
-import com.flying.orm.rdb.exception.RdbConnectionAcquireTimeoutException;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.isolation.R2dbcConnectionInvalidator;
 import com.flying.orm.rdb.observation.ResourceCleanupObservation;
 import com.flying.orm.rdb.observation.SqlExecutionObserver;
@@ -111,20 +111,12 @@ class BatchReceiptStoreTest {
         assertThrows(BatchReceiptIntegrityException.class, receipt::exactInputRowCount);
     }
 
-    /** 回执预查询必须遵守本次批量的连接等待配置，零值继续交给连接池自身管理。 */
+    /** 即使配置回执 SQL 时限，连接等待和排队也完全交给连接池。 */
     @Test
-    void usesTheConfiguredConnectionAcquireTimeoutForReceiptReads() {
+    void delegatesReceiptConnectionWaitingToThePool() {
         BatchReceiptStore store = store(neverConnectionFactory(), new AtomicInteger(), new AtomicInteger());
 
         StepVerifier.withVirtualTime(() -> store.find(completeToken(), Duration.ofMillis(10)))
-                    .thenAwait(Duration.ofMillis(10))
-                    .expectErrorSatisfies(error -> {
-                        RdbConnectionAcquireTimeoutException timeout = assertInstanceOf(
-                                RdbConnectionAcquireTimeoutException.class, error);
-                        assertEquals(Duration.ofMillis(10), timeout.timeout());
-                    })
-                    .verify();
-        StepVerifier.withVirtualTime(() -> store.find(completeToken(), Duration.ZERO))
                     .thenAwait(Duration.ofSeconds(6))
                     .thenCancel()
                     .verify();
@@ -200,6 +192,30 @@ class BatchReceiptStoreTest {
         assertEquals(1, closes.get());
         assertEquals(1, invalidations.get());
         assertEquals(1, cleanupObservations.size());
+    }
+
+    /** 回执读取后的 close 与 invalidate 共享一次清理预算，不能把五秒边界串成十秒。 */
+    @Test
+    void sharesOneCleanupDeadlineAcrossConfirmedReadCloseAndInvalidation() {
+        AtomicInteger closes = new AtomicInteger();
+        AtomicInteger invalidations = new AtomicInteger();
+        ConnectionFactory factory = connectionFactory(Flux.just(receiptResult()));
+        BatchReceiptStore store = new BatchReceiptStore(
+                factory,
+                R2dbcBindMarkers.from(factory),
+                SqlExecutionObserver.noop(),
+                R2dbcConnectionInvalidator.of(
+                        ignored -> Mono.<Void>never().doOnSubscribe(subscription -> closes.incrementAndGet()),
+                        ignored -> Mono.<Void>never().doOnSubscribe(subscription -> invalidations.incrementAndGet())));
+
+        StepVerifier.withVirtualTime(() -> store.find(completeToken()))
+                    .thenAwait(SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT.plusMillis(2))
+                    .expectNext(new BatchReceiptStore.Receipt("", 1L, 1L))
+                    .expectComplete()
+                    .verify(Duration.ofSeconds(1));
+
+        assertEquals(1, closes.get());
+        assertEquals(1, invalidations.get());
     }
 
     /** usingWhen 在资源域内保留 cleanup wrapper；其 cause 仍必须是同一 fatal，供公共入口统一恢复。 */
