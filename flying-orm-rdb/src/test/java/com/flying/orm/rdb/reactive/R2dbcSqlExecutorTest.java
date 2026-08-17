@@ -191,6 +191,7 @@ class R2dbcSqlExecutorTest {
                           .filter(ValueBind.class::isInstance)
                           .map(ValueBind.class::cast)
                           .anyMatch(bind -> bind.index() == 0 && Long.valueOf(42L).equals(bind.value())));
+        assertEquals(List.of("id"), factory.generatedKeyColumns());
     }
 
     /** R2DBC 侧索引 INSERT 返回零影响行时必须回滚业务写，不能继续提交。 */
@@ -2020,6 +2021,7 @@ class R2dbcSqlExecutorTest {
         private final AtomicInteger commitCount = new AtomicInteger();
         private final AtomicInteger rollbackCount = new AtomicInteger();
         private final List<String> sqlHistory = new ArrayList<>();
+        private final List<String> generatedKeyColumns = new ArrayList<>();
         private final String databaseName;
         private final Throwable executeError;
         private final Duration rowDelay;
@@ -2148,6 +2150,10 @@ class R2dbcSqlExecutorTest {
 
         private List<String> sqlHistory() {
             return List.copyOf(sqlHistory);
+        }
+
+        private List<String> generatedKeyColumns() {
+            return List.copyOf(generatedKeyColumns);
         }
 
         private int addCount() {
@@ -2348,7 +2354,12 @@ class R2dbcSqlExecutorTest {
                         fetchSize = (Integer) args[0];
                         yield statement;
                     }
-                    case "returnGeneratedValues" -> statement;
+                    case "returnGeneratedValues" -> {
+                        if (args != null && args.length == 1 && args[0] instanceof String[] columns) {
+                            generatedKeyColumns.addAll(List.of(columns));
+                        }
+                        yield statement;
+                    }
                     default -> defaultValue(method);
                 };
             }

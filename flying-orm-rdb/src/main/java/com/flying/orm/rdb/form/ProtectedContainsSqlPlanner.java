@@ -136,7 +136,7 @@ final class ProtectedContainsSqlPlanner {
      */
     private SqlFragment businessCondition(ProtectedFieldRuntime.PreparedContainsQuery query,
                                            String businessAlias) {
-        return support.conditionRenderer.withIdentifierRenderer(name -> qualified(
+        return support.conditionRenderer.withFieldIdentifierRenderer(name -> qualified(
                         businessAlias, query.physicalForm().field(name).name()))
                 .renderWhere(query.remainingWhere());
     }

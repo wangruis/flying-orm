@@ -1,10 +1,8 @@
 package com.flying.orm.core.page;
 
-import java.lang.reflect.Array;
-import java.util.ArrayDeque;
-import java.util.ArrayList;
+import com.flying.orm.core.internal.value.BindableValueSnapshots;
+
 import java.util.Arrays;
-import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Objects;
 
@@ -56,54 +54,6 @@ public record CursorPageQuery(int size, List<CursorSort> sorts, List<Object> cur
 
     static List<Object> snapshotCursor(List<?> values) {
         List<?> safeValues = Objects.requireNonNull(values, "cursor values must not be null");
-        List<Object> snapshot = new ArrayList<>(safeValues.size());
-        IdentityHashMap<Object, Object> arrayCopies = new IdentityHashMap<>();
-        for (Object value : safeValues) {
-            snapshot.add(snapshotArray(value, arrayCopies));
-        }
-        return List.copyOf(snapshot);
-    }
-
-    /** 仅深复制数组可达图；列表中的共享数组身份和数组环在同一次快照中保持。 */
-    private static Object snapshotArray(Object value, IdentityHashMap<Object, Object> copies) {
-        if (value == null || !value.getClass().isArray()) {
-            return value;
-        }
-        Object existing = copies.get(value);
-        if (existing != null) {
-            return existing;
-        }
-        Object rootCopy = Array.newInstance(value.getClass().getComponentType(), Array.getLength(value));
-        copies.put(value, rootCopy);
-        ArrayDeque<Object> sources = new ArrayDeque<>();
-        ArrayDeque<Object> targets = new ArrayDeque<>();
-        sources.addLast(value);
-        targets.addLast(rootCopy);
-        while (!sources.isEmpty()) {
-            Object source = sources.removeFirst();
-            Object target = targets.removeFirst();
-            Class<?> componentType = source.getClass().getComponentType();
-            int length = Array.getLength(source);
-            if (componentType.isPrimitive()) {
-                System.arraycopy(source, 0, target, 0, length);
-                continue;
-            }
-            for (int index = 0; index < length; index++) {
-                Object item = Array.get(source, index);
-                if (item == null || !item.getClass().isArray()) {
-                    Array.set(target, index, item);
-                    continue;
-                }
-                Object itemCopy = copies.get(item);
-                if (itemCopy == null) {
-                    itemCopy = Array.newInstance(item.getClass().getComponentType(), Array.getLength(item));
-                    copies.put(item, itemCopy);
-                    sources.addLast(item);
-                    targets.addLast(itemCopy);
-                }
-                Array.set(target, index, itemCopy);
-            }
-        }
-        return rootCopy;
+        return List.copyOf(BindableValueSnapshots.immutableValues(safeValues));
     }
 }

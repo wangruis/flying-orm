@@ -27,9 +27,14 @@ public final class SqlTemplate {
      * 查询模板宁可保守拒绝，也不把一个看起来只读的入口变成隐蔽写入口。
      */
     private static final Set<String> WRITE_KEYWORDS = Set.of(
-            "ALTER", "CALL", "COPY", "CREATE", "DELETE", "DROP", "EXEC", "EXECUTE",
-            "GRANT", "INSERT", "INTO", "LOAD", "LOCK", "MERGE", "REPLACE", "REVOKE",
-            "TRUNCATE", "UPDATE", "UPSERT");
+            "ALTER", "BACKUP", "BULK", "CALL", "CHECKPOINT", "COPY", "CREATE", "DBCC", "DELETE", "DENY",
+            "DROP", "EXEC", "EXECUTE", "COMMIT", "DECLARE", "GRANT", "INSERT", "INTO", "KILL", "LOAD",
+            "LOCK", "MERGE", "PRINT", "RAISERROR", "RECONFIGURE", "REPLACE", "RESTORE", "RETURN", "REVOKE",
+            "ROLLBACK", "SAVE", "SHUTDOWN", "THROW", "TRUNCATE", "UPDATE", "UPSERT", "USE", "WAITFOR");
+
+    private static final Set<String> SQL_SERVER_BATCH_KEYWORDS = Set.of(
+            "ADD", "BREAK", "CONTINUE", "DUMP", "GOTO", "IF", "LOAD", "READTEXT", "RECEIVE", "REVERT",
+            "SEND", "SETUSER", "UPDATETEXT", "WHILE", "WRITETEXT");
 
     private final String id;
 
@@ -116,6 +121,9 @@ public final class SqlTemplate {
         boolean sqlServer = "sqlserver".equalsIgnoreCase(dialectName)
                 || "sql-server".equalsIgnoreCase(dialectName);
         String firstKeyword = null;
+        String previousKeyword = null;
+        int caseDepth = 0;
+        boolean previousEndClosedCase = false;
         for (int index = 0; index < sql.length();) {
             char current = sql.charAt(index);
             char next = index + 1 < sql.length() ? sql.charAt(index + 1) : '\0';
@@ -179,10 +187,23 @@ public final class SqlTemplate {
             if (firstKeyword == null) {
                 firstKeyword = keyword;
             }
-            if (WRITE_KEYWORDS.contains(keyword)) {
+            boolean endClosedCase = "END".equals(keyword) && caseDepth > 0;
+            if (sqlServer && "CONVERSATION".equals(keyword) && "END".equals(previousKeyword)
+                    && !previousEndClosedCase) {
+                throw new IllegalArgumentException(
+                        "SQL query template contains a write or DDL statement: END CONVERSATION");
+            }
+            if (WRITE_KEYWORDS.contains(keyword) || sqlServer && SQL_SERVER_BATCH_KEYWORDS.contains(keyword)) {
                 throw new IllegalArgumentException(
                         "SQL query template contains a write or DDL keyword: " + keyword);
             }
+            if ("CASE".equals(keyword)) {
+                caseDepth++;
+            } else if (endClosedCase) {
+                caseDepth--;
+            }
+            previousEndClosedCase = endClosedCase;
+            previousKeyword = keyword;
             index = end;
         }
 

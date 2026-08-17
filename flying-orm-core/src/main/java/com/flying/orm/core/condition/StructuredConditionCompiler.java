@@ -40,8 +40,8 @@ public final class StructuredConditionCompiler {
     }
 
     /**
-     * 在任何输入适配器运行前，迭代检查树深度和节点总数。
-     * 这里不做字段或值解释，因此深层恶意输入不会先把 Java 调用栈耗尽。
+     * 在任何输入适配器运行前，检查树预算以及外部 Map、Collection 和数组的有界值图。
+     * 这里只执行资源边界，不按表单解释字段值，因此深层或超大输入不会先进入扩展序列化。
      */
     public static void validateStructure(StructuredConditionInput input, StructuredConditionPolicy policy) {
         StructuredConditionStructureValidator.validate(input, policy);

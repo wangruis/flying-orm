@@ -1,7 +1,9 @@
 package com.flying.orm.rdb.operator;
 
+import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.form.ReactiveFormClient;
+import com.flying.orm.rdb.internal.InternalApi;
 
 import java.util.Objects;
 
@@ -22,10 +24,18 @@ public final class EntityDmlOperator<T> {
     private final EntityDmlModel<T> model;
 
     private EntityDmlOperator(ReactiveFormClient client, SqlRenderer renderer, Class<T> type) {
+        this(client, renderer, null, type);
+    }
+
+    private EntityDmlOperator(ReactiveFormClient client,
+                              SqlRenderer renderer,
+                              DynamicForm form,
+                              Class<T> type) {
         this.client = Objects.requireNonNull(client, "form client must not be null");
         this.renderer = Objects.requireNonNull(renderer, "sql renderer must not be null");
-        this.model = new EntityDmlModel<>(this.client.entityModels()
-                                                  .metadata(Objects.requireNonNull(type, "entity type must not be null")));
+        var metadata = this.client.entityModels()
+                                  .metadata(Objects.requireNonNull(type, "entity type must not be null"));
+        this.model = form == null ? new EntityDmlModel<>(metadata) : new EntityDmlModel<>(metadata, form);
     }
 
     /** 创建绑定实体映射的响应式 DML 入口。 */
@@ -33,6 +43,16 @@ public final class EntityDmlOperator<T> {
                                                    SqlRenderer renderer,
                                                    Class<T> type) {
         return new EntityDmlOperator<>(client, renderer, type);
+    }
+
+    /** Repository 内部使用显式表单时，实体字段映射不应偷偷换回注解生成的表单。 */
+    @InternalApi
+    public static <T> EntityDmlOperator<T> create(ReactiveFormClient client,
+                                                   SqlRenderer renderer,
+                                                   DynamicForm form,
+                                                   Class<T> type) {
+        return new EntityDmlOperator<>(client, renderer,
+                                       Objects.requireNonNull(form, "entity dynamic form must not be null"), type);
     }
 
     /** @return 当前实体的新查询命令 */

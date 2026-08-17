@@ -58,6 +58,7 @@ public final class SchemaDialect {
     private final SchemaDialectTypeSupport types;
     private final SchemaDialectDdlSupport ddl;
     private final SchemaDialectGenerationSupport generation;
+    private final GeneratedValueStyle generatedValueStyle;
     private final SchemaOnlineDdlSupport onlineDdlSupport;
     private SchemaDialect(String quoteOpen,
                           String quoteClose,
@@ -69,7 +70,7 @@ public final class SchemaDialect {
                           ColumnChangeStyle columnChangeStyle,
                           SchemaOnlineDdlSupport onlineDdlSupport,
                           SchemaLockTimeoutStyle lockTimeoutStyle) {
-        this.types = new SchemaDialectTypeSupport(quoteOpen, quoteClose, typeMappings);
+        this.types = new SchemaDialectTypeSupport(quoteOpen, quoteClose, typeMappings, generatedValueStyle);
         this.ddl = new SchemaDialectDdlSupport(types,
                                                columnCommentStyle,
                                                dropIndexStyle,
@@ -79,6 +80,8 @@ public final class SchemaDialect {
                                                onlineDdlSupport,
                                                lockTimeoutStyle);
         this.generation = new SchemaDialectGenerationSupport(types, generatedValueStyle);
+        this.generatedValueStyle = Objects.requireNonNull(generatedValueStyle,
+                                                          "generated value style must not be null");
         this.onlineDdlSupport = Objects.requireNonNull(onlineDdlSupport,
                                                        "online DDL support must not be null");
     }
@@ -91,6 +94,11 @@ public final class SchemaDialect {
     /** 创建可以配置标识符引号、类型映射和数据库特殊 DDL 的构建器。 */
     public static Builder builder() {
         return new Builder();
+    }
+
+    /** 包内建表校验读取明确样式，不把数据库分支泄露到业务 API。 */
+    GeneratedValueStyle generatedValueStyle() {
+        return generatedValueStyle;
     }
 
     public String identifier(String value) {
@@ -111,6 +119,13 @@ public final class SchemaDialect {
 
     public Optional<String> columnCommentSql(String table, String column, String comment) {
         return ddl.columnCommentSql(table, column, comment);
+    }
+
+    Optional<String> columnCommentChangeSql(String table,
+                                            String column,
+                                            String previousComment,
+                                            String targetComment) {
+        return ddl.columnCommentChangeSql(table, column, previousComment, targetComment);
     }
 
     public String dropIndexSql(String table, String index) {
@@ -137,6 +152,18 @@ public final class SchemaDialect {
         return ddl.addColumnSql(table, columnDefinition);
     }
 
+    /**
+     * 生成只依赖目标类型的列类型变更 SQL。
+     *
+     * <p>MySQL 和 SQL Server 修改类型时还需要完整列定义来保留可空性、生成策略和其他列属性，
+     * 因此这两个内置方言会拒绝此低信息入口；表单迁移器使用包内完整定义入口。</p>
+     *
+     * @param table        表名
+     * @param column       字段名
+     * @param databaseType 目标数据库类型
+     * @return 可安全执行的 DDL
+     * @throws IllegalArgumentException 当前方言不能仅凭目标类型安全生成 DDL
+     */
     public String alterColumnTypeSql(String table, String column, String databaseType) {
         return ddl.alterColumnTypeSql(table, column, databaseType);
     }
@@ -163,8 +190,16 @@ public final class SchemaDialect {
         return this.generation.generatedValueClause(generation, databaseType);
     }
 
+    String generatedTableClause(ValueGeneration generation) {
+        return this.generation.generatedTableClause(generation);
+    }
+
     public Optional<String> createSequenceSql(ValueGeneration generation, String databaseType) {
         return this.generation.createSequenceSql(generation, databaseType);
+    }
+
+    Optional<String> dropSequenceSql(ValueGeneration generation) {
+        return this.generation.dropSequenceSql(generation);
     }
     public String quoteLiteral(String value) {
         return types.quoteLiteral(value);

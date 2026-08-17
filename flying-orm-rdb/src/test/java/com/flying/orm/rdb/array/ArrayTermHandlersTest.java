@@ -1,7 +1,10 @@
 package com.flying.orm.rdb.array;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.StructuredConditionErrorCode;
+import com.flying.orm.core.condition.StructuredConditionException;
 import com.flying.orm.core.condition.StructuredConditionInput;
+import com.flying.orm.core.condition.StructuredConditionPolicy;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.sql.render.SqlFragment;
@@ -54,6 +57,19 @@ class ArrayTermHandlersTest {
                                           .renderWhere(where);
 
         assertArrayEquals(new String[]{"admin"}, (String[]) fragment.parameters().getFirst());
+    }
+
+    /** 数组适配器不能先复制完整外部集合，再让通用策略看到已经包装过的标量。 */
+    @Test
+    void rejectsOversizedRawArrayBeforeAdaptation() {
+        StructuredConditionException error = assertThrows(
+                StructuredConditionException.class,
+                () -> ArrayStructuredConditions.postgresql().compile(
+                        arrayForm(),
+                        StructuredConditionInput.term("tags", "array-overlaps", List.of("a", "b", "c")),
+                        StructuredConditionPolicy.defaults().withMaxCollectionSize(2)));
+
+        assertEquals(StructuredConditionErrorCode.VALUE_COLLECTION_TOO_LARGE, error.code());
     }
 
     @Test

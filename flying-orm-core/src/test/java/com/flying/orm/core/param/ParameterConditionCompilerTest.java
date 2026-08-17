@@ -8,6 +8,8 @@ import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.condition.TermRegistry;
 import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
+import java.nio.ReadOnlyBufferException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -194,6 +196,25 @@ class ParameterConditionCompilerTest {
         assertArrayEquals(new byte[]{1, 2}, (byte[]) second[0]);
         assertSame(second[2], ((Object[]) second[2])[0]);
         assertSame(marker, second[3]);
+    }
+
+    /** 二进制默认值在规则发布后不能被源对象或访问器改写。 */
+    @Test
+    void snapshotsByteBufferDefaultAtBothBoundaries() {
+        ByteBuffer source = ByteBuffer.wrap(new byte[]{1, 2});
+        ParameterConditionSpec spec = ParameterConditionSpec.builder("key", "key", "=")
+                                                              .defaultValue(source)
+                                                              .build();
+
+        source.put(0, (byte) 9);
+        ByteBuffer first = (ByteBuffer) spec.defaultValue();
+        assertEquals(1, first.get(0));
+        assertThrows(ReadOnlyBufferException.class, () -> first.put(0, (byte) 8));
+
+        first.position(1);
+        ByteBuffer second = (ByteBuffer) spec.defaultValue();
+        assertEquals(0, second.position());
+        assertEquals(1, second.get(0));
     }
 
     @Test

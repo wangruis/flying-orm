@@ -42,7 +42,7 @@ final class NativeSqlExecutionState {
         this.valueCodecs = Objects.requireNonNull(valueCodecs, "value codec registry must not be null");
         this.dialect = Objects.requireNonNull(dialect, "RDB dialect must not be null");
         // 原生入口也必须只有一条语句，避免参数化入口被误当成多语句执行通道。
-        this.sql = SqlStatements.requireSingle(sql);
+        this.sql = SqlStatements.requireSingle(sql, dialect);
         this.jdbcBindMarkers = jdbcBindMarkers;
     }
 

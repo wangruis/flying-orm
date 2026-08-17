@@ -135,7 +135,7 @@ class RdbDialectTest {
                                                                                     "name", "王")));
 
         assertEquals("sqlserver", dialect.name());
-        assertEquals("create table [Users] ([id] BIGINT primary key, [name] NVARCHAR(64))",
+        assertEquals("create table [Users] ([id] BIGINT not null primary key, [name] NVARCHAR(64) null)",
                      createTable.sql());
         assertEquals("select [id], [name] from [Users] where [name] = ? order by [id] asc offset ? rows fetch next ? rows only",
                      select.sql());
@@ -186,6 +186,22 @@ class RdbDialectTest {
                      RdbDialect.oracle().schema().onlineDdlSupport());
         assertEquals(SchemaOnlineDdlSupport.LICENSE_OR_EDITION_DEPENDENT,
                      RdbDialect.sqlServer().schema().onlineDdlSupport());
+    }
+
+    /**
+     * MySQL 和 SQL Server 的类型变更会重写列定义；缺少可空性、生成策略等事实时必须拒绝猜测。
+     */
+    @Test
+    void requiresCompleteColumnDefinitionForDatabaseSpecificTypeChanges() {
+        IllegalArgumentException mysql = assertThrows(
+                IllegalArgumentException.class,
+                () -> RdbDialect.mysql().schema().alterColumnTypeSql("users", "name", "VARCHAR(128)"));
+        IllegalArgumentException sqlServer = assertThrows(
+                IllegalArgumentException.class,
+                () -> RdbDialect.sqlServer().schema().alterColumnTypeSql("users", "name", "NVARCHAR(128)"));
+
+        assertEquals("alter column type requires a complete column definition for mysql", mysql.getMessage());
+        assertEquals("alter column type requires a complete column definition for sql server", sqlServer.getMessage());
     }
 
     private static SqlRenderer conditionRenderer() {

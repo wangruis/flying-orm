@@ -45,7 +45,8 @@ public final class DialectSqlContracts {
                 new DialectSqlContractCase(
                         "sqlserver",
                         RdbDialect.sqlServer(),
-                        "create table [Users] ([id] BIGINT primary key, [name] NVARCHAR(255), [enabled] BIT, [created_at] DATETIME2)",
+                        "create table [Users] ([id] BIGINT not null primary key, [name] NVARCHAR(255) null, "
+                                + "[enabled] BIT null, [created_at] DATETIME2 null)",
                         "select [id], [name], [enabled], [created_at] from [Users] where [name] = ? order by [id] asc offset ? rows fetch next ? rows only",
                         "merge into [Users] with (holdlock) as target using (values (?, ?, ?, ?)) as source ([id], [name], [enabled], [created_at]) on target.[id] = source.[id] when matched then update set target.[name] = source.[name], target.[enabled] = source.[enabled], target.[created_at] = source.[created_at] when not matched then insert ([id], [name], [enabled], [created_at]) values (source.[id], source.[name], source.[enabled], source.[created_at]);"));
     }

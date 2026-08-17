@@ -9,12 +9,18 @@ import com.flying.orm.core.sql.render.SqlFragment;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import org.junit.jupiter.api.Test;
 
+import java.math.BigInteger;
 import java.time.LocalDate;
+import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.OffsetTime;
+import java.util.AbstractCollection;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -87,6 +93,22 @@ class StructuredConditionCompilerTest {
 
         assertEquals("lower(name) like lower(?) and lower(name) not like lower(?)", fragment.sql());
         assertEquals(List.of("%Alice%", "%Admin%"), fragment.parameters());
+    }
+
+    /** LIKE 家族只面向文本字段；数值字段即使值能转成整数，也不能生成跨库不一致的 age like ?。 */
+    @Test
+    void rejectsStructuredLikeOperatorsOnNonTextFields() {
+        StructuredConditionCompiler compiler = StructuredConditionCompiler.create();
+
+        for (String operator : List.of("like", "not-like", "like-ignore-case", "not-like-ignore-case")) {
+            StructuredConditionException error = assertThrows(
+                    StructuredConditionException.class,
+                    () -> compiler.compile(usersForm(), StructuredConditionInput.term("age", operator, "18")));
+
+            assertEquals(StructuredConditionErrorCode.VALUE_TYPE_MISMATCH, error.code());
+            assertEquals("conditions.value", error.path());
+            assertEquals("age", error.field());
+        }
     }
 
     /**
@@ -184,6 +206,26 @@ class StructuredConditionCompilerTest {
         assertEquals(List.of(1, 2, 3), terms.get(4).value());
     }
 
+    /** 方言类型必须按完整名称分类，不能因共享前缀把区间、64 位整数或带时区时间改成别的类型。 */
+    @Test
+    void doesNotMisclassifyDialectSpecificTypesByPrefix() {
+        OffsetDateTime timestamp = OffsetDateTime.parse("2026-08-16T12:34:56+08:00");
+        OffsetTime time = OffsetTime.parse("12:34:56+08:00");
+
+        assertEquals(2_147_483_648L, compileScalar("INT8", "2147483648"));
+        assertEquals(4_294_967_295L, compileScalar("INT(11) UNSIGNED", "4294967295"));
+        assertEquals(4_294_967_295L, compileScalar("INT(11) ZEROFILL", "4294967295"));
+        assertEquals(new BigInteger("18446744073709551615"),
+                     compileScalar("BIGINT UNSIGNED", "18446744073709551615"));
+        assertEquals("4294967296", compileScalar("SERIAL", "4294967296"));
+        assertEquals("10101010", compileScalar("BIT(8)", "10101010"));
+        assertEquals("P1D", compileScalar("INTERVAL DAY TO SECOND", "P1D"));
+        assertEquals(timestamp, compileScalar("TIMESTAMP WITH TIME ZONE", timestamp));
+        assertEquals(time, compileScalar("TIMETZ", time));
+        assertEquals(LocalDateTime.parse("2026-08-16T12:34:56"),
+                     compileScalar("TIMESTAMP(6) WITH LOCAL TIME ZONE", "2026-08-16T12:34:56"));
+    }
+
     @Test
     void preservesLargeBinaryScalarValueInStructuredCondition() {
         byte[] payload = new byte[1_024];
@@ -192,11 +234,9 @@ class StructuredConditionCompilerTest {
                                       .addField(DynamicField.of("payload", "blob"))
                                       .build();
 
-        ConditionGroup where = StructuredConditionCompiler.create()
-                                                          .compile(form,
-                                                                   StructuredConditionInput.term("payload",
-                                                                                                 "eq",
-                                                                                                 payload));
+        StructuredConditionInput input = StructuredConditionInput.term("payload", "eq", payload);
+        StructuredConditionCompiler.validateStructure(input, StructuredConditionPolicy.defaults());
+        ConditionGroup where = StructuredConditionCompiler.create().compile(form, input);
         payload[0] = 9;
         byte[] bound = (byte[]) ((TermCondition) where.children().getFirst()).value();
 
@@ -212,11 +252,9 @@ class StructuredConditionCompilerTest {
                                       .addField(DynamicField.of("tags", "ARRAY"))
                                       .build();
 
-        ConditionGroup where = StructuredConditionCompiler.create()
-                                                          .compile(form,
-                                                                   StructuredConditionInput.term("tags",
-                                                                                                 "eq",
-                                                                                                 tags));
+        StructuredConditionInput input = StructuredConditionInput.term("tags", "eq", tags);
+        StructuredConditionCompiler.validateStructure(input, StructuredConditionPolicy.defaults());
+        ConditionGroup where = StructuredConditionCompiler.create().compile(form, input);
         tags[0] = "after";
         String[] bound = (String[]) ((TermCondition) where.children().getFirst()).value();
 
@@ -629,6 +667,60 @@ class StructuredConditionCompilerTest {
         assertCauseChainDoesNotContain(error, secret);
     }
 
+    /** 原始容器预检也属于前端错误边界，不能把自定义容器的异常文本或 cause 暴露给调用方。 */
+    @Test
+    void sanitizesFailureRaisedDuringRawCollectionValidation() {
+        String secret = "secret-token";
+        AbstractCollection<Object> values = new AbstractCollection<>() {
+            @Override
+            public Iterator<Object> iterator() {
+                throw new IllegalStateException(secret);
+            }
+
+            @Override
+            public int size() {
+                return 1;
+            }
+        };
+
+        StructuredConditionException error = assertThrows(
+                StructuredConditionException.class,
+                () -> StructuredConditionCompiler.validateStructure(
+                        StructuredConditionInput.term("score", "in", values),
+                        StructuredConditionPolicy.defaults()));
+
+        assertEquals(StructuredConditionErrorCode.VALUE_SHAPE_NOT_ALLOWED, error.code());
+        assertEquals("conditions.value", error.path());
+        assertNull(error.getCause());
+        assertEquals(0, error.getSuppressed().length);
+        assertCauseChainDoesNotContain(error, secret);
+    }
+
+    /** 原始容器回调包装的 JVM fatal 不能被稳定错误替换，必须保持同一对象出站。 */
+    @Test
+    void propagatesFatalRaisedDuringRawCollectionValidation() {
+        OutOfMemoryError fatal = new OutOfMemoryError("fatal");
+        AbstractCollection<Object> values = new AbstractCollection<>() {
+            @Override
+            public Iterator<Object> iterator() {
+                throw new IllegalStateException("wrapper", fatal);
+            }
+
+            @Override
+            public int size() {
+                return 1;
+            }
+        };
+
+        OutOfMemoryError actual = assertThrows(
+                OutOfMemoryError.class,
+                () -> StructuredConditionCompiler.validateStructure(
+                        StructuredConditionInput.term("score", "in", values),
+                        StructuredConditionPolicy.defaults()));
+
+        assertSame(fatal, actual);
+    }
+
     /** 超限 Iterable 只读取到确认越界的那个元素，不能先把整个输入复制进内存。 */
     @Test
     void stopsReadingIterableAsSoonAsCollectionLimitIsExceeded() {
@@ -659,6 +751,35 @@ class StructuredConditionCompilerTest {
         assertEquals(3, reads.get());
     }
 
+    /** 扩展适配器包装 JSON、数组或向量之前，原始值图仍必须服从深度、节点和字符串预算。 */
+    @Test
+    void validatesExtensionValueGraphBeforeAdaptation() {
+        StructuredConditionPolicy policy = StructuredConditionPolicy.defaults()
+                                                                    .withMaxDepth(2)
+                                                                    .withMaxNodes(2)
+                                                                    .withMaxStringLength(4);
+        StructuredConditionInput depth = StructuredConditionInput.term(
+                "payload", "custom", Map.of("a", Map.of("b", Map.of("c", 1))));
+        StructuredConditionInput nodes = StructuredConditionInput.term(
+                "payload", "custom", Map.of("a", Map.of(), "b", Map.of()));
+        StructuredConditionInput text = StructuredConditionInput.term(
+                "payload", "custom", Map.of("v", "12345"));
+
+        StructuredConditionException depthError = assertThrows(
+                StructuredConditionException.class,
+                () -> StructuredConditionCompiler.validateStructure(depth, policy));
+        StructuredConditionException nodesError = assertThrows(
+                StructuredConditionException.class,
+                () -> StructuredConditionCompiler.validateStructure(nodes, policy));
+        StructuredConditionException textError = assertThrows(
+                StructuredConditionException.class,
+                () -> StructuredConditionCompiler.validateStructure(text, policy));
+
+        assertEquals(StructuredConditionErrorCode.DEPTH_EXCEEDED, depthError.code());
+        assertEquals(StructuredConditionErrorCode.NODE_COUNT_EXCEEDED, nodesError.code());
+        assertEquals(StructuredConditionErrorCode.VALUE_TOO_LONG, textError.code());
+    }
+
     /** 可配置预算不能高于后续 AST 与渲染硬边界，避免编译成功后才以普通异常失败。 */
     @Test
     void rejectsConfiguredBudgetsBeyondExecutionHardLimits() {
@@ -686,5 +807,14 @@ class StructuredConditionCompilerTest {
         for (Throwable current = error; current != null; current = current.getCause()) {
             assertFalse(current.toString().contains(forbidden));
         }
+    }
+
+    private static Object compileScalar(String dataType, Object value) {
+        DynamicForm form = DynamicForm.builder("typed_values", "Typed values")
+                                      .addField(DynamicField.of("value", dataType))
+                                      .build();
+        ConditionGroup where = StructuredConditionCompiler.create().compile(
+                form, StructuredConditionInput.term("value", "eq", value));
+        return ((TermCondition) where.children().getFirst()).value();
     }
 }

@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.array;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.StructuredConditionCompiler;
 import com.flying.orm.core.condition.StructuredConditionInput;
 import com.flying.orm.core.condition.StructuredConditionPolicy;
 import com.flying.orm.core.form.DynamicField;
@@ -57,6 +58,14 @@ public final class ArrayStructuredConditions implements StructuredConditionResol
     }
 
     @Override
+    public void validate(DynamicForm form,
+                         StructuredConditionInput input,
+                         StructuredConditionPolicy policy) {
+        StructuredConditionCustomizer.super.validate(form, input, policy);
+        validateRawValues(input, policy);
+    }
+
+    @Override
     public StructuredConditionPolicy customize(StructuredConditionPolicy policy) {
         StructuredConditionPolicy safePolicy = StructuredConditionCustomizer.super.customize(policy);
         for (String operator : OPERATORS) {
@@ -87,6 +96,18 @@ public final class ArrayStructuredConditions implements StructuredConditionResol
             terms.add(adaptNode(form, Objects.requireNonNull(term, "structured condition child must not be null")));
         }
         return new StructuredConditionInput(input.field(), input.operator(), input.value(), input.logic(), terms);
+    }
+
+    private void validateRawValues(StructuredConditionInput input, StructuredConditionPolicy policy) {
+        String operator = normalize(input.operator());
+        if (OPERATORS.contains(operator)) {
+            StructuredConditionCompiler.validateStructure(
+                    StructuredConditionInput.term("_array_value", "in", input.value()), policy);
+            return;
+        }
+        for (StructuredConditionInput term : input.terms()) {
+            validateRawValues(Objects.requireNonNull(term, "structured condition child must not be null"), policy);
+        }
     }
 
     private Object arrayValues(Object value) {

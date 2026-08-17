@@ -51,6 +51,34 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** 覆盖实体 Repository 的映射、逻辑删除、乐观锁、scope 和批量写入组合契约。 */
 class ReactiveFormRepositoryTest {
 
+    /** Lambda 命令必须继续使用 Repository 显式表单，不能偷偷退回实体注解生成的表名。 */
+    @Test
+    void lambdaCommandsKeepRepositoryExplicitForm() {
+        RecordingSqlExecutor executor = new RecordingSqlExecutor();
+        ReactiveFormRepository<UserEntity> repository = ReactiveFormRepository.create(
+                ReactiveFormClient.create(executor, renderer()), form(), UserEntity.class);
+
+        StepVerifier.create(repository.createQuery()
+                                      .select(UserEntity::id)
+                                      .where(UserEntity::id, 1L)
+                                      .executeRows())
+                    .verifyComplete();
+        assertEquals("select id from Users where id = ?", executor.request().sql());
+
+        StepVerifier.create(repository.createUpdate()
+                                      .set(UserEntity::status, Status.ACTIVE)
+                                      .where(UserEntity::id, 1L)
+                                      .execute())
+                    .expectNext(1L)
+                    .verifyComplete();
+        assertEquals("update Users set status = ? where id = ?", executor.request().sql());
+
+        StepVerifier.create(repository.createDelete().where(UserEntity::id, 1L).execute())
+                    .expectNext(1L)
+                    .verifyComplete();
+        assertEquals("delete from Users where id = ?", executor.request().sql());
+    }
+
     @Test
     void writesEntityValuesThroughFormValueCodecs() {
         RecordingSqlExecutor executor = new RecordingSqlExecutor();

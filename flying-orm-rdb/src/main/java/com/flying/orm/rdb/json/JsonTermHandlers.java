@@ -46,13 +46,15 @@ public final class JsonTermHandlers {
 
     private static SqlFragment renderMysqlPathEquals(TermCondition term, SqlRenderContext context) {
         JsonConditionValue value = conditionValue(term.value(), JsonConditionValue.Kind.PATH_EQUALS);
-        return SqlFragment.of("json_unquote(json_extract(" + context.identifier(term.field()) + ", ?)) = ?",
-                              mysqlPath(value), value.value());
+        return SqlFragment.of("json_extract(" + context.identifier(term.field()) + ", ?) = cast(? as json)",
+                              mysqlPath(value), JsonValueCodec.writeLiteral(value.value()));
     }
 
     private static SqlFragment renderPostgresqlPathEquals(TermCondition term, SqlRenderContext context) {
         JsonConditionValue value = conditionValue(term.value(), JsonConditionValue.Kind.PATH_EQUALS);
-        return SqlFragment.of(context.identifier(term.field()) + " #>> ? = ?", postgresqlPath(value), value.value());
+        return SqlFragment.of(context.identifier(term.field())
+                                      + " #>> cast(? as text[]) = cast(? as text)",
+                              postgresqlPath(value), value.value());
     }
 
     private static SqlFragment renderMysqlContains(TermCondition term, SqlRenderContext context) {
@@ -75,7 +77,7 @@ public final class JsonTermHandlers {
 
     private static SqlFragment renderPostgresqlExists(TermCondition term, SqlRenderContext context) {
         JsonConditionValue value = conditionValue(term.value(), JsonConditionValue.Kind.EXISTS);
-        return SqlFragment.of(context.identifier(term.field()) + " #> ? is not null",
+        return SqlFragment.of(context.identifier(term.field()) + " #> cast(? as text[]) is not null",
                               (Object) postgresqlPath(value));
     }
 
@@ -89,7 +91,8 @@ public final class JsonTermHandlers {
 
     private static SqlFragment renderPostgresqlArrayContains(TermCondition term, SqlRenderContext context) {
         JsonConditionValue value = conditionValue(term.value(), JsonConditionValue.Kind.ARRAY_CONTAINS);
-        return SqlFragment.of("(" + context.identifier(term.field()) + " #> ?) @> cast(? as jsonb)",
+        return SqlFragment.of("(" + context.identifier(term.field())
+                                      + " #> cast(? as text[])) @> cast(? as jsonb)",
                               postgresqlPath(value),
                               JsonValueCodec.write(List.of(value.value())));
     }

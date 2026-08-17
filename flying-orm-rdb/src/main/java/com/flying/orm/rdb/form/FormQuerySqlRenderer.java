@@ -182,13 +182,19 @@ final class FormQuerySqlRenderer {
         String selected = fields.isEmpty() ? "*" : support.identifierColumns(fields);
         StringBuilder sql = new StringBuilder("select ").append(selected)
                 .append(" from ").append(support.identifier(form.table()));
-        appendWhere(sql, where);
         if (cursorPage == null) {
+            appendWhere(sql, where);
             return sql.toString();
         }
-        if (!cursorPage.firstPage()) {
-            sql.append(where.sql().isBlank() ? " where (" : " and (")
-               .append(cursorWhere(form, cursorPage)).append(')');
+        if (cursorPage.firstPage()) {
+            appendWhere(sql, where);
+        } else {
+            if (where.sql().isBlank()) {
+                sql.append(" where (");
+            } else {
+                sql.append(" where (").append(where.sql()).append(") and (");
+            }
+            sql.append(cursorWhere(form, cursorPage)).append(')');
         }
         StringJoiner order = new StringJoiner(", ");
         for (CursorSort sort : cursorPage.sorts()) {

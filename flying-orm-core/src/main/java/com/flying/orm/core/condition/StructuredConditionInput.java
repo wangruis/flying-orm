@@ -15,7 +15,7 @@ import java.util.List;
  * @param terms    分组下的子条件
  * @author wangr
  * @date 2026-07-24
- * @version v1.0
+ * @version v2.0
  */
 public record StructuredConditionInput(String field,
                                        String operator,
@@ -24,10 +24,26 @@ public record StructuredConditionInput(String field,
                                        List<StructuredConditionInput> terms) {
 
     /**
-     * 复制子节点列表但保留 null 元素，让编译入口能够以稳定错误码和路径报告非法节点。
+     * 复制子节点列表与前端值图，但保留 null 元素，让编译入口能够以稳定错误码和路径报告非法节点。
      */
     public StructuredConditionInput {
+        value = StructuredConditionValueSnapshots.snapshot(value);
         terms = terms == null ? List.of() : Collections.unmodifiableList(new ArrayList<>(terms));
+    }
+
+    /**
+     * 返回独立的结构化值快照，避免调用方通过 record 访问器改写已发布条件。
+     *
+     * @return JSON 形状容器和标准可绑定值已冻结的值
+     */
+    @Override
+    public Object value() {
+        return StructuredConditionValueSnapshots.snapshot(value);
+    }
+
+    /** 包内编译链读取构造期快照，避免校验与归一化重复复制同一份值图。 */
+    Object stableValue() {
+        return value;
     }
 
     /**

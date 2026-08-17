@@ -80,6 +80,41 @@ class BatchRowSnapshotterTest {
         assertSame(result[2], assertInstanceOf(SqlTypedValue.class, result[6]).value());
     }
 
+    /** JDBC 旧时间类型可变，批量接收后必须与上游对象彻底分离并保留 Timestamp 纳秒。 */
+    @Test
+    void snapshotsMutableJdbcTemporalValues() {
+        java.sql.Timestamp timestamp = java.sql.Timestamp.valueOf("2026-08-16 12:34:56.123456789");
+        java.sql.Date sqlDate = java.sql.Date.valueOf("2026-08-16");
+        java.sql.Time sqlTime = java.sql.Time.valueOf("12:34:56");
+        java.util.Date utilDate = new java.util.Date(1_755_325_696_789L);
+        long timestampMillis = timestamp.getTime();
+        int timestampNanos = timestamp.getNanos();
+        long sqlDateMillis = sqlDate.getTime();
+        long sqlTimeMillis = sqlTime.getTime();
+        long utilDateMillis = utilDate.getTime();
+
+        Object[] result = BatchRowSnapshotter.snapshot(new Object[]{timestamp, sqlDate, sqlTime, utilDate});
+        timestamp.setTime(0L);
+        timestamp.setNanos(1);
+        sqlDate.setTime(0L);
+        sqlTime.setTime(0L);
+        utilDate.setTime(0L);
+
+        java.sql.Timestamp ownedTimestamp = assertInstanceOf(java.sql.Timestamp.class, result[0]);
+        java.sql.Date ownedDate = assertInstanceOf(java.sql.Date.class, result[1]);
+        java.sql.Time ownedTime = assertInstanceOf(java.sql.Time.class, result[2]);
+        java.util.Date ownedUtilDate = assertInstanceOf(java.util.Date.class, result[3]);
+        assertNotSame(timestamp, ownedTimestamp);
+        assertNotSame(sqlDate, ownedDate);
+        assertNotSame(sqlTime, ownedTime);
+        assertNotSame(utilDate, ownedUtilDate);
+        assertEquals(timestampMillis, ownedTimestamp.getTime());
+        assertEquals(timestampNanos, ownedTimestamp.getNanos());
+        assertEquals(sqlDateMillis, ownedDate.getTime());
+        assertEquals(sqlTimeMillis, ownedTime.getTime());
+        assertEquals(utilDateMillis, ownedUtilDate.getTime());
+    }
+
     /** ProtectedWriteWork、SqlRequest 和尾槽 Metadata 中的可变值必须一起重建。 */
     @Test
     void rebuildsProtectedWorkRequestsAndReceiptMetadata() {

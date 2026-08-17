@@ -119,10 +119,9 @@ final class R2dbcAtomicBatchWriter {
                     return Mono.just(BatchWriteResult.from(BatchWriteOptions.Mode.ATOMIC, List.of(result)));
                 }));
         return replay.switchIfEmpty(Mono.defer(() -> writeStreamingWithReceipt(request, planHash)
-                // usingWhen 已经先完成未知事务连接的淘汰，再允许确认器获取第二条连接。
-                .onErrorResume(BatchWriteException.class,
-                               failure -> confirmer.confirmAtomic(request, failure))))
-                     .onErrorMap(TimeoutException.class, error -> timeoutBeforeTransaction(error));
+                // usingWhen 已经先完成原事务连接的归还或淘汰，再允许回执重放获取第二条连接。
+                .onErrorResume(failure -> recoverReceiptFailure(request, replay, failure))))
+                      .onErrorMap(TimeoutException.class, error -> timeoutBeforeTransaction(error));
     }
 
     private Mono<BatchWriteResult> writeStreamingWithReceipt(BatchWriteRequest request,
@@ -178,7 +177,8 @@ final class R2dbcAtomicBatchWriter {
         Connection connection = resource.connection();
         MessageDigest digest = receipts.newPayloadDigest();
         return connections.begin(resource)
-                   .then(receiptStore.reserve(connection, recovery, 0, planHash))
+                   .then(receiptStore.reserve(connection, recovery, 0, planHash)
+                                     .onErrorMap(R2dbcBatchReceiptReservationConflict::classify))
                    // reserve 已和业务写入处在同一事务，先暴露操作级令牌；即使首片失败也有恢复依据。
                    .doOnSuccess(ignored -> token.set(receipts.recoveryToken(
                            request, 0, planHash, null, null, null)))
@@ -189,8 +189,23 @@ final class R2dbcAtomicBatchWriter {
                    .then(Mono.defer(() -> completeReceiptAndCommit(
                            resource, request, planHash, token, completed, digest)))
                    .onErrorResume(error -> error instanceof BatchWriteException
-                           ? Mono.error(error)
-                           : rollback(resource, completed, error, token.get()));
+                            ? Mono.error(error)
+                            : rollback(resource, completed, error, token.get()));
+    }
+
+    private Mono<BatchWriteResult> recoverReceiptFailure(BatchWriteRequest request,
+                                                         Mono<BatchWriteResult> replay,
+                                                         Throwable failure) {
+        VirtualMachineError fatal = ReactiveSqlExecutionProtection.findVirtualMachineError(failure);
+        if (fatal != null) {
+            return Mono.error(fatal);
+        }
+        if (R2dbcBatchReceiptReservationConflict.find(failure) != null) {
+            return replay.switchIfEmpty(Mono.error(failure));
+        }
+        return failure instanceof BatchWriteException batchFailure
+                ? confirmer.confirmAtomic(request, batchFailure)
+                : Mono.error(failure);
     }
 
     private Mono<BatchWriteResult> completeReceiptAndCommit(

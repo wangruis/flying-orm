@@ -4,6 +4,8 @@ import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.TermCondition;
 import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
+import java.nio.ReadOnlyBufferException;
 import java.time.LocalDateTime;
 import java.util.Set;
 
@@ -186,6 +188,25 @@ class DataScopeTest {
         cycle[0] = cycle;
         Object[] cycleSnapshot = (Object[]) TenantScope.of("tenant_id", cycle).value();
         assertTrue(cycleSnapshot == cycleSnapshot[0]);
+    }
+
+    /** 二进制租户标识在构造和访问边界都必须冻结，不能改变后续租户条件。 */
+    @Test
+    void tenantScopeSnapshotsByteBufferValue() {
+        ByteBuffer tenantId = ByteBuffer.wrap(new byte[]{7, 8});
+        TenantScope scope = TenantScope.of("tenant_id", tenantId);
+
+        tenantId.put(0, (byte) 9);
+        ByteBuffer exposed = (ByteBuffer) scope.value();
+        assertEquals(7, exposed.get(0));
+        assertThrows(ReadOnlyBufferException.class, () -> exposed.put(0, (byte) 6));
+
+        exposed.position(1);
+        ByteBuffer conditionValue = (ByteBuffer) ((TermCondition) scope.toCondition()
+                                                                        .children()
+                                                                        .getFirst()).value();
+        assertEquals(0, conditionValue.position());
+        assertEquals(7, conditionValue.get(0));
     }
 
     /** 验证内容相同的数组租户约束能够合并，避免防御性副本破坏 Scope 组合。 */

@@ -7,9 +7,12 @@ import com.flying.orm.core.internal.condition.ConditionValuePolicy;
 
 import java.lang.reflect.Array;
 import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.OffsetTime;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -40,6 +43,7 @@ final class StructuredConditionValueNormalizer {
                      String operator) {
         ConditionValueShape shape = policy.valueShape(operator);
         try {
+            requireTextFieldForLike(operator, field, path);
             Object stableValue = snapshotIterable(value, shape, field, policy, path);
             validateValueLimits(stableValue, shape, field, policy, path, false);
             ConditionValueNormalizer.ScalarConverter converter = !policy.usesFieldValue(operator)
@@ -181,8 +185,19 @@ final class StructuredConditionValueNormalizer {
         }
     }
 
+    private static void requireTextFieldForLike(String operator, DynamicField field, String path) {
+        String normalized = operator.trim().toLowerCase(Locale.ROOT);
+        if ((normalized.equals("like")
+                || normalized.equals("not-like")
+                || normalized.equals("like-ignore-case")
+                || normalized.equals("not-like-ignore-case"))
+                && targetType(field) != String.class) {
+            throw valueTypeMismatch(field, path);
+        }
+    }
+
     /** 扩展异常可包装或交叉引用底层失败；按对象身份遍历，fatal 必须保持原对象出站。 */
-    private static void rethrowVirtualMachineError(Throwable failure) {
+    static void rethrowVirtualMachineError(Throwable failure) {
         ArrayDeque<Throwable> pending = new ArrayDeque<>();
         Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
         pending.addFirst(failure);
@@ -229,34 +244,77 @@ final class StructuredConditionValueNormalizer {
 
     /** 根据跨方言逻辑类型选择稳定的 Java 类型，数据库专有类型仍交给 codec 的通用写转换。 */
     private static Class<?> targetType(DynamicField field) {
-        String dataType = field.dataType().trim().toUpperCase(Locale.ROOT);
-        if (dataType.startsWith("BIGINT")) {
-            return Long.class;
+        LogicalDataType dataType = logicalDataType(field.dataType());
+        return switch (dataType.name()) {
+            case "BIGINT", "BIGSERIAL", "INT8" -> dataType.unsigned() ? BigInteger.class : Long.class;
+            case "INT", "INTEGER", "INT4" -> dataType.unsigned() ? Long.class : Integer.class;
+            case "INT2", "SMALLINT", "TINYINT", "MEDIUMINT" -> Integer.class;
+            case "DEC", "DECIMAL", "NUMERIC", "NUMBER", "DOUBLE", "DOUBLE PRECISION", "FLOAT", "FLOAT4",
+                    "FLOAT8", "REAL", "BINARY_FLOAT", "BINARY_DOUBLE", "MONEY", "SMALLMONEY" -> BigDecimal.class;
+            case "BOOL", "BOOLEAN" -> Boolean.class;
+            case "TIMESTAMP WITH TIME ZONE", "TIMESTAMPTZ" -> OffsetDateTime.class;
+            case "TIMESTAMP", "TIMESTAMP WITHOUT TIME ZONE", "TIMESTAMP WITH LOCAL TIME ZONE", "DATETIME",
+                    "DATETIME2" -> LocalDateTime.class;
+            case "TIME WITH TIME ZONE", "TIMETZ" -> OffsetTime.class;
+            case "TIME", "TIME WITHOUT TIME ZONE" -> LocalTime.class;
+            case "DATE" -> LocalDate.class;
+            case "CHAR", "CHARACTER", "CHARACTER VARYING", "VARCHAR", "VARCHAR2", "NCHAR", "NVARCHAR",
+                    "NVARCHAR2", "TEXT", "CLOB", "NCLOB", "JSON", "JSONB", "BPCHAR" -> String.class;
+            default -> null;
+        };
+    }
+
+    /** 去掉精度和长度修饰，同时保留 WITH TIME ZONE 等决定 Java 语义的类型词。 */
+    private static LogicalDataType logicalDataType(String source) {
+        String value = source.trim().toUpperCase(Locale.ROOT);
+        StringBuilder normalized = new StringBuilder(value.length());
+        int parentheses = 0;
+        boolean pendingSpace = false;
+        for (int index = 0; index < value.length(); index++) {
+            char current = value.charAt(index);
+            if (current == '(') {
+                parentheses++;
+                continue;
+            }
+            if (current == ')' && parentheses > 0) {
+                parentheses--;
+                continue;
+            }
+            if (parentheses > 0) {
+                continue;
+            }
+            if (Character.isWhitespace(current)) {
+                pendingSpace = normalized.length() > 0;
+                continue;
+            }
+            if (pendingSpace) {
+                normalized.append(' ');
+                pendingSpace = false;
+            }
+            normalized.append(current);
         }
-        if (dataType.startsWith("INT") || dataType.startsWith("INTEGER") || dataType.startsWith("SMALLINT")
-                || dataType.startsWith("TINYINT")) {
-            return Integer.class;
-        }
-        if (dataType.startsWith("DECIMAL") || dataType.startsWith("NUMERIC") || dataType.startsWith("NUMBER")
-                || dataType.startsWith("DOUBLE") || dataType.startsWith("FLOAT") || dataType.startsWith("REAL")) {
-            return BigDecimal.class;
-        }
-        if (dataType.startsWith("BOOL") || dataType.startsWith("BOOLEAN") || dataType.startsWith("BIT")) {
-            return Boolean.class;
-        }
-        if (dataType.startsWith("TIMESTAMP") || dataType.startsWith("DATETIME")) {
-            return LocalDateTime.class;
-        }
-        if (dataType.startsWith("DATE")) {
-            return LocalDate.class;
-        }
-        if (dataType.startsWith("TIME")) {
-            return LocalTime.class;
-        }
-        if (dataType.startsWith("CHAR") || dataType.startsWith("VARCHAR") || dataType.startsWith("TEXT")
-                || dataType.startsWith("CLOB") || dataType.startsWith("JSON")) {
-            return String.class;
-        }
-        return null;
+        return stripNumericModifiers(normalized.toString());
+    }
+
+    private static LogicalDataType stripNumericModifiers(String dataType) {
+        String result = dataType;
+        boolean unsigned = false;
+        boolean stripped;
+        do {
+            stripped = false;
+            if (result.endsWith(" ZEROFILL")) {
+                result = result.substring(0, result.length() - " ZEROFILL".length()).stripTrailing();
+                unsigned = true;
+                stripped = true;
+            } else if (result.endsWith(" UNSIGNED")) {
+                result = result.substring(0, result.length() - " UNSIGNED".length()).stripTrailing();
+                unsigned = true;
+                stripped = true;
+            }
+        } while (stripped);
+        return new LogicalDataType(result, unsigned);
+    }
+
+    private record LogicalDataType(String name, boolean unsigned) {
     }
 }

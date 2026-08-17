@@ -2,15 +2,14 @@ package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.StructuredConditionPolicy;
+import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.page.CursorPageQuery;
-import com.flying.orm.core.page.CursorSort;
 import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageSort;
-import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.sql.render.SqlRequest;
-import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.form.spec.WriteOperation;
 import com.flying.orm.rdb.form.spec.WriteSpec;
@@ -46,14 +45,16 @@ final class FormOperationPlanner {
     PlannedQuery select(QuerySpec spec) {
         QuerySpec safeSpec = Objects.requireNonNull(spec, "query spec must not be null");
         ScopedRead read = scopedRead(safeSpec);
-        List<String> projections = readableProjections(safeSpec, read.form());
-        List<String> groups = readableGroups(safeSpec, read.form());
-        List<PageSort> sorts = readableSorts(safeSpec.form(), read.form(), safeSpec.sorts());
+        List<String> projections = FormQueryShapeGuard.readableProjections(safeSpec, read.form());
+        List<String> groups = FormQueryShapeGuard.readableGroups(safeSpec, read.form());
+        List<PageSort> sorts = FormQueryShapeGuard.readableSorts(
+                safeSpec.form(), read.form(), safeSpec.sorts());
+        FormQueryShapeGuard.requireValidGrouping(projections, groups, sorts);
         Optional<ProtectedFieldRuntime.PreparedContainsQuery> contains = renderer.protection()
                 .prepareContainsQuery(safeSpec.form(), read.form(), read.where(), read.scope());
         if (contains.isPresent()) {
-            requireContainsShape(safeSpec);
-            List<String> outputFields = outputFields(projections, read.form());
+            FormQueryShapeGuard.requireContainsShape(safeSpec);
+            List<String> outputFields = FormQueryShapeGuard.outputFields(projections, read.form());
             SqlRequest request = renderer.protection().containsRows(
                     contains.orElseThrow(), sorts,
                     ProtectedContainsResultSupport.DEFAULT_CANDIDATE_LIMIT);
@@ -71,24 +72,25 @@ final class FormOperationPlanner {
 
     PlannedPage page(QuerySpec spec, PageQuery page) {
         QuerySpec safeSpec = Objects.requireNonNull(spec, "query spec must not be null");
-        requireUngroupedPagination(safeSpec, "offset pagination");
+        FormQueryShapeGuard.requireUngroupedPagination(safeSpec, "offset pagination");
         PageQuery requested = Objects.requireNonNull(page, "page query must not be null");
         ScopedRead read = scopedRead(safeSpec);
-        List<String> projections = readableProjections(safeSpec, read.form());
+        List<String> projections = FormQueryShapeGuard.readableProjections(safeSpec, read.form());
         List<PageSort> requestedSorts = safeSpec.sorts().isEmpty() ? requested.sorts() : safeSpec.sorts();
-        List<PageSort> sorts = readableSorts(safeSpec.form(), read.form(), requestedSorts);
+        List<PageSort> sorts = FormQueryShapeGuard.readableSorts(
+                safeSpec.form(), read.form(), requestedSorts);
         PageQuery effectivePage = new PageQuery(requested.page(), requested.size(), sorts);
         Optional<ProtectedFieldRuntime.PreparedContainsQuery> contains = renderer.protection()
                 .prepareContainsQuery(safeSpec.form(), read.form(), read.where(), read.scope());
         if (contains.isPresent()) {
-            requireContainsShape(safeSpec);
+            FormQueryShapeGuard.requireContainsShape(safeSpec);
             SqlRequest request = renderer.protection().containsRows(
                     contains.orElseThrow(), effectivePage.sorts(),
                     ProtectedContainsResultSupport.DEFAULT_CANDIDATE_LIMIT);
             return new PlannedPage(safeSpec.form(), null, request, effectivePage,
                                    executionOptions(safeSpec), read.scope(),
                                    safeSpec.sensitiveDisplayMode(), contains.orElseThrow(),
-                                   outputFields(projections, read.form()));
+                                   FormQueryShapeGuard.outputFields(projections, read.form()));
         }
         ProtectedFieldRuntime.PreparedQuery query = renderer.protection().prepareQuery(
                 safeSpec.form(), read.form(), read.where(), read.scope());
@@ -101,7 +103,7 @@ final class FormOperationPlanner {
 
     PlannedCursorPage cursorPage(QuerySpec spec, CursorPageQuery page) {
         QuerySpec safeSpec = Objects.requireNonNull(spec, "query spec must not be null");
-        requireUngroupedPagination(safeSpec, "cursor pagination");
+        FormQueryShapeGuard.requireUngroupedPagination(safeSpec, "cursor pagination");
         if (!safeSpec.sorts().isEmpty()) {
             throw new IllegalArgumentException(
                     "cursor pagination sorts must be declared with CursorPageQuery");
@@ -109,21 +111,21 @@ final class FormOperationPlanner {
         ScopedRead read = scopedRead(safeSpec);
         CursorPageQuery normalized = CursorPageNormalizer.normalize(
                 read.form(), Objects.requireNonNull(page, "cursor page query must not be null"));
-        requireReadableUnencryptedCursorSorts(
+        FormQueryShapeGuard.requireReadableUnencryptedCursorSorts(
                 safeSpec.form(), read.form(), normalized.sorts(), safeSpec.sensitiveDisplayMode());
-        List<String> projections = readableProjections(safeSpec, read.form());
-        requireCursorProjection(projections, normalized.sorts());
+        List<String> projections = FormQueryShapeGuard.readableProjections(safeSpec, read.form());
+        FormQueryShapeGuard.requireCursorProjection(projections, normalized.sorts());
         Optional<ProtectedFieldRuntime.PreparedContainsQuery> contains = renderer.protection()
                 .prepareContainsQuery(safeSpec.form(), read.form(), read.where(), read.scope());
         if (contains.isPresent()) {
-            requireContainsShape(safeSpec);
+            FormQueryShapeGuard.requireContainsShape(safeSpec);
             SqlRequest request = renderer.protection().containsRows(
                     contains.orElseThrow(), normalized,
                     ProtectedContainsResultSupport.DEFAULT_CANDIDATE_LIMIT);
             return new PlannedCursorPage(safeSpec.form(), request, normalized,
                                          executionOptions(safeSpec), read.scope(),
                                          safeSpec.sensitiveDisplayMode(), contains.orElseThrow(),
-                                         outputFields(projections, read.form()));
+                                         FormQueryShapeGuard.outputFields(projections, read.form()));
         }
         ProtectedFieldRuntime.PreparedQuery query = renderer.protection().prepareQuery(
                 safeSpec.form(), read.form(), read.where(), read.scope());
@@ -219,85 +221,6 @@ final class FormOperationPlanner {
                    .orElseGet(() -> scopes.scopedRead(spec.form(), spec.where(), spec.scope()));
     }
 
-    private static void requireContainsShape(QuerySpec spec) {
-        if (!spec.groups().isEmpty()) {
-            throw new IllegalArgumentException("protected contains search does not support grouped queries");
-        }
-    }
-
-    private static void requireUngroupedPagination(QuerySpec spec, String pagination) {
-        if (!spec.groups().isEmpty()) {
-            throw new IllegalArgumentException(pagination + " does not support grouped QuerySpec");
-        }
-    }
-    private static List<String> readableProjections(QuerySpec spec, DynamicForm readableForm) {
-        return spec.projections().stream()
-                   .map(readableForm::field)
-                   .map(com.flying.orm.core.form.DynamicField::name)
-                   .toList();
-    }
-    private static List<String> readableGroups(QuerySpec spec, DynamicForm readableForm) {
-        return spec.groups().stream()
-                   .map(readableForm::field)
-                   .map(field -> {
-                       requireUnencrypted(spec.form(), field.name(),
-                                          "encrypted field must not be used for query grouping");
-                       return field.name();
-                   })
-                   .toList();
-    }
-    private static List<PageSort> readableSorts(DynamicForm form,
-                                                DynamicForm readableForm,
-                                                List<PageSort> sorts) {
-        return Objects.requireNonNull(sorts, "query sorts must not be null").stream()
-                      .map(sort -> {
-                          com.flying.orm.core.form.DynamicField field = readableForm.field(sort.field());
-                          requireUnencrypted(form, field.name(),
-                                             "encrypted field must not be used for query ordering");
-                          return new PageSort(field.name(), sort.direction());
-                      })
-                      .toList();
-    }
-    private static void requireReadableUnencryptedCursorSorts(DynamicForm form,
-                                                               DynamicForm readableForm,
-                                                               List<CursorSort> sorts,
-                                                               SensitiveDisplayMode displayMode) {
-        for (var field : form.fields()) {
-            if (field.primaryKey() && readableForm.findField(field.name()).isEmpty()) {
-                throw new IllegalArgumentException(
-                        "cursor pagination requires every primary-key field to be readable: " + field.name());
-            }
-        }
-        for (CursorSort sort : sorts) {
-            requireUnencrypted(form, sort.field(),
-                               "encrypted field must not be used for cursor ordering");
-            var masking = form.protections().masked(sort.field()).orElse(null);
-            if (masking != null && (displayMode == SensitiveDisplayMode.MASKED
-                    || displayMode == SensitiveDisplayMode.DECLARED
-                    && masking.display() == SensitiveDisplayMode.MASKED)) {
-                throw new IllegalArgumentException("masked field must not be used for cursor ordering");
-            }
-        }
-    }
-
-    private static void requireUnencrypted(DynamicForm form, String field, String message) {
-        if (form.protections().encrypted(field).isPresent()) {
-            throw new IllegalArgumentException(message);
-        }
-    }
-
-    private static void requireCursorProjection(List<String> projections, List<CursorSort> sorts) {
-        if (projections.isEmpty()) {
-            return;
-        }
-        for (CursorSort sort : sorts) {
-            if (projections.stream().noneMatch(field -> field.equalsIgnoreCase(sort.field()))) {
-                throw new IllegalArgumentException(
-                        "cursor projection must include every cursor sort field");
-            }
-        }
-    }
-
     private static ProtectedFieldRuntime.PreparedQuery withProjection(ProtectedFieldRuntime.PreparedQuery query,
                                                                       List<String> projections) {
         return projections.isEmpty()
@@ -305,12 +228,6 @@ final class FormOperationPlanner {
                 : new ProtectedFieldRuntime.PreparedQuery(query.physicalForm(), query.where(), projections);
     }
 
-    private static List<String> outputFields(List<String> projections, DynamicForm visibleForm) {
-        if (projections.isEmpty()) {
-            return visibleForm.fields().stream().map(com.flying.orm.core.form.DynamicField::name).toList();
-        }
-        return projections;
-    }
     private static ConditionGroup withExpectedVersion(ConditionGroup where, OptimisticLockOptions lock) {
         ConditionGroup.Builder builder = ConditionGroup.and();
         where.children().forEach(builder::add);
@@ -384,6 +301,14 @@ final class FormOperationPlanner {
 
         boolean protectedWriteRequired() {
             return protectedWrite != null;
+        }
+
+        java.util.Optional<String> generatedKeyColumn() {
+            List<String> columns = form.fields().stream()
+                                       .filter(field -> field.primaryKey() && field.generation().generated())
+                                       .map(DynamicField::name)
+                                       .toList();
+            return columns.size() == 1 ? java.util.Optional.of(columns.getFirst()) : java.util.Optional.empty();
         }
 
         long requireSuccess(long affectedRows) {

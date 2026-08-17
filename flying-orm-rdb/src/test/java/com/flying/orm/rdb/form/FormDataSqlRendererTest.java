@@ -658,6 +658,23 @@ class FormDataSqlRendererTest {
         assertEquals(List.of(30L, 30L, 20L, 30L, 20L, 10L, 4, 0L), request.parameters());
     }
 
+    /** 顶层 OR 业务条件必须整体先于游标条件求值，不能被 SQL 的 AND 优先级改写语义。 */
+    @Test
+    void groupsRootOrConditionBeforeAppendingCursorCondition() {
+        SqlRequest request = renderer().select(
+                form(),
+                ConditionGroup.or()
+                              .where("name", "=", "Alice")
+                              .where("age", "=", 18)
+                              .build(),
+                CursorPageQuery.after(10, List.of("u1"), CursorSort.asc("id")));
+
+        assertEquals("select id, name, age from Users where (name = ? or age = ?) and (id > ?) "
+                             + "order by id asc limit ? offset ?",
+                     request.sql());
+        assertEquals(List.of("Alice", 18, "u1", 11, 0L), request.parameters());
+    }
+
     /**
      * 验证分页 select SQL 会追加排序、limit 和 offset，并且 count SQL 复用相同 where。
      */
@@ -735,6 +752,20 @@ class FormDataSqlRendererTest {
         assertFalse(error.getMessage().contains(secretRawFieldName));
     }
 
+    /** UPDATE 的根 OR 条件保持为独立整体，供后续受保护 owner 限制安全追加 AND。 */
+    @Test
+    void preservesRootOrAsGroupedUpdatePredicate() {
+        SqlRequest request = renderer().update(form(),
+                                               orderedMap("name", "王"),
+                                               ConditionGroup.or()
+                                                             .where("id", "=", "u1")
+                                                             .where("name", "=", "旧值")
+                                                             .build());
+
+        assertEquals("update Users set name = ? where (id = ? or name = ?)", request.sql());
+        assertEquals(List.of("王", "u1", "旧值"), request.parameters());
+    }
+
     @Test
     void rendersOptimisticLockedUpdateWithVersionIncrement() {
         SqlRequest request = renderer().update(versionedForm(),
@@ -747,6 +778,22 @@ class FormDataSqlRendererTest {
         assertEquals("update Users set name = ?, version = version + 1 where id = ? and version = ?",
                      request.sql());
         assertEquals(List.of("王", "u1", 3), request.parameters());
+    }
+
+    /** 根 OR 业务条件必须整体先求值，版本条件只能继续收窄更新范围。 */
+    @Test
+    void groupsRootOrConditionBeforeOptimisticUpdateVersionCondition() {
+        SqlRequest request = renderer().update(versionedForm(),
+                                               orderedMap("name", "王"),
+                                               ConditionGroup.or()
+                                                             .where("id", "=", "u1")
+                                                             .where("name", "=", "旧值")
+                                                             .build(),
+                                               OptimisticLockOptions.increment("version", 3));
+
+        assertEquals("update Users set name = ?, version = version + 1 "
+                             + "where (id = ? or name = ?) and version = ?", request.sql());
+        assertEquals(List.of("王", "u1", "旧值", 3), request.parameters());
     }
 
     @Test
@@ -856,6 +903,20 @@ class FormDataSqlRendererTest {
 
         assertEquals("delete from Users where id = ? and version = ?", request.sql());
         assertEquals(List.of("u1", 3), request.parameters());
+    }
+
+    /** 根 OR 业务条件必须整体先求值，版本条件只能继续收窄删除范围。 */
+    @Test
+    void groupsRootOrConditionBeforeOptimisticDeleteVersionCondition() {
+        SqlRequest request = renderer().delete(versionedForm(),
+                                               ConditionGroup.or()
+                                                             .where("id", "=", "u1")
+                                                             .where("name", "=", "旧值")
+                                                             .build(),
+                                               OptimisticLockOptions.increment("version", 3));
+
+        assertEquals("delete from Users where (id = ? or name = ?) and version = ?", request.sql());
+        assertEquals(List.of("u1", "旧值", 3), request.parameters());
     }
 
     /**

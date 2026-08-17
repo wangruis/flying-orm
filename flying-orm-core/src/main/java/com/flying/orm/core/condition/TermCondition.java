@@ -1,10 +1,9 @@
 package com.flying.orm.core.condition;
 
+import com.flying.orm.core.internal.value.BindableValueSnapshots;
+
 import java.lang.reflect.Array;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.IdentityHashMap;
 import java.util.List;
 
 /**
@@ -46,9 +45,11 @@ public record TermCondition(String field, String operator, Object value) impleme
     @Override
     public Object value() {
         if (requiresBoundedCollection(operator) && value instanceof List<?> values) {
-            return snapshotArrayElements(values);
+            return BindableValueSnapshots.immutableValues(values);
         }
-        return copyArray(value);
+        return isStandardOperator(operator)
+                ? BindableValueSnapshots.immutableValue(value)
+                : BindableValueSnapshots.arrayGraph(value);
     }
 
     /**
@@ -74,7 +75,9 @@ public record TermCondition(String field, String operator, Object value) impleme
                 throw collectionTooLarge();
             }
         }
-        return copyArray(value);
+        return isStandardOperator(operator)
+                ? BindableValueSnapshots.immutableValue(value)
+                : BindableValueSnapshots.arrayGraph(value);
     }
 
     /**
@@ -82,26 +85,13 @@ public record TermCondition(String field, String operator, Object value) impleme
      */
     private static List<Object> snapshotIterable(Iterable<?> values) {
         List<Object> snapshot = new ArrayList<>();
-        IdentityHashMap<Object, Object> arrayCopies = new IdentityHashMap<>();
         for (Object item : values) {
             if (snapshot.size() >= MAX_COLLECTION_SIZE) {
                 throw collectionTooLarge();
             }
-            snapshot.add(copyArray(item, arrayCopies));
+            snapshot.add(item);
         }
-        return Collections.unmodifiableList(snapshot);
-    }
-
-    /**
-     * 标准多值 term 已经发布后仍需隔离其直接数组元素；不递归复制业务对象或嵌套容器。
-     */
-    private static List<Object> snapshotArrayElements(List<?> values) {
-        List<Object> snapshot = new ArrayList<>(values.size());
-        IdentityHashMap<Object, Object> arrayCopies = new IdentityHashMap<>();
-        for (Object value : values) {
-            snapshot.add(copyArray(value, arrayCopies));
-        }
-        return Collections.unmodifiableList(snapshot);
+        return BindableValueSnapshots.immutableValues(snapshot);
     }
 
     private static boolean requiresBoundedCollection(String operator) {
@@ -113,51 +103,8 @@ public record TermCondition(String field, String operator, Object value) impleme
                            .orElse(false);
     }
 
-    private static Object copyArray(Object value) {
-        return copyArray(value, new IdentityHashMap<>());
-    }
-
-    /** 仅复制数组可达图；普通业务对象保持身份，共享引用和数组环也在副本中保持。 */
-    private static Object copyArray(Object value, IdentityHashMap<Object, Object> copies) {
-        if (value == null || !value.getClass().isArray()) {
-            return value;
-        }
-        Object existing = copies.get(value);
-        if (existing != null) {
-            return existing;
-        }
-        Object rootCopy = Array.newInstance(value.getClass().getComponentType(), Array.getLength(value));
-        copies.put(value, rootCopy);
-        ArrayDeque<Object> sources = new ArrayDeque<>();
-        ArrayDeque<Object> targets = new ArrayDeque<>();
-        sources.addLast(value);
-        targets.addLast(rootCopy);
-        while (!sources.isEmpty()) {
-            Object source = sources.removeFirst();
-            Object target = targets.removeFirst();
-            Class<?> componentType = source.getClass().getComponentType();
-            int length = Array.getLength(source);
-            if (componentType.isPrimitive()) {
-                System.arraycopy(source, 0, target, 0, length);
-                continue;
-            }
-            for (int index = 0; index < length; index++) {
-                Object item = Array.get(source, index);
-                if (item == null || !item.getClass().isArray()) {
-                    Array.set(target, index, item);
-                    continue;
-                }
-                Object itemCopy = copies.get(item);
-                if (itemCopy == null) {
-                    itemCopy = Array.newInstance(item.getClass().getComponentType(), Array.getLength(item));
-                    copies.put(item, itemCopy);
-                    sources.addLast(item);
-                    targets.addLast(itemCopy);
-                }
-                Array.set(target, index, itemCopy);
-            }
-        }
-        return rootCopy;
+    private static boolean isStandardOperator(String operator) {
+        return TermRegistry.standard().find(operator).isPresent();
     }
 
     private static ConditionValueException collectionTooLarge() {

@@ -35,6 +35,7 @@ public final class SqlTemplateEngine {
         this.valueCodecs = Objects.requireNonNull(valueCodecs, "value codec registry must not be null");
         this.jdbcBindMarkers = jdbcBindMarkers;
         for (SqlTemplate template : registry.templates()) {
+            SqlStatements.requireSingle(template.sql(), dialect);
             SqlTemplate.requireReadOnlyQuery(template.sql(), dialect);
         }
     }
@@ -67,9 +68,9 @@ public final class SqlTemplateEngine {
      */
     public static SqlRequest compileNative(String sql, Map<String, ?> values, RdbDialect dialect,
                                            ValueCodecRegistry valueCodecs) {
-        SqlTemplate template = SqlTemplate.nativeStatement(sql);
-        return renderTemplate(template, values, Map.of(),
-                              Objects.requireNonNull(dialect, "RDB dialect must not be null"),
+        RdbDialect safeDialect = Objects.requireNonNull(dialect, "RDB dialect must not be null");
+        SqlTemplate template = SqlTemplate.nativeStatement(SqlStatements.requireSingle(sql, safeDialect));
+        return renderTemplate(template, values, Map.of(), safeDialect,
                               valueCodecs, false);
     }
 
@@ -77,7 +78,9 @@ public final class SqlTemplateEngine {
     @InternalApi
     public static SqlRequest compileNativeJdbc(String sql, Map<String, ?> values, RdbDialect dialect,
                                                ValueCodecRegistry valueCodecs) {
-        return renderTemplate(SqlTemplate.nativeStatement(sql), values, Map.of(), dialect, valueCodecs, true);
+        RdbDialect safeDialect = Objects.requireNonNull(dialect, "RDB dialect must not be null");
+        SqlTemplate template = SqlTemplate.nativeStatement(SqlStatements.requireSingle(sql, safeDialect));
+        return renderTemplate(template, values, Map.of(), safeDialect, valueCodecs, true);
     }
 
     private static SqlRequest renderTemplate(SqlTemplate template, Map<String, ?> values,
@@ -285,6 +288,12 @@ public final class SqlTemplateEngine {
                 index = end;
                 continue;
             }
+            if (postgresql && jdbcBindMarkers && current == '?') {
+                // pgJDBC 用双问号区分数据库问号运算符和 JDBC 参数标记；命名参数仍由上面的分支生成单问号。
+                sql.append("??");
+                index++;
+                continue;
+            }
             sql.append(current);
             index++;
         }
@@ -317,7 +326,7 @@ public final class SqlTemplateEngine {
 
     /**
      * 模板请求会标成 NATIVE，执行器不会再改写参数标记，所以这里必须一次生成当前驱动认识的格式。
-     * 只在识别到命名参数时追加标记，原 SQL 自带的问号（例如 PostgreSQL JSON 运算符）会原样保留。
+     * 只在识别到命名参数时追加标记；PostgreSQL 原生问号运算符在 JDBC 模式按 pgJDBC 契约转义。
      */
     private static void appendBindMarker(StringBuilder sql, RdbDialect dialect, int parameterIndex,
                                          boolean jdbcBindMarkers) {

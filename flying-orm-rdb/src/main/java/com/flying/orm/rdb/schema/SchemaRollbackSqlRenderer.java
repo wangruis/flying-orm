@@ -61,7 +61,7 @@ final class SchemaRollbackSqlRenderer {
     }
 
     SqlRequest rollbackCreateIndex(String table, IndexMetadata index) {
-        return tables.createIndex(tables.identifier(table), index);
+        return tables.createIndex(table, index);
     }
 
     private static DynamicField toField(ColumnMetadata column) {

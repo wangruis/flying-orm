@@ -10,6 +10,7 @@ import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.core.sql.render.RelationTermPackage;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import org.junit.jupiter.api.Test;
 
@@ -121,6 +122,66 @@ class JoinQuerySqlRendererTest {
                 () -> renderer().joinQueries().select(spec, Map.of(), PageQuery.of(1, 20)));
 
         assertEquals("join page requires at least one source-qualified order", error.getMessage());
+    }
+
+    /** 不同 JOIN 源的业务条件按 AND 合并时，源内顶层 OR 必须保持原分组语义。 */
+    @Test
+    void preservesTopLevelOrWhenCombiningJoinSourceConditions() {
+        DynamicForm users = form("users", "id", "name");
+        DynamicForm orders = form("orders", "id", "user_id", "status");
+        JoinQuerySpec.Builder builder = JoinQuerySpec.builder(users);
+        JoinSource root = builder.root();
+        JoinSource joined = builder.join(JoinType.LEFT, orders, root, "id", "user_id");
+        JoinQuerySpec spec = builder.select(root, "name")
+                                    .where(root, ConditionGroup.or()
+                                                               .where("name", "=", "alice")
+                                                               .where("name", "=", "bob")
+                                                               .build())
+                                    .where(joined, ConditionGroup.and()
+                                                                 .where("status", "=", "paid")
+                                                                 .build())
+                                    .build();
+
+        SqlRequest request = renderer().joinQueries().select(spec, Map.of());
+
+        assertEquals("select t0.name as s0_name from users t0 "
+                             + "left outer join orders t1 on t0.id = t1.user_id "
+                             + "where (t0.name = ? or t0.name = ?) and t1.status = ?",
+                     request.sql());
+        assertEquals(java.util.List.of("alice", "bob", "paid"), request.parameters());
+    }
+
+    /** relation-exists 的关系表结构标识符不能被 JOIN 当前源的字段限定规则误判。 */
+    @Test
+    void rendersRelationExistsInsideQualifiedJoinBusinessCondition() {
+        DynamicForm users = form("users", "id", "name");
+        DynamicForm orders = form("orders", "id", "user_id");
+        JoinQuerySpec.Builder builder = JoinQuerySpec.builder(users);
+        JoinSource root = builder.root();
+        builder.join(JoinType.LEFT, orders, root, "id", "user_id");
+        JoinQuerySpec spec = builder.select(root, "name")
+                                    .where(root, ConditionGroup.and(RelationTermPackage.of(
+                                            "user-org", "org_user", "ou", "user_id", "org_id",
+                                            "user-in-org", "user-not-in-org").terms())
+                                                               .where("id", "user-in-org", "org-1")
+                                                               .build())
+                                    .build();
+        SqlRenderer conditionRenderer = SqlRenderer.builder()
+                                                    .addDefaultTerms()
+                                                    .addTermPackage(RelationTermPackage.of(
+                                                            "user-org", "org_user", "ou", "user_id", "org_id",
+                                                            "user-in-org", "user-not-in-org"))
+                                                    .build();
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(conditionRenderer, RdbDialect.h2());
+
+        SqlRequest request = renderer.joinQueries().select(spec, Map.of());
+
+        assertEquals("select t0.name as s0_name from users t0 "
+                             + "left outer join orders t1 on t0.id = t1.user_id "
+                             + "where exists (select 1 from org_user ou "
+                             + "where ou.user_id = t0.id and ou.org_id = ?)",
+                     request.sql());
+        assertEquals(java.util.List.of("org-1"), request.parameters());
     }
 
     private static FormDataSqlRenderer renderer() {

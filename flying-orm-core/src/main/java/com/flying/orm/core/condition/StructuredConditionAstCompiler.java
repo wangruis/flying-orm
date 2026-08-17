@@ -93,7 +93,7 @@ final class StructuredConditionAstCompiler {
                                         externalField,
                                         externalOperator,
                                         "structured condition operator is not allowed at " + path));
-        Object value = valueNormalizer.normalize(input.value(),
+        Object value = valueNormalizer.normalize(input.stableValue(),
                                                  field,
                                                  policy,
                                                  ConditionCompilationBudget.propertyPath(path, "value"),

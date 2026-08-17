@@ -147,6 +147,38 @@ class FormSchemaSqlRendererTest {
                      () -> RdbDialect.h2().schema().lockTimeoutGuard(Duration.ofSeconds(1)));
     }
 
+    /** 各数据库的会话变量都有明确数值范围，越界配置不能推迟到数据库执行时才失败。 */
+    @Test
+    void rejectsLockTimeoutsOutsideBuiltInDialectRanges() {
+        assertEquals(List.of("set session lock_wait_timeout = 31536000"),
+                     RdbDialect.mysql().schema()
+                               .lockTimeoutGuard(Duration.ofSeconds(31_536_000L)).setupSqlTexts());
+        assertThrows(IllegalArgumentException.class,
+                     () -> RdbDialect.mysql().schema()
+                                     .lockTimeoutGuard(Duration.ofSeconds(31_536_001L)));
+
+        assertEquals(List.of("set lock_timeout = '2147483647ms'"),
+                     RdbDialect.postgresql().schema()
+                               .lockTimeoutGuard(Duration.ofMillis(Integer.MAX_VALUE)).setupSqlTexts());
+        assertThrows(IllegalArgumentException.class,
+                     () -> RdbDialect.postgresql().schema()
+                                     .lockTimeoutGuard(Duration.ofMillis((long) Integer.MAX_VALUE + 1L)));
+
+        assertEquals(List.of("alter session set ddl_lock_timeout = 1000000"),
+                     RdbDialect.oracle().schema()
+                               .lockTimeoutGuard(Duration.ofSeconds(1_000_000L)).setupSqlTexts());
+        assertThrows(IllegalArgumentException.class,
+                     () -> RdbDialect.oracle().schema()
+                                     .lockTimeoutGuard(Duration.ofSeconds(1_000_001L)));
+
+        assertEquals(List.of("set lock_timeout 2147483647"),
+                     RdbDialect.sqlServer().schema()
+                               .lockTimeoutGuard(Duration.ofMillis(Integer.MAX_VALUE)).setupSqlTexts());
+        assertThrows(IllegalArgumentException.class,
+                     () -> RdbDialect.sqlServer().schema()
+                                     .lockTimeoutGuard(Duration.ofMillis((long) Integer.MAX_VALUE + 1L)));
+    }
+
     /**
      * 默认结构渲染策略叫 standard，名字要清楚表达它只是基础写法。
      */
@@ -180,6 +212,193 @@ class FormSchemaSqlRendererTest {
         assertEquals(List.of(), requests.get(0).parameters());
     }
 
+    /** 复合主键必须渲染成一个表级约束，不能给每一列分别声明 primary key。 */
+    @Test
+    void rendersCompositePrimaryKeyAsOneTableConstraint() {
+        DynamicForm form = DynamicForm.builder("membership", "membership")
+                                      .addField(DynamicField.primaryKey("tenant_id", "BIGINT"))
+                                      .addField(DynamicField.primaryKey("user_id", "BIGINT"))
+                                      .build();
+
+        String sql = FormSchemaSqlRenderer.create(RdbDialect.postgresql()).createTable(form).getFirst().sql();
+
+        assertEquals("create table \"membership\" (\"tenant_id\" BIGINT not null, "
+                             + "\"user_id\" BIGINT not null, primary key (\"tenant_id\", \"user_id\"))",
+                     sql);
+    }
+
+    /** 直接建表入口也必须兑现 DynamicField.unique，不能只在迁移计划入口创建唯一索引。 */
+    @Test
+    void directCreateTableIncludesGeneratedUniqueIndexes() {
+        DynamicForm form = DynamicForm.builder("users", "users")
+                                      .addField(DynamicField.primaryKey("id", "BIGINT"))
+                                      .addField(DynamicField.of("email", "VARCHAR").withUnique(true))
+                                      .build();
+
+        List<String> sql = FormSchemaSqlRenderer.create(RdbDialect.postgresql()).createTable(form)
+                                                .stream().map(SqlRequest::sql).toList();
+
+        assertEquals(2, sql.size());
+        assertTrue(sql.get(1).startsWith("create unique index "));
+        assertTrue(sql.get(1).endsWith(" on \"users\" (\"email\")"));
+    }
+
+    /** 无长度参数语义的物理类型不能被静默拼成数据库不接受的伪类型。 */
+    @Test
+    void rejectsTypeArgumentsForUnparameterizedPhysicalTypes() {
+        DynamicForm form = DynamicForm.builder("payloads", "payloads")
+                                      .addField(DynamicField.of("body", "BINARY").withLength(128))
+                                      .build();
+
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> FormSchemaSqlRenderer.create(RdbDialect.postgresql()).createTable(form));
+
+        assertEquals("data type does not accept length or precision arguments: BYTEA", failure.getMessage());
+    }
+
+    /** PostgreSQL 与 SQL Server 的整数类型没有长度参数，不能生成 INTEGER(10) 或 INT(10)。 */
+    @Test
+    void rejectsIntegerLengthThatBuiltInDialectsCannotExecute() {
+        DynamicForm form = DynamicForm.builder("counters", "counters")
+                                      .addField(DynamicField.of("value", "INTEGER").withLength(10))
+                                      .build();
+
+        IllegalArgumentException postgresql = assertThrows(
+                IllegalArgumentException.class,
+                () -> FormSchemaSqlRenderer.create(RdbDialect.postgresql()).createTable(form));
+        IllegalArgumentException sqlServer = assertThrows(
+                IllegalArgumentException.class,
+                () -> FormSchemaSqlRenderer.create(RdbDialect.sqlServer()).createTable(form));
+
+        assertEquals("data type does not accept length or precision arguments: INTEGER", postgresql.getMessage());
+        assertEquals("data type does not accept length or precision arguments: INT", sqlServer.getMessage());
+    }
+
+    /** 多词固定类型和位置敏感的 interval 也不能被通用长度逻辑拼成非法 DDL。 */
+    @Test
+    void rejectsArgumentsForFixedMultiWordAndPositionSensitiveTypes() {
+        DynamicForm postgresqlDouble = DynamicForm.builder("metrics", "metrics")
+                                                  .addField(DynamicField.of("value", "DOUBLE PRECISION")
+                                                                        .withLength(10))
+                                                  .build();
+        DynamicForm sqlServerDateTime = DynamicForm.builder("events", "events")
+                                                   .addField(DynamicField.of("created_at", "SMALLDATETIME")
+                                                                         .withLength(3))
+                                                   .build();
+        DynamicForm oracleInterval = DynamicForm.builder("events", "events")
+                                                .addField(DynamicField.of("retention", "INTERVAL YEAR TO MONTH")
+                                                                      .withLength(2))
+                                                .build();
+
+        assertEquals("data type does not accept length or precision arguments: DOUBLE PRECISION",
+                     assertThrows(IllegalArgumentException.class,
+                                  () -> FormSchemaSqlRenderer.create(RdbDialect.postgresql())
+                                                             .createTable(postgresqlDouble)).getMessage());
+        assertEquals("data type does not accept length or precision arguments: SMALLDATETIME",
+                     assertThrows(IllegalArgumentException.class,
+                                  () -> FormSchemaSqlRenderer.create(RdbDialect.sqlServer())
+                                                             .createTable(sqlServerDateTime)).getMessage());
+        assertEquals("data type does not accept length or precision arguments: INTERVAL YEAR TO MONTH",
+                     assertThrows(IllegalArgumentException.class,
+                                  () -> FormSchemaSqlRenderer.create(RdbDialect.oracle())
+                                                             .createTable(oracleInterval)).getMessage());
+    }
+
+    /** 生成列要按当前数据库真正支持的数值类型校验，不能只看模糊的 numeric 前缀。 */
+    @Test
+    void rejectsUnsupportedIdentityTypeAndInvalidMysqlIdentityLayout() {
+        DynamicForm postgresDecimal = DynamicForm.builder("events", "events")
+                                                 .addField(DynamicField.primaryKey("id", "DECIMAL")
+                                                                       .withPrecision(20, 0)
+                                                                       .withGeneration(ValueGeneration.identity()))
+                                                 .build();
+        DynamicForm mysqlMultiple = DynamicForm.builder("events", "events")
+                                               .addField(DynamicField.primaryKey("tenant_id", "BIGINT")
+                                                                     .withGeneration(ValueGeneration.identity()))
+                                               .addField(DynamicField.primaryKey("event_id", "BIGINT")
+                                                                     .withGeneration(ValueGeneration.identity()))
+                                               .build();
+
+        assertThrows(IllegalArgumentException.class,
+                     () -> FormSchemaSqlRenderer.create(RdbDialect.postgresql()).createTable(postgresDecimal));
+        IllegalArgumentException mysqlFailure = assertThrows(
+                IllegalArgumentException.class,
+                () -> FormSchemaSqlRenderer.create(RdbDialect.mysql()).createTable(mysqlMultiple));
+        assertEquals("mysql table must not declare more than one identity column", mysqlFailure.getMessage());
+    }
+
+    /** identity 数量、MySQL 索引位置和 SQL Server scale 必须在生成不可执行 DDL 前失败。 */
+    @Test
+    void rejectsInvalidIdentityLayoutsForBuiltInDialects() {
+        DynamicForm mysqlComposite = DynamicForm.builder("events", "events")
+                                                 .addField(DynamicField.primaryKey("tenant_id", "BIGINT"))
+                                                 .addField(DynamicField.primaryKey("event_id", "BIGINT")
+                                                                       .withGeneration(ValueGeneration.identity()))
+                                                 .build();
+        DynamicForm oracleMultiple = DynamicForm.builder("events", "events")
+                                                .addField(DynamicField.of("event_id", "BIGINT")
+                                                                      .withGeneration(ValueGeneration.identity()))
+                                                .addField(DynamicField.of("audit_id", "BIGINT")
+                                                                      .withGeneration(ValueGeneration.identity()))
+                                                .build();
+        DynamicForm sqlServerDecimal = DynamicForm.builder("events", "events")
+                                                  .addField(DynamicField.primaryKey("event_id", "DECIMAL")
+                                                                        .withPrecision(20, 2)
+                                                                        .withGeneration(ValueGeneration.identity()))
+                                                  .build();
+
+        assertEquals("mysql identity column must be the first column of an index",
+                     assertThrows(IllegalArgumentException.class,
+                                  () -> FormSchemaSqlRenderer.create(RdbDialect.mysql())
+                                                             .createTable(mysqlComposite)).getMessage());
+        assertEquals("oracle table must not declare more than one identity column",
+                     assertThrows(IllegalArgumentException.class,
+                                  () -> FormSchemaSqlRenderer.create(RdbDialect.oracle())
+                                                             .createTable(oracleMultiple)).getMessage());
+        assertEquals("sql server generated decimal data type must have scale zero: DECIMAL(20,2)",
+                     assertThrows(IllegalArgumentException.class,
+                                  () -> FormSchemaSqlRenderer.create(RdbDialect.sqlServer())
+                                                             .createTable(sqlServerDecimal)).getMessage());
+    }
+
+    /** MySQL 标识列起点要进入表选项，无法逐列表达的步长不能被静默忽略。 */
+    @Test
+    void rendersMysqlIdentityStartAndRejectsUnsupportedIncrement() {
+        DynamicForm startAt = DynamicForm.builder("events", "events")
+                                         .addField(DynamicField.primaryKey("id", "BIGINT")
+                                                               .withGeneration(ValueGeneration.identity(100, 1, 0)))
+                                         .build();
+        DynamicForm increment = DynamicForm.builder("events", "events")
+                                           .addField(DynamicField.primaryKey("id", "BIGINT")
+                                                                 .withGeneration(ValueGeneration.identity(1, 2, 0)))
+                                           .build();
+
+        String sql = FormSchemaSqlRenderer.create(RdbDialect.mysql()).createTable(startAt).getFirst().sql();
+
+        assertTrue(sql.endsWith(" auto_increment = 100"));
+        assertEquals("mysql identity increment must be one",
+                     assertThrows(IllegalArgumentException.class,
+                                  () -> FormSchemaSqlRenderer.create(RdbDialect.mysql())
+                                                             .createTable(increment)).getMessage());
+    }
+
+    /** Oracle 不接受 CACHE 1，方言必须在生成不可执行 DDL 前稳定拒绝。 */
+    @Test
+    void rejectsOracleSequenceCacheOfOne() {
+        DynamicForm form = DynamicForm.builder("events", "events")
+                                      .addField(DynamicField.primaryKey("id", "BIGINT")
+                                                            .withGeneration(ValueGeneration.sequence(
+                                                                    "events_id_seq", 1, 1, 1)))
+                                      .build();
+
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> FormSchemaSqlRenderer.create(RdbDialect.oracle()).createTable(form));
+
+        assertEquals("oracle sequence cache size must be zero or at least two", failure.getMessage());
+    }
+
     /** 直接迁移不能把约束变化伪装成类型变化后返回成功。 */
     @Test
     void directMigrationRejectsColumnConstraintChanges() {
@@ -197,6 +416,29 @@ class FormSchemaSqlRendererTest {
         assertEquals("column constraint changes require a reviewed migration plan", failure.getMessage());
     }
 
+    /** 直接迁移新增唯一字段时必须同时创建稳定唯一索引，不能只加列后静默丢失数据约束。 */
+    @Test
+    void directMigrationCreatesUniqueIndexForAddedUniqueField() {
+        DynamicForm source = DynamicForm.builder("users", "users")
+                                        .addField(DynamicField.primaryKey("id", "BIGINT"))
+                                        .build();
+        DynamicForm target = DynamicForm.builder("users", "users")
+                                        .addField(DynamicField.primaryKey("id", "BIGINT"))
+                                        .addField(DynamicField.of("external_reference", "VARCHAR").withUnique(true))
+                                        .build();
+
+        List<String> sql = FormSchemaSqlRenderer.create(RdbDialect.postgresql())
+                                                .migrate(source.diffTo(target))
+                                                .stream()
+                                                .map(SqlRequest::sql)
+                                                .toList();
+
+        assertEquals(List.of(
+                "alter table \"users\" add column \"external_reference\" VARCHAR(255)",
+                "create unique index \"uk_users_external_reference\" "
+                        + "on \"users\" (\"external_reference\")"), sql);
+    }
+
     /** 只有注释变化时不应额外重写字段类型。 */
     @Test
     void directMigrationRendersOnlySupportedCommentChange() {
@@ -212,6 +454,27 @@ class FormSchemaSqlRendererTest {
 
         assertEquals(List.of("comment on column \"users\".\"name\" is 'display name'"),
                      requests.stream().map(SqlRequest::sql).toList());
+    }
+
+    /** Oracle 删除字段注释使用空字符串；PostgreSQL 仍使用 NULL，不能把两种方言混成一条语法。 */
+    @Test
+    void removesColumnCommentsWithDialectSpecificSyntax() {
+        TableMetadata current = TableMetadata.builder("users")
+                                             .addColumn(ColumnMetadata.of("name", "VARCHAR")
+                                                                      .withComment("display name"))
+                                             .build();
+        DynamicForm target = DynamicForm.builder("users", "users")
+                                        .addField(DynamicField.of("name", "VARCHAR"))
+                                        .build();
+
+        assertEquals(List.of("comment on column \"users\".\"name\" is ''"),
+                     FormSchemaSqlRenderer.create(RdbDialect.oracle())
+                                          .migrateSafelyPlan(current, target, List.of())
+                                          .sqlTexts());
+        assertEquals(List.of("comment on column \"users\".\"name\" is null"),
+                     FormSchemaSqlRenderer.create(RdbDialect.postgresql())
+                                          .migrateSafelyPlan(current, target, List.of())
+                                          .sqlTexts());
     }
 
     /** MySQL MODIFY COLUMN 必须重放完整目标定义，避免扩容时丢失 NOT NULL 与内联注释。 */
@@ -361,7 +624,7 @@ class FormSchemaSqlRendererTest {
 
         assertTrue(safe.requests().isEmpty());
         assertEquals(1, safe.skippedChanges().size());
-        assertEquals(List.of("alter table [users] alter column [name] VARCHAR(64)"), allowed.sqlTexts());
+        assertEquals(List.of("alter table [users] alter column [name] VARCHAR(64) null"), allowed.sqlTexts());
     }
 
     /** 超出迁移比较数值范围的数据库专用类型参数必须保守进入审核，不能让比较器本身抛出异常。 */
@@ -488,6 +751,20 @@ class FormSchemaSqlRendererTest {
         assertEquals("create table \"parameterized_types\" (\"created_at\" TIMESTAMP(6) WITH TIME ZONE, "
                              + "\"local_time\" TIME(3) WITHOUT TIME ZONE, \"tags\" VARCHAR(32)[])",
                      renderer.createTable(form).getFirst().sql());
+    }
+
+    /** 数组参数能力由元素类型决定，不能生成 PostgreSQL 不接受的 TEXT(32)[] 等类型。 */
+    @Test
+    void rejectsArgumentsOnPostgresqlArrayElementTypesThatDoNotAcceptThem() {
+        SchemaDialect postgresql = RdbDialect.postgresql().schema();
+
+        assertEquals("VARCHAR(32)[]", postgresql.dataType("VARCHAR[]", 32, null, null));
+        assertThrows(IllegalArgumentException.class,
+                     () -> postgresql.dataType("TEXT[]", 32, null, null));
+        assertThrows(IllegalArgumentException.class,
+                     () -> postgresql.dataType("BYTEA[]", 32, null, null));
+        assertThrows(IllegalArgumentException.class,
+                     () -> postgresql.dataType("INTEGER[]", null, 3, null));
     }
 
     @Test
@@ -1039,9 +1316,9 @@ class FormSchemaSqlRendererTest {
         List<SqlRequest> requests = FormSchemaSqlRenderer.create(RdbDialect.sqlServer())
                                                          .createTable(commonTypeForm());
 
-        assertEquals("create table [Dynamic_Form] ([id] BIGINT primary key, [name] NVARCHAR(255), "
-                             + "[enabled] BIT, [amount] DECIMAL(38,10), [payload] VARBINARY(max), "
-                             + "[description] NVARCHAR(max), [created_at] DATETIME2)",
+        assertEquals("create table [Dynamic_Form] ([id] BIGINT not null primary key, [name] NVARCHAR(255) null, "
+                             + "[enabled] BIT null, [amount] DECIMAL(38,10) null, [payload] VARBINARY(max) null, "
+                             + "[description] NVARCHAR(max) null, [created_at] DATETIME2 null)",
                      requests.get(0).sql());
     }
 
@@ -1055,12 +1332,97 @@ class FormSchemaSqlRendererTest {
 
         List<SqlRequest> requests = FormSchemaSqlRenderer.create(RdbDialect.sqlServer()).createTable(form);
 
-        assertEquals(List.of("create table [dbo].[Users] ([name] NVARCHAR(64))",
+        assertEquals(List.of("create table [dbo].[Users] ([name] NVARCHAR(64) null)",
                              "exec sp_addextendedproperty @name = N'MS_Description', @value = N'Name', "
                                      + "@level0type = N'SCHEMA', @level0name = N'dbo', "
                                      + "@level1type = N'TABLE', @level1name = N'Users', "
                                      + "@level2type = N'COLUMN', @level2name = N'name'"),
-                     requests.stream().map(SqlRequest::sql).toList());
+                      requests.stream().map(SqlRequest::sql).toList());
+    }
+
+    /** SQL Server 注释必须拿到可信 schema，不能把未限定表静默猜成 dbo。 */
+    @Test
+    void requiresQualifiedSqlServerTableForColumnComments() {
+        SchemaDialect sqlServer = RdbDialect.sqlServer().schema();
+
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> sqlServer.columnCommentSql("Users", "name", "Name"));
+
+        assertEquals("SQL Server column comments require a schema-qualified table", error.getMessage());
+        assertTrue(sqlServer.columnCommentSql("sales.Users", "name", "Name")
+                            .orElseThrow()
+                            .contains("@level0name = N'sales'"));
+    }
+
+    /** SQL Server 已存在的扩展属性必须更新或删除，不能重复调用 add 后在真实库失败。 */
+    @Test
+    void updatesAndRemovesSqlServerColumnComments() {
+        TableMetadata current = TableMetadata.builder("dbo.Users")
+                                             .addColumn(ColumnMetadata.of("name", "VARCHAR")
+                                                                      .withLength(64)
+                                                                      .withComment("Old name"))
+                                             .build();
+        DynamicForm updated = DynamicForm.builder("users", "dbo.Users")
+                                         .addField(DynamicField.of("name", "VARCHAR")
+                                                               .withLength(64)
+                                                               .withComment("New name"))
+                                         .build();
+        DynamicForm removed = DynamicForm.builder("users", "dbo.Users")
+                                         .addField(DynamicField.of("name", "VARCHAR").withLength(64))
+                                         .build();
+        FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.sqlServer());
+
+        List<String> updateSql = renderer.migrateSafelyPlan(current, updated, List.of()).sqlTexts();
+        List<String> removeSql = renderer.migrateSafelyPlan(current, removed, List.of()).sqlTexts();
+
+        assertEquals(1, updateSql.size());
+        assertTrue(updateSql.getFirst().startsWith("exec sp_updateextendedproperty "));
+        assertTrue(updateSql.getFirst().contains("@value = N'New name'"));
+        assertEquals(1, removeSql.size());
+        assertTrue(removeSql.getFirst().startsWith("exec sp_dropextendedproperty "));
+    }
+
+    /** PostgreSQL/Oracle 按名字删索引时必须保留表的 schema，避免误删同名索引或找不到目标。 */
+    @Test
+    void qualifiesNameOnlyDropIndexWithTableSchema() {
+        assertEquals("drop index \"audit\".\"idx_users_old\"",
+                     RdbDialect.postgresql().schema().dropIndexSql("audit.Users", "idx_users_old"));
+        assertEquals("drop index \"audit\".\"idx_users_old\"",
+                     RdbDialect.oracle().schema().dropIndexSql("audit.Users", "idx_users_old"));
+        assertEquals("drop index \"audit\".\"idx_users_old\"",
+                     RdbDialect.oracle().schema().dropIndexSql(" audit.Users ", " idx_users_old "));
+    }
+
+    /** Oracle 显式 schema 的索引创建与删除必须落在同一 schema，不能依赖当前登录用户。 */
+    @Test
+    void qualifiesOracleCreateIndexWithTableSchema() {
+        IndexMetadata index = IndexMetadata.builder("idx_users_email").addColumn("email").build();
+        FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.oracle());
+
+        assertEquals("create index \"audit\".\"idx_users_email\" on \"audit\".\"Users\" (\"email\")",
+                     renderer.createIndexes("audit.Users", List.of(index)).getFirst().sql());
+        assertEquals("create index \"audit\".\"idx_users_email\" on \"audit\".\"Users\" (\"email\")",
+                     renderer.createIndexes(" audit.Users ", List.of(index)).getFirst().sql());
+        assertEquals("drop index \"audit\".\"idx_users_email\"",
+                     RdbDialect.oracle().schema().dropIndexSql("audit.Users", index.name()));
+    }
+
+    /** 索引名和索引列只能是单段标识符，schema 只由目标表提供。 */
+    @Test
+    void rejectsQualifiedIndexNamesAndColumnsBeforeRendering() {
+        FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.postgresql());
+        IndexMetadata qualifiedName = IndexMetadata.builder("audit.idx_users_email")
+                                                   .addColumn("email")
+                                                   .build();
+        IndexMetadata qualifiedColumn = IndexMetadata.builder("idx_users_email")
+                                                     .addColumn("users.email")
+                                                     .build();
+
+        assertThrows(IllegalArgumentException.class,
+                     () -> renderer.createIndexes("audit.Users", List.of(qualifiedName)));
+        assertThrows(IllegalArgumentException.class,
+                     () -> renderer.createIndexes("audit.Users", List.of(qualifiedColumn)));
     }
 
     /**

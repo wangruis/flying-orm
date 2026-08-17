@@ -134,10 +134,9 @@ final class R2dbcIndependentBatchWriter {
                                    connections::closeAfterOutcome,
                                    (resource, ignored) -> connections.closeAfterOutcome(resource),
                                    resource -> connections.cancel(resource, "independent")))
-                           // 事务连接的 usingWhen 清理完成后才查询回执，避免单连接池自锁。
-                            .flatMap(result -> confirmer.confirmChunk(request, result))
-                            .onErrorResume(R2dbcBatchChunkWriteFailure.class,
-                                           failure -> confirmer.confirmChunkFailure(request, failure));
+                            // 事务连接的 usingWhen 清理完成后才查询回执，避免单连接池自锁。
+                             .flatMap(result -> confirmer.confirmChunk(request, result))
+                             .onErrorResume(failure -> recoverReceiptFailure(request, chunk, token.get(), failure));
     }
 
     private Mono<BatchChunkResult> executeReceiptTransaction(
@@ -153,7 +152,8 @@ final class R2dbcIndependentBatchWriter {
                    .then(receiptStore.reserve(resource.connection(),
                                               request.options().recovery(),
                                               chunk.chunkIndex(),
-                                              planHash))
+                                              planHash)
+                                     .onErrorMap(R2dbcBatchReceiptReservationConflict::classify))
                    .then(chunks.executeChunk(resource, request, chunk))
                    .flatMap(result -> completeReceiptAndCommit(
                            resource, request, result, planHash, payloadHash, token))
@@ -212,6 +212,9 @@ final class R2dbcIndependentBatchWriter {
                                             R2dbcBatchWriterChunks.BatchChunk chunk,
                                             Throwable error,
                                             BatchChunkResult.RecoveryToken recoveryToken) {
+        if (R2dbcBatchReceiptReservationConflict.find(error) != null) {
+            return rollbackReservationConflict(resource, error);
+        }
         BatchChunkResult failed = error instanceof R2dbcBatchChunkConflictFailure conflict
                 ? BatchChunkResult.conflicted(chunk.chunkIndex(),
                                               chunk.startOffset(),
@@ -276,7 +279,43 @@ final class R2dbcIndependentBatchWriter {
                            return Mono.error(outcome);
                        }
                        return Mono.just(unknown);
-                    });
+                     });
+    }
+
+    private Mono<BatchChunkResult> rollbackReservationConflict(R2dbcBatchConnectionHandle resource,
+                                                                Throwable conflict) {
+        Mono<Void> rollback = connections.rollback(resource)
+                .onErrorResume(rollbackError -> {
+                    VirtualMachineError fatal = ReactiveSqlExecutionProtection.promoteVirtualMachineError(
+                            conflict, rollbackError);
+                    if (fatal != null) {
+                        return Mono.error(fatal);
+                    }
+                    ReactiveSqlExecutionProtection.addSuppressedIfAcyclic(conflict, rollbackError);
+                    return Mono.empty();
+                });
+        return rollback.then(Mono.error(conflict));
+    }
+
+    private Mono<BatchChunkResult> recoverReceiptFailure(BatchWriteRequest request,
+                                                          R2dbcBatchWriterChunks.BatchChunk chunk,
+                                                          BatchChunkResult.RecoveryToken token,
+                                                          Throwable failure) {
+        VirtualMachineError fatal = ReactiveSqlExecutionProtection.findVirtualMachineError(failure);
+        if (fatal != null) {
+            return Mono.error(fatal);
+        }
+        if (R2dbcBatchReceiptReservationConflict.find(failure) != null) {
+            return receiptStore.find(token, request.options().timeout())
+                               .map(receipt -> BatchChunkResult.committed(token.chunkIndex(),
+                                                                          chunk.startOffset(),
+                                                                          Math.toIntExact(receipt.exactInputRowCount()),
+                                                                          receipt.affectedRows()))
+                               .switchIfEmpty(Mono.error(failure));
+        }
+        return failure instanceof R2dbcBatchChunkWriteFailure chunkFailure
+                ? confirmer.confirmChunkFailure(request, chunkFailure)
+                : Mono.error(failure);
     }
 
     /**

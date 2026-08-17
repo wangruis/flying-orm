@@ -3,6 +3,8 @@ package com.flying.orm.rdb.operator;
 import com.flying.orm.core.annotation.TableField;
 import com.flying.orm.core.annotation.TableName;
 import com.flying.orm.core.annotation.Version;
+import com.flying.orm.core.form.DynamicField;
+import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.batch.BatchChunkResult;
@@ -14,6 +16,7 @@ import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.form.FormDataSqlRenderer;
 import com.flying.orm.rdb.form.SyncFormClient;
 import com.flying.orm.rdb.mapping.FlyingLogicDelete;
+import com.flying.orm.rdb.repository.SyncFormRepository;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.sync.SyncBatchExecutor;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
@@ -28,6 +31,30 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** 验证实体 Lambda 的同步入口直接执行 JDBC 契约，同时复用响应式入口的字段和安全 SQL 规则。 */
 class SyncEntityLambdaDmlOperatorTest {
+
+    /** 同步 Repository 的 Lambda 命令同样必须使用调用方显式表单。 */
+    @Test
+    void repositoryLambdaCommandsKeepExplicitForm() {
+        RecordingExecutor executor = new RecordingExecutor();
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.mysql());
+        SyncFormClient client = SyncFormClient.create(executor, new UnusedBatchExecutor(), renderer);
+        DynamicForm form = DynamicForm.builder("dimension", "explicit_dimension_users")
+                                      .addField(DynamicField.of("user_id", "VARCHAR"))
+                                      .addField(DynamicField.of("dimension_id", "VARCHAR"))
+                                      .addField(DynamicField.of("name", "VARCHAR"))
+                                      .addField(DynamicField.of("deleted", "INTEGER"))
+                                      .addField(DynamicField.of("version", "BIGINT"))
+                                      .addField(DynamicField.of("score", "INTEGER"))
+                                      .addField(DynamicField.of("balance", "INTEGER"))
+                                      .build();
+        SyncFormRepository<DimensionUser> repository = SyncFormRepository.create(client, form, DimensionUser.class);
+
+        repository.createQuery().select(DimensionUser::getName)
+                  .where(DimensionUser::getUserId, "u-1").executeRows();
+
+        assertTrue(executor.requests.getFirst().sql().contains("from `explicit_dimension_users`"));
+    }
 
     @Test
     void queryUpdateAndDeleteUseNativeSyncRuntime() {

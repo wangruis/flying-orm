@@ -33,20 +33,38 @@ final class R2dbcGeneratedKeyWriter {
     }
 
     Mono<SqlWriteResult> write(SqlRequest request, SqlExecutionOptions options) {
+        return write(request, options, null);
+    }
+
+    Mono<SqlWriteResult> write(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
         SqlExecutionOptions safeOptions = Objects.requireNonNull(options, "sql execution options must not be null");
         return session.withStatementMono(
                 safeRequest,
                 safeOptions,
                 SqlExecutionOperation.UPDATE,
-                (statement, largeObjects) -> collect(statement, safeOptions, largeObjects));
+                (statement, largeObjects) -> collect(statement, safeOptions, largeObjects, generatedKeyColumn));
     }
 
     static Mono<SqlWriteResult> collect(Statement statement,
                                         SqlExecutionOptions options,
                                         R2dbcLargeObjectScope largeObjects) {
-        // 空参数表示让驱动返回本次写入产生的全部键，具体列名由实体元数据在回填阶段匹配。
-        statement.returnGeneratedValues();
+        return collect(statement, options, largeObjects, null);
+    }
+
+    static Mono<SqlWriteResult> collect(Statement statement,
+                                        SqlExecutionOptions options,
+                                        R2dbcLargeObjectScope largeObjects,
+                                        String generatedKeyColumn) {
+        if (generatedKeyColumn == null) {
+            statement.returnGeneratedValues();
+        } else {
+            String column = generatedKeyColumn.trim();
+            if (column.isEmpty()) {
+                return Mono.error(new IllegalArgumentException("generated key column must not be blank"));
+            }
+            statement.returnGeneratedValues(column);
+        }
         Accumulator accumulator = new Accumulator(options, largeObjects);
         return Flux.from(statement.execute())
                    .concatMap(result -> Flux.from(result.flatMap(segment -> segment(segment, accumulator))), 1)

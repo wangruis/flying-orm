@@ -102,6 +102,12 @@ public final class SyncFormClient {
         return SyncEntityDmlOperator.create(this, entityRenderer, type);
     }
 
+    /** Repository 内部创建 Lambda DML 状态时复用当前已装配的条件渲染器。 */
+    @InternalApi
+    public SqlRenderer entityRenderer() {
+        return entityRenderer;
+    }
+
     public List<DynamicRow> select(QuerySpec spec) { return runtime.select(spec); }
     /** 执行轻量多表查询并使用同步客户端的默认执行保护。 */
     public List<DynamicRow> selectJoin(JoinQuerySpec spec) { return runtime.selectJoin(spec, null); }

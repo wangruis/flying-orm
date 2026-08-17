@@ -1,8 +1,7 @@
 package com.flying.orm.core.form;
 
-import java.lang.reflect.Array;
-import java.util.ArrayDeque;
-import java.util.IdentityHashMap;
+import com.flying.orm.core.internal.value.BindableValueSnapshots;
+
 import java.util.Objects;
 
 /**
@@ -22,8 +21,10 @@ public record LogicDeleteDefinition(String fieldName, Object notDeletedValue, Ob
 
     public LogicDeleteDefinition {
         fieldName = FormNames.requireText(fieldName, "logic delete field name");
-        notDeletedValue = copyArray(Objects.requireNonNull(notDeletedValue, "logic not deleted value must not be null"));
-        deletedValue = copyArray(Objects.requireNonNull(deletedValue, "logic deleted value must not be null"));
+        notDeletedValue = BindableValueSnapshots.immutableValue(
+                Objects.requireNonNull(notDeletedValue, "logic not deleted value must not be null"));
+        deletedValue = BindableValueSnapshots.immutableValue(
+                Objects.requireNonNull(deletedValue, "logic deleted value must not be null"));
     }
 
     /**
@@ -33,7 +34,7 @@ public record LogicDeleteDefinition(String fieldName, Object notDeletedValue, Ob
      */
     @Override
     public Object notDeletedValue() {
-        return copyArray(notDeletedValue);
+        return BindableValueSnapshots.immutableValue(notDeletedValue);
     }
 
     /**
@@ -43,7 +44,7 @@ public record LogicDeleteDefinition(String fieldName, Object notDeletedValue, Ob
      */
     @Override
     public Object deletedValue() {
-        return copyArray(deletedValue);
+        return BindableValueSnapshots.immutableValue(deletedValue);
     }
 
     public static LogicDeleteDefinition of(String fieldName, Object notDeletedValue, Object deletedValue) {
@@ -52,44 +53,5 @@ public record LogicDeleteDefinition(String fieldName, Object notDeletedValue, Ob
 
     public static LogicDeleteDefinition numeric(String fieldName) {
         return new LogicDeleteDefinition(fieldName, 0, 1);
-    }
-
-    private static Object copyArray(Object value) {
-        if (value == null || !value.getClass().isArray()) {
-            return value;
-        }
-        IdentityHashMap<Object, Object> copies = new IdentityHashMap<>();
-        Object rootCopy = Array.newInstance(value.getClass().getComponentType(), Array.getLength(value));
-        copies.put(value, rootCopy);
-        ArrayDeque<Object> sources = new ArrayDeque<>();
-        ArrayDeque<Object> targets = new ArrayDeque<>();
-        sources.addLast(value);
-        targets.addLast(rootCopy);
-        while (!sources.isEmpty()) {
-            Object source = sources.removeFirst();
-            Object target = targets.removeFirst();
-            Class<?> componentType = source.getClass().getComponentType();
-            int length = Array.getLength(source);
-            if (componentType.isPrimitive()) {
-                System.arraycopy(source, 0, target, 0, length);
-                continue;
-            }
-            for (int index = 0; index < length; index++) {
-                Object item = Array.get(source, index);
-                if (item == null || !item.getClass().isArray()) {
-                    Array.set(target, index, item);
-                    continue;
-                }
-                Object itemCopy = copies.get(item);
-                if (itemCopy == null) {
-                    itemCopy = Array.newInstance(item.getClass().getComponentType(), Array.getLength(item));
-                    copies.put(item, itemCopy);
-                    sources.addLast(item);
-                    targets.addLast(itemCopy);
-                }
-                Array.set(target, index, itemCopy);
-            }
-        }
-        return rootCopy;
     }
 }

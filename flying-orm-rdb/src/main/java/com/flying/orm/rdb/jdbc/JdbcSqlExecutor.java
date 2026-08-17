@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.jdbc;
 
+import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.exception.RdbErrorKind;
 import com.flying.orm.rdb.exception.RdbException;
@@ -8,6 +9,7 @@ import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.internal.InternalApi;
+import com.flying.orm.rdb.internal.template.SqlStatements;
 import com.flying.orm.rdb.observation.SqlExecutionObserver;
 import com.flying.orm.rdb.observation.SqlExecutionOperation;
 import com.flying.orm.rdb.observation.SqlStatementType;
@@ -18,6 +20,7 @@ import com.flying.orm.rdb.transaction.JdbcTransactionParticipant;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -26,6 +29,7 @@ import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 
 /**
@@ -48,6 +52,8 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
     private final SqlExecutionOptions defaultOptions;
     private final SqlExecutionObserver observer;
     private final JdbcExecutionObservationSupport observations;
+    /** 首个真实连接识别出的产品名；同一执行器按项目契约只服务同一种方言。 */
+    private volatile String databaseProductName;
 
     private JdbcSqlExecutor(JdbcConnectionProvider connections,
                             SqlExecutionOptions defaultOptions,
@@ -102,6 +108,7 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
     @Override
     public List<DynamicRow> query(SqlRequest request, SqlExecutionOptions options) {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
+        requirePortableSingle(safeRequest);
         SqlExecutionOptions safeOptions = Objects.requireNonNull(options, "sql execution options must not be null");
         long startedAt = System.nanoTime();
         List<DynamicRow> rows = new ArrayList<>();
@@ -128,6 +135,7 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
     @Override
     public long rowsUpdated(SqlRequest request, SqlExecutionOptions options) {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
+        requirePortableSingle(safeRequest);
         SqlExecutionOptions safeOptions = Objects.requireNonNull(options, "sql execution options must not be null");
         long startedAt = System.nanoTime();
         SqlTransactionSource transactionSource = SqlTransactionSource.AUTO_COMMIT;
@@ -147,14 +155,24 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
 
     @Override
     public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+        return rowsUpdatedReturningKeys(request, options, null);
+    }
+
+    @Override
+    @InternalApi
+    public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request,
+                                                   SqlExecutionOptions options,
+                                                   String generatedKeyColumn) {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
+        requirePortableSingle(safeRequest);
         SqlExecutionOptions safeOptions = Objects.requireNonNull(options, "sql execution options must not be null");
         long startedAt = System.nanoTime();
         SqlTransactionSource transactionSource = SqlTransactionSource.AUTO_COMMIT;
         try {
             JdbcConnectionProvider.JdbcConnectionLease lease = connections.acquire();
             transactionSource = lease.transactionSource();
-            SqlWriteResult result = executeUpdateReturningKeys(lease, safeRequest, safeOptions);
+            SqlWriteResult result = executeUpdateReturningKeys(
+                    lease, safeRequest, safeOptions, generatedKeyColumn);
             observations.success(SqlExecutionOperation.UPDATE, safeRequest, result.affectedRows(), startedAt,
                                  transactionSource);
             return result;
@@ -184,6 +202,7 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
         boolean outcomeConfirmed = false;
         try {
             connection = lease.connection();
+            requireConnectionSingle(connection, request);
             statement = connection.prepareStatement(request.sql());
             JdbcStatementOptions.apply(statement, options);
             JdbcStatementBinder.bind(statement, request.parameters());
@@ -210,6 +229,7 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
         boolean outcomeConfirmed = false;
         try {
             connection = lease.connection();
+            requireConnectionSingle(connection, request);
             statement = connection.prepareStatement(request.sql());
             JdbcStatementOptions.apply(statement, options);
             JdbcStatementBinder.bind(statement, request.parameters());
@@ -234,7 +254,8 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
 
     private SqlWriteResult executeUpdateReturningKeys(JdbcConnectionProvider.JdbcConnectionLease lease,
                                                        SqlRequest request,
-                                                       SqlExecutionOptions options) throws SQLException {
+                                                       SqlExecutionOptions options,
+                                                       String generatedKeyColumn) throws SQLException {
         Connection connection = null;
         PreparedStatement statement = null;
         ResultSet generatedKeys = null;
@@ -242,7 +263,10 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
         boolean outcomeConfirmed = false;
         try {
             connection = lease.connection();
-            statement = connection.prepareStatement(request.sql(), Statement.RETURN_GENERATED_KEYS);
+            requireConnectionSingle(connection, request);
+            statement = generatedKeyColumn == null
+                    ? connection.prepareStatement(request.sql(), Statement.RETURN_GENERATED_KEYS)
+                    : connection.prepareStatement(request.sql(), new String[]{generatedKeyColumn});
             JdbcStatementOptions.apply(statement, options);
             JdbcStatementBinder.bind(statement, request.parameters());
             JdbcStatementControl.requireNotInterrupted(statement);
@@ -275,5 +299,39 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
         if (translated instanceof RdbException rdbError && rdbError.kind() == RdbErrorKind.CONNECTION) {
             lease.discardAfterUncertainTransaction(operationFailure);
         }
+    }
+
+    private static void requirePortableSingle(SqlRequest request) {
+        if (request.bindMarkerStyle() != SqlBindMarkerStyle.NATIVE) {
+            SqlStatements.requirePortableSingle(request.sql());
+        }
+    }
+
+    private void requireConnectionSingle(Connection connection, SqlRequest request) throws SQLException {
+        String productName = databaseProductName(connection);
+        if (request.bindMarkerStyle() == SqlBindMarkerStyle.NATIVE || isSqlServer(productName)) {
+            SqlStatements.requireSingleForDatabaseProduct(request.sql(), productName);
+        }
+    }
+
+    private String databaseProductName(Connection connection) throws SQLException {
+        String current = databaseProductName;
+        if (current != null) {
+            return current;
+        }
+        DatabaseMetaData metadata = connection.getMetaData();
+        if (metadata == null) {
+            return "";
+        }
+        String detected = Objects.requireNonNullElse(metadata.getDatabaseProductName(), "");
+        if (!detected.isBlank()) {
+            databaseProductName = detected;
+        }
+        return detected;
+    }
+
+    private static boolean isSqlServer(String databaseProductName) {
+        String normalized = databaseProductName.toLowerCase(Locale.ROOT);
+        return normalized.contains("sql server") || normalized.contains("sqlserver") || normalized.contains("mssql");
     }
 }

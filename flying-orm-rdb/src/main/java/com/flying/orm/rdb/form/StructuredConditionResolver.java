@@ -68,6 +68,7 @@ public interface StructuredConditionResolver {
             for (StructuredConditionCustomizer customizer : safeCustomizers) {
                 StructuredConditionCustomizer safeCustomizer = Objects.requireNonNull(customizer,
                                                                                      "structured condition customizer must not be null");
+                safeCustomizer.validate(form, adaptedInput, adaptedPolicy);
                 adaptedInput = safeCustomizer.adapt(form, adaptedInput);
                 adaptedPolicy = safeCustomizer.customize(adaptedPolicy);
             }

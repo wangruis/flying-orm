@@ -179,8 +179,12 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
             return executor.atomicProtectedWrite(plan.protectedWrite(), plan.options())
                            .doOnNext(result -> plan.requireSuccess(result.affectedRows()));
         }
-        return executor.rowsUpdatedReturningKeys(plan.request(), plan.options())
-                       .doOnNext(result -> plan.requireSuccess(result.affectedRows()));
+        Mono<SqlWriteResult> result = plan.generatedKeyColumn()
+                                          .map(column -> executor.rowsUpdatedReturningKeys(
+                                                  plan.request(), plan.options(), column))
+                                          .orElseGet(() -> executor.rowsUpdatedReturningKeys(
+                                                  plan.request(), plan.options()));
+        return result.doOnNext(value -> plan.requireSuccess(value.affectedRows()));
     }
 
     Mono<Long> updateSpec(WriteSpec spec) {

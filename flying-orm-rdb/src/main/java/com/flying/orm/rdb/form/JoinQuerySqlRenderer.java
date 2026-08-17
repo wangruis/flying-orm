@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.LogicalOperator;
 import com.flying.orm.core.join.JoinClause;
 import com.flying.orm.core.join.JoinFieldPair;
 import com.flying.orm.core.join.JoinOrder;
@@ -174,10 +175,13 @@ final class JoinQuerySqlRenderer {
                                      List<Object> parameters) {
         StringJoiner where = new StringJoiner(" and ");
         for (JoinSource source : spec.sources()) {
+            ConditionGroup condition = businessConditions.get(source);
             SqlFragment fragment = sources.businessCondition(
-                    source, form(physicalForms, source), businessConditions.get(source));
+                    source, form(physicalForms, source), condition);
             if (!fragment.sql().isBlank()) {
-                where.add(fragment.sql());
+                where.add(condition.operator() == LogicalOperator.OR && condition.children().size() > 1
+                                  ? "(" + fragment.sql() + ")"
+                                  : fragment.sql());
                 parameters.addAll(fragment.parameters());
             }
         }

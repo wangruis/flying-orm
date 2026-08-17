@@ -10,6 +10,8 @@ import io.r2dbc.spi.Parameters;
 
 import java.lang.reflect.Array;
 import java.nio.ByteBuffer;
+import java.sql.Time;
+import java.sql.Timestamp;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
@@ -105,6 +107,17 @@ public final class BatchRowSnapshotter {
                 result = snapshotBuffer(buffer);
             } else if (value instanceof CharSequence text && !(value instanceof String)) {
                 result = snapshotText(text);
+            } else if (value instanceof Timestamp timestamp) {
+                result = snapshotTimestamp(timestamp);
+            } else if (value instanceof java.sql.Date date) {
+                reserve(24L);
+                result = new java.sql.Date(date.getTime());
+            } else if (value instanceof Time time) {
+                reserve(24L);
+                result = new Time(time.getTime());
+            } else if (value instanceof java.util.Date date) {
+                reserve(24L);
+                result = new java.util.Date(date.getTime());
             } else if (depth > MAX_DEPTH) {
                 throw new IllegalArgumentException("batch value nesting exceeds 64");
             } else if (value instanceof SqlTypedValue typed) {
@@ -153,6 +166,13 @@ public final class BatchRowSnapshotter {
         char[] characters = new char[length];
         for (int index = 0; index < length; index++) characters[index] = text.charAt(index);
         return new String(characters);
+    }
+
+    private Timestamp snapshotTimestamp(Timestamp timestamp) {
+        reserve(32L);
+        Timestamp result = new Timestamp(timestamp.getTime());
+        result.setNanos(timestamp.getNanos());
+        return result;
     }
 
     private Object copyTypedValue(SqlTypedValue typed, int depth) {

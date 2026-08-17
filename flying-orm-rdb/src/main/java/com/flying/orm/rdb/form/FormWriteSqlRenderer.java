@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.LogicalOperator;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.sql.render.SqlRequest;
@@ -77,7 +78,7 @@ final class FormWriteSqlRenderer {
                                    StringJoiner sets = new StringJoiner(", ");
                                    fieldValues.forEach(fieldValue -> sets.add(updateExpression(fieldValue)));
                                    return "update " + support.identifier(safeForm.table()) + " set " + sets + " where "
-                                           + whereFragment.sql();
+                                           + groupedForAdditionalPredicate(where, whereFragment.sql());
                                });
     }
 
@@ -119,7 +120,8 @@ final class FormWriteSqlRenderer {
                                        sets.add(support.identifier(lockField.name()) + " = ?");
                                    }
                                    return "update " + support.identifier(safeForm.table()) + " set " + sets + " where "
-                                           + whereFragment.sql() + " and " + support.identifier(lockField.name()) + " = ?";
+                                           + groupedForAdditionalPredicate(where, whereFragment.sql()) + " and "
+                                           + support.identifier(lockField.name()) + " = ?";
                                });
     }
 
@@ -173,8 +175,15 @@ final class FormWriteSqlRenderer {
         parameters.add(support.valueCodecs.write(safeLock.expectedValue()));
         return support.request("delete-optimistic", safeForm, List.of(lockField.name()), whereFragment, "", "", "",
                                parameters, List.of(), () -> "delete from " + support.identifier(safeForm.table())
-                                       + " where " + whereFragment.sql() + " and "
+                                       + " where " + groupedForAdditionalPredicate(where, whereFragment.sql()) + " and "
                                        + support.identifier(lockField.name()) + " = ?");
+    }
+
+    /** 根 OR 在写请求中统一成为整体，后续版本或 owner 谓词只能继续收窄业务范围。 */
+    private static String groupedForAdditionalPredicate(ConditionGroup where, String renderedWhere) {
+        return where.operator() == LogicalOperator.OR && where.children().size() > 1
+                ? "(" + renderedWhere + ")"
+                : renderedWhere;
     }
 
     private List<UpdateAssignment> updateAssignments(DynamicForm form, Map<String, Object> values) {

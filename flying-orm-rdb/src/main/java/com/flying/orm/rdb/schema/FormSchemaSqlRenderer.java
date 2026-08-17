@@ -77,8 +77,9 @@ public final class FormSchemaSqlRenderer {
     /** 生成建表 SQL，必要的序列和字段注释会按原来的顺序附在请求列表中。 */
     public List<SqlRequest> createTable(DynamicForm form) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        List<SqlRequest> requests = new java.util.ArrayList<>(
-                tables.createTable(ProtectedFormLayout.physical(safeForm)));
+        DynamicForm physical = ProtectedFormLayout.physical(safeForm);
+        List<SqlRequest> requests = new java.util.ArrayList<>(tables.createTable(physical));
+        requests.addAll(tables.createIndexes(physical.table(), physical.toTableMetadata().indexes()));
         ProtectedContainsLayout.resolve(safeForm).ifPresent(layout -> {
             requests.addAll(tables.createTable(layout.table()));
             requests.addAll(tables.createIndexes(layout.table().table(), layout.indexes()));
@@ -152,6 +153,10 @@ public final class FormSchemaSqlRenderer {
     /* 下面的方法只服务于 schema 包内审核器，避免把回滚拼装规则复制到审核器里。 */
     SqlRequest rollbackDropTable(String table) {
         return rollback.rollbackDropTable(table);
+    }
+
+    List<SqlRequest> rollbackDropSequences(DynamicForm form) {
+        return tables.dropSequences(form.fields());
     }
 
     SqlRequest rollbackAddColumn(String table, com.flying.orm.core.metadata.ColumnMetadata column) {

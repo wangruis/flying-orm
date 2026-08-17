@@ -53,8 +53,7 @@ public final class SchemaMigrationReviewer {
                                                                         "migration review policy must not be null");
         SchemaRollbackPlan baseRollback = safeMigration.tableExists()
                 ? rollbackExisting(safeCurrent, safeMigration, safePolicy.columnRenames())
-                : new SchemaRollbackPlan(List.of(renderer.rollbackDropTable(safeMigration.target().table())),
-                                         List.of());
+                : rollbackCreated(safeMigration);
         List<SqlRequest> rollbackRequests = new ArrayList<>();
         List<String> additionalTables = new ArrayList<>(safeMigration.additionalCreatedTables());
         Collections.reverse(additionalTables);
@@ -97,6 +96,13 @@ public final class SchemaMigrationReviewer {
                         .map(SqlRequest::sql)
                         .map(String::stripLeading)
                         .anyMatch(sql -> sql.regionMatches(true, 0, prefix, 0, prefix.length()));
+    }
+
+    private SchemaRollbackPlan rollbackCreated(SchemaMigrationPlan migration) {
+        List<SqlRequest> requests = new ArrayList<>();
+        requests.add(renderer.rollbackDropTable(migration.target().table()));
+        requests.addAll(renderer.rollbackDropSequences(migration.target()));
+        return new SchemaRollbackPlan(requests, List.of());
     }
 
     private SchemaRollbackPlan rollbackExisting(TableMetadata current,

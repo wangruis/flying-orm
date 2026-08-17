@@ -15,6 +15,7 @@ import com.flying.orm.rdb.lifecycle.ReactiveEntityListener;
 import com.flying.orm.rdb.lock.OptimisticLockOptions;
 import com.flying.orm.rdb.mapping.EntityMetadata;
 import com.flying.orm.rdb.operator.SyncEntityDmlDeleteOperator;
+import com.flying.orm.rdb.operator.SyncEntityDmlOperator;
 import com.flying.orm.rdb.operator.SyncEntityDmlQueryOperator;
 import com.flying.orm.rdb.operator.SyncEntityDmlUpdateOperator;
 import org.reactivestreams.Publisher;
@@ -102,17 +103,21 @@ public final class SyncFormRepository<T> {
 
     /** @return 当前实体的同步 Lambda 查询命令 */
     public SyncEntityDmlQueryOperator<T> createQuery() {
-        return client.entity(entityType).query();
+        return entityOperator().query();
     }
 
     /** @return 当前实体的同步 Lambda 更新命令 */
     public SyncEntityDmlUpdateOperator<T> createUpdate() {
-        return client.entity(entityType).update();
+        return entityOperator().update();
     }
 
     /** @return 当前实体的同步 Lambda 删除命令 */
     public SyncEntityDmlDeleteOperator<T> createDelete() {
-        return client.entity(entityType).delete();
+        return entityOperator().delete();
+    }
+
+    private SyncEntityDmlOperator<T> entityOperator() {
+        return SyncEntityDmlOperator.create(client, client.entityRenderer(), form, entityType);
     }
 
     static <T> SyncFormRepository<T> create(SyncFormClient client,

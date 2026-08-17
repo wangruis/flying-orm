@@ -5,6 +5,8 @@ import com.flying.orm.core.sql.render.SqlIdentifiers;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.StringJoiner;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -39,17 +41,31 @@ final class SchemaDialectTypeSupport {
                     + "|(?:unsigned(?:\\s+zerofill)?|zerofill))(?:\\[\\])*\\s*$");
     private static final Pattern TYPE_WHITESPACE = Pattern.compile("\\s+");
     private static final Pattern TYPE_ARGUMENT_WHITESPACE = Pattern.compile("\\s*([(),])\\s*");
+    private static final Set<String> TYPES_WITHOUT_ARGUMENTS = Set.of(
+            "blob", "clob", "nclob", "text", "tinytext", "mediumtext", "longtext",
+            "tinyblob", "mediumblob", "longblob", "bytea", "json", "jsonb", "uuid",
+            "boolean", "bool", "date", "xml", "sqlxml");
+    private static final Set<String> POSTGRESQL_INTEGER_TYPES = Set.of(
+            "smallint", "int2", "integer", "int", "int4", "bigint", "int8",
+            "smallserial", "serial2", "serial", "serial4", "bigserial", "serial8",
+            "real", "float4", "double precision", "float8", "money");
+    private static final Set<String> SQL_SERVER_FIXED_TYPES = Set.of(
+            "tinyint", "smallint", "int", "integer", "bigint", "bit", "real", "money", "smallmoney",
+            "datetime", "smalldatetime", "image", "ntext", "uniqueidentifier", "rowversion", "timestamp");
 
     private final String quoteOpen;
     private final String quoteClose;
     private final Map<String, String> typeMappings;
+    private final SchemaDialect.GeneratedValueStyle databaseStyle;
 
     SchemaDialectTypeSupport(String quoteOpen,
                              String quoteClose,
-                             Map<String, String> typeMappings) {
+                             Map<String, String> typeMappings,
+                             SchemaDialect.GeneratedValueStyle databaseStyle) {
         this.quoteOpen = quoteOpen;
         this.quoteClose = quoteClose;
         this.typeMappings = Map.copyOf(new LinkedHashMap<>(typeMappings));
+        this.databaseStyle = Objects.requireNonNull(databaseStyle, "database style must not be null");
     }
 
     String identifier(String value) {
@@ -73,7 +89,10 @@ final class SchemaDialectTypeSupport {
         return withTypeArguments(dataType(value), length, precision, scale);
     }
 
-    private static String withTypeArguments(String type, Integer length, Integer precision, Integer scale) {
+    private String withTypeArguments(String type, Integer length, Integer precision, Integer scale) {
+        if ((length != null || precision != null || scale != null) && !acceptsTypeArguments(type)) {
+            throw new IllegalArgumentException("data type does not accept length or precision arguments: " + type);
+        }
         if (length != null) {
             return withArguments(type, String.valueOf(length));
         }
@@ -84,6 +103,37 @@ final class SchemaDialectTypeSupport {
             return withArguments(type, String.valueOf(precision));
         }
         return type;
+    }
+
+    private boolean acceptsTypeArguments(String type) {
+        String base = argumentBaseType(type);
+        if (base.startsWith("interval ")) {
+            return false;
+        }
+        int dot = base.lastIndexOf('.');
+        if (dot >= 0) {
+            base = base.substring(dot + 1);
+        }
+        if (TYPES_WITHOUT_ARGUMENTS.contains(base)) {
+            return false;
+        }
+        return switch (databaseStyle) {
+            case POSTGRESQL -> !POSTGRESQL_INTEGER_TYPES.contains(base);
+            case SQL_SERVER -> !SQL_SERVER_FIXED_TYPES.contains(base);
+            default -> true;
+        };
+    }
+
+    /** 保留 DOUBLE PRECISION 等多词类型，只移除已由语法模型单独处理的参数和后缀。 */
+    private static String argumentBaseType(String type) {
+        String normalized = canonicalDataType(type);
+        int open = normalized.indexOf('(');
+        String base = (open < 0 ? normalized : normalized.substring(0, open)).trim();
+        while (base.endsWith("[]")) {
+            base = base.substring(0, base.length() - 2).trim();
+        }
+        Matcher modifier = TYPE_MODIFIER_SUFFIX.matcher(base);
+        return modifier.find() ? base.substring(0, modifier.start()).trim() : base;
     }
 
     String quoteLiteral(String value) {

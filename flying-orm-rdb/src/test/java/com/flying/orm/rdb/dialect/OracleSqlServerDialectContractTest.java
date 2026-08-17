@@ -100,16 +100,16 @@ class OracleSqlServerDialectContractTest {
 
         assertEquals(List.of(
                              "create sequence [users_serial_seq] as BIGINT start with 10 increment by 5 cache 64",
-                             "create table [dbo].[Users] ([id] BIGINT identity(1,1) primary key, "
-                                     + "[serial_no] BIGINT default next value for [users_serial_seq], "
-                                     + "[name] NVARCHAR(64))"),
+                             "create table [dbo].[Users] ([id] BIGINT identity(1,1) not null primary key, "
+                                      + "[serial_no] BIGINT default next value for [users_serial_seq] null, "
+                                      + "[name] NVARCHAR(64) null)"),
                      createSql);
         assertEquals("alter table \"Users\" modify (\"name\" VARCHAR2(128))",
                      FormSchemaSqlRenderer.create(RdbDialect.oracle())
                                           .migrate(oracleSource.diffTo(oracleTarget))
                                           .getFirst()
                                           .sql());
-        assertEquals("alter table [Users] alter column [name] NVARCHAR(128)",
+        assertEquals("alter table [Users] alter column [name] NVARCHAR(128) null",
                      FormSchemaSqlRenderer.create(RdbDialect.sqlServer())
                                           .migrate(oracleSource.diffTo(oracleTarget))
                                           .getFirst()

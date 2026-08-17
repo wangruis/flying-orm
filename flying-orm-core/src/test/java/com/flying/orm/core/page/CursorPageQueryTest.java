@@ -2,8 +2,10 @@ package com.flying.orm.core.page;
 
 import org.junit.jupiter.api.Test;
 
-import java.util.List;
+import java.nio.ByteBuffer;
+import java.nio.ReadOnlyBufferException;
 import java.util.Arrays;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -93,5 +95,22 @@ class CursorPageQueryTest {
         assertSame(secondRoot[2], ((Object[]) secondRoot[2])[0]);
         assertSame(marker, secondRoot[3]);
         assertSame(marker, second.get(2));
+    }
+
+    /** ByteBuffer 游标必须冻结当前可读值，每次访问返回独立只读视图。 */
+    @Test
+    void snapshotsByteBufferCursorValuesAtBothBoundaries() {
+        ByteBuffer source = ByteBuffer.wrap(new byte[]{1, 2});
+        CursorPageQuery page = CursorPageQuery.after(20, List.of(source), CursorSort.asc("binaryKey"));
+
+        source.put(0, (byte) 9);
+        ByteBuffer first = (ByteBuffer) page.cursor().getFirst();
+        assertEquals(1, first.get(0));
+        assertThrows(ReadOnlyBufferException.class, () -> first.put(0, (byte) 8));
+
+        first.position(1);
+        ByteBuffer second = (ByteBuffer) page.cursor().getFirst();
+        assertEquals(0, second.position());
+        assertEquals(1, second.get(0));
     }
 }

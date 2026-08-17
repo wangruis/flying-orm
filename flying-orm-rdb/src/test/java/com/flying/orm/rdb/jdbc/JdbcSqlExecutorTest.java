@@ -321,6 +321,98 @@ class JdbcSqlExecutorTest {
         assertEquals("sensor-a", rows.getFirst().get("NAME"));
     }
 
+    /** JDBC 原生 SQL 在取得连接后按真实数据库词法校验，合法 MySQL 井号注释不能被二次拒绝。 */
+    @Test
+    void validatesNativeSqlWithJdbcDatabaseProduct() {
+        java.util.concurrent.atomic.AtomicReference<String> preparedSql =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        PreparedStatement statement = proxy(PreparedStatement.class, (ignored, method, arguments) -> {
+            if (method.getName().equals("executeLargeUpdate")) {
+                return 1L;
+            }
+            return defaultValue(method.getReturnType());
+        });
+        java.sql.DatabaseMetaData metadata = proxy(java.sql.DatabaseMetaData.class,
+                                                   (ignored, method, arguments) -> method.getName()
+                                                           .equals("getDatabaseProductName")
+                                                           ? "MySQL" : defaultValue(method.getReturnType()));
+        Connection connection = proxy(Connection.class, (ignored, method, arguments) -> {
+            if (method.getName().equals("getMetaData")) {
+                return metadata;
+            }
+            if (method.getName().equals("prepareStatement")) {
+                preparedSql.set((String) arguments[0]);
+                return statement;
+            }
+            return defaultValue(method.getReturnType());
+        });
+        DataSource dataSource = proxy(DataSource.class, (ignored, method, arguments) ->
+                method.getName().equals("getConnection") ? connection : defaultValue(method.getReturnType()));
+        String sql = "update users set active = true # delete from audit_log\nwhere id = 1";
+
+        long updated = JdbcSqlExecutor.create(dataSource).rowsUpdated(SqlRequest.nativeSql(sql, List.of()));
+
+        assertEquals(1L, updated);
+        assertEquals(sql, preparedSql.get());
+    }
+
+    /** 已取得真实数据库产品后，CANONICAL 请求也必须拒绝 SQL Server 的无分号批处理。 */
+    @Test
+    void validatesCanonicalSqlServerBatchWithJdbcDatabaseProduct() {
+        java.util.concurrent.atomic.AtomicInteger prepareCalls = new java.util.concurrent.atomic.AtomicInteger();
+        java.sql.DatabaseMetaData metadata = proxy(java.sql.DatabaseMetaData.class,
+                                                   (ignored, method, arguments) -> method.getName()
+                                                           .equals("getDatabaseProductName")
+                                                           ? "Microsoft SQL Server"
+                                                           : defaultValue(method.getReturnType()));
+        Connection connection = proxy(Connection.class, (ignored, method, arguments) -> {
+            if (method.getName().equals("getMetaData")) {
+                return metadata;
+            }
+            if (method.getName().equals("prepareStatement")) {
+                prepareCalls.incrementAndGet();
+            }
+            return defaultValue(method.getReturnType());
+        });
+        DataSource dataSource = proxy(DataSource.class, (ignored, method, arguments) ->
+                method.getName().equals("getConnection") ? connection : defaultValue(method.getReturnType()));
+
+        assertThrows(IllegalArgumentException.class,
+                     () -> JdbcSqlExecutor.create(dataSource)
+                             .rowsUpdated(new SqlRequest("select 1\nselect 2", List.of())));
+        assertEquals(0, prepareCalls.get());
+    }
+
+    /** JDBC 原生生成键协作必须把明确列名交给驱动，Oracle 不得退化为 ROWID。 */
+    @Test
+    void requestsTheDeclaredGeneratedKeyColumnFromJdbcDriver() {
+        java.util.concurrent.atomic.AtomicReference<String[]> requestedColumns =
+                new java.util.concurrent.atomic.AtomicReference<>();
+        PreparedStatement statement = proxy(PreparedStatement.class, (ignored, method, arguments) -> {
+            if (method.getName().equals("executeLargeUpdate")) {
+                throw new SQLException("stop after statement preparation");
+            }
+            return defaultValue(method.getReturnType());
+        });
+        Connection connection = proxy(Connection.class, (ignored, method, arguments) -> {
+            if (method.getName().equals("prepareStatement") && arguments.length == 2
+                    && arguments[1] instanceof String[] columns) {
+                requestedColumns.set(columns.clone());
+                return statement;
+            }
+            return defaultValue(method.getReturnType());
+        });
+        DataSource dataSource = proxy(DataSource.class, (ignored, method, arguments) ->
+                method.getName().equals("getConnection") ? connection : defaultValue(method.getReturnType()));
+
+        assertThrows(RuntimeException.class, () -> JdbcSqlExecutor.create(dataSource).rowsUpdatedReturningKeys(
+                new SqlRequest("insert into device(name) values (?)", List.of("sensor")),
+                SqlExecutionOptions.safeDefaults(),
+                "id"));
+
+        org.junit.jupiter.api.Assertions.assertArrayEquals(new String[]{"id"}, requestedColumns.get());
+    }
+
     @Test
     void detectsTheFirstRowBeyondTheConfiguredLimit() throws Exception {
         JdbcDataSource dataSource = dataSource("row_limit");

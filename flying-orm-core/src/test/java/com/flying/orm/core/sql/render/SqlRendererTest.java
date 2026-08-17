@@ -8,6 +8,8 @@ import com.flying.orm.core.codec.ValueCodec;
 import com.flying.orm.core.codec.ValueCodecRegistry;
 import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
+import java.nio.ReadOnlyBufferException;
 import java.util.AbstractCollection;
 import java.util.ArrayList;
 import java.util.List;
@@ -27,6 +29,23 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * @version v1.0
  */
 class SqlRendererTest {
+
+    /** 标准条件里的 ByteBuffer 在 AST 发布时冻结；自定义 term 的可信标量交接语义保持不变。 */
+    @Test
+    void snapshotsByteBufferForStandardTerms() {
+        ByteBuffer source = ByteBuffer.wrap(new byte[]{1, 2});
+        TermCondition term = TermCondition.of("payload", "=", source);
+
+        source.put(0, (byte) 9);
+        ByteBuffer first = (ByteBuffer) term.value();
+        assertEquals(1, first.get(0));
+        assertThrows(ReadOnlyBufferException.class, () -> first.put(0, (byte) 8));
+
+        first.position(1);
+        ByteBuffer second = (ByteBuffer) term.value();
+        assertEquals(0, second.position());
+        assertEquals(1, second.get(0));
+    }
 
     /** 直接加入条件树的集合值也必须在构造时快照，避免外部修改改变 SQL 与参数顺序。 */
     @Test
@@ -49,6 +68,31 @@ class SqlRendererTest {
 
         assertEquals("id in (?) and status in (?)", fragment.sql());
         assertEquals(List.of("u1", "active"), fragment.parameters());
+    }
+
+    /** 标准条件发布后不得继续持有可变文本，否则调用方复用 StringBuilder 会改写后续绑定值。 */
+    @Test
+    void snapshotsMutableTextValuesBeforeRendering() {
+        StringBuilder source = new StringBuilder("u1");
+        StringBuilder typed = new StringBuilder("u3");
+        TermCondition term = TermCondition.of("id", "in", List.of(source));
+        TermCondition typedArrayTerm = TermCondition.of("id", "in", new StringBuilder[]{typed});
+        source.replace(0, source.length(), "u2");
+        typed.replace(0, typed.length(), "u4");
+
+        SqlFragment fragment = SqlRenderer.builder()
+                                          .addDefaultTerms()
+                                          .build()
+                                          .renderWhere(ConditionGroup.and().add(term).build());
+
+        assertEquals(List.of("u1"), term.value());
+        assertEquals(List.of("u1"), fragment.parameters());
+
+        SqlFragment typedArrayFragment = SqlRenderer.builder()
+                                                    .addDefaultTerms()
+                                                    .build()
+                                                    .renderWhere(ConditionGroup.and().add(typedArrayTerm).build());
+        assertEquals(List.of("u3"), typedArrayFragment.parameters());
     }
 
     /** 标准范围条件同样在构造期冻结集合，并拒绝超过公开上限的直接 AST 输入。 */

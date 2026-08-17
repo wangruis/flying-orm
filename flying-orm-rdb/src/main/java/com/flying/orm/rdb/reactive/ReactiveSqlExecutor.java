@@ -10,6 +10,7 @@ import com.flying.orm.rdb.batch.BatchWriteResult;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.execution.SqlWriteResult;
+import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.observation.BatchExecutionObserver;
 import com.flying.orm.rdb.observation.SqlExecutionObserver;
 import com.flying.orm.rdb.result.DynamicRow;
@@ -150,6 +151,26 @@ public interface ReactiveSqlExecutor {
      */
     default Mono<SqlWriteResult> rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
         return rowsUpdated(request, options).map(rows -> new SqlWriteResult(rows, java.util.List.of()));
+    }
+
+    /**
+     * ORM 内部按已校验的物理列名读取数据库生成键；不支持列名选择的自定义执行器继续使用原有入口。
+     *
+     * @param request SQL 请求
+     * @param options 执行保护选项
+     * @param generatedKeyColumn 已校验的生成键物理列名
+     * @return 写入结果
+     */
+    @InternalApi
+    default Mono<SqlWriteResult> rowsUpdatedReturningKeys(SqlRequest request,
+                                                          SqlExecutionOptions options,
+                                                          String generatedKeyColumn) {
+        String column = Objects.requireNonNull(generatedKeyColumn,
+                                               "generated key column must not be null").trim();
+        if (column.isEmpty()) {
+            return Mono.error(new IllegalArgumentException("generated key column must not be blank"));
+        }
+        return rowsUpdatedReturningKeys(request, options);
     }
 
     /** ORM 内部受保护字段写工作单元；只有能够控制同一连接事务的原生执行器可以覆盖。 */

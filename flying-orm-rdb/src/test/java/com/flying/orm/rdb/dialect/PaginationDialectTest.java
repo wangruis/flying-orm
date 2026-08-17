@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
  * 验证分页方言只负责在基础 SQL 之上追加分页语法和参数顺序。
@@ -44,5 +45,29 @@ class PaginationDialectTest {
         assertEquals("select id from Users where status = ? order by id asc offset ? rows fetch next ? rows only",
                      request.sql());
         assertEquals(List.of("enabled", 10L, 10), request.parameters());
+    }
+
+    /** SQL Server 只接受最外层 ORDER BY，子查询、字符串和注释里的同名文本不能满足分页前置条件。 */
+    @Test
+    void requiresTopLevelOrderByForSqlServerPagination() {
+        PaginationDialect dialect = PaginationDialect.sqlServerOffsetFetch();
+
+        assertThrows(IllegalArgumentException.class,
+                     () -> dialect.paginate("select * from (select id from users order by id) nested_users",
+                                            List.of(), PageQuery.of(1, 10)));
+        assertThrows(IllegalArgumentException.class,
+                     () -> dialect.paginate("select ' order by ' as note from users",
+                                            List.of(), PageQuery.of(1, 10)));
+        assertThrows(IllegalArgumentException.class,
+                     () -> dialect.paginate("select id from users /* order by id */",
+                                            List.of(), PageQuery.of(1, 10)));
+
+        SqlRequest request = dialect.paginate("select id from users\norder\tby id",
+                                              List.of(), PageQuery.of(1, 10));
+        assertEquals("select id from users\norder\tby id offset ? rows fetch next ? rows only", request.sql());
+        SqlRequest carriageReturn = dialect.paginate("select id from users -- comment\rorder by id",
+                                                     List.of(), PageQuery.of(1, 10));
+        assertEquals("select id from users -- comment\rorder by id offset ? rows fetch next ? rows only",
+                     carriageReturn.sql());
     }
 }

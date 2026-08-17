@@ -109,14 +109,14 @@ record RelationExistsTermHandler(String id,
     public SqlFragment render(TermCondition term, SqlRenderContext context) {
         TermCondition safeTerm = Objects.requireNonNull(term, "term condition must not be null");
         SqlRenderContext safeContext = Objects.requireNonNull(context, "sql render context must not be null");
-        String alias = safeContext.identifier(relationAlias);
-        String relationKey = alias + "." + safeContext.identifier(relationKeyColumn);
-        String relationValue = alias + "." + safeContext.identifier(relationValueColumn);
+        String alias = structureIdentifier(safeContext, relationAlias);
+        String relationKey = alias + "." + structureIdentifier(safeContext, relationKeyColumn);
+        String relationValue = alias + "." + structureIdentifier(safeContext, relationValueColumn);
         List<Object> values = values(safeTerm.value()).stream().map(safeContext::parameter).toList();
         String valueExpression = valueExpression(relationValue, values.size());
         String sql = (negated ? "not exists" : "exists")
                 + " (select 1 from "
-                + safeContext.identifier(relationTable)
+                + structureIdentifier(safeContext, relationTable)
                 + " "
                 + alias
                 + " where "
@@ -127,6 +127,12 @@ record RelationExistsTermHandler(String id,
                 + valueExpression
                 + ")";
         return new SqlFragment(sql, values);
+    }
+
+    private static String structureIdentifier(SqlRenderContext context, String identifier) {
+        return context instanceof SqlRenderer renderer
+                ? renderer.structureIdentifier(identifier)
+                : context.identifier(identifier);
     }
 
     private static String valueExpression(String relationValue, int valueSize) {

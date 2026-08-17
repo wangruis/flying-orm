@@ -1,7 +1,10 @@
 package com.flying.orm.rdb.vector;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.StructuredConditionErrorCode;
+import com.flying.orm.core.condition.StructuredConditionException;
 import com.flying.orm.core.condition.StructuredConditionInput;
+import com.flying.orm.core.condition.StructuredConditionPolicy;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.sql.render.SqlFragment;
@@ -13,6 +16,7 @@ import com.flying.orm.rdb.schema.FormSchemaSqlRenderer;
 import org.junit.jupiter.api.Test;
 
 import java.util.AbstractCollection;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -60,6 +64,25 @@ class PostgresqlVectorSupportTest {
         assertEquals("(embedding <=> cast(? as vector)) < ?", fragment.sql());
         assertArrayEquals(new float[]{0.1F, 0.2F, 0.3F}, (float[]) fragment.parameters().getFirst(), 0.00001F);
         assertEquals(0.25D, fragment.parameters().get(1));
+    }
+
+    /** Vector 维度由字段模型与 codec 管理，不能被通用前端集合上限误杀。 */
+    @Test
+    void acceptsVectorDimensionsAboveGenericCollectionLimit() {
+        int dimensions = 1_536;
+        ConditionGroup where = VectorStructuredConditions.postgresql().compile(
+                vectorForm(dimensions),
+                StructuredConditionInput.term(
+                        "embedding",
+                        "vector-cosine-lt",
+                        Map.of("vector", Collections.nCopies(dimensions, 0.1), "distance", 0.25)),
+                StructuredConditionPolicy.defaults().withMaxCollectionSize(2));
+        SqlFragment fragment = SqlRenderer.builder()
+                                          .addTermPackage(VectorTermHandlers.postgresql())
+                                          .build()
+                                          .renderWhere(where);
+
+        assertEquals(dimensions, ((float[]) fragment.parameters().getFirst()).length);
     }
 
     @Test
@@ -129,9 +152,13 @@ class PostgresqlVectorSupportTest {
     }
 
     private static DynamicForm vectorForm() {
+        return vectorForm(3);
+    }
+
+    private static DynamicForm vectorForm(int dimensions) {
         return DynamicForm.builder("documents", "documents")
                           .addField(DynamicField.primaryKey("id", "BIGINT"))
-                          .addField(DynamicField.of("embedding", "VECTOR").withLength(3))
+                          .addField(DynamicField.of("embedding", "VECTOR").withLength(dimensions))
                           .build();
     }
 

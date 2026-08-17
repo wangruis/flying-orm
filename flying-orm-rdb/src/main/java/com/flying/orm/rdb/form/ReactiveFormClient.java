@@ -6,6 +6,7 @@ import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageResult;
 import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.batch.BatchChunkResult;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteResult;
@@ -119,6 +120,12 @@ public final class ReactiveFormClient {
     /** 为实体提供复用当前 Scope、执行保护和映射缓存的 Lambda DML 入口。 */
     public <T> EntityDmlOperator<T> entity(Class<T> type) {
         return EntityDmlOperator.create(this, renderer.conditionRenderer(), type);
+    }
+
+    /** Repository 内部创建 Lambda DML 状态时复用当前已装配的条件渲染器。 */
+    @InternalApi
+    public SqlRenderer entityRenderer() {
+        return renderer.conditionRenderer();
     }
 
     /** 执行不可变查询规格并返回紧凑动态行流。 */

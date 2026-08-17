@@ -59,8 +59,41 @@ final class SchemaDialectDdlSupport {
                                    + " is " + types.quoteLiteral(comment));
     }
 
+    Optional<String> columnCommentChangeSql(String table,
+                                            String column,
+                                            String previousComment,
+                                            String targetComment) {
+        if (Objects.equals(previousComment, targetComment)
+                || columnCommentStyle == SchemaDialect.ColumnCommentStyle.NONE
+                || columnCommentStyle == SchemaDialect.ColumnCommentStyle.INLINE) {
+            return Optional.empty();
+        }
+        if (columnCommentStyle == SchemaDialect.ColumnCommentStyle.SQL_SERVER_EXTENDED_PROPERTY) {
+            if (previousComment == null) {
+                return Optional.of(sqlServerColumnComment(table, column, targetComment));
+            }
+            return Optional.of(targetComment == null
+                    ? sqlServerColumnComment(table, column, null, "sp_dropextendedproperty")
+                    : sqlServerColumnComment(table, column, targetComment, "sp_updateextendedproperty"));
+        }
+        String value = targetComment == null
+                ? databaseStyle == SchemaDialect.GeneratedValueStyle.ORACLE ? "''" : "null"
+                : types.quoteLiteral(targetComment);
+        return Optional.of("comment on column " + types.identifier(table) + "." + types.identifier(column)
+                                   + " is " + value);
+    }
+
     String dropIndexSql(String table, String index) {
-        String sql = "drop index " + types.identifier(index);
+        String indexName = requireUnqualifiedIdentifier(index, "drop index name");
+        if (dropIndexStyle == SchemaDialect.DropIndexStyle.NAME_ONLY) {
+            String safeTable = com.flying.orm.core.sql.render.SqlIdentifiers.requireIdentifier(
+                    table, "drop index table");
+            int separator = safeTable.lastIndexOf('.');
+            if (separator >= 0) {
+                indexName = safeTable.substring(0, separator + 1) + indexName;
+            }
+        }
+        String sql = "drop index " + types.identifier(indexName);
         return dropIndexStyle == SchemaDialect.DropIndexStyle.ON_TABLE
                 ? sql + " on " + types.identifier(table)
                 : sql;
@@ -93,6 +126,7 @@ final class SchemaDialectDdlSupport {
         }
         long millis = Math.max(1, saturatingMillis(safeTimeout));
         long seconds = Math.max(1, ceilMillisToSeconds(millis));
+        requireLockTimeoutRange(millis, seconds);
         return switch (lockTimeoutStyle) {
             case MYSQL -> guard("set session lock_wait_timeout = " + seconds,
                                 "set session lock_wait_timeout = default");
@@ -103,6 +137,27 @@ final class SchemaDialectDdlSupport {
             case NONE -> throw new UnsupportedOperationException(
                     "current schema dialect does not support session lock timeout");
         };
+    }
+
+    /** 会话变量的数值上限由数据库定义，越界配置必须在发送 SQL 前稳定失败。 */
+    private void requireLockTimeoutRange(long millis, long seconds) {
+        boolean withinRange = switch (lockTimeoutStyle) {
+            case MYSQL -> seconds <= 31_536_000L;
+            case POSTGRESQL, SQL_SERVER -> millis <= Integer.MAX_VALUE;
+            case ORACLE -> seconds <= 1_000_000L;
+            case NONE -> true;
+        };
+        if (!withinRange) {
+            throw new IllegalArgumentException("DDL lock timeout exceeds current database range");
+        }
+    }
+
+    private static String requireUnqualifiedIdentifier(String value, String category) {
+        String identifier = com.flying.orm.core.sql.render.SqlIdentifiers.requireIdentifier(value, category);
+        if (identifier.indexOf('.') >= 0) {
+            throw new IllegalArgumentException(category + " must not be qualified");
+        }
+        return identifier;
     }
 
     /** 数据库超时使用 long 毫秒表示；超大 Duration 保持为可传递的最大值，而不是在 ORM 中溢出。 */
@@ -143,8 +198,10 @@ final class SchemaDialectDdlSupport {
     String alterColumnTypeSql(String table, String column, String databaseType) {
         String safeType = SchemaDialectTypeSupport.requireDataType(databaseType, "alter column data type");
         if (databaseStyle == SchemaDialect.GeneratedValueStyle.MYSQL) {
-            return "alter table " + types.identifier(table) + " modify column "
-                    + types.identifier(column) + " " + safeType;
+            throw incompleteColumnDefinition("mysql");
+        }
+        if (databaseStyle == SchemaDialect.GeneratedValueStyle.SQL_SERVER) {
+            throw incompleteColumnDefinition("sql server");
         }
         return switch (columnChangeStyle) {
             case ORACLE -> "alter table " + types.identifier(table) + " modify ("
@@ -164,7 +221,18 @@ final class SchemaDialectDdlSupport {
             return "alter table " + types.identifier(table) + " modify column "
                     + requireColumnDefinition(columnDefinition);
         }
+        if (databaseStyle == SchemaDialect.GeneratedValueStyle.SQL_SERVER) {
+            String safeType = SchemaDialectTypeSupport.requireDataType(databaseType, "alter column data type");
+            return "alter table " + types.identifier(table) + " alter column "
+                    + types.identifier(column) + " " + safeType
+                    + sqlServerNullability(columnDefinition);
+        }
         return alterColumnTypeSql(table, column, databaseType);
+    }
+
+    private static IllegalArgumentException incompleteColumnDefinition(String database) {
+        return new IllegalArgumentException(
+                "alter column type requires a complete column definition for " + database);
     }
 
     boolean rewritesFullColumnDefinition() {
@@ -199,15 +267,23 @@ final class SchemaDialectDdlSupport {
     }
 
     private String sqlServerColumnComment(String table, String column, String comment) {
+        return sqlServerColumnComment(table, column, comment, "sp_addextendedproperty");
+    }
+
+    private String sqlServerColumnComment(String table, String column, String comment, String procedure) {
         String safeTable = com.flying.orm.core.sql.render.SqlIdentifiers.requireIdentifier(table, "comment table");
         String[] parts = safeTable.split("\\.");
-        if (parts.length > 2) {
-            throw new IllegalArgumentException("SQL Server column comments support table or schema.table only");
+        if (parts.length != 2) {
+            throw new IllegalArgumentException("SQL Server column comments require a schema-qualified table");
         }
-        String schema = parts.length == 2 ? parts[0] : "dbo";
-        String tableName = parts.length == 2 ? parts[1] : parts[0];
+        String schema = parts[0];
+        String tableName = parts[1];
         String safeColumn = com.flying.orm.core.sql.render.SqlIdentifiers.requireIdentifier(column, "comment column");
-        return "exec sp_addextendedproperty @name = N'MS_Description', @value = " + unicode(comment)
+        String sql = "exec " + procedure + " @name = N'MS_Description'";
+        if (comment != null) {
+            sql += ", @value = " + unicode(comment);
+        }
+        return sql
                 + ", @level0type = N'SCHEMA', @level0name = " + unicode(schema)
                 + ", @level1type = N'TABLE', @level1name = " + unicode(tableName)
                 + ", @level2type = N'COLUMN', @level2name = " + unicode(safeColumn);
@@ -228,5 +304,16 @@ final class SchemaDialectDdlSupport {
             throw new IllegalArgumentException("column definition contains unsupported SQL syntax");
         }
         return text;
+    }
+
+    private static String sqlServerNullability(String columnDefinition) {
+        String normalized = requireColumnDefinition(columnDefinition).toLowerCase(Locale.ROOT);
+        if (normalized.endsWith(" not null") || normalized.endsWith(" not null primary key")) {
+            return " not null";
+        }
+        if (normalized.endsWith(" null")) {
+            return " null";
+        }
+        throw new IllegalArgumentException("SQL Server column definition must declare nullability");
     }
 }

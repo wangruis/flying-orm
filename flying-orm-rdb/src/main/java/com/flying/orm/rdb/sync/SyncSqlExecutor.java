@@ -106,6 +106,22 @@ public interface SyncSqlExecutor {
     /** 执行写入并读取数据库生成键。实现必须在同一个 Statement 上取得影响行数和生成键。 */
     SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options);
 
+    /**
+     * ORM 内部按已校验的物理列名读取数据库生成键；不支持列名选择的自定义执行器继续使用原有入口。
+     *
+     * @param request SQL 请求
+     * @param options 执行保护选项
+     * @param generatedKeyColumn 已校验的生成键物理列名
+     * @return 写入结果
+     */
+    @InternalApi
+    default SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request,
+                                                    SqlExecutionOptions options,
+                                                    String generatedKeyColumn) {
+        Objects.requireNonNull(generatedKeyColumn, "generated key column must not be null");
+        return rowsUpdatedReturningKeys(request, options);
+    }
+
     /** ORM 内部受保护字段写工作单元；只有能够控制同一连接事务的原生执行器可以覆盖。 */
     default SqlWriteResult atomicProtectedWrite(ProtectedWriteWork work, SqlExecutionOptions options) {
         Objects.requireNonNull(work, "protected write work must not be null");

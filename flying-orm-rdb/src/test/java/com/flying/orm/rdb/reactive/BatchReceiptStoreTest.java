@@ -27,12 +27,15 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.TimeoutException;
 import java.util.function.BiFunction;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * 验证批量恢复回执的数值边界。回执决定 UNKNOWN 分片能否被认定为已提交，
@@ -120,6 +123,33 @@ class BatchReceiptStoreTest {
                     .thenAwait(Duration.ofSeconds(6))
                     .thenCancel()
                     .verify();
+    }
+
+    /** 公共 UNKNOWN 恢复没有显式 options，连接可用后仍必须应用默认 SQL 兜底时限。 */
+    @Test
+    void appliesDefaultSqlTimeoutToPublicReceiptRecovery() {
+        BatchReceiptStore store = store(connectionFactory(Flux.never()),
+                                        new AtomicInteger(),
+                                        new AtomicInteger());
+
+        StepVerifier.withVirtualTime(() -> store.find(completeToken()))
+                    .thenAwait(SqlExecutionOptions.DEFAULT_TIMEOUT.plusMillis(1))
+                    .expectError(TimeoutException.class)
+                    .verify(Duration.ofSeconds(1));
+    }
+
+    /** 回执表是 SQL 标识符而不是普通文本，schema 和保留字必须按当前数据库逐段引用。 */
+    @Test
+    void quotesQualifiedReceiptTableForTheCurrentDatabase() {
+        AtomicReference<String> sql = new AtomicReference<>();
+        ConnectionFactory factory = connectionFactory(Flux.just(receiptResult()), "PostgreSQL", sql);
+        BatchReceiptStore store = store(factory, new AtomicInteger(), new AtomicInteger());
+        BatchChunkResult.RecoveryToken token = new BatchChunkResult.RecoveryToken(
+                "operation-1", 0, "audit.order", "plan", "payload", 1L, 1L);
+
+        StepVerifier.create(store.find(token)).expectNextCount(1).verifyComplete();
+
+        assertTrue(sql.get().contains(" from \"audit\".\"order\" where "));
     }
 
     /** 回执读取在驱动错误或取消时结果未确认，连接只能失效，不能按正常连接归池。 */
@@ -330,11 +360,18 @@ class BatchReceiptStoreTest {
     }
 
     private static ConnectionFactory connectionFactory(Publisher<? extends Result> execution) {
+        return connectionFactory(execution, "test", new AtomicReference<>());
+    }
+
+    private static ConnectionFactory connectionFactory(Publisher<? extends Result> execution,
+                                                       String databaseProductName,
+                                                       AtomicReference<String> sql) {
         Connection connection = (Connection) Proxy.newProxyInstance(
                 BatchReceiptStoreTest.class.getClassLoader(),
                 new Class<?>[]{Connection.class},
                 (ignored, method, arguments) -> {
                     if (method.getName().equals("createStatement")) {
+                        sql.set((String) arguments[0]);
                         return statement(execution);
                     }
                     throw new UnsupportedOperationException(method.getName());
@@ -347,7 +384,7 @@ class BatchReceiptStoreTest {
 
             @Override
             public ConnectionFactoryMetadata getMetadata() {
-                return () -> "test";
+                return () -> databaseProductName;
             }
         };
     }

@@ -11,6 +11,7 @@ import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.page.CursorPageQuery;
 import com.flying.orm.core.page.CursorSort;
+import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.param.ParameterConditionCompiler;
 import com.flying.orm.core.param.ParameterConditionPackage;
 import com.flying.orm.core.param.ParameterConditionSpec;
@@ -35,6 +36,7 @@ import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.dialect.UpsertDialect;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlResultMemoryLimitExceededException;
+import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.form.spec.BatchSpec;
 import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.form.spec.WriteSpec;
@@ -77,6 +79,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * @version v1.0
  */
 class ReactiveFormClientTest {
+
+    /** Form 计划必须把数据库生成主键的物理列名交给原生 R2DBC 内部协作。 */
+    @Test
+    void passesGeneratedKeyColumnToNativeReactiveExecutor() {
+        RecordingSqlExecutor executor = new RecordingSqlExecutor();
+        ReactiveFormClient client = ReactiveFormClient.create(executor, renderer());
+        DynamicForm generated = DynamicForm.builder("device", "device")
+                                           .addField(DynamicField.primaryKey("id", "BIGINT")
+                                                                 .withGeneration(ValueGeneration.identity()))
+                                           .addField(DynamicField.of("profile", "JSON"))
+                                           .build();
+
+        StepVerifier.create(client.insertReturningKeys(WriteSpec.insert(generated, Map.of("profile", "{}"))))
+                    .assertNext(result -> assertEquals(1L, result.affectedRows()))
+                    .verifyComplete();
+
+        assertEquals("id", executor.generatedKeyColumn);
+    }
 
     @Test
     void immutableSpecsShareTheSameSafeReactivePipelineAndClientDefaults() {
@@ -738,9 +758,9 @@ class ReactiveFormClientTest {
                     .expectNextCount(1)
                     .verifyComplete();
 
-        assertEquals("select `id`, `profile` from `Profiles` where json_unquote(json_extract(`profile`, ?)) = ?",
+        assertEquals("select `id`, `profile` from `Profiles` where json_extract(`profile`, ?) = cast(? as json)",
                      executor.request().sql());
-        assertEquals(List.of("$.name", "Alice"), executor.request().parameters());
+        assertEquals(List.of("$.name", "\"Alice\""), executor.request().parameters());
     }
 
     @Test
@@ -778,10 +798,10 @@ class ReactiveFormClientTest {
                     .verifyComplete();
 
         assertEquals("select `id`, `profile`, `userId` from `Profiles` where "
-                             + "json_unquote(json_extract(`profile`, ?)) = ? and exists "
+                             + "json_extract(`profile`, ?) = cast(? as json) and exists "
                              + "(select 1 from org_user ou where ou.user_id = `userId` and ou.org_id = ?)",
                      executor.request().sql());
-        assertEquals(List.of("$.name", "Alice", "org-1"), executor.request().parameters());
+        assertEquals(List.of("$.name", "\"Alice\"", "org-1"), executor.request().parameters());
     }
 
     @Test
@@ -1600,6 +1620,8 @@ class ReactiveFormClientTest {
 
         private boolean keepBatchOpen;
 
+        private String generatedKeyColumn;
+
         @Override
         public Flux<DynamicRow> query(SqlRequest request) {
             this.request = request;
@@ -1638,6 +1660,19 @@ class ReactiveFormClientTest {
         public Mono<Long> rowsUpdated(SqlRequest request, SqlExecutionOptions options) {
             this.options.add(options);
             return rowsUpdated(request);
+        }
+
+        @Override
+        public Mono<SqlWriteResult> rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+            return rowsUpdated(request, options).map(rows -> new SqlWriteResult(rows, List.of()));
+        }
+
+        @Override
+        public Mono<SqlWriteResult> rowsUpdatedReturningKeys(SqlRequest request,
+                                                             SqlExecutionOptions options,
+                                                             String generatedKeyColumn) {
+            this.generatedKeyColumn = generatedKeyColumn;
+            return rowsUpdatedReturningKeys(request, options);
         }
 
         @Override

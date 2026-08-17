@@ -78,6 +78,13 @@ final class DefaultOptionsReactiveSqlExecutor implements ReactiveSqlExecutor, Co
         return delegate.rowsUpdatedReturningKeys(request, options);
     }
 
+    @Override
+    public Mono<SqlWriteResult> rowsUpdatedReturningKeys(SqlRequest request,
+                                                         SqlExecutionOptions options,
+                                                         String generatedKeyColumn) {
+        return delegate.rowsUpdatedReturningKeys(request, options, generatedKeyColumn);
+    }
+
     /** 显式保护写入已经携带本次执行选项；装饰器只负责保持底层原子能力。 */
     @Override
     public Mono<SqlWriteResult> atomicProtectedWrite(ProtectedWriteWork work, SqlExecutionOptions options) {

@@ -1021,6 +1021,7 @@ TYPE public final class com.flying.orm.core.sql.render.SqlRenderer implements co
   METHOD public com.flying.orm.core.sql.render.SqlFragment renderWhere(com.flying.orm.core.condition.ConditionGroup)
   METHOD public com.flying.orm.core.condition.TermRegistry terms()
   METHOD public com.flying.orm.core.codec.ValueCodecRegistry valueCodecs()
+  METHOD public com.flying.orm.core.sql.render.SqlRenderer withFieldIdentifierRenderer(java.util.function.UnaryOperator<java.lang.String>)
   METHOD public com.flying.orm.core.sql.render.SqlRenderer withIdentifierRenderer(java.util.function.UnaryOperator<java.lang.String>)
   METHOD public com.flying.orm.core.sql.render.SqlRenderer withValueCodecs(com.flying.orm.core.codec.ValueCodecRegistry)
 END
@@ -1113,6 +1114,7 @@ TYPE public final class com.flying.orm.rdb.array.ArrayStructuredConditions imple
   METHOD public com.flying.orm.core.condition.ConditionGroup compile(com.flying.orm.core.form.DynamicForm, com.flying.orm.core.condition.StructuredConditionInput, com.flying.orm.core.condition.StructuredConditionPolicy)
   METHOD public com.flying.orm.core.condition.StructuredConditionPolicy customize(com.flying.orm.core.condition.StructuredConditionPolicy)
   METHOD public static com.flying.orm.rdb.array.ArrayStructuredConditions postgresql()
+  METHOD public void validate(com.flying.orm.core.form.DynamicForm, com.flying.orm.core.condition.StructuredConditionInput, com.flying.orm.core.condition.StructuredConditionPolicy)
 END
 TYPE public final class com.flying.orm.rdb.array.ArrayTermHandlers
   METHOD public static com.flying.orm.core.sql.render.SqlTermPackage postgresql()
@@ -1989,6 +1991,7 @@ TYPE public abstract interface com.flying.orm.rdb.form.StructuredConditionCustom
   METHOD public static com.flying.orm.rdb.form.StructuredConditionCustomizer allowOperator(java.lang.String)
   METHOD public static com.flying.orm.rdb.form.StructuredConditionCustomizer allowOperator(java.lang.String, java.lang.String)
   METHOD public default com.flying.orm.core.condition.StructuredConditionPolicy customize(com.flying.orm.core.condition.StructuredConditionPolicy)
+  METHOD public default void validate(com.flying.orm.core.form.DynamicForm, com.flying.orm.core.condition.StructuredConditionInput, com.flying.orm.core.condition.StructuredConditionPolicy)
 END
 TYPE public abstract interface com.flying.orm.rdb.form.StructuredConditionResolver
   METHOD public abstract com.flying.orm.core.condition.ConditionGroup compile(com.flying.orm.core.form.DynamicForm, com.flying.orm.core.condition.StructuredConditionInput, com.flying.orm.core.condition.StructuredConditionPolicy)
@@ -2237,6 +2240,7 @@ TYPE public final class com.flying.orm.rdb.json.JsonStructuredConditions impleme
   METHOD public com.flying.orm.core.condition.ConditionGroup compile(com.flying.orm.core.form.DynamicForm, com.flying.orm.core.condition.StructuredConditionInput, com.flying.orm.core.condition.StructuredConditionPolicy)
   METHOD public com.flying.orm.core.condition.StructuredConditionPolicy customize(com.flying.orm.core.condition.StructuredConditionPolicy)
   METHOD public static com.flying.orm.rdb.json.JsonStructuredConditions standard()
+  METHOD public void validate(com.flying.orm.core.form.DynamicForm, com.flying.orm.core.condition.StructuredConditionInput, com.flying.orm.core.condition.StructuredConditionPolicy)
 END
 TYPE public final class com.flying.orm.rdb.json.JsonTermHandlers
   METHOD public static com.flying.orm.core.sql.render.SqlTermPackage mysql()

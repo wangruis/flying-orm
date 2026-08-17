@@ -3,6 +3,7 @@ package com.flying.orm.rdb.form;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.core.protection.MaskedFieldDefinition;
@@ -42,6 +43,22 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /** 验证原生同步表单操作直接消费共享 SQL 计划，不经过 Reactor 或 R2DBC 桥。 */
 class SyncFormOperationsTest {
+
+    /** Form 计划必须把数据库生成主键的物理列名交给原生 JDBC 内部协作。 */
+    @Test
+    void passesGeneratedKeyColumnToNativeSyncExecutor() {
+        RecordingSyncSqlExecutor executor = new RecordingSyncSqlExecutor();
+        SyncFormOperations operations = operations(executor, SqlExecutionOptions.safeDefaults());
+        DynamicForm generated = DynamicForm.builder("device", "device")
+                                           .addField(DynamicField.primaryKey("id", "BIGINT")
+                                                                 .withGeneration(ValueGeneration.identity()))
+                                           .addField(DynamicField.of("profile", "JSON"))
+                                           .build();
+
+        operations.insertReturningKeys(WriteSpec.insert(generated, row("profile", "{}")));
+
+        assertEquals("id", executor.generatedKeyColumn);
+    }
 
     @Test
     void executesQueryPageAndJsonDecodingThroughSyncExecutor() {
@@ -110,6 +127,30 @@ class SyncFormOperationsTest {
         assertEquals("cursor pagination does not support grouped QuerySpec",
                      cursorGroupError.getMessage());
         assertEquals(requestsBeforeRejection, executor.requests.size());
+    }
+
+    /** 简单字段分组只允许显式选择和排序分组字段，不能把跨库非法 SQL 推给驱动。 */
+    @Test
+    void enforcesCompleteGroupedQueryShapeBeforeExecution() {
+        RecordingSyncSqlExecutor executor = new RecordingSyncSqlExecutor();
+        SyncFormOperations operations = operations(executor, SqlExecutionOptions.safeDefaults());
+
+        QuerySpec nonGroupedProjection = QuerySpec.of(form(), ConditionGroup.and().build())
+                                                  .withProjection(List.of("profile"), List.of("id"));
+        QuerySpec nonGroupedSort = QuerySpec.of(form(), ConditionGroup.and().build())
+                                            .withProjection(List.of("id"), List.of("id"))
+                                            .withSorts(List.of(PageSort.asc("profile")));
+
+        assertThrows(IllegalArgumentException.class, () -> operations.select(nonGroupedProjection));
+        assertThrows(IllegalArgumentException.class, () -> operations.select(nonGroupedSort));
+        assertEquals(0, executor.requests.size());
+
+        operations.select(QuerySpec.of(form(), ConditionGroup.and().build())
+                                   .withProjection(List.of("id"), List.of("id"))
+                                   .withSorts(List.of(PageSort.asc("id"))));
+
+        assertEquals("select id from device group by id order by id asc",
+                     executor.requests.getFirst().sql());
     }
 
     /** FieldScope 不可读字段不能通过排序或分组形成旁路，JDBC/R2DBC 共用同一规划器。 */
@@ -311,6 +352,7 @@ class SyncFormOperationsTest {
         private final List<SqlRequest> requests = new ArrayList<>();
         private final List<SqlExecutionOptions> options = new ArrayList<>();
         private long updatedRows = 1L;
+        private String generatedKeyColumn;
 
         @Override
         public List<DynamicRow> query(SqlRequest request) {
@@ -343,6 +385,14 @@ class SyncFormOperationsTest {
         @Override
         public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
             return new SqlWriteResult(rowsUpdated(request, options), List.of());
+        }
+
+        @Override
+        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request,
+                                                       SqlExecutionOptions options,
+                                                       String generatedKeyColumn) {
+            this.generatedKeyColumn = generatedKeyColumn;
+            return rowsUpdatedReturningKeys(request, options);
         }
     }
 

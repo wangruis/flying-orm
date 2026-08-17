@@ -1,6 +1,8 @@
 package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
+import com.flying.orm.core.sql.render.SqlIdentifiers;
+import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.internal.template.SqlStatements;
 import io.r2dbc.spi.ConnectionFactory;
 
@@ -17,9 +19,11 @@ import java.util.Objects;
 final class R2dbcBindMarkers {
 
     private final MarkerFormat format;
+    private final String databaseProductName;
 
-    private R2dbcBindMarkers(MarkerFormat format) {
+    private R2dbcBindMarkers(MarkerFormat format, String databaseProductName) {
         this.format = format;
+        this.databaseProductName = databaseProductName;
     }
 
     static R2dbcBindMarkers from(ConnectionFactory connectionFactory) {
@@ -28,15 +32,54 @@ final class R2dbcBindMarkers {
                                                      "connection factory metadata must not be null").getName();
         String normalized = databaseName == null ? "" : databaseName.toLowerCase(Locale.ROOT);
         if (normalized.contains("postgres")) {
-            return new R2dbcBindMarkers(MarkerFormat.POSTGRESQL);
+            return new R2dbcBindMarkers(MarkerFormat.POSTGRESQL, databaseName);
         }
         if (normalized.contains("sql server") || normalized.contains("mssql")) {
-            return new R2dbcBindMarkers(MarkerFormat.SQL_SERVER);
+            return new R2dbcBindMarkers(MarkerFormat.SQL_SERVER, databaseName);
         }
         if (normalized.contains("oracle")) {
-            return new R2dbcBindMarkers(MarkerFormat.ORACLE);
+            return new R2dbcBindMarkers(MarkerFormat.ORACLE, databaseName);
         }
-        return new R2dbcBindMarkers(MarkerFormat.QUESTION_MARK);
+        return new R2dbcBindMarkers(MarkerFormat.QUESTION_MARK, databaseName);
+    }
+
+    /** 所有请求按真实驱动方言校验；只有 SQL Server 会额外识别无分号批处理。 */
+    void requireSingle(SqlRequest request) {
+        SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
+        SqlStatements.requireSingleForDatabaseProduct(safeRequest.sql(), databaseProductName);
+    }
+
+    /**
+     * 把已经通过结构校验的普通或 schema-qualified 标识符按驱动规则逐段引用。
+     * PostgreSQL、Oracle 和 H2 先遵守未引用名称的大小写折叠，避免给默认回执表增加大小写语义变化。
+     */
+    String identifier(String value) {
+        String safe = SqlIdentifiers.requireIdentifier(value, "R2DBC SQL identifier");
+        String normalizedDatabase = databaseProductName == null
+                ? "" : databaseProductName.toLowerCase(Locale.ROOT);
+        String[] segments = safe.split("\\.", -1);
+        StringBuilder result = new StringBuilder(safe.length() + segments.length * 2);
+        for (int index = 0; index < segments.length; index++) {
+            if (index > 0) {
+                result.append('.');
+            }
+            appendIdentifier(result, segments[index], normalizedDatabase);
+        }
+        return result.toString();
+    }
+
+    private void appendIdentifier(StringBuilder result, String segment, String database) {
+        if (format == MarkerFormat.POSTGRESQL) {
+            result.append('"').append(segment.toLowerCase(Locale.ROOT)).append('"');
+        } else if (format == MarkerFormat.ORACLE || database.contains("h2")) {
+            result.append('"').append(segment.toUpperCase(Locale.ROOT)).append('"');
+        } else if (database.contains("mysql")) {
+            result.append('`').append(segment).append('`');
+        } else if (format == MarkerFormat.SQL_SERVER) {
+            result.append('[').append(segment).append(']');
+        } else {
+            result.append(segment);
+        }
     }
 
     String adapt(String sql, int parameterCount, SqlBindMarkerStyle markerStyle) {

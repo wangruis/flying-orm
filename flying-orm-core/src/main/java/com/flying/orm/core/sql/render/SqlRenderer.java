@@ -32,13 +32,18 @@ public final class SqlRenderer implements SqlRenderContext {
 
     private final UnaryOperator<String> identifierRenderer;
 
+    private final UnaryOperator<String> structureIdentifierRenderer;
+
     private SqlRenderer(SqlTermRegistry termRegistry,
                         ValueCodecRegistry valueCodecs,
-                        UnaryOperator<String> identifierRenderer) {
+                        UnaryOperator<String> identifierRenderer,
+                        UnaryOperator<String> structureIdentifierRenderer) {
         this.termRegistry = Objects.requireNonNull(termRegistry, "sql term registry must not be null");
         this.valueCodecs = Objects.requireNonNull(valueCodecs, "value codec registry must not be null");
         this.identifierRenderer = Objects.requireNonNull(identifierRenderer,
                                                          "sql identifier renderer must not be null");
+        this.structureIdentifierRenderer = Objects.requireNonNull(
+                structureIdentifierRenderer, "sql structure identifier renderer must not be null");
     }
 
     /**
@@ -116,6 +121,12 @@ public final class SqlRenderer implements SqlRenderContext {
         return SqlFragment.encodedParameter(valueCodecs.write(value));
     }
 
+    String structureIdentifier(String name) {
+        String safeName = SqlIdentifiers.requireIdentifier(name, "sql structure identifier");
+        return Objects.requireNonNull(structureIdentifierRenderer.apply(safeName),
+                                      "rendered sql structure identifier must not be null");
+    }
+
     /**
      * 返回当前渲染器使用的只读 codec 注册表，表单和实体映射可直接复用同一个实例。
      *
@@ -132,7 +143,7 @@ public final class SqlRenderer implements SqlRenderContext {
      * @return 使用新 codec 的只读渲染器
      */
     public SqlRenderer withValueCodecs(ValueCodecRegistry valueCodecs) {
-        return new SqlRenderer(termRegistry, valueCodecs, identifierRenderer);
+        return new SqlRenderer(termRegistry, valueCodecs, identifierRenderer, structureIdentifierRenderer);
     }
 
     /**
@@ -145,10 +156,26 @@ public final class SqlRenderer implements SqlRenderContext {
      * @return 使用新标识符规则的只读渲染器
      */
     public SqlRenderer withIdentifierRenderer(UnaryOperator<String> identifierRenderer) {
+        UnaryOperator<String> safeRenderer = Objects.requireNonNull(
+                identifierRenderer, "sql identifier renderer must not be null");
+        return new SqlRenderer(termRegistry, valueCodecs, safeRenderer, safeRenderer);
+    }
+
+    /**
+     * 保留方言的表名、别名和关系列渲染，只替换当前条件叶子字段的限定规则。
+     *
+     * <p>这是 JOIN 和受保护候选查询的内部组合边界。普通调用方应使用
+     * {@link #withIdentifierRenderer(UnaryOperator)} 同时配置所有标识符。</p>
+     *
+     * @param identifierRenderer 当前条件字段的安全渲染器
+     * @return 只替换条件字段规则的新渲染器
+     */
+    public SqlRenderer withFieldIdentifierRenderer(UnaryOperator<String> identifierRenderer) {
         return new SqlRenderer(termRegistry,
                                valueCodecs,
                                Objects.requireNonNull(identifierRenderer,
-                                                      "sql identifier renderer must not be null"));
+                                                      "sql field identifier renderer must not be null"),
+                               structureIdentifierRenderer);
     }
 
     private SqlFragment renderNode(ConditionNode node) {
@@ -253,7 +280,8 @@ public final class SqlRenderer implements SqlRenderContext {
          * @return SQL 渲染器
          */
         public SqlRenderer build() {
-            return new SqlRenderer(terms.build(), valueCodecs, UnaryOperator.identity());
+            UnaryOperator<String> identifiers = UnaryOperator.identity();
+            return new SqlRenderer(terms.build(), valueCodecs, identifiers, identifiers);
         }
     }
 }

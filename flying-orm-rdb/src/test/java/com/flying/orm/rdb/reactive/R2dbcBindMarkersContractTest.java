@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
+import com.flying.orm.core.sql.render.SqlRequest;
 import io.r2dbc.spi.Connection;
 import io.r2dbc.spi.ConnectionFactory;
 import io.r2dbc.spi.ConnectionFactoryMetadata;
@@ -14,6 +15,21 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
  * 驱动绑定标记只在创建 Statement 前改写。Oracle 官方驱动支持匿名问号，SQL Server 驱动使用 @P0 开始的标记。
  */
 class R2dbcBindMarkersContractTest {
+
+    /** 回执表等运行时标识符必须逐段按真实驱动方言引用，不能依赖保留字恰好可裸写。 */
+    @Test
+    void quotesQualifiedRuntimeIdentifiersForEverySupportedDatabase() {
+        assertEquals("`audit`.`order`",
+                     R2dbcBindMarkers.from(connectionFactory("MySQL")).identifier("audit.order"));
+        assertEquals("\"audit\".\"order\"",
+                     R2dbcBindMarkers.from(connectionFactory("PostgreSQL")).identifier("audit.order"));
+        assertEquals("\"AUDIT\".\"ORDER\"",
+                     R2dbcBindMarkers.from(connectionFactory("Oracle Database")).identifier("audit.order"));
+        assertEquals("[audit].[order]",
+                     R2dbcBindMarkers.from(connectionFactory("Microsoft SQL Server")).identifier("audit.order"));
+        assertEquals("\"AUDIT\".\"ORDER\"",
+                     R2dbcBindMarkers.from(connectionFactory("H2")).identifier("audit.order"));
+    }
 
     @Test
     void keepsOracleQuestionMarkersAndNumbersSqlServerMarkersFromZero() {
@@ -97,6 +113,33 @@ class R2dbcBindMarkersContractTest {
                      () -> mysql.adapt("select * from users where name = '?", 0, SqlBindMarkerStyle.CANONICAL));
         assertThrows(IllegalArgumentException.class,
                      () -> postgresql.adapt("select * from users /* ?", 0, SqlBindMarkerStyle.CANONICAL));
+    }
+
+    /** 原生 SQL 使用真实驱动方言；井号词法不能被通用规则误作跨方言语法解析。 */
+    @Test
+    void validatesNativeStatementsWithTheFactoryDialect() {
+        R2dbcBindMarkers mysql = R2dbcBindMarkers.from(connectionFactory("MySQL"));
+        R2dbcBindMarkers postgresql = R2dbcBindMarkers.from(connectionFactory("PostgreSQL"));
+        SqlRequest statement = SqlRequest.nativeSql(
+                "update users set active = true # delete from audit_log\nwhere id = 1", java.util.List.of());
+
+        mysql.requireSingle(statement);
+        postgresql.requireSingle(statement);
+        mysql.requireSingle(new SqlRequest(statement.sql(), java.util.List.of()));
+        assertThrows(IllegalArgumentException.class, () -> postgresql.requireSingle(SqlRequest.nativeSql(
+                "select 17 # 5; delete from users", java.util.List.of())));
+    }
+
+    /** SQL Server 的 FOR JSON 是查询输出子句，不能让后续独立 UPDATE 伪装成 FOR UPDATE。 */
+    @Test
+    void rejectsSqlServerOutputClauseBeforeSecondUpdateForEveryMarkerStyle() {
+        R2dbcBindMarkers sqlServer = R2dbcBindMarkers.from(connectionFactory("Microsoft SQL Server"));
+        String batch = "select id from users for json path\nupdate statistics dbo.Users";
+
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServer.requireSingle(new SqlRequest(batch, java.util.List.of())));
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServer.requireSingle(SqlRequest.nativeSql(batch, java.util.List.of())));
     }
 
     private static ConnectionFactory connectionFactory(String name) {

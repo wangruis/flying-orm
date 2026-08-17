@@ -129,6 +129,24 @@ final class ObservedReactiveSqlExecutor implements ReactiveSqlExecutor, Connecti
                                                safeOptions);
     }
 
+    @Override
+    public Mono<SqlWriteResult> rowsUpdatedReturningKeys(SqlRequest request,
+                                                         SqlExecutionOptions options,
+                                                         String generatedKeyColumn) {
+        SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
+        SqlExecutionOptions safeOptions = Objects.requireNonNull(options,
+                                                                  "sql execution options must not be null");
+        String safeColumn = Objects.requireNonNull(generatedKeyColumn,
+                                                   "generated key column must not be null");
+        Mono<SqlWriteResult> source = Mono.defer(() -> delegate.rowsUpdatedReturningKeys(
+                safeRequest, safeOptions, safeColumn).onErrorMap(ReactiveSqlExecutionProtection::translate));
+        return observationSupport.observeMono(SqlExecutionOperation.UPDATE,
+                                               safeRequest.sql(), safeRequest.parameters().size(), 0,
+                                               safeRequest.parameters(), source,
+                                               SqlWriteResult::affectedRows,
+                                               safeOptions);
+    }
+
     /** 原子保护写入作为一个事务工作单元观测，侧索引内部参数不单独暴露。 */
     @Override
     public Mono<SqlWriteResult> atomicProtectedWrite(ProtectedWriteWork work, SqlExecutionOptions options) {

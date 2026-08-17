@@ -10,6 +10,8 @@ import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
 import com.flying.orm.rdb.execution.ProtectedBatchRows;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
+import com.flying.orm.rdb.exception.RdbErrorKind;
+import com.flying.orm.rdb.exception.RdbException;
 import com.flying.orm.rdb.isolation.R2dbcConnectionInvalidator;
 import com.flying.orm.rdb.observation.BatchExecutionObserver;
 import com.flying.orm.rdb.observation.ResourceCleanupObservation;
@@ -936,6 +938,45 @@ class R2dbcBatchWriterTest {
         assertTrue(factory.confirmationStartedAfterCleanup);
     }
 
+    /** 同一 operationId 的并发 ATOMIC 请求在预留冲突后必须重读首个请求已提交的回执。 */
+    @Test
+    void atomicReceiptReservationConflictReplaysCommittedFactAfterRollback() {
+        Object[] row = new Object[]{"u1"};
+        ControlledConnectionFactory factory = new ControlledConnectionFactory();
+        factory.duplicateReceiptReserve = true;
+        factory.receiptPayloadAfterReservationConflict = new BatchPayloadHasher()
+                .hashRows(List.<Object[]>of(row));
+
+        BatchWriteResult result = R2dbcSqlExecutor.create(factory)
+                .writeBatch(request(BatchWriteOptions.atomic(1).withReceipt("concurrent-atomic"),
+                                    Flux.<Object[]>just(row)))
+                .block();
+
+        assertEquals(BatchWriteResult.Status.COMMITTED, result.status());
+        assertEquals(1, factory.rollbacks.get());
+        assertEquals(1, factory.reservationReplayReads.get());
+        assertTrue(factory.reservationReplayStartedAfterCleanup);
+    }
+
+    /** INDEPENDENT 分片的预留冲突同样要在本分片回滚和连接归还后重读已提交回执。 */
+    @Test
+    void independentReceiptReservationConflictReplaysCommittedFactAfterRollback() {
+        ControlledConnectionFactory factory = new ControlledConnectionFactory();
+        factory.duplicateReceiptReserve = true;
+        factory.receiptPayloadAfterReservationConflict = "unused-by-exact-token-read";
+
+        BatchChunkResult result = R2dbcSqlExecutor.create(factory)
+                .writeBatchChunks(request(BatchWriteOptions.independent(1)
+                                                           .withReceipt("concurrent-independent")))
+                .single()
+                .block();
+
+        assertEquals(BatchChunkResult.Status.COMMITTED, result.status());
+        assertEquals(1, factory.rollbacks.get());
+        assertEquals(1, factory.reservationReplayReads.get());
+        assertTrue(factory.reservationReplayStartedAfterCleanup);
+    }
+
     /** confirmTimeout 为零表示明确关闭主动确认，未知提交必须保持 UNKNOWN。 */
     @Test
     void zeroReceiptConfirmationTimeoutKeepsAtomicCommitUnknown() {
@@ -1204,6 +1245,7 @@ class R2dbcBatchWriterTest {
         private final AtomicInteger connections = new AtomicInteger();
         private final AtomicInteger activeConnections = new AtomicInteger();
         private final AtomicInteger confirmReceiptReads = new AtomicInteger();
+        private final AtomicInteger reservationReplayReads = new AtomicInteger();
         private final AtomicInteger commitAttempts = new AtomicInteger();
         private final List<String> statementSql = new ArrayList<>();
 
@@ -1226,6 +1268,10 @@ class R2dbcBatchWriterTest {
         private boolean committedReceiptAfterCommitFailure;
         private String preexistingReceiptPayload;
         private boolean confirmationStartedAfterCleanup;
+        private boolean duplicateReceiptReserve;
+        private String receiptPayloadAfterReservationConflict;
+        private boolean reservationReplayAvailable;
+        private boolean reservationReplayStartedAfterCleanup;
 
         @Override
         public Publisher<? extends Connection> create() {
@@ -1314,14 +1360,37 @@ class R2dbcBatchWriterTest {
                 return Flux.just(ownerResult(ownerId));
             }
             if (sql.startsWith("select row_count, affected_rows")
+                    && reservationReplayAvailable) {
+                reservationReplayReads.incrementAndGet();
+                reservationReplayStartedAfterCleanup = activeConnections.get() == 1;
+                return Flux.just(receiptResult(1L, 1L));
+            }
+            if (sql.startsWith("select row_count, affected_rows")
                     && committedReceiptAfterCommitFailure
                     && commitAttempts.get() > 0) {
                 confirmReceiptReads.incrementAndGet();
                 confirmationStartedAfterCleanup = activeConnections.get() == 1;
                 return Flux.just(receiptResult(1L, 1L));
             }
+            if (sql.startsWith("select payload_hash") && reservationReplayAvailable) {
+                reservationReplayReads.incrementAndGet();
+                reservationReplayStartedAfterCleanup = activeConnections.get() == 1;
+                return Flux.just(receiptResult(preexistingReceiptPayload, 1L, 1L));
+            }
             if (sql.startsWith("select payload_hash") && preexistingReceiptPayload != null) {
                 return Flux.just(receiptResult(preexistingReceiptPayload, 1L, 1L));
+            }
+            if (sql.startsWith("insert into ") && sql.contains("status, created_at")
+                    && duplicateReceiptReserve) {
+                duplicateReceiptReserve = false;
+                reservationReplayAvailable = true;
+                preexistingReceiptPayload = receiptPayloadAfterReservationConflict;
+                return errorOnRequest(new RdbException(
+                        RdbErrorKind.DUPLICATE_KEY,
+                        "database duplicate key conflict",
+                        "23505",
+                        null,
+                        new IllegalStateException("duplicate receipt reservation")));
             }
             Flux<Result> execution = Flux.just(result(
                     sql.startsWith("select "), zeroRowsSql != null && zeroRowsSql.equals(sql) ? 0L : 1L));

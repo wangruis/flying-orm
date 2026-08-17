@@ -15,6 +15,7 @@ import com.flying.orm.rdb.lifecycle.ReactiveEntityListener;
 import com.flying.orm.rdb.internal.mapping.EntityValues;
 import com.flying.orm.rdb.mapping.EntityMetadata;
 import com.flying.orm.rdb.operator.EntityDmlDeleteOperator;
+import com.flying.orm.rdb.operator.EntityDmlOperator;
 import com.flying.orm.rdb.operator.EntityDmlQueryOperator;
 import com.flying.orm.rdb.operator.EntityDmlUpdateOperator;
 import org.reactivestreams.Publisher;
@@ -113,17 +114,21 @@ public final class ReactiveFormRepository<T> {
 
     /** @return 当前实体的 Lambda 查询命令 */
     public EntityDmlQueryOperator<T> createQuery() {
-        return client.entity(entityType).query();
+        return entityOperator().query();
     }
 
     /** @return 当前实体的 Lambda 更新命令 */
     public EntityDmlUpdateOperator<T> createUpdate() {
-        return client.entity(entityType).update();
+        return entityOperator().update();
     }
 
     /** @return 当前实体的 Lambda 删除命令 */
     public EntityDmlDeleteOperator<T> createDelete() {
-        return client.entity(entityType).delete();
+        return entityOperator().delete();
+    }
+
+    private EntityDmlOperator<T> entityOperator() {
+        return EntityDmlOperator.create(client, client.entityRenderer(), form, entityType);
     }
 
     static <T> ReactiveFormRepository<T> create(ReactiveFormClient client,

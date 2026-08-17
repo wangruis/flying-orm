@@ -21,8 +21,12 @@ final class EntityDmlModel<T> {
     private final DynamicForm form;
 
     EntityDmlModel(EntityMetadata<T> metadata) {
+        this(metadata, Objects.requireNonNull(metadata, "entity metadata must not be null").toDynamicForm());
+    }
+
+    EntityDmlModel(EntityMetadata<T> metadata, DynamicForm form) {
         this.metadata = Objects.requireNonNull(metadata, "entity metadata must not be null");
-        this.form = metadata.toDynamicForm();
+        this.form = Objects.requireNonNull(form, "entity dynamic form must not be null");
     }
 
     EntityMetadata<T> metadata() {

@@ -5,6 +5,7 @@ import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.ColumnMetadata;
 import com.flying.orm.core.metadata.IndexMetadata;
 import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import org.junit.jupiter.api.Test;
@@ -25,6 +26,25 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * @version v1.0
  */
 class SchemaMigrationReviewerTest {
+
+    /** 新表审核回滚必须先删表再删显式序列，不能把序列永久遗留在 schema 中。 */
+    @Test
+    void rollbackForCreatedTableDropsItsExplicitSequence() {
+        DynamicForm target = DynamicForm.builder("events", "events")
+                                        .addField(DynamicField.primaryKey("id", "BIGINT")
+                                                              .withGeneration(ValueGeneration.sequence(
+                                                                      "events_id_seq")))
+                                        .build();
+        FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.postgresql());
+        SchemaMigrationPlan plan = renderer.createTablePlan(target, List.of());
+        TableMetadata absent = TableMetadata.builder("events").build();
+
+        ReviewedSchemaMigrationPlan reviewed = SchemaMigrationReviewer.create(renderer).review(
+                absent, plan, SchemaMigrationReviewPolicy.allowBlocking());
+
+        assertEquals(List.of("drop table \"events\"", "drop sequence \"events_id_seq\""),
+                     reviewed.rollback().requests().stream().map(SqlRequest::sql).toList());
+    }
 
     /** 已存在但受本次 DDL 影响的辅助表只参与缓存失效，复审时不能被当成新表生成删除回滚。 */
     @Test

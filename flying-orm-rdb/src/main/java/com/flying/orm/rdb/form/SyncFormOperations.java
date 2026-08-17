@@ -163,9 +163,15 @@ final class SyncFormOperations {
         FormOperationPlanner.PlannedWrite plan = planner.insert(spec);
         SqlWriteResult result = plan.protectedWriteRequired()
                 ? executor.atomicProtectedWrite(plan.protectedWrite(), plan.options())
-                : executor.rowsUpdatedReturningKeys(plan.request(), plan.options());
+                : rowsUpdatedReturningKeys(plan);
         plan.requireSuccess(result.affectedRows());
         return result;
+    }
+
+    private SqlWriteResult rowsUpdatedReturningKeys(FormOperationPlanner.PlannedWrite plan) {
+        return plan.generatedKeyColumn()
+                   .map(column -> executor.rowsUpdatedReturningKeys(plan.request(), plan.options(), column))
+                   .orElseGet(() -> executor.rowsUpdatedReturningKeys(plan.request(), plan.options()));
     }
 
     long update(WriteSpec spec) {

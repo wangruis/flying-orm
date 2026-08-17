@@ -16,7 +16,6 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLFeatureNotSupportedException;
-import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -194,7 +193,7 @@ final class JdbcProtectedWriteExecutor {
                                         SqlExecutionOptions options) throws SQLException {
         boolean keys = work.requiresGeneratedKeys();
         try (PreparedStatement statement = keys
-                ? connection.prepareStatement(request.sql(), Statement.RETURN_GENERATED_KEYS)
+                ? connection.prepareStatement(request.sql(), new String[]{generatedKeyColumn(work)})
                 : connection.prepareStatement(request.sql())) {
             JdbcStatementOptions.apply(statement, options);
             JdbcStatementBinder.bind(statement, request.parameters());
@@ -212,6 +211,17 @@ final class JdbcProtectedWriteExecutor {
                 return new SqlWriteResult(rows, JdbcResultSetReader.readGeneratedKeys(generated, options));
             }
         }
+    }
+
+    private static String generatedKeyColumn(ProtectedWriteWork work) {
+        Map<String, Object> knownOwner = work.knownOwner();
+        List<String> missing = work.ownerFields().stream()
+                                   .filter(field -> !knownOwner.containsKey(field) || knownOwner.get(field) == null)
+                                   .toList();
+        if (missing.size() != 1) {
+            throw new IllegalArgumentException("protected insert requires exactly one generated owner key");
+        }
+        return missing.getFirst();
     }
 
     private static void requireStableOwnerSet(ProtectedWriteWork work,

@@ -127,7 +127,7 @@ enum StandardPaginationDialect implements PaginationDialect {
         public SqlRequest paginate(String sql, List<Object> parameters, PageQuery page) {
             PageQuery safePage = requirePage(page);
             String safeSql = requireSql(sql).trim();
-            if (!safeSql.toLowerCase(Locale.ROOT).contains(" order by ")) {
+            if (!hasTopLevelOrderBy(safeSql)) {
                 throw new IllegalArgumentException("SQL Server pagination requires an explicit order by");
             }
             return new SqlRequest(safeSql + " offset ? rows fetch next ? rows only",
@@ -143,7 +143,7 @@ enum StandardPaginationDialect implements PaginationDialect {
         @Override
         public SqlRequest limit(String sql, List<Object> parameters, int maxRows) {
             String safeSql = requireSql(sql).trim();
-            if (!safeSql.toLowerCase(Locale.ROOT).contains(" order by ")) {
+            if (!hasTopLevelOrderBy(safeSql)) {
                 throw new IllegalArgumentException("SQL Server bounded query requires an explicit order by");
             }
             return new SqlRequest(safeSql + " offset 0 rows fetch next ? rows only",
@@ -179,5 +179,105 @@ enum StandardPaginationDialect implements PaginationDialect {
             throw new IllegalArgumentException("query row limit must be positive");
         }
         return maxRows;
+    }
+
+    /** 只识别 SQL Server 分页依赖的最外层 ORDER BY，不把字符串、注释、子查询或窗口函数算进去。 */
+    private static boolean hasTopLevelOrderBy(String sql) {
+        int depth = 0;
+        boolean order = false;
+        for (int index = 0; index < sql.length();) {
+            char current = sql.charAt(index);
+            char next = index + 1 < sql.length() ? sql.charAt(index + 1) : '\0';
+            if (current == '\'' || current == '"') {
+                index = quotedEnd(sql, index, current);
+            } else if (current == '[') {
+                index = bracketEnd(sql, index);
+            } else if (current == '-' && next == '-') {
+                index = lineCommentEnd(sql, index + 2);
+            } else if (current == '/' && next == '*') {
+                index = blockCommentEnd(sql, index + 2);
+            } else if (current == '(') {
+                depth++;
+                order = false;
+                index++;
+            } else if (current == ')') {
+                depth = Math.max(0, depth - 1);
+                order = false;
+                index++;
+            } else if (depth == 0 && (Character.isLetter(current) || current == '_')) {
+                int end = index + 1;
+                while (end < sql.length()) {
+                    char character = sql.charAt(end);
+                    if (!Character.isLetterOrDigit(character) && character != '_') {
+                        break;
+                    }
+                    end++;
+                }
+                String word = sql.substring(index, end).toUpperCase(Locale.ROOT);
+                if (order && "BY".equals(word)) {
+                    return true;
+                }
+                order = "ORDER".equals(word);
+                index = end;
+            } else {
+                index++;
+            }
+        }
+        return false;
+    }
+
+    private static int quotedEnd(String sql, int offset, char quote) {
+        for (int index = offset + 1; index < sql.length(); index++) {
+            if (sql.charAt(index) == quote) {
+                if (index + 1 < sql.length() && sql.charAt(index + 1) == quote) {
+                    index++;
+                } else {
+                    return index + 1;
+                }
+            }
+        }
+        return sql.length();
+    }
+
+    private static int bracketEnd(String sql, int offset) {
+        for (int index = offset + 1; index < sql.length(); index++) {
+            if (sql.charAt(index) == ']') {
+                if (index + 1 < sql.length() && sql.charAt(index + 1) == ']') {
+                    index++;
+                } else {
+                    return index + 1;
+                }
+            }
+        }
+        return sql.length();
+    }
+
+    private static int lineCommentEnd(String sql, int offset) {
+        for (int index = offset; index < sql.length(); index++) {
+            char current = sql.charAt(index);
+            if (current == '\n' || current == '\r') {
+                return index + 1;
+            }
+        }
+        return sql.length();
+    }
+
+    private static int blockCommentEnd(String sql, int offset) {
+        int depth = 1;
+        for (int index = offset; index + 1 < sql.length(); index++) {
+            char current = sql.charAt(index);
+            char next = sql.charAt(index + 1);
+            if (current == '/' && next == '*') {
+                depth++;
+                index++;
+            } else if (current == '*' && next == '/') {
+                depth--;
+                index++;
+                if (depth == 0) {
+                    return index + 1;
+                }
+            }
+        }
+        return sql.length();
     }
 }

@@ -17,6 +17,24 @@ import java.util.Objects;
 public interface StructuredConditionCustomizer {
 
     /**
+     * 在扩展值被包装、复制或序列化前执行专用容量校验。
+     *
+     * <p>通用条件编译器只负责原始值图的深度、节点和字符串边界；JSON、SQL Array、Vector 等扩展
+     * 各自知道业务容器的真实含义，不能由 Core 猜测。</p>
+     *
+     * @param form 可信动态表单
+     * @param input 原始结构化条件
+     * @param policy 当前安全策略
+     */
+    default void validate(DynamicForm form,
+                          StructuredConditionInput input,
+                          StructuredConditionPolicy policy) {
+        Objects.requireNonNull(form, "dynamic form must not be null");
+        Objects.requireNonNull(input, "structured condition input must not be null");
+        Objects.requireNonNull(policy, "structured condition policy must not be null");
+    }
+
+    /**
      * 在可信表单元数据下适配前端条件。只修改 operator 白名单的定制器可以沿用这个默认实现；
      * 需要转换值的定制器必须覆盖本方法，并根据表单字段验证输入。
      */

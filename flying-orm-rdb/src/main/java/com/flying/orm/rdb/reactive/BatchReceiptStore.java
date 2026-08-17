@@ -59,7 +59,7 @@ final class BatchReceiptStore {
      * @return 回执内容
      */
     Mono<Receipt> find(BatchChunkResult.RecoveryToken token) {
-        return find(token, Duration.ZERO);
+        return find(token, SqlExecutionOptions.DEFAULT_TIMEOUT);
     }
 
     /** 查询连接由连接池决定等待时间；连接可用后，SQL 可选择独立的执行兜底时限。 */
@@ -71,7 +71,7 @@ final class BatchReceiptStore {
             // 只有 operation id/plan hash 不能证明流式输入已经完整写入；恢复入口必须保持 UNKNOWN。
             return Mono.empty();
         }
-        String sql = "select row_count, affected_rows from " + safeToken.receiptTable()
+        String sql = "select row_count, affected_rows from " + receiptTable(safeToken.receiptTable())
                 + " where operation_id = ? and chunk_index = ? and plan_hash = ? and payload_hash = ?"
                 + " and status = 'COMMITTED'";
         Flux<Receipt> receipts = Flux.usingWhen(acquireConnection(),
@@ -121,7 +121,7 @@ final class BatchReceiptStore {
                                         int chunkIndex,
                                         String planHash,
                                         Duration timeout) {
-        String sql = "select payload_hash, row_count, affected_rows from " + receiptTable
+        String sql = "select payload_hash, row_count, affected_rows from " + receiptTable(receiptTable)
                 + " where operation_id = ? and chunk_index = ? and plan_hash = ? and status = 'COMMITTED'";
         Flux<Receipt> receipts = Flux.usingWhen(acquireConnection(),
                                                 connection -> protectRead(
@@ -156,7 +156,7 @@ final class BatchReceiptStore {
         BatchWriteOptions.Recovery safeRecovery = Objects.requireNonNull(recovery, "batch recovery must not be null");
         // Oracle 会把空字符串当成 NULL。预留回执还没有真实参数摘要，但这里必须先写一个四库都能保存的非空值；
         // 同一事务提交前，complete 会把它替换成真正的 payload hash，恢复查询也只读取 COMMITTED 回执。
-        String sql = "insert into " + safeRecovery.receiptTable()
+        String sql = "insert into " + receiptTable(safeRecovery.receiptTable())
                 + " (operation_id, chunk_index, plan_hash, payload_hash, row_count, affected_rows, status, created_at)"
                 + " values (?, ?, ?, 'RESERVED', 0, 0, 'RESERVED', current_timestamp)";
         return rowsUpdated(connection,
@@ -184,7 +184,7 @@ final class BatchReceiptStore {
                         long rowCount,
                         long affectedRows) {
         BatchWriteOptions.Recovery safeRecovery = Objects.requireNonNull(recovery, "batch recovery must not be null");
-        String sql = "update " + safeRecovery.receiptTable()
+        String sql = "update " + receiptTable(safeRecovery.receiptTable())
                 + " set payload_hash = ?, row_count = ?, affected_rows = ?, status = 'COMMITTED'"
                 + " where operation_id = ? and chunk_index = ?";
         return rowsUpdated(connection,
@@ -305,6 +305,10 @@ final class BatchReceiptStore {
 
     private String sqlForDriver(String sql, int parameterCount) {
         return bindMarkers.adapt(sql, parameterCount, SqlBindMarkerStyle.CANONICAL);
+    }
+
+    private String receiptTable(String table) {
+        return bindMarkers.identifier(table);
     }
 
     private Mono<Connection> acquireConnection() {

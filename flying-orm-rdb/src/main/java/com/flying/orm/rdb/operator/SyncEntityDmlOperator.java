@@ -1,7 +1,9 @@
 package com.flying.orm.rdb.operator;
 
+import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.form.SyncFormClient;
+import com.flying.orm.rdb.internal.InternalApi;
 
 import java.util.Objects;
 
@@ -21,10 +23,17 @@ public final class SyncEntityDmlOperator<T> {
     private final SqlRenderer renderer;
     private final EntityDmlModel<T> model;
     private SyncEntityDmlOperator(SyncFormClient client, SqlRenderer renderer, Class<T> type) {
+        this(client, renderer, null, type);
+    }
+
+    private SyncEntityDmlOperator(SyncFormClient client,
+                                  SqlRenderer renderer,
+                                  DynamicForm form,
+                                  Class<T> type) {
         this.client = Objects.requireNonNull(client, "sync form client must not be null");
         this.renderer = Objects.requireNonNull(renderer, "sql renderer must not be null");
-        this.model = new EntityDmlModel<>(client.entityModels()
-                                                .metadata(Objects.requireNonNull(type, "entity type must not be null")));
+        var metadata = client.entityModels().metadata(Objects.requireNonNull(type, "entity type must not be null"));
+        this.model = form == null ? new EntityDmlModel<>(metadata) : new EntityDmlModel<>(metadata, form);
     }
 
     /**
@@ -35,6 +44,16 @@ public final class SyncEntityDmlOperator<T> {
      */
     public static <T> SyncEntityDmlOperator<T> create(SyncFormClient client, SqlRenderer renderer, Class<T> type) {
         return new SyncEntityDmlOperator<>(client, renderer, type);
+    }
+
+    /** Repository 内部使用显式表单时，实体字段映射不应偷偷换回注解生成的表单。 */
+    @InternalApi
+    public static <T> SyncEntityDmlOperator<T> create(SyncFormClient client,
+                                                       SqlRenderer renderer,
+                                                       DynamicForm form,
+                                                       Class<T> type) {
+        return new SyncEntityDmlOperator<>(client, renderer,
+                                           Objects.requireNonNull(form, "entity dynamic form must not be null"), type);
     }
 
     /** @return 当前实体的新同步查询命令 */

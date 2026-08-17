@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.batch;
 
 import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
+import com.flying.orm.rdb.internal.template.SqlStatements;
 import org.reactivestreams.Publisher;
 
 import java.util.List;
@@ -82,7 +83,7 @@ public record BatchWriteRequest(String sql,
      * 检查批量请求的静态形状，具体行数据由执行器按流式方式消费。
      */
     public BatchWriteRequest {
-        sql = requireText(sql, "batch write sql");
+        sql = SqlStatements.requirePortableSingle(requireText(sql, "batch write sql"));
         if (parameterCount < 0) {
             throw new IllegalArgumentException("batch write parameter count must not be negative");
         }

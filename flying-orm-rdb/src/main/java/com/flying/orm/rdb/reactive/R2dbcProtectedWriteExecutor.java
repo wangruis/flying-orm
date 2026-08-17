@@ -112,12 +112,24 @@ final class R2dbcProtectedWriteExecutor {
                 connection, request.sql(), request.parameters().size(),
                 request.bindMarkerStyle(), request.parameters());
         if (work.requiresGeneratedKeys()) {
-            return R2dbcGeneratedKeyWriter.collect(statement, options, largeObjects);
+            return R2dbcGeneratedKeyWriter.collect(
+                    statement, options, largeObjects, generatedKeyColumn(work));
         }
         return Flux.from(statement.execute())
                    .flatMap(Result::getRowsUpdated)
                    .reduce(0L, R2dbcExecutionCounts::add)
                    .map(rows -> new SqlWriteResult(rows, List.of()));
+    }
+
+    private static String generatedKeyColumn(ProtectedWriteWork work) {
+        Map<String, Object> knownOwner = work.knownOwner();
+        List<String> missing = work.ownerFields().stream()
+                                   .filter(field -> !knownOwner.containsKey(field) || knownOwner.get(field) == null)
+                                   .toList();
+        if (missing.size() != 1) {
+            throw new IllegalArgumentException("protected insert requires exactly one database-generated owner field");
+        }
+        return missing.getFirst();
     }
 
     private static Mono<Void> requireStableOwnerSet(ProtectedWriteWork work,

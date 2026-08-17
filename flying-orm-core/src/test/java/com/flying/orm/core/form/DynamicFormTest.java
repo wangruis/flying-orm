@@ -6,6 +6,8 @@ import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.MaskedFieldDefinition;
 import org.junit.jupiter.api.Test;
 
+import java.nio.ByteBuffer;
+import java.nio.ReadOnlyBufferException;
 import java.util.List;
 import java.util.Optional;
 
@@ -362,6 +364,26 @@ class DynamicFormTest {
         assertArrayEquals(new byte[]{0}, (byte[]) second[0]);
         assertSame(second[2], ((Object[]) second[2])[0]);
         assertSame(marker, second[3]);
+    }
+
+    /** 二进制逻辑删除值必须在表单发布和访问边界保持冻结。 */
+    @Test
+    void snapshotsByteBufferLogicDeleteValuesAtBothBoundaries() {
+        ByteBuffer notDeleted = ByteBuffer.wrap(new byte[]{0});
+        ByteBuffer deleted = ByteBuffer.wrap(new byte[]{1});
+        LogicDeleteDefinition definition = LogicDeleteDefinition.of("removed", notDeleted, deleted);
+
+        notDeleted.put(0, (byte) 8);
+        deleted.put(0, (byte) 9);
+        ByteBuffer first = (ByteBuffer) definition.notDeletedValue();
+        assertEquals(0, first.get(0));
+        assertEquals(1, ((ByteBuffer) definition.deletedValue()).get(0));
+        assertThrows(ReadOnlyBufferException.class, () -> first.put(0, (byte) 7));
+
+        first.position(1);
+        ByteBuffer second = (ByteBuffer) definition.notDeletedValue();
+        assertEquals(0, second.position());
+        assertEquals(0, second.get(0));
     }
 
     @Test

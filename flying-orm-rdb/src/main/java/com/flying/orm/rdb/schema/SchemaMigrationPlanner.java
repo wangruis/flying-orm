@@ -134,6 +134,7 @@ final class SchemaMigrationPlanner {
             requests.add(new SqlRequest(dialect.addColumnSql(rawTable, tables.columnDefinition(field)), List.of()));
             tables.addColumnComment(requests, changes.target().table(), field);
         }
+        addUniqueIndexesForAddedFields(requests, changes);
         for (FieldChange change : changes.changedFields()) {
             validateDirectFieldChange(change);
             DynamicField target = change.target();
@@ -149,7 +150,11 @@ final class SchemaMigrationPlanner {
                                                                         tables.columnDefinition(target)), List.of()));
             }
             if (commentChanged && !dialect.inlineColumnComment()) {
-                tables.addColumnComment(requests, changes.target().table(), target);
+                tables.addColumnCommentChange(requests,
+                                              changes.target().table(),
+                                              target.name(),
+                                              change.source().comment(),
+                                              target.comment());
             }
         }
         for (DynamicField field : changes.removedFields()) {
@@ -157,6 +162,26 @@ final class SchemaMigrationPlanner {
                                         List.of()));
         }
         return List.copyOf(requests);
+    }
+
+    /** 新增唯一字段必须同时兑现 DynamicForm 自动发布的唯一索引，不能让迁移成功后约束静默缺失。 */
+    private void addUniqueIndexesForAddedFields(List<SqlRequest> requests, DynamicFormChangeSet changes) {
+        Set<String> addedUniqueFields = changes.addedFields().stream()
+                                                .filter(DynamicField::unique)
+                                                .map(DynamicField::normalizedName)
+                                                .collect(java.util.stream.Collectors.toUnmodifiableSet());
+        if (addedUniqueFields.isEmpty()) {
+            return;
+        }
+        List<IndexMetadata> indexes = changes.target().toTableMetadata().indexes().stream()
+                                             .filter(IndexMetadata::unique)
+                                             .filter(index -> index.columns().size() == 1)
+                                             .filter(index -> changes.target().findField(index.columns().getFirst())
+                                                                     .map(DynamicField::normalizedName)
+                                                                     .filter(addedUniqueFields::contains)
+                                                                     .isPresent())
+                                             .toList();
+        requests.addAll(tables.createIndexes(changes.target().table(), indexes));
     }
 
     private static void validateDirectFieldChange(FieldChange change) {
@@ -234,7 +259,7 @@ final class SchemaMigrationPlanner {
             }
         }
         addRemovedColumns(requests, skipped, safeCurrent, safeTarget, table, safeOptions, primaryKeyChanged);
-        addIndexes(requests, skipped, safeCurrent, safeTarget, safeIndexes, safeOptions, table);
+        addIndexes(requests, skipped, safeCurrent, safeTarget, safeIndexes, safeOptions, rawTable);
         SchemaForeignKeyPlanner.addChanges(skipped, safeCurrent, safeForeignKeys, safeOptions.columnRenames());
         return new SchemaMigrationPlan(safeTarget, safeIndexes, safeForeignKeys, true, requests, skipped);
     }

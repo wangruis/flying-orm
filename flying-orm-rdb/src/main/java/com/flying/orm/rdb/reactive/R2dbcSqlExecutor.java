@@ -12,6 +12,7 @@ import com.flying.orm.rdb.execution.SqlExecutionSequenceResult;
 import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.isolation.R2dbcConnectionInvalidator;
 import com.flying.orm.rdb.isolation.IsolationContexts;
+import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.observation.BatchExecutionObserver;
 import com.flying.orm.rdb.observation.SqlExecutionObserver;
 import com.flying.orm.rdb.observation.SqlExecutionObservers;
@@ -210,6 +211,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
     @Override
     public Flux<DynamicRow> query(SqlRequest request, SqlExecutionOptions options) {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
+        bindMarkers.requireSingle(safeRequest);
         SqlExecutionOptions safeOptions = Objects.requireNonNull(
                 options, "sql execution options must not be null");
         // usingWhen 把连接生命周期绑到订阅上；完成、失败或取消都会触发异步 close。
@@ -238,6 +240,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
     @Override
     public Mono<Long> rowsUpdated(SqlRequest request, SqlExecutionOptions options) {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
+        bindMarkers.requireSingle(safeRequest);
         SqlExecutionOptions safeOptions = Objects.requireNonNull(
                 options, "sql execution options must not be null");
         Mono<Long> source = executionSession.withStatementMono(
@@ -260,6 +263,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
     @Override
     public Mono<SqlWriteResult> rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
+        bindMarkers.requireSingle(safeRequest);
         Mono<SqlWriteResult> source = generatedKeyWriter.write(safeRequest, options)
                                                         .onErrorMap(ReactiveSqlExecutionProtection::translate);
         return observationSupport.observeMono(SqlExecutionOperation.UPDATE,
@@ -267,6 +271,26 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
                                                safeRequest.parameters(), source,
                                                SqlWriteResult::affectedRows,
                                                options);
+    }
+
+    @InternalApi
+    @Override
+    public Mono<SqlWriteResult> rowsUpdatedReturningKeys(SqlRequest request,
+                                                         SqlExecutionOptions options,
+                                                         String generatedKeyColumn) {
+        SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
+        bindMarkers.requireSingle(safeRequest);
+        SqlExecutionOptions safeOptions = Objects.requireNonNull(
+                options, "sql execution options must not be null");
+        String safeColumn = Objects.requireNonNull(generatedKeyColumn,
+                                                   "generated key column must not be null");
+        Mono<SqlWriteResult> source = generatedKeyWriter.write(safeRequest, safeOptions, safeColumn)
+                                                        .onErrorMap(ReactiveSqlExecutionProtection::translate);
+        return observationSupport.observeMono(SqlExecutionOperation.UPDATE,
+                                               safeRequest.sql(), safeRequest.parameters().size(), 0,
+                                               safeRequest.parameters(), source,
+                                               SqlWriteResult::affectedRows,
+                                               safeOptions);
     }
     @Override
     public Mono<SqlWriteResult> atomicProtectedWrite(ProtectedWriteWork work, SqlExecutionOptions options) {

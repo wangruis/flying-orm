@@ -71,6 +71,13 @@ final class BatchMemoryLimitedReactiveSqlExecutor implements ReactiveSqlExecutor
         return delegate.rowsUpdatedReturningKeys(request, options);
     }
 
+    @Override
+    public Mono<SqlWriteResult> rowsUpdatedReturningKeys(SqlRequest request,
+                                                         SqlExecutionOptions options,
+                                                         String generatedKeyColumn) {
+        return delegate.rowsUpdatedReturningKeys(request, options, generatedKeyColumn);
+    }
+
     /** 字段保护写入不是批量输入；保留底层同连接事务能力而不套用批量行数上限。 */
     @Override
     public Mono<SqlWriteResult> atomicProtectedWrite(ProtectedWriteWork work, SqlExecutionOptions options) {

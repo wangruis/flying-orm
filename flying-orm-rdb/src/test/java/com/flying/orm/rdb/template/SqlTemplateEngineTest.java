@@ -9,6 +9,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -61,6 +62,27 @@ class SqlTemplateEngineTest {
                      () -> engine.render("by-id", Map.of("id", 1), Map.of("table", "users; drop table users")));
         assertThrows(IllegalArgumentException.class,
                      () -> SqlTemplate.query("multi", "select 1; delete from users", Set.of()));
+        assertDoesNotThrow(() -> SqlTemplate.query("dialect-pending", "select 1\nselect 2", Set.of()));
+        assertThrows(IllegalArgumentException.class,
+                     () -> SqlTemplate.query("multi-use", "select 1\nuse tempdb", Set.of()));
+        assertThrows(IllegalArgumentException.class,
+                     () -> SqlTemplate.query("multi-declare", "select 1\ndeclare @value int", Set.of()));
+        assertThrows(IllegalArgumentException.class,
+                     () -> SqlTemplate.query("multi-commit", "select 1\ncommit transaction", Set.of()));
+        assertThrows(IllegalArgumentException.class,
+                     () -> SqlTemplate.query("multi-rollback", "select 1\nrollback transaction", Set.of()));
+        assertThrows(IllegalArgumentException.class,
+                     () -> SqlTemplate.query("multi-wait", "select 1\nwaitfor delay '00:00:01'", Set.of()));
+        assertThrows(IllegalArgumentException.class,
+                     () -> SqlTemplate.query("multi-shutdown", "select 1\nshutdown", Set.of()));
+        assertThrows(IllegalArgumentException.class,
+                     () -> SqlTemplate.query("multi-backup",
+                                             "select 1\nbackup database app to disk = 'app.bak'",
+                                             Set.of()));
+        assertDoesNotThrow(() -> SqlTemplate.query("literal-semicolon",
+                                                   "select ';' as marker",
+                                                   Set.of()));
+        assertDoesNotThrow(() -> SqlTemplate.query("single-trailing", "select 1;", Set.of()));
 
         Map<String, Object> nullable = new LinkedHashMap<>();
         nullable.put("id", null);
@@ -70,6 +92,45 @@ class SqlTemplateEngineTest {
                                                  .parameters();
         assertEquals(1, parameters.size());
         assertNull(parameters.getFirst());
+    }
+
+    /** SQL Server 的无分号控制流批次必须在方言已知时被单语句边界拒绝。 */
+    @Test
+    void rejectsSqlServerControlFlowBatches() {
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServerEngine("multi-select", "select 1\nselect 2"));
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServerEngine("multi-while", "select 1\nwhile 1 = 1 continue"));
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServerEngine("multi-goto", "select 1\nloop_label:\ngoto loop_label"));
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServerEngine("multi-receive",
+                                           "select 1\nreceive top (1) * from message_queue"));
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServerEngine("multi-setuser", "select 1\nsetuser 'mary'"));
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServerEngine("multi-end-conversation",
+                                           "select 1\nend conversation @dialog_handle"));
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServerEngine("multi-dump",
+                                           "select 1\ndump database app to disk = 'app.bak'"));
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServerEngine("multi-load",
+                                           "select 1\nload database app from disk = 'app.bak'"));
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServerEngine(
+                             "multi-add-signature",
+                             "select 1\nadd signature to object::dbo.refresh_users by certificate app_cert"));
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServerEngine(
+                             "multi-add-sensitivity",
+                             "select 1\nadd sensitivity classification to dbo.users.email "
+                                     + "with (label = 'Confidential')"));
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServerEngine("receive", "receive top (1) * from message_queue"));
+        assertDoesNotThrow(() -> sqlServerEngine(
+                "case-expression",
+                "select case when active = 1 then 1 else 0 end conversation from users"));
     }
 
     /** SQL Server 模板在进入执行器前就要生成驱动使用的 @Pn 参数名。 */
@@ -190,6 +251,42 @@ class SqlTemplateEngineTest {
 
         assertEquals("select 1 /* outer /* inner */ :ignored */ where id = @P0", request.sql());
         assertEquals(java.util.List.of(7L), request.parameters());
+    }
+
+    /** PostgreSQL 嵌套注释内的语句关键字不能被单语句或只读边界当成可执行正文。 */
+    @Test
+    void keepsPostgresqlNestedBlockCommentsOpaqueToStatementBoundary() {
+        SqlTemplateEngine engine = createEngine(SqlTemplate.query(
+                "postgresql-nested-statement",
+                "select 1 /* outer /* inner */ delete from audit_log */",
+                Set.of()), RdbDialect.postgresql());
+
+        assertDoesNotThrow(() -> engine.render("postgresql-nested-statement", Map.of(), Map.of()));
+    }
+
+    /** pgJDBC 要求原生问号运算符写成双问号，命名参数仍只生成一个 JDBC 占位符。 */
+    @Test
+    void escapesPostgresqlQuestionOperatorsForJdbcOnly() {
+        String source = "select * from docs where payload ? 'enabled' "
+                + "and payload ?| array['a'] and payload ?& array['b'] and tenant_id = :tenant";
+
+        SqlRequest jdbc = SqlTemplateEngine.compileNativeJdbc(source,
+                                                               Map.of("tenant", "t-1"),
+                                                               RdbDialect.postgresql(),
+                                                               ValueCodecRegistry.standard());
+        SqlRequest r2dbc = SqlTemplateEngine.compileNative(source,
+                                                            Map.of("tenant", "t-1"),
+                                                            RdbDialect.postgresql(),
+                                                            ValueCodecRegistry.standard());
+
+        assertEquals("select * from docs where payload ?? 'enabled' "
+                             + "and payload ??| array['a'] and payload ??& array['b'] and tenant_id = ?",
+                     jdbc.sql());
+        assertEquals("select * from docs where payload ? 'enabled' "
+                             + "and payload ?| array['a'] and payload ?& array['b'] and tenant_id = $1",
+                     r2dbc.sql());
+        assertEquals(java.util.List.of("t-1"), jdbc.parameters());
+        assertEquals(java.util.List.of("t-1"), r2dbc.parameters());
     }
 
     /** MySQL 井号行注释中的参数和写关键字都只是注释文本。 */
@@ -433,5 +530,9 @@ class SqlTemplateEngineTest {
         return SqlTemplateEngine.create(SqlTemplateRegistry.builder().register(template).build(),
                                         dialect,
                                         ValueCodecRegistry.standard());
+    }
+
+    private static SqlTemplateEngine sqlServerEngine(String id, String sql) {
+        return createEngine(SqlTemplate.query(id, sql, Set.of()), RdbDialect.sqlServer());
     }
 }

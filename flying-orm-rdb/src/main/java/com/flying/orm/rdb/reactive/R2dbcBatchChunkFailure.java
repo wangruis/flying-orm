@@ -3,9 +3,15 @@ package com.flying.orm.rdb.reactive;
 import com.flying.orm.rdb.batch.BatchOptimisticLockException;
 import com.flying.orm.rdb.batch.BatchChunkResult;
 import com.flying.orm.rdb.batch.BatchRowConflict;
+import com.flying.orm.rdb.exception.RdbErrorKind;
+import com.flying.orm.rdb.exception.RdbException;
 
+import java.util.ArrayDeque;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * 批量分片在响应式链路中传递失败时使用的内部包装类型。
@@ -144,5 +150,54 @@ final class R2dbcBatchChunkConflictFailure extends RuntimeException {
 
     List<BatchRowConflict> conflicts() {
         return conflicts;
+    }
+}
+
+/** 回执表预留唯一键冲突；只用于触发资源域外的幂等回执重放。 */
+final class R2dbcBatchReceiptReservationConflict extends RuntimeException {
+
+    private static final long serialVersionUID = 1L;
+
+    private R2dbcBatchReceiptReservationConflict(Throwable cause) {
+        super(cause);
+    }
+
+    /** 只把回执 reserve 自身的确定唯一键冲突标记为并发重放信号。 */
+    static Throwable classify(Throwable failure) {
+        Throwable safeFailure = Objects.requireNonNull(failure, "batch receipt reservation failure must not be null");
+        Throwable translated = ReactiveSqlExecutionProtection.translate(safeFailure);
+        if (translated instanceof VirtualMachineError) {
+            return translated;
+        }
+        if (translated instanceof RdbException databaseFailure
+                && databaseFailure.kind() == RdbErrorKind.DUPLICATE_KEY) {
+            return new R2dbcBatchReceiptReservationConflict(safeFailure);
+        }
+        return safeFailure;
+    }
+
+    /** 在事务、回滚和资源清理包装形成的异常图中恢复内部冲突标记。 */
+    static R2dbcBatchReceiptReservationConflict find(Throwable failure) {
+        Throwable safeFailure = Objects.requireNonNull(failure, "batch receipt failure must not be null");
+        ArrayDeque<Throwable> pending = new ArrayDeque<>();
+        Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        pending.addFirst(safeFailure);
+        while (!pending.isEmpty()) {
+            Throwable current = pending.removeFirst();
+            if (!visited.add(current)) {
+                continue;
+            }
+            if (current instanceof R2dbcBatchReceiptReservationConflict conflict) {
+                return conflict;
+            }
+            Throwable cause = current.getCause();
+            if (cause != null) {
+                pending.addLast(cause);
+            }
+            for (Throwable suppressed : current.getSuppressed()) {
+                pending.addLast(suppressed);
+            }
+        }
+        return null;
     }
 }

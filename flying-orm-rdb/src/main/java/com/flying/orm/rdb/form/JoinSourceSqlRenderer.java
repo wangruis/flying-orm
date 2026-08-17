@@ -67,7 +67,7 @@ final class JoinSourceSqlRenderer {
         com.flying.orm.core.form.DynamicForm safeForm = Objects.requireNonNull(
                 physicalForm, "join physical form must not be null");
         ConditionGroup safeCondition = Objects.requireNonNull(condition, "join condition must not be null");
-        SqlRenderer renderer = support.conditionRenderer.withIdentifierRenderer(name -> {
+        SqlRenderer renderer = support.conditionRenderer.withFieldIdentifierRenderer(name -> {
             String field = safeForm.field(name).name();
             return qualified
                     ? alias(safeSource) + "." + support.identifier(field)

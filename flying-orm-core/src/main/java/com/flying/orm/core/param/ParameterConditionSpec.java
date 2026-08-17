@@ -1,8 +1,7 @@
 package com.flying.orm.core.param;
 
-import java.lang.reflect.Array;
-import java.util.ArrayDeque;
-import java.util.IdentityHashMap;
+import com.flying.orm.core.internal.value.BindableValueSnapshots;
+
 import java.util.Objects;
 import java.util.function.Function;
 
@@ -40,7 +39,7 @@ public record ParameterConditionSpec(String parameter,
         parameter = ParameterNames.requireText(parameter, "parameter name");
         field = ParameterNames.requireText(field, "condition field");
         operator = ParameterNames.normalize(operator, "condition operator");
-        defaultValue = copyArray(defaultValue);
+        defaultValue = BindableValueSnapshots.immutableValue(defaultValue);
         converter = Objects.requireNonNullElse(converter, Function.identity());
     }
 
@@ -53,7 +52,7 @@ public record ParameterConditionSpec(String parameter,
      */
     @Override
     public Object defaultValue() {
-        return copyArray(defaultValue);
+        return BindableValueSnapshots.immutableValue(defaultValue);
     }
 
     /**
@@ -97,53 +96,6 @@ public record ParameterConditionSpec(String parameter,
      */
     public Object convert(Object value) {
         return converter.apply(value);
-    }
-
-    /** 仅深复制数组可达图；普通业务对象保持身份，共享引用和数组环也在副本中保持。 */
-    private static Object copyArray(Object value) {
-        return copyArray(value, new IdentityHashMap<>());
-    }
-
-    private static Object copyArray(Object value, IdentityHashMap<Object, Object> copies) {
-        if (value == null || !value.getClass().isArray()) {
-            return value;
-        }
-        Object existing = copies.get(value);
-        if (existing != null) {
-            return existing;
-        }
-        Object rootCopy = Array.newInstance(value.getClass().getComponentType(), Array.getLength(value));
-        copies.put(value, rootCopy);
-        ArrayDeque<Object> sources = new ArrayDeque<>();
-        ArrayDeque<Object> targets = new ArrayDeque<>();
-        sources.addLast(value);
-        targets.addLast(rootCopy);
-        while (!sources.isEmpty()) {
-            Object source = sources.removeFirst();
-            Object target = targets.removeFirst();
-            Class<?> componentType = source.getClass().getComponentType();
-            int length = Array.getLength(source);
-            if (componentType.isPrimitive()) {
-                System.arraycopy(source, 0, target, 0, length);
-                continue;
-            }
-            for (int index = 0; index < length; index++) {
-                Object item = Array.get(source, index);
-                if (item == null || !item.getClass().isArray()) {
-                    Array.set(target, index, item);
-                    continue;
-                }
-                Object itemCopy = copies.get(item);
-                if (itemCopy == null) {
-                    itemCopy = Array.newInstance(item.getClass().getComponentType(), Array.getLength(item));
-                    copies.put(item, itemCopy);
-                    sources.addLast(item);
-                    targets.addLast(itemCopy);
-                }
-                Array.set(target, index, itemCopy);
-            }
-        }
-        return rootCopy;
     }
 
     /**
