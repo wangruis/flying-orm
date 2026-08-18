@@ -14,10 +14,22 @@
     <url>https://github.com/wangruis/flying-orm</url>
     <inceptionYear>2026</inceptionYear>
 
+    <licenses>
+        <license>
+            <name>The Apache License, Version 2.0</name>
+            <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+        </license>
+    </licenses>
+
     <developers>
         <developer>
             <id>wangr</id>
             <name>wangr</name>
+            <url>https://github.com/wangruis</url>
+            <roles>
+                <role>Owner</role>
+            </roles>
+            <timezone>+8</timezone>
         </developer>
     </developers>
 
