@@ -432,6 +432,21 @@ class NativeSqlOperatorTest {
                              "restore database app from disk = 'app.bak' with replace\ndrop table users"));
     }
 
+    /** Oracle 匿名块通过方言边界后，编译阶段不得再套用不理解 PL/SQL 分号的通用边界。 */
+    @Test
+    void compilesSingleOracleBeginAndDeclareBlocks() {
+        DatabaseOperator oracle = DatabaseOperator.create(new RecordingSqlExecutor(),
+                                                            SqlRenderer.builder().addDefaultTerms().build(),
+                                                            RdbDialect.oracle());
+        String beginBlock = "begin null; end;";
+        String declareBlock = "declare v_count number; begin v_count := 1; end;";
+
+        assertEquals(beginBlock, oracle.unsafeNativeSql(beginBlock).toRequest().sql());
+        assertEquals(declareBlock, oracle.unsafeNativeSql(declareBlock).toRequest().sql());
+        assertThrows(IllegalArgumentException.class,
+                     () -> oracle.unsafeNativeSql(declareBlock + " select 1 from dual"));
+    }
+
     private static DatabaseOperator operator(ReactiveSqlExecutor executor) {
         return DatabaseOperator.create(executor,
                                        SqlRenderer.builder().addDefaultTerms().build(),

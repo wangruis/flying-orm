@@ -212,13 +212,31 @@ final class R2dbcBatchConnectionLifecycle {
     /** LOB 清理失败时先淘汰连接；事务终态已确认时不得用普通清理错误覆盖结果。 */
     private Mono<Boolean> releaseLargeObjects(R2dbcBatchConnectionHandle resource,
                                               SqlExecutionOperation operation) {
-        return resource.largeObjects().complete(resource.cleanupDeadline()).thenReturn(true).onErrorResume(error -> {
+        Mono<Boolean> release = resource.largeObjects().complete(resource.cleanupDeadline())
+                .thenReturn(true)
+                .onErrorResume(error -> {
+                    BatchTransactionState state = resource.state();
+                    Mono<Void> invalidation = state == BatchTransactionState.COMMITTED
+                            || state == BatchTransactionState.ROLLED_BACK
+                            ? invalidateAfterCloseFailure(resource, operation, error)
+                            : invalidateUncertainConnection(resource, operation,
+                                    ResourceCleanupObservation.Phase.CONNECTION_INVALIDATE, error);
+                    return invalidation.thenReturn(false);
+                });
+        return release.flatMap(reusable -> {
+            if (!reusable) {
+                return Mono.just(false);
+            }
+            Throwable cleanupFailure = resource.largeObjects().cleanupFailure();
+            if (cleanupFailure == null) {
+                return Mono.just(true);
+            }
             BatchTransactionState state = resource.state();
             Mono<Void> invalidation = state == BatchTransactionState.COMMITTED
                     || state == BatchTransactionState.ROLLED_BACK
-                    ? invalidateAfterCloseFailure(resource, operation, error)
+                    ? invalidateAfterCloseFailure(resource, operation, cleanupFailure)
                     : invalidateUncertainConnection(resource, operation,
-                            ResourceCleanupObservation.Phase.CONNECTION_INVALIDATE, error);
+                            ResourceCleanupObservation.Phase.CONNECTION_INVALIDATE, cleanupFailure);
             return invalidation.thenReturn(false);
         });
     }

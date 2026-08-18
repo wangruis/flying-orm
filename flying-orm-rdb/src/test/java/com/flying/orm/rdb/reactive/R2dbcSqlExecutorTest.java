@@ -583,6 +583,43 @@ class R2dbcSqlExecutorTest {
         assertEquals(1, factory.closedCount());
     }
 
+    /** LOB 读取与未订阅 locator 清理同时失败时，自有连接不能按普通 SQL 错误重新归池。 */
+    @Test
+    void invalidatesOwnedConnectionWhenLargeObjectDiscardFailsAfterReadError() {
+        AtomicInteger reusableCloses = new AtomicInteger();
+        AtomicInteger invalidations = new AtomicInteger();
+        R2dbcBadGrammarException primary = new R2dbcBadGrammarException(
+                "LOB read failed", "42000", 942);
+        IllegalStateException cleanup = new IllegalStateException("LOB discard failed");
+        Blob blob = Blob.from(Flux.error(primary));
+        Clob clob = new Clob() {
+            @Override
+            public Publisher<CharSequence> stream() {
+                return Flux.just("unused");
+            }
+
+            @Override
+            public Publisher<Void> discard() {
+                return Mono.error(cleanup);
+            }
+        };
+        Map<String, Object> values = new LinkedHashMap<>();
+        values.put("payload", blob);
+        values.put("content", clob);
+        RecordingConnectionFactory factory = new RecordingConnectionFactory(List.of(values), 0, "Oracle");
+        ReactiveSqlExecutor executor = R2dbcSqlExecutor.create(factory)
+                .withConnectionInvalidator(recordingInvalidator(reusableCloses, invalidations));
+
+        StepVerifier.create(executor.query(new SqlRequest(
+                            "select payload, content from documents", List.of())))
+                    .expectErrorSatisfies(error -> assertTrue(reaches(error, cleanup)))
+                    .verify();
+
+        assertEquals(0, reusableCloses.get());
+        assertEquals(0, factory.closedCount());
+        assertEquals(1, invalidations.get());
+    }
+
     /** 取消活动 LOB 时，连接必须等待后续未订阅 locator 的异步 discard 完成后才能归还。 */
     @Test
     void waitsForPendingLargeObjectDiscardBeforeClosingOwnedConnectionOnCancel() {

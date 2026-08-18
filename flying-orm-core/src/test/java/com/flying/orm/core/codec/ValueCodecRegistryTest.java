@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Test;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
 import java.nio.MappedByteBuffer;
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -99,6 +100,15 @@ class ValueCodecRegistryTest {
         ValueCodecRegistry registry = ValueCodecRegistry.standard();
 
         assertEquals("  large text  ", registry.write(new StringBuilder("  large text  ")));
+    }
+
+    /** 文本 codec 只能声明可实际构造的目标类型，并完整支持 JDK 标准 CharBuffer。 */
+    @Test
+    void readsStandardCharBufferAndRejectsUnknownCharSequenceTargets() {
+        ValueCodecRegistry registry = ValueCodecRegistry.standard();
+
+        assertEquals(CharBuffer.wrap("buffer text"), registry.read("buffer text", CharBuffer.class));
+        assertFalse(new TextValueCodec().supports(UnknownText.class));
     }
 
     /** Character/char 是合法实体标量，必须作为单字符文本完成双向转换。 */
@@ -299,5 +309,8 @@ class ValueCodecRegistryTest {
     }
 
     private record UnknownValue(String value) {
+    }
+
+    private abstract static class UnknownText implements CharSequence {
     }
 }

@@ -35,6 +35,21 @@ final class StructuredConditionStructureValidator {
                                      int depth,
                                      String path) {
         budget.checkNode(depth, policy, path);
+        validateName(input.field(),
+                     policy,
+                     StructuredConditionErrorCode.FIELD_NOT_ALLOWED,
+                     ConditionCompilationBudget.propertyPath(path, "field"),
+                     "structured condition field exceeds limit at ");
+        validateName(input.operator(),
+                     policy,
+                     StructuredConditionErrorCode.OPERATOR_NOT_ALLOWED,
+                     ConditionCompilationBudget.propertyPath(path, "operator"),
+                     "structured condition operator exceeds limit at ");
+        validateName(input.logic(),
+                     policy,
+                     StructuredConditionErrorCode.LOGIC_NOT_ALLOWED,
+                     ConditionCompilationBudget.propertyPath(path, "logic"),
+                     "structured condition logic exceeds limit at ");
         String valuePath = path + ".value";
         try {
             validateRawValue(input.stableValue(),
@@ -61,6 +76,16 @@ final class StructuredConditionStructureValidator {
             }
             // 策略把最大深度封顶在 64。递归深度固定有界，同时不会先为超大同级节点分配一整块栈内存。
             validateNode(child, policy, budget, depth + 1, childPath);
+        }
+    }
+
+    private static void validateName(String value,
+                                     StructuredConditionPolicy policy,
+                                     StructuredConditionErrorCode code,
+                                     String path,
+                                     String message) {
+        if (value != null && value.length() > policy.maxStringLength()) {
+            throw StructuredConditionException.of(code, path, message + path);
         }
     }
 

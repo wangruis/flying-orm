@@ -21,6 +21,7 @@ import java.util.function.BiFunction;
  */
 final class R2dbcLargeObjectScope {
     private final List<R2dbcLargeObjectRow> rows = new ArrayList<>();
+    private final AtomicReference<Throwable> cleanupFailure = new AtomicReference<>();
     private R2dbcCleanupDeadline activeCleanup;
     private boolean rowsClosed;
 
@@ -41,7 +42,9 @@ final class R2dbcLargeObjectScope {
         return state.read()
                     .doOnSuccess(ignored -> unregister(state))
                     .onErrorResume(primary -> state.discardAfterError(
-                                                           primary, cleanupDeadline(state.cleanupTimeout()))
+                                                           primary,
+                                                           cleanupDeadline(state.cleanupTimeout()),
+                                                           this::recordCleanupFailure)
                                                    .doFinally(ignored -> unregister(state))
                                                    .then(Mono.defer(() -> {
                                                        VirtualMachineError fatal =
@@ -58,7 +61,8 @@ final class R2dbcLargeObjectScope {
         R2dbcCleanupDeadline cleanup = register(state);
         R2dbcCleanupDeadline sharedDeadline = cleanup == null
                 ? cleanupDeadline(state.cleanupTimeout()) : cleanup;
-        Mono<Void> discard = state.discardAfterError(primary, sharedDeadline);
+        Mono<Void> discard = state.discardAfterError(
+                primary, sharedDeadline, this::recordCleanupFailure);
         return discard
                     .doFinally(ignored -> unregister(state))
                     .then(Mono.defer(() -> {
@@ -85,7 +89,17 @@ final class R2dbcLargeObjectScope {
     }
     Mono<Void> error(Throwable primary, R2dbcCleanupDeadline deadline) {
         Objects.requireNonNull(primary, "large object primary error must not be null");
-        return cleanup((row, sharedDeadline) -> row.discardAfterError(primary, sharedDeadline), deadline);
+        return cleanup((row, sharedDeadline) -> row.discardAfterError(
+                primary, sharedDeadline, this::recordCleanupFailure), deadline);
+    }
+
+    /** @return 已经挂入业务异常、但仍要求淘汰连接的首个普通 LOB 清理失败 */
+    Throwable cleanupFailure() {
+        return cleanupFailure.get();
+    }
+
+    private void recordCleanupFailure(Throwable failure) {
+        R2dbcLargeObjectRow.merge(cleanupFailure, failure);
     }
 
     private synchronized R2dbcCleanupDeadline register(R2dbcLargeObjectRow row) {
@@ -118,7 +132,7 @@ final class R2dbcLargeObjectScope {
                                R2dbcCleanupDeadline deadline) {
         R2dbcCleanupDeadline safeDeadline = shareCleanupDeadline(deadline);
         return Mono.defer(() -> {
-            AtomicReference<Throwable> cleanupFailure = new AtomicReference<>();
+            AtomicReference<Throwable> aggregateFailure = new AtomicReference<>();
             List<R2dbcLargeObjectRow> rowSnapshot;
             synchronized (this) {
                 rowsClosed = true;
@@ -127,13 +141,13 @@ final class R2dbcLargeObjectScope {
             return Flux.fromIterable(rowSnapshot)
                        .concatMap(row -> action.apply(row, safeDeadline)
                                .onErrorResume(error -> {
-                                   R2dbcLargeObjectRow.merge(cleanupFailure, error);
+                                   R2dbcLargeObjectRow.merge(aggregateFailure, error);
                                    return Mono.empty();
                                })
                                .doFinally(ignored -> unregister(row)), 1)
                        .then()
-                       .then(Mono.defer(() -> cleanupFailure.get() == null
-                               ? Mono.empty() : Mono.error(cleanupFailure.get())));
+                       .then(Mono.defer(() -> aggregateFailure.get() == null
+                               ? Mono.empty() : Mono.error(aggregateFailure.get())));
         });
     }
 

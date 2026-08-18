@@ -1,11 +1,17 @@
 package com.flying.orm.core.codec;
 
+import java.nio.CharBuffer;
+
 /** 大文本和普通文本都保留空白，只将可变字符序列收口为最通用的 String。 */
 final class TextValueCodec implements ValueCodec {
 
     @Override
     public boolean supports(Class<?> targetType) {
-        return CharSequence.class.isAssignableFrom(targetType)
+        return targetType == String.class
+                || targetType == CharSequence.class
+                || targetType == StringBuilder.class
+                || targetType == StringBuffer.class
+                || targetType == CharBuffer.class
                 || targetType == Character.class
                 || targetType == char[].class;
     }
@@ -26,6 +32,9 @@ final class TextValueCodec implements ValueCodec {
         }
         if (targetType == StringBuffer.class) {
             return new StringBuffer(text);
+        }
+        if (targetType == CharBuffer.class) {
+            return CharBuffer.wrap(text);
         }
         if (targetType == Character.class) {
             if (text.length() != 1) {

@@ -759,11 +759,11 @@ class StructuredConditionCompilerTest {
                                                                     .withMaxNodes(2)
                                                                     .withMaxStringLength(4);
         StructuredConditionInput depth = StructuredConditionInput.term(
-                "payload", "custom", Map.of("a", Map.of("b", Map.of("c", 1))));
+                "id", "json", Map.of("a", Map.of("b", Map.of("c", 1))));
         StructuredConditionInput nodes = StructuredConditionInput.term(
-                "payload", "custom", Map.of("a", Map.of(), "b", Map.of()));
+                "id", "json", Map.of("a", Map.of(), "b", Map.of()));
         StructuredConditionInput text = StructuredConditionInput.term(
-                "payload", "custom", Map.of("v", "12345"));
+                "id", "json", Map.of("v", "12345"));
 
         StructuredConditionException depthError = assertThrows(
                 StructuredConditionException.class,
@@ -778,6 +778,33 @@ class StructuredConditionCompilerTest {
         assertEquals(StructuredConditionErrorCode.DEPTH_EXCEEDED, depthError.code());
         assertEquals(StructuredConditionErrorCode.NODE_COUNT_EXCEEDED, nodesError.code());
         assertEquals(StructuredConditionErrorCode.VALUE_TOO_LONG, textError.code());
+    }
+
+    /** 扩展适配器执行前，字段、操作符和分组逻辑也必须服从统一字符串预算。 */
+    @Test
+    void validatesConditionNamesBeforeAdaptation() {
+        StructuredConditionPolicy policy = StructuredConditionPolicy.defaults().withMaxStringLength(4);
+        StructuredConditionInput field = StructuredConditionInput.term("field", "eq", 1);
+        StructuredConditionInput operator = StructuredConditionInput.term("id", "equals", 1);
+        StructuredConditionInput logic = new StructuredConditionInput(
+                null, null, null, "either", List.of(StructuredConditionInput.term("id", "eq", 1)));
+
+        StructuredConditionException fieldError = assertThrows(
+                StructuredConditionException.class,
+                () -> StructuredConditionCompiler.validateStructure(field, policy));
+        StructuredConditionException operatorError = assertThrows(
+                StructuredConditionException.class,
+                () -> StructuredConditionCompiler.validateStructure(operator, policy));
+        StructuredConditionException logicError = assertThrows(
+                StructuredConditionException.class,
+                () -> StructuredConditionCompiler.validateStructure(logic, policy));
+
+        assertEquals(StructuredConditionErrorCode.FIELD_NOT_ALLOWED, fieldError.code());
+        assertEquals("conditions.field", fieldError.path());
+        assertEquals(StructuredConditionErrorCode.OPERATOR_NOT_ALLOWED, operatorError.code());
+        assertEquals("conditions.operator", operatorError.path());
+        assertEquals(StructuredConditionErrorCode.LOGIC_NOT_ALLOWED, logicError.code());
+        assertEquals("conditions.logic", logicError.path());
     }
 
     /** 可配置预算不能高于后续 AST 与渲染硬边界，避免编译成功后才以普通异常失败。 */

@@ -42,9 +42,14 @@ public final class SqlTemplate {
 
     private final Set<String> identifierSlots;
 
-    private SqlTemplate(String id, String sql, Set<String> identifierSlots, boolean readOnly) {
+    private SqlTemplate(String id,
+                        String sql,
+                        Set<String> identifierSlots,
+                        boolean readOnly,
+                        boolean singleStatementValidated) {
         this.id = requireText(id, "SQL template id");
-        this.sql = SqlStatements.requireSingle(sql);
+        this.sql = singleStatementValidated
+                ? requireText(sql, "SQL statement") : SqlStatements.requireSingle(sql);
         this.identifierSlots = normalizeSlots(identifierSlots);
         if (readOnly) {
             requireReadOnlyQuery(this.sql);
@@ -60,12 +65,12 @@ public final class SqlTemplate {
      * @return 完成校验后的不可变查询模板
      */
     public static SqlTemplate query(String id, String sql, Set<String> identifierSlots) {
-        return new SqlTemplate(id, sql, identifierSlots, true);
+        return new SqlTemplate(id, sql, identifierSlots, true, false);
     }
 
-    /** 原生 SQL 只复用命名参数扫描模型，不套用注册查询模板的只读策略。 */
+    /** 原生 SQL 已按真实方言校验，只复用命名参数扫描模型，不再套用无方言单语句边界。 */
     static SqlTemplate nativeStatement(String sql) {
-        return new SqlTemplate("direct-native-sql", sql, Set.of(), false);
+        return new SqlTemplate("direct-native-sql", sql, Set.of(), false, true);
     }
 
     public String id() {

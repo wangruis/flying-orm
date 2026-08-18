@@ -23,7 +23,7 @@ final class SqlStatementBoundary {
                           boolean mysqlDialect,
                           boolean sqlServerDialect,
                           boolean oracleDialect) {
-        if (oracleDialect && OracleAnonymousBlockBoundary.startsWithBegin(sql)) {
+        if (oracleDialect && OracleAnonymousBlockBoundary.startsWithBlock(sql)) {
             OracleAnonymousBlockBoundary.validate(sql);
             return;
         }

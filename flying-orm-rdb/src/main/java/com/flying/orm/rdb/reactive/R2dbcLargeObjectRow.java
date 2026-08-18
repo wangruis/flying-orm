@@ -16,6 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 /**
  * 管理一行 R2DBC 结果中的 LOB locator 状态，只允许读取或释放一次。
@@ -99,7 +100,9 @@ final class R2dbcLargeObjectRow {
                 ? Mono.empty() : Mono.error(cleanupFailure.get())));
     }
 
-    Mono<Void> discardAfterError(Throwable primary, R2dbcCleanupDeadline deadline) {
+    Mono<Void> discardAfterError(Throwable primary,
+                                 R2dbcCleanupDeadline deadline,
+                                 Consumer<Throwable> cleanupFailureRecorder) {
         return discardPending(deadline).onErrorResume(cleanup -> {
             VirtualMachineError fatal = ReactiveSqlExecutionProtection.promoteVirtualMachineError(
                     primary, cleanup);
@@ -107,6 +110,7 @@ final class R2dbcLargeObjectRow {
                 return Mono.error(fatal);
             }
             ReactiveSqlExecutionProtection.addSuppressedIfAcyclic(primary, cleanup);
+            cleanupFailureRecorder.accept(cleanup);
             return Mono.empty();
         });
     }

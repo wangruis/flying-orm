@@ -115,6 +115,16 @@ final class R2dbcConnectionLeaseCleanup {
             if (safeLease.external()) {
                 return Mono.empty();
             }
+            Throwable cleanupFailure = safeLease.largeObjects().cleanupFailure();
+            if (cleanupFailure != null) {
+                return invalidateAfterCleanupFailure(
+                        safeLease,
+                        operation,
+                        ResourceCleanupObservation.Phase.CONNECTION_INVALIDATE,
+                        false,
+                        cleanupFailure,
+                        deadline);
+            }
             RuntimeException translated = RdbExceptionTranslator.translate(error);
             boolean reusable = translated instanceof RdbException rdbException
                     && reusableAfterError(rdbException.kind());

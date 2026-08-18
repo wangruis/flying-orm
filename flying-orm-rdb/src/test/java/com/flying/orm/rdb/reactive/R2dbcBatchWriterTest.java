@@ -10,6 +10,7 @@ import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
 import com.flying.orm.rdb.execution.ProtectedBatchRows;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.exception.RdbErrorKind;
 import com.flying.orm.rdb.exception.RdbException;
 import com.flying.orm.rdb.isolation.R2dbcConnectionInvalidator;
@@ -24,6 +25,7 @@ import com.flying.orm.rdb.transaction.R2dbcTransactionParticipationException;
 import io.r2dbc.spi.Connection;
 import io.r2dbc.spi.ConnectionFactory;
 import io.r2dbc.spi.ConnectionFactoryMetadata;
+import io.r2dbc.spi.Clob;
 import io.r2dbc.spi.Result;
 import io.r2dbc.spi.Statement;
 import org.junit.jupiter.api.Test;
@@ -274,6 +276,43 @@ class R2dbcBatchWriterTest {
 
         assertSame(fatal, observed);
         assertEquals(1, invalidations.get());
+    }
+
+    /** 行内 LOB 释放已经失败时，事务终态明确也不能把污染连接正常归池。 */
+    @Test
+    void confirmedOutcomeInvalidatesConnectionAfterCapturedLargeObjectDiscardFailure() {
+        AtomicInteger invalidations = new AtomicInteger();
+        IllegalStateException primary = new IllegalStateException("generated key read failed");
+        IllegalStateException cleanup = new IllegalStateException("clob discard failed");
+        ControlledConnectionFactory factory = new ControlledConnectionFactory();
+        R2dbcBatchConnectionLifecycle lifecycle = new R2dbcBatchConnectionLifecycle(
+                factory,
+                SqlExecutionObserver.noop(),
+                invalidator(invalidations),
+                R2dbcTransactionParticipant.none());
+        R2dbcBatchConnectionHandle resource = new R2dbcBatchConnectionHandle(
+                Mono.from(factory.create()).block());
+        Clob clob = new Clob() {
+            @Override
+            public Publisher<CharSequence> stream() {
+                return Flux.empty();
+            }
+
+            @Override
+            public Publisher<Void> discard() {
+                return Mono.error(cleanup);
+            }
+        };
+
+        resource.largeObjects().discardCaptured(
+                List.of(clob), SqlExecutionOptions.safeDefaults(), primary).block();
+        resource.markActive();
+        resource.markCommitted();
+        lifecycle.closeAfterOutcome(resource).block();
+
+        assertTrue(reaches(primary, cleanup));
+        assertEquals(1, invalidations.get());
+        assertEquals(0, factory.closed.get());
     }
 
     /** 同一个分片流的每次订阅都必须从零开始编号，不能共享前一次或并发订阅的计数器。 */

@@ -5,7 +5,7 @@ import java.util.Deque;
 import java.util.Locale;
 
 /**
- * Oracle {@code BEGIN ... END;} 匿名块的单语句词法边界。
+ * Oracle {@code BEGIN ... END;} 或带简单声明区的 {@code DECLARE ... BEGIN ... END;} 匿名块单语句词法边界。
  *
  * <p>匿名块内部允许过程语句分号，并只跟踪 {@code BEGIN}/{@code IF}/{@code LOOP}/{@code CASE} 的结束范围；
  * 外层 {@code END;} 完成后只允许空白和注释。具体 PL/SQL 语法仍由 Oracle 驱动校验。</p>
@@ -19,17 +19,24 @@ final class OracleAnonymousBlockBoundary {
     private OracleAnonymousBlockBoundary() {
     }
 
-    static boolean startsWithBegin(String sql) {
+    static boolean startsWithBlock(String sql) {
+        String firstWord = firstWord(sql);
+        return "BEGIN".equals(firstWord) || "DECLARE".equals(firstWord);
+    }
+
+    private static String firstWord(String sql) {
         int offset = triviaEnd(sql, 0);
         if (offset >= sql.length() || !isWordStart(sql.charAt(offset))) {
-            return false;
+            return "";
         }
         int end = wordEnd(sql, offset);
-        return "BEGIN".equals(sql.substring(offset, end).toUpperCase(Locale.ROOT));
+        return sql.substring(offset, end).toUpperCase(Locale.ROOT);
     }
 
     static void validate(String sql) {
         Deque<String> scopes = new ArrayDeque<>();
+        boolean declarationPreamble = "DECLARE".equals(firstWord(sql));
+        boolean leadingDeclare = declarationPreamble;
         boolean pendingEnd = false;
         boolean endLabel = false;
         boolean completed = false;
@@ -56,12 +63,14 @@ final class OracleAnonymousBlockBoundary {
                     pendingEnd = false;
                 }
                 endLabel = false;
-                completed = scopes.isEmpty();
+                completed = scopes.isEmpty() && !declarationPreamble;
                 index++;
             } else if (isWordStart(current)) {
                 int end = wordEnd(sql, index);
                 String word = sql.substring(index, end).toUpperCase(Locale.ROOT);
-                if (pendingEnd) {
+                if (leadingDeclare && "DECLARE".equals(word)) {
+                    leadingDeclare = false;
+                } else if (pendingEnd) {
                     closePendingEnd(scopes, word);
                     pendingEnd = false;
                     endLabel = true;
@@ -71,6 +80,9 @@ final class OracleAnonymousBlockBoundary {
                     pendingEnd = true;
                 } else if (isScopeStart(word)) {
                     scopes.push(word);
+                    if ("BEGIN".equals(word)) {
+                        declarationPreamble = false;
+                    }
                 }
                 index = end;
             } else {
