@@ -47,6 +47,9 @@ final class JdbcSyncFormRuntime implements SyncFormRuntime {
 
     @Override public BatchWriteOptions defaultBatchWriteOptions() { return configuration.batchOptions(); }
     @Override public EntityModelRegistry entityModels() { return configuration.entityModels(); }
+    @Override public java.util.Optional<com.flying.orm.rdb.transaction.JdbcTransactionContext> currentTransaction() {
+        return sqlExecutor.currentTransaction();
+    }
     @Override public List<DynamicRow> select(QuerySpec spec) { return operations.select(spec); }
     @Override public List<DynamicRow> selectJoin(JoinQuerySpec spec, SqlExecutionOptions options) {
         return operations.selectJoin(spec, options);

@@ -29,6 +29,7 @@ interface SyncFormRuntime {
 
     BatchWriteOptions defaultBatchWriteOptions();
     EntityModelRegistry entityModels();
+    java.util.Optional<com.flying.orm.rdb.transaction.JdbcTransactionContext> currentTransaction();
     List<DynamicRow> select(QuerySpec spec);
     List<DynamicRow> selectJoin(JoinQuerySpec spec, SqlExecutionOptions options);
     PageResult<DynamicRow> pageJoin(JoinQuerySpec spec, PageQuery page, SqlExecutionOptions options);

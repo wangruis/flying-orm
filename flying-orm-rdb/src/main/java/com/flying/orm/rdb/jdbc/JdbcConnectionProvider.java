@@ -60,6 +60,10 @@ final class JdbcConnectionProvider {
                                      .orElse(requestedRoutingIdentity);
     }
 
+    Optional<JdbcTransactionContext> currentTransaction() {
+        return transactionParticipant.currentTransactionForExecution();
+    }
+
     /**
      * 一次 SQL 使用的连接租约。关闭外部租约是空操作，关闭自有租约才会把连接归还给连接池。
      *

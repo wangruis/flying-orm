@@ -54,7 +54,9 @@ public final class ReactiveFormClient {
     private ReactiveFormClient(ReactiveSqlExecutor executor, FormDataSqlRenderer renderer) {
         this(new ReactiveFormOperationContext(executor,
                                               renderer,
-                                              defaultStructuredConditionResolver(renderer),
+                                              StructuredConditionResolver.defaults(Objects.requireNonNull(
+                                                      renderer, "form data sql renderer must not be null")
+                                                      .valueCodecs()),
                                               DataScope.none(),
                                               SqlExecutionOptions.safeDefaults(),
                                               BatchWriteOptions.defaults(),
@@ -115,6 +117,13 @@ public final class ReactiveFormClient {
     @InternalApi
     public EntityModelRegistry entityModels() {
         return entityModels;
+    }
+
+    /** @return 当前订阅正在参与的外部事务；没有外部事务时为空。 */
+    @InternalApi
+    public Mono<com.flying.orm.rdb.transaction.R2dbcTransactionContext> currentTransaction() {
+        return Mono.defer(() -> Objects.requireNonNull(
+                context.executor().currentTransaction(), "current transaction lookup must return a Mono"));
     }
 
     /** 为实体提供复用当前 Scope、执行保护和映射缓存的 Lambda DML 入口。 */
@@ -224,11 +233,5 @@ public final class ReactiveFormClient {
     /** 同包同步门面和实体入口复用这条已经装配好的内部操作链。 */
     ReactiveFormOperations operations() {
         return operations;
-    }
-
-    private static StructuredConditionResolver defaultStructuredConditionResolver(FormDataSqlRenderer renderer) {
-        FormDataSqlRenderer safeRenderer = Objects.requireNonNull(renderer,
-                                                                  "form data sql renderer must not be null");
-        return StructuredConditionResolver.defaults(safeRenderer.valueCodecs());
     }
 }

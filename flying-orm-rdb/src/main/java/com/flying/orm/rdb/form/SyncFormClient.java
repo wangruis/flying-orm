@@ -97,6 +97,12 @@ public final class SyncFormClient {
     @InternalApi
     public EntityModelRegistry entityModels() { return runtime.entityModels(); }
 
+    /** @return 当前线程正在参与的外部 JDBC 事务；没有外部事务时为空。 */
+    @InternalApi
+    public java.util.Optional<com.flying.orm.rdb.transaction.JdbcTransactionContext> currentTransaction() {
+        return runtime.currentTransaction();
+    }
+
     /** 原生 JDBC 实体 Lambda 入口，表名、字段和主键都来自统一实体元数据。 */
     public <T> SyncEntityDmlOperator<T> entity(Class<T> type) {
         return SyncEntityDmlOperator.create(this, entityRenderer, type);

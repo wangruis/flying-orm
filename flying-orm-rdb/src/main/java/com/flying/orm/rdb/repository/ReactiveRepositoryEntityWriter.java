@@ -3,6 +3,7 @@ package com.flying.orm.rdb.repository;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.rdb.execution.GeneratedKeyReadException;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.form.ReactiveFormClient;
 import com.flying.orm.rdb.form.spec.WriteSpec;
@@ -57,24 +58,25 @@ final class ReactiveRepositoryEntityWriter<T> {
 
     Mono<Long> insert(T entity) {
         T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
+        if (lifecycle.hasWork(EntityLifecyclePhase.POST_PERSIST)) {
+            return lifecycle.persist(safeEntity, client::currentTransaction,
+                                     external -> executeInsert(safeEntity, external));
+        }
         return lifecycle.fire(EntityLifecyclePhase.PRE_PERSIST, safeEntity, null)
                 .then(Mono.defer(() -> {
-                    ids.prepare(safeEntity);
-                    WriteSpec spec = WriteSpec.insert(form, insertValues.apply(safeEntity));
                     if (!ids.databaseGenerated()) {
-                        return client.insert(spec);
+                        return executeInsert(safeEntity, false);
                     }
-                    return client.insertReturningKeys(spec).map(result -> {
-                        ids.applyGeneratedKey(safeEntity, result);
-                        return result.affectedRows();
-                    });
-                }))
-                .flatMap(rows -> lifecycle.fire(EntityLifecyclePhase.POST_PERSIST, safeEntity, rows).thenReturn(rows));
+                    return client.currentTransaction()
+                            .map(ignored -> true)
+                            .defaultIfEmpty(false)
+                            .flatMap(external -> executeInsert(safeEntity, external));
+                }));
     }
 
     Mono<Long> update(T entity, ConditionGroup where, Object... modifiers) {
         T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
-        return lifecycle.update(safeEntity, () -> {
+        return lifecycle.update(safeEntity, client::currentTransaction, () -> {
             Map<String, Object> allValues = values.apply(safeEntity);
             Map<String, Object> row = updateValues.apply(safeEntity);
             ConditionGroup activeWhere = RepositoryLogicDeletes.activeWhere(metadata, form, where);
@@ -90,7 +92,7 @@ final class ReactiveRepositoryEntityWriter<T> {
                               OptimisticLockOptions lock,
                               Object... modifiers) {
         T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
-        return lifecycle.update(safeEntity, () -> executeUpdate(
+        return lifecycle.update(safeEntity, client::currentTransaction, () -> executeUpdate(
                 RepositoryOptimisticLocks.withoutLockField(updateValues.apply(safeEntity), lock),
                 RepositoryLogicDeletes.activeWhere(metadata, form, where),
                 prepend(lock, modifiers)));
@@ -105,7 +107,7 @@ final class ReactiveRepositoryEntityWriter<T> {
 
     Mono<Long> delete(T entity, ConditionGroup where, Object... modifiers) {
         T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
-        return lifecycle.remove(safeEntity, () -> {
+        return lifecycle.remove(safeEntity, client::currentTransaction, () -> {
             ConditionGroup activeWhere = RepositoryLogicDeletes.activeWhere(metadata, form, where);
             Optional<OptimisticLockOptions> lock = RepositoryOptimisticLocks.incrementLock(
                     metadata, values.apply(safeEntity));
@@ -131,6 +133,48 @@ final class ReactiveRepositoryEntityWriter<T> {
 
     private Mono<Long> executeDelete(ConditionGroup where, Object... modifiers) {
         return client.delete(applyWriteModifiers(WriteSpec.delete(form, where), modifiers));
+    }
+
+    private Mono<Long> executeInsert(T entity, boolean externalTransaction) {
+        ids.prepare(entity);
+        WriteSpec spec = WriteSpec.insert(form, insertValues.apply(entity));
+        if (!ids.databaseGenerated()) {
+            return client.insert(spec);
+        }
+        return client.insertReturningKeys(spec)
+                .onErrorMap(GeneratedKeyReadException.class, failure -> {
+                    Throwable preferred = RepositoryFailureSupport.preferVirtualMachineError(failure);
+                    if (preferred instanceof VirtualMachineError fatal) {
+                        return fatal;
+                    }
+                    return new GeneratedKeyResolutionException(
+                            failure.affectedRows(), externalTransaction
+                                    ? GeneratedKeyResolutionException.WriteState.ENLISTED
+                                    : GeneratedKeyResolutionException.WriteState.UNKNOWN,
+                            failure);
+                })
+                .map(result -> {
+                    applyGeneratedKey(entity, result, externalTransaction);
+                    return result.affectedRows();
+                });
+    }
+
+    private void applyGeneratedKey(T entity,
+                                   com.flying.orm.rdb.execution.SqlWriteResult result,
+                                   boolean externalTransaction) {
+        try {
+            ids.applyGeneratedKey(entity, result);
+        } catch (RuntimeException failure) {
+            Throwable preferred = RepositoryFailureSupport.preferVirtualMachineError(failure);
+            if (preferred instanceof VirtualMachineError fatal) {
+                throw fatal;
+            }
+            throw new GeneratedKeyResolutionException(
+                    result.affectedRows(), externalTransaction
+                    ? GeneratedKeyResolutionException.WriteState.ENLISTED
+                    : GeneratedKeyResolutionException.WriteState.COMMITTED,
+                    failure);
+        }
     }
 
     /**

@@ -28,6 +28,8 @@ import com.flying.orm.rdb.reactive.ConnectionScopedReactiveSqlExecutor;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.transaction.R2dbcTransactionContext;
+import com.flying.orm.rdb.transaction.R2dbcTransactionCompletion;
+import com.flying.orm.rdb.transaction.TransactionOutcome;
 import io.r2dbc.spi.Connection;
 import io.r2dbc.h2.H2ConnectionConfiguration;
 import io.r2dbc.h2.H2ConnectionFactory;
@@ -526,6 +528,39 @@ class ReactiveSchemaClientTest {
         assertEquals(1, executor.sqlRequests().size());
     }
 
+    /** 外部事务 DDL 必须在 SQL 后立即失效，并在真实事务回滚后再次清掉可能重载的未提交结构。 */
+    @Test
+    void invalidatesReactiveMetadataAgainAfterExternalDdlTransactionCompletes() {
+        RecordingSqlExecutor executor = new RecordingSqlExecutor();
+        executor.bindExternalTransaction();
+        List<String> invalidated = new ArrayList<>();
+        ReactiveSchemaClient client = ReactiveSchemaClient.create(executor, RdbDialect.postgresql())
+                                                         .withMetadataInvalidator(invalidated::add);
+
+        StepVerifier.create(client.createTable(form())).expectNext(1L).verifyComplete();
+        assertEquals(List.of("Users"), invalidated);
+
+        executor.completeExternalTransaction(TransactionOutcome.ROLLED_BACK).block();
+
+        assertEquals(List.of("Users", "Users"), invalidated);
+    }
+
+    /** 事务适配器没有完成通知时，事务型 DDL 也必须在第一条 SQL 前失败关闭。 */
+    @Test
+    void rejectsExternalReactiveDdlWithoutTransactionCompletionNotification() {
+        RecordingSqlExecutor executor = new RecordingSqlExecutor();
+        executor.bindExternalTransactionWithoutCompletion();
+        ReactiveSchemaClient client = ReactiveSchemaClient.create(executor, RdbDialect.postgresql());
+
+        StepVerifier.create(client.createTable(form()))
+                    .expectErrorSatisfies(error -> assertEquals(
+                            SchemaMigrationFailureCode.DDL_TRANSACTION_NOT_SUPPORTED,
+                            assertInstanceOf(SchemaMigrationRejectedException.class, error).failureCode()))
+                    .verify();
+
+        assertTrue(executor.sqlRequests().isEmpty());
+    }
+
     /** 即使方言支持普通事务 DDL，PostgreSQL 并发索引这类明确的非事务语句也不能混入外部事务。 */
     @Test
     void rejectsReviewedNonTransactionalDdlInsideExternalTransaction() {
@@ -901,6 +936,8 @@ class ReactiveSchemaClientTest {
 
         private R2dbcTransactionContext transaction;
 
+        private RecordingTransactionCompletion completion;
+
         @Override
         public Mono<R2dbcTransactionContext> currentTransaction() {
             return Mono.justOrEmpty(transaction);
@@ -957,7 +994,32 @@ class ReactiveSchemaClientTest {
         }
 
         private void bindExternalTransaction() {
+            completion = new RecordingTransactionCompletion();
+            transaction = R2dbcTransactionContext.external(connection(), "primary", completion);
+        }
+
+        private void bindExternalTransactionWithoutCompletion() {
+            completion = null;
             transaction = R2dbcTransactionContext.external(connection(), "primary");
+        }
+
+        private Mono<Void> completeExternalTransaction(TransactionOutcome outcome) {
+            return completion.complete(outcome);
+        }
+    }
+
+    private static final class RecordingTransactionCompletion implements R2dbcTransactionCompletion {
+
+        private Listener listener;
+
+        @Override
+        public boolean register(Listener listener) {
+            this.listener = listener;
+            return true;
+        }
+
+        private Mono<Void> complete(TransactionOutcome outcome) {
+            return Mono.from(listener.afterCompletion(outcome));
         }
     }
 

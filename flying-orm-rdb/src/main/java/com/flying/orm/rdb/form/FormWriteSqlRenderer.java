@@ -65,7 +65,7 @@ final class FormWriteSqlRenderer {
     SqlRequest update(DynamicForm form, Map<String, Object> values, ConditionGroup where) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
         List<UpdateAssignment> fieldValues = updateAssignments(safeForm, values);
-        FormSqlRenderSupport.ConditionSql whereFragment = support.requiredWhere(where, "update");
+        FormSqlRenderSupport.ConditionSql whereFragment = support.requiredWhere(safeForm, where, "update");
         List<Object> parameters = new ArrayList<>(fieldValues.size() + whereFragment.parameters().size());
         List<String> fields = new ArrayList<>(fieldValues.size());
         for (UpdateAssignment fieldValue : fieldValues) {
@@ -94,7 +94,7 @@ final class FormWriteSqlRenderer {
         DynamicField lockField = support.field(safeForm, safeLock.field());
         requireUnencryptedLockField(safeForm, lockField);
         List<UpdateAssignment> fieldValues = updateAssignments(safeForm, values);
-        FormSqlRenderSupport.ConditionSql whereFragment = support.requiredWhere(where, "update");
+        FormSqlRenderSupport.ConditionSql whereFragment = support.requiredWhere(safeForm, where, "update");
         List<Object> parameters = new ArrayList<>(fieldValues.size() + whereFragment.parameters().size() + 2);
         List<String> fields = new ArrayList<>(fieldValues.size() + 1);
         for (UpdateAssignment fieldValue : fieldValues) {
@@ -105,10 +105,10 @@ final class FormWriteSqlRenderer {
             fields.add(lockField.name() + ":lock-increment");
         } else {
             fields.add(lockField.name() + ":lock-assign");
-            parameters.add(support.valueCodecs.write(safeLock.nextValue()));
+            parameters.add(support.writeValue(lockField, safeLock.nextValue()));
         }
         parameters.addAll(whereFragment.parameters());
-        parameters.add(support.valueCodecs.write(safeLock.expectedValue()));
+        parameters.add(support.writeValue(lockField, safeLock.expectedValue()));
         return support.request("update-optimistic", safeForm, fields, whereFragment, "", "", "",
                                parameters, List.of(), () -> {
                                    StringJoiner sets = new StringJoiner(", ");
@@ -138,7 +138,7 @@ final class FormWriteSqlRenderer {
         DynamicField lockField = support.field(safeForm, safeLock.field());
         requireUnencryptedLockField(safeForm, lockField);
         List<UpdateAssignment> fieldValues = updateAssignments(safeForm, values);
-        FormSqlRenderSupport.ConditionSql whereFragment = support.requiredWhere(where, "update");
+        FormSqlRenderSupport.ConditionSql whereFragment = support.requiredWhere(safeForm, where, "update");
         SqlRequest safeRequest = Objects.requireNonNull(request, "optimistic update request must not be null");
         List<Class<?>> parameterTypes = new ArrayList<>(safeRequest.parameters().size());
         fieldValues.forEach(fieldValue -> parameterTypes.add(support.parameterType(fieldValue.field())));
@@ -155,7 +155,7 @@ final class FormWriteSqlRenderer {
      */
     SqlRequest delete(DynamicForm form, ConditionGroup where) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        FormSqlRenderSupport.ConditionSql whereFragment = support.requiredWhere(where, "delete");
+        FormSqlRenderSupport.ConditionSql whereFragment = support.requiredWhere(safeForm, where, "delete");
         return support.request("delete", safeForm, List.of(), whereFragment, "", "", "",
                                whereFragment.parameters(), List.of(), () -> "delete from "
                                        + support.identifier(safeForm.table()) + " where " + whereFragment.sql());
@@ -169,10 +169,10 @@ final class FormWriteSqlRenderer {
         OptimisticLockOptions safeLock = Objects.requireNonNull(lock, "optimistic lock options must not be null");
         DynamicField lockField = support.field(safeForm, safeLock.field());
         requireUnencryptedLockField(safeForm, lockField);
-        FormSqlRenderSupport.ConditionSql whereFragment = support.requiredWhere(where, "delete");
+        FormSqlRenderSupport.ConditionSql whereFragment = support.requiredWhere(safeForm, where, "delete");
         List<Object> parameters = new ArrayList<>(whereFragment.parameters().size() + 1);
         parameters.addAll(whereFragment.parameters());
-        parameters.add(support.valueCodecs.write(safeLock.expectedValue()));
+        parameters.add(support.writeValue(lockField, safeLock.expectedValue()));
         return support.request("delete-optimistic", safeForm, List.of(lockField.name()), whereFragment, "", "", "",
                                parameters, List.of(), () -> "delete from " + support.identifier(safeForm.table())
                                        + " where " + groupedForAdditionalPredicate(where, whereFragment.sql()) + " and "

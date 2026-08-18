@@ -6,6 +6,7 @@ import com.flying.orm.rdb.dialect.RdbDialect;
 import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -166,6 +167,43 @@ class SqlTemplateEngineTest {
                                              Set.of()));
         assertThrows(IllegalArgumentException.class,
                      () -> SqlTemplate.query("drop-table", "drop table users", Set.of()));
+    }
+
+    /** 只读模板不能通过各方言的读语法获取阻塞型锁，普通只读尾部和标识符仍要保留。 */
+    @Test
+    void rejectsReadQueriesThatAcquireBlockingLocks() {
+        assertThrows(IllegalArgumentException.class,
+                     () -> SqlTemplate.query("postgres-share", "select * from users for share", Set.of()));
+        assertThrows(IllegalArgumentException.class,
+                     () -> SqlTemplate.query("postgres-key-share",
+                                             "select * from users for key share", Set.of()));
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServerEngine("sqlserver-updlock",
+                                           "select * from users with (updlock, rowlock)"));
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServerEngine("sqlserver-holdlock",
+                                           "select * from users with (holdlock)"));
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServerEngine("sqlserver-xlock", "select * from users with (xlock)"));
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServerEngine("sqlserver-tablockx",
+                                           "select * from users with (tablockx)"));
+        assertThrows(IllegalArgumentException.class,
+                     () -> sqlServerEngine("sqlserver-legacy-updlock",
+                                           "select * from users (updlock)"));
+        for (String hint : List.of("serializable", "repeatableread", "readcommittedlock", "tablock")) {
+            assertThrows(IllegalArgumentException.class,
+                         () -> sqlServerEngine("sqlserver-" + hint,
+                                               "select * from users with (" + hint + ")"));
+            assertThrows(IllegalArgumentException.class,
+                         () -> sqlServerEngine("sqlserver-legacy-" + hint,
+                                               "select * from users (" + hint + ")"));
+        }
+
+        assertDoesNotThrow(() -> sqlServerEngine("sqlserver-for-json", "select * from users for json auto"));
+        assertDoesNotThrow(() -> SqlTemplate.query(
+                "share-column", "select share from user_permissions", Set.of()));
+        assertDoesNotThrow(() -> sqlServerEngine("sqlserver-nolock", "select * from users with (nolock)"));
     }
 
     /** 依赖方言模式的反斜杠引号不能让真实写关键字落入校验器误判的字符串区间。 */

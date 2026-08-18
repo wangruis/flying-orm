@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.jdbc;
 
 import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.rdb.execution.GeneratedKeyReadException;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlExecutionTimeoutException;
@@ -29,6 +30,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
+import java.sql.SQLTimeoutException;
 import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -46,6 +48,121 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** 验证同步入口走原生 JDBC，并保持参数顺序、紧凑结果、生成键和执行保护。 */
 class JdbcSqlExecutorTest {
+
+    /** 写 SQL 已进入驱动后超时、取消或结果未知，自有连接都不能再归还连接池。 */
+    @Test
+    void discardsOwnedConnectionAfterUncertainRegularWriteFailure() {
+        List<SQLException> failures = List.of(
+                new SQLTimeoutException("timed out", "HYT00"),
+                new SQLException("cancelled", "HY008"),
+                new SQLException("outcome unavailable"));
+        List<RdbErrorKind> kinds = List.of(RdbErrorKind.TIMEOUT, RdbErrorKind.CANCELLED, RdbErrorKind.UNKNOWN);
+
+        for (int index = 0; index < failures.size(); index++) {
+            SQLException expected = failures.get(index);
+            AtomicInteger aborts = new AtomicInteger();
+            AtomicInteger closes = new AtomicInteger();
+            PreparedStatement statement = proxy(PreparedStatement.class, (ignored, method, arguments) -> {
+                if (method.getName().equals("executeLargeUpdate")) {
+                    throw expected;
+                }
+                return defaultValue(method.getReturnType());
+            });
+            Connection connection = proxy(Connection.class, (ignored, method, arguments) -> switch (method.getName()) {
+                case "prepareStatement" -> statement;
+                case "abort" -> {
+                    aborts.incrementAndGet();
+                    yield null;
+                }
+                case "close" -> {
+                    closes.incrementAndGet();
+                    yield null;
+                }
+                default -> defaultValue(method.getReturnType());
+            });
+            DataSource dataSource = proxy(DataSource.class, (ignored, method, arguments) ->
+                    method.getName().equals("getConnection") ? connection : defaultValue(method.getReturnType()));
+
+            RdbException observed = assertThrows(RdbException.class, () -> JdbcSqlExecutor.create(dataSource)
+                    .rowsUpdated(new SqlRequest("update device set name = ?", List.of("x"))));
+
+            assertEquals(kinds.get(index), observed.kind());
+            assertEquals(1, aborts.get());
+            assertEquals(0, closes.get());
+        }
+    }
+
+    /** 写入成功后读取生成键失败仍然是结果不确定，连接必须隔离。 */
+    @Test
+    void discardsOwnedConnectionWhenGeneratedKeyReadFailsAfterWrite() {
+        AtomicInteger aborts = new AtomicInteger();
+        AtomicInteger closes = new AtomicInteger();
+        PreparedStatement statement = proxy(PreparedStatement.class, (ignored, method, arguments) -> switch (
+                method.getName()) {
+            case "executeLargeUpdate" -> 1L;
+            case "getGeneratedKeys" -> throw new SQLException("generated keys unavailable");
+            default -> defaultValue(method.getReturnType());
+        });
+        Connection connection = proxy(Connection.class, (ignored, method, arguments) -> switch (method.getName()) {
+            case "prepareStatement" -> statement;
+            case "abort" -> {
+                aborts.incrementAndGet();
+                yield null;
+            }
+            case "close" -> {
+                closes.incrementAndGet();
+                yield null;
+            }
+            default -> defaultValue(method.getReturnType());
+        });
+        DataSource dataSource = proxy(DataSource.class, (ignored, method, arguments) ->
+                method.getName().equals("getConnection") ? connection : defaultValue(method.getReturnType()));
+
+        GeneratedKeyReadException observed = assertThrows(
+                GeneratedKeyReadException.class, () -> JdbcSqlExecutor.create(dataSource)
+                .rowsUpdatedReturningKeys(
+                        new SqlRequest("insert into device(name) values (?)", List.of("x")),
+                        SqlExecutionOptions.safeDefaults()));
+
+        assertEquals(1L, observed.affectedRows());
+        assertInstanceOf(SQLException.class, observed.getCause());
+        assertEquals(1, aborts.get());
+        assertEquals(0, closes.get());
+    }
+
+    /** 明确的 SQL 语法失败没有未知写入结果，连接仍可正常归池。 */
+    @Test
+    void returnsOwnedConnectionAfterClearRegularWriteFailure() {
+        AtomicInteger aborts = new AtomicInteger();
+        AtomicInteger closes = new AtomicInteger();
+        PreparedStatement statement = proxy(PreparedStatement.class, (ignored, method, arguments) -> {
+            if (method.getName().equals("executeLargeUpdate")) {
+                throw new SQLException("bad sql", "42000");
+            }
+            return defaultValue(method.getReturnType());
+        });
+        Connection connection = proxy(Connection.class, (ignored, method, arguments) -> switch (method.getName()) {
+            case "prepareStatement" -> statement;
+            case "abort" -> {
+                aborts.incrementAndGet();
+                yield null;
+            }
+            case "close" -> {
+                closes.incrementAndGet();
+                yield null;
+            }
+            default -> defaultValue(method.getReturnType());
+        });
+        DataSource dataSource = proxy(DataSource.class, (ignored, method, arguments) ->
+                method.getName().equals("getConnection") ? connection : defaultValue(method.getReturnType()));
+
+        RdbException observed = assertThrows(RdbException.class, () -> JdbcSqlExecutor.create(dataSource)
+                .rowsUpdated(new SqlRequest("update missing set name = ?", List.of("x"))));
+
+        assertEquals(RdbErrorKind.BAD_SQL, observed.kind());
+        assertEquals(0, aborts.get());
+        assertEquals(1, closes.get());
+    }
 
     /** 业务密文和 CONTAINS 令牌必须在同一个自有 JDBC 事务中提交。 */
     @Test
@@ -832,6 +949,118 @@ class JdbcSqlExecutorTest {
         assertEquals(1, aborts.get());
     }
 
+    /** 外部事务中的业务 INSERT 已执行后，生成键读取失败必须保留 ENLISTED 所需的写入证据。 */
+    @Test
+    void preservesGeneratedKeyReadEvidenceForExternalProtectedWrite() {
+        AtomicInteger commits = new AtomicInteger();
+        AtomicInteger rollbacks = new AtomicInteger();
+        AtomicInteger closes = new AtomicInteger();
+        PreparedStatement statement = proxy(PreparedStatement.class, (ignored, method, arguments) -> switch (
+                method.getName()) {
+            case "executeLargeUpdate" -> 1L;
+            case "getGeneratedKeys" -> throw new SQLException("generated keys unavailable");
+            default -> defaultValue(method.getReturnType());
+        });
+        Connection connection = proxy(Connection.class, (ignored, method, arguments) -> switch (method.getName()) {
+            case "prepareStatement" -> statement;
+            case "commit" -> {
+                commits.incrementAndGet();
+                yield null;
+            }
+            case "rollback" -> {
+                rollbacks.incrementAndGet();
+                yield null;
+            }
+            case "close" -> {
+                closes.incrementAndGet();
+                yield null;
+            }
+            default -> defaultValue(method.getReturnType());
+        });
+        DataSource dataSource = proxy(DataSource.class, (ignored, method, arguments) ->
+                method.getName().equals("getConnection") ? connection : defaultValue(method.getReturnType()));
+        JdbcTransactionParticipant participant = () -> Optional.of(
+                JdbcTransactionContext.external(connection, "primary"));
+
+        GeneratedKeyReadException observed = assertThrows(
+                GeneratedKeyReadException.class,
+                () -> JdbcSqlExecutor.create(dataSource)
+                                     .withTransactionParticipant(participant)
+                                     .atomicProtectedWrite(
+                                             protectedGeneratedInsertWork(), SqlExecutionOptions.safeDefaults()));
+
+        assertEquals(1L, observed.affectedRows());
+        assertInstanceOf(SQLException.class, observed.getCause());
+        assertEquals(0, commits.get());
+        assertEquals(0, rollbacks.get());
+        assertEquals(0, closes.get());
+    }
+
+    /** 自有事务确认回滚后写入已撤销，不能继续把生成键读取失败报告成未确认写入。 */
+    @Test
+    void doesNotReportUnknownWhenProtectedGeneratedKeyFailureWasRolledBack() {
+        AtomicInteger rollbacks = new AtomicInteger();
+        PreparedStatement statement = proxy(PreparedStatement.class, (ignored, method, arguments) -> switch (
+                method.getName()) {
+            case "executeLargeUpdate" -> 1L;
+            case "getGeneratedKeys" -> throw new SQLException("generated keys unavailable");
+            default -> defaultValue(method.getReturnType());
+        });
+        Connection connection = proxy(Connection.class, (ignored, method, arguments) -> switch (method.getName()) {
+            case "getAutoCommit" -> false;
+            case "prepareStatement" -> statement;
+            case "rollback" -> {
+                rollbacks.incrementAndGet();
+                yield null;
+            }
+            default -> defaultValue(method.getReturnType());
+        });
+        DataSource dataSource = proxy(DataSource.class, (ignored, method, arguments) ->
+                method.getName().equals("getConnection") ? connection : defaultValue(method.getReturnType()));
+
+        RdbException observed = assertThrows(
+                RdbException.class,
+                () -> JdbcSqlExecutor.create(dataSource).atomicProtectedWrite(
+                        protectedGeneratedInsertWork(), SqlExecutionOptions.safeDefaults()));
+
+        assertEquals(1, rollbacks.get());
+        assertInstanceOf(SQLException.class, observed.getCause());
+    }
+
+    /** 生成键读取失败后的回滚结果未知时，必须保留 affected rows 供 Repository 报告 UNKNOWN。 */
+    @Test
+    void preservesGeneratedKeyReadEvidenceWhenProtectedRollbackIsUnknown() {
+        AtomicInteger aborts = new AtomicInteger();
+        PreparedStatement statement = proxy(PreparedStatement.class, (ignored, method, arguments) -> switch (
+                method.getName()) {
+            case "executeLargeUpdate" -> 1L;
+            case "getGeneratedKeys" -> throw new SQLException("generated keys unavailable");
+            default -> defaultValue(method.getReturnType());
+        });
+        Connection connection = proxy(Connection.class, (ignored, method, arguments) -> switch (method.getName()) {
+            case "getAutoCommit" -> false;
+            case "prepareStatement" -> statement;
+            case "rollback" -> throw new SQLException("rollback reply lost", "08006");
+            case "abort" -> {
+                aborts.incrementAndGet();
+                yield null;
+            }
+            default -> defaultValue(method.getReturnType());
+        });
+        DataSource dataSource = proxy(DataSource.class, (ignored, method, arguments) ->
+                method.getName().equals("getConnection") ? connection : defaultValue(method.getReturnType()));
+
+        GeneratedKeyReadException observed = assertThrows(
+                GeneratedKeyReadException.class,
+                () -> JdbcSqlExecutor.create(dataSource).atomicProtectedWrite(
+                        protectedGeneratedInsertWork(), SqlExecutionOptions.safeDefaults()));
+
+        assertEquals(1L, observed.affectedRows());
+        RdbException unknown = assertInstanceOf(RdbException.class, observed.getCause());
+        assertEquals(RdbErrorKind.UNKNOWN, unknown.kind());
+        assertEquals(1, aborts.get());
+    }
+
     /** 提交已经确认后，恢复 auto-commit 的普通故障只能隔离连接并进入清理观测，不能把成功改写成失败。 */
     @Test
     void keepsCommittedProtectedWriteResultWhenAutoCommitRestoreFails() {
@@ -1171,6 +1400,19 @@ class JdbcSqlExecutorTest {
                 "delete from protected_customer_tokens where id = ? and field_tag = ?",
                 "insert into protected_customer_tokens(id, field_tag, token_hash) values (?, ?, ?)",
                 List.of(new ProtectedWriteWork.FieldTokens("contact", List.of(token))));
+    }
+
+    private static ProtectedWriteWork protectedGeneratedInsertWork() {
+        return new ProtectedWriteWork(
+                ProtectedWriteWork.Kind.INSERT,
+                new SqlRequest("insert into protected_customer(contact) values (?)", List.of(new byte[]{9, 8, 7})),
+                null,
+                List.of("id"),
+                Map.of(),
+                "id = ?",
+                "delete from protected_customer_tokens where id = ? and field_tag = ?",
+                "insert into protected_customer_tokens(id, field_tag, token_hash) values (?, ?, ?)",
+                List.of(new ProtectedWriteWork.FieldTokens("contact", List.of(new byte[]{1}))));
     }
 
     private static void createProtectedTables(JdbcDataSource dataSource) throws SQLException {

@@ -82,10 +82,10 @@ final class DmlWriteCommand {
     WriteSpec spec() {
         WriteSpec spec;
         if (kind == Kind.UPDATE) {
-            DynamicForm form = DmlFormBuilder.form(table, values.keySet(), lock, logicDelete);
+            DynamicForm form = DmlFormBuilder.form(table, values.keySet(), lock, logicDelete, where);
             spec = WriteSpec.update(form, values, where).withScope(scope);
         } else {
-            DynamicForm form = DmlFormBuilder.form(table, Set.of(), lock, logicDelete);
+            DynamicForm form = DmlFormBuilder.form(table, Set.of(), lock, logicDelete, where);
             spec = WriteSpec.delete(form, where).withScope(scope);
         }
         return lock == null ? spec : spec.withLock(lock);

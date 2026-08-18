@@ -55,6 +55,7 @@ import reactor.core.publisher.Mono;
 import reactor.test.StepVerifier;
 
 import java.nio.ByteBuffer;
+import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.OffsetTime;
@@ -161,6 +162,27 @@ class ReactiveFormClientTest {
         StepVerifier.create(client.insert(spec)).expectNext(1L).verifyComplete();
 
         assertArrayEquals(new byte[]{1, 2, 3}, ((byte[][]) executor.request().parameters().get(1))[0]);
+    }
+
+    /** WriteSpec 是冷执行边界，旧 JDBC 时间值不能在规格创建后被调用方改写。 */
+    @Test
+    void snapshotsMutableJdbcTimeValuesAtTheWriteSpecBoundary() {
+        Timestamp source = Timestamp.valueOf("2026-08-18 10:11:12.123456789");
+        long expectedMillis = source.getTime();
+        int expectedNanos = source.getNanos();
+        DynamicForm temporalForm = DynamicForm.builder("temporal", "TemporalRecords")
+                                               .addField(DynamicField.primaryKey("id", "BIGINT"))
+                                               .addField(DynamicField.of("created_at", "TIMESTAMP"))
+                                               .build();
+        WriteSpec spec = WriteSpec.insert(temporalForm, orderedMap("id", 1L, "created_at", source));
+
+        source.setTime(0L);
+        Timestamp exposed = (Timestamp) spec.values().get("created_at");
+        exposed.setTime(1L);
+
+        Timestamp stable = (Timestamp) spec.values().get("created_at");
+        assertEquals(expectedMillis, stable.getTime());
+        assertEquals(expectedNanos, stable.getNanos());
     }
 
     @Test
@@ -709,7 +731,7 @@ class ReactiveFormClientTest {
                                                                                                       "name",
                                                                                                       "like"))
                                                                         .add(ParameterConditionSpec.of("orgId",
-                                                                                                      "userId",
+                                                                                                      "id",
                                                                                                       "user-in-org"))
                                                                         .build();
 
@@ -717,7 +739,7 @@ class ReactiveFormClientTest {
                     .expectNext(DynamicRow.copyOf(Map.of("id", "u1", "name", "王")))
                     .verifyComplete();
 
-        assertEquals("select id, name from Users where name like ? and exists (select 1 from org_user ou where ou.user_id = userId and ou.org_id = ?)",
+        assertEquals("select id, name from Users where name like ? and exists (select 1 from org_user ou where ou.user_id = id and ou.org_id = ?)",
                      executor.request().sql());
         assertEquals(List.of("王%", "org-1"), executor.request().parameters());
     }
@@ -739,8 +761,8 @@ class ReactiveFormClientTest {
                     .expectNext(DynamicRow.copyOf(Map.of("id", "u1", "name", "王")))
                     .verifyComplete();
 
-        assertEquals("select id, name from Users where exists (select 1 from org_user ou where ou.user_id = userId and ou.org_id in (?, ?)) "
-                             + "and not exists (select 1 from org_user ou where ou.user_id = userId and ou.org_id = ?)",
+        assertEquals("select id, name from Users where exists (select 1 from org_user ou where ou.user_id = id and ou.org_id in (?, ?)) "
+                             + "and not exists (select 1 from org_user ou where ou.user_id = id and ou.org_id = ?)",
                      executor.request().sql());
         assertEquals(List.of("org-1", "org-2", "org-3"), executor.request().parameters());
     }
@@ -846,9 +868,9 @@ class ReactiveFormClientTest {
                     })
                     .verifyComplete();
 
-        assertEquals("select count(*) as total from Users where exists (select 1 from org_user ou where ou.user_id = userId and ou.org_id in (?, ?))",
+        assertEquals("select count(*) as total from Users where exists (select 1 from org_user ou where ou.user_id = id and ou.org_id in (?, ?))",
                      executor.requests().get(0).sql());
-        assertEquals("select id, name from Users where exists (select 1 from org_user ou where ou.user_id = userId and ou.org_id in (?, ?)) order by id asc limit ? offset ?",
+        assertEquals("select id, name from Users where exists (select 1 from org_user ou where ou.user_id = id and ou.org_id in (?, ?)) order by id asc limit ? offset ?",
                      executor.requests().get(1).sql());
         assertEquals(List.of("org-1", "org-2", 2, 2L), executor.requests().get(1).parameters());
     }
@@ -1428,8 +1450,8 @@ class ReactiveFormClientTest {
     private static ParameterConditionPackage userOrganizationParameters() {
         return ParameterConditionPackage.of(
                 "user-organization",
-                ParameterConditionSpec.of("orgIds", "userId", "user-in-org"),
-                ParameterConditionSpec.of("excludeOrgIds", "userId", "user-not-in-org"));
+                ParameterConditionSpec.of("orgIds", "id", "user-in-org"),
+                ParameterConditionSpec.of("excludeOrgIds", "id", "user-not-in-org"));
     }
 
     private static com.flying.orm.core.sql.render.SqlTermPackage userOrganizationTerms() {

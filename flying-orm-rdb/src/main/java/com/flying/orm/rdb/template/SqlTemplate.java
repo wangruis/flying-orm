@@ -122,7 +122,9 @@ public final class SqlTemplate {
                 || "sql-server".equalsIgnoreCase(dialectName);
         String firstKeyword = null;
         String previousKeyword = null;
+        String previousPreviousKeyword = null;
         int caseDepth = 0;
+        int sqlServerHintDepth = 0;
         boolean previousEndClosedCase = false;
         for (int index = 0; index < sql.length();) {
             char current = sql.charAt(index);
@@ -175,6 +177,13 @@ public final class SqlTemplate {
                 continue;
             }
             if (!Character.isLetter(current)) {
+                if ((generic || sqlServer) && current == '(' && "WITH".equals(previousKeyword)) {
+                    sqlServerHintDepth = 1;
+                } else if (sqlServerHintDepth > 0 && current == '(') {
+                    sqlServerHintDepth++;
+                } else if (sqlServerHintDepth > 0 && current == ')') {
+                    sqlServerHintDepth--;
+                }
                 index++;
                 continue;
             }
@@ -197,12 +206,22 @@ public final class SqlTemplate {
                 throw new IllegalArgumentException(
                         "SQL query template contains a write or DDL keyword: " + keyword);
             }
+            if ("SHARE".equals(keyword)
+                    && ("FOR".equals(previousKeyword)
+                    || "KEY".equals(previousKeyword) && "FOR".equals(previousPreviousKeyword))) {
+                throw new IllegalArgumentException("SQL query template must not acquire a row lock: FOR SHARE");
+            }
+            if ((sqlServer || generic && sqlServerHintDepth > 0) && isSqlServerBlockingLockHint(keyword)) {
+                throw new IllegalArgumentException(
+                        "SQL query template must not use a SQL Server blocking lock hint: " + keyword);
+            }
             if ("CASE".equals(keyword)) {
                 caseDepth++;
             } else if (endClosedCase) {
                 caseDepth--;
             }
             previousEndClosedCase = endClosedCase;
+            previousPreviousKeyword = previousKeyword;
             previousKeyword = keyword;
             index = end;
         }
@@ -210,6 +229,17 @@ public final class SqlTemplate {
         if (!"SELECT".equals(firstKeyword) && !"WITH".equals(firstKeyword)) {
             throw new IllegalArgumentException("SQL query template must start with SELECT or WITH");
         }
+    }
+
+    private static boolean isSqlServerBlockingLockHint(String keyword) {
+        return "UPDLOCK".equals(keyword)
+                || "HOLDLOCK".equals(keyword)
+                || "XLOCK".equals(keyword)
+                || "TABLOCKX".equals(keyword)
+                || "SERIALIZABLE".equals(keyword)
+                || "REPEATABLEREAD".equals(keyword)
+                || "READCOMMITTEDLOCK".equals(keyword)
+                || "TABLOCK".equals(keyword);
     }
 
     /** MySQL 与 MariaDB 会执行这两类特殊块注释，不能把它们当作普通注释跳过。 */

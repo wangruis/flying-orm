@@ -10,6 +10,7 @@ import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.sql.render.SqlFragment;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
@@ -82,6 +83,19 @@ public final class FormDataSqlRenderer {
     @InternalApi
     public SqlRenderer conditionRenderer() {
         return support.conditionRenderer;
+    }
+
+    /**
+     * 使用当前动态表单和方言规则渲染内部扩展查询的条件片段。
+     *
+     * @param form 动态表单
+     * @param where 条件 AST
+     * @return 已完成字段校验和值转换的参数化条件片段
+     */
+    @InternalApi
+    public SqlFragment renderCondition(DynamicForm form, ConditionGroup where) {
+        FormSqlRenderSupport.ConditionSql condition = support.condition(form, where);
+        return new SqlFragment(condition.sql(), condition.parameters());
     }
 
     /**

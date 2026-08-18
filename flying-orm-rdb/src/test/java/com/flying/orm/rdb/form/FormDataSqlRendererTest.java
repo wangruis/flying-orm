@@ -126,6 +126,28 @@ class FormDataSqlRendererTest {
         assertEquals(0L, plans.conditionSnapshot().estimatedSize());
     }
 
+    /** 自定义 term 保留自己的值语义，但字段仍必须按 DynamicForm 校验并使用规范名称。 */
+    @Test
+    void validatesAndCanonicalizesCustomTermFieldsAgainstDynamicForm() {
+        SqlRenderer conditions = SqlRenderer.builder()
+                .addTerm(SqlTermHandler.of("custom",
+                                           (term, context) -> SqlFragment.of(
+                                                   context.identifier(term.field()) + " = ?", term.value())))
+                .build();
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(conditions, RdbDialect.postgresql());
+
+        SqlRequest request = renderer.select(
+                form(), ConditionGroup.and(conditions.terms()).where("ID", "custom", "u1").build());
+
+        assertEquals("select \"id\", \"name\", \"age\" from \"Users\" where \"id\" = ?", request.sql());
+        assertThrows(IllegalArgumentException.class,
+                     () -> renderer.select(
+                             form(),
+                             ConditionGroup.and(conditions.terms())
+                                           .where("missing", "custom", "u1")
+                                           .build()));
+    }
+
     /**
      * 验证 insert SQL 按调用方数据顺序生成列和参数。
      */
@@ -256,7 +278,7 @@ class FormDataSqlRendererTest {
     void preservesOffsetTimeForNativeDialectsAndUsesTextForFallbackDialects() {
         DynamicForm form = DynamicForm.builder("schedule", "Schedules")
                                       .addField(DynamicField.primaryKey("id", "BIGINT"))
-                                      .addField(DynamicField.of("meeting_time", "OFFSET_TIME"))
+                                      .addField(DynamicField.of("meeting_time", "OFFSET_TIME").withNullable(false))
                                       .build();
         OffsetTime value = OffsetTime.parse("13:40:00+08:00");
 
@@ -269,11 +291,63 @@ class FormDataSqlRendererTest {
                                                                        List.of(orderedMap("id", 1L,
                                                                                           "meeting_time", value),
                                                                                orderedMap("id", 2L,
-                                                                                          "meeting_time", value)));
+                                                                                           "meeting_time", value)));
+        FormDataSqlRenderer mysqlRenderer = FormDataSqlRenderer.create(conditionRenderer(), RdbDialect.mysql());
+        SqlRequest mysqlCondition = mysqlRenderer.select(
+                form, ConditionGroup.and().where("meeting_time", "=", value).build());
+        SqlRequest mysqlCursor = mysqlRenderer.select(
+                form, ConditionGroup.and().build(),
+                CursorPageQuery.after(3, List.of(value, 7L), CursorSort.asc("meeting_time")));
+        SqlRequest mysqlOptimistic = mysqlRenderer.update(
+                form,
+                orderedMap("id", 1L),
+                ConditionGroup.and().where("id", "=", 1L).build(),
+                OptimisticLockOptions.assign("meeting_time", value, OffsetTime.parse("13:41:00+08:00")));
 
         assertEquals(value, postgresql.parameters().get(1));
         assertEquals("13:40+08:00", mysql.parameters().get(1));
         assertEquals("13:40+08:00", parameterRows(mysqlBatch).get(1).get(1));
+        assertEquals(List.of("13:40+08:00"), mysqlCondition.parameters());
+        assertEquals(List.of("13:40+08:00", "13:40+08:00", 7L, 4, 0L), mysqlCursor.parameters());
+        assertEquals(List.of(1L, "13:41+08:00", 1L, "13:40+08:00"), mysqlOptimistic.parameters());
+    }
+
+    /** Oracle 旧版本的逻辑 BOOLEAN 条件必须和写入一样绑定为 1/0。 */
+    @Test
+    void encodesLegacyOracleBooleanConditionThroughTheDynamicField() {
+        DynamicForm form = DynamicForm.builder("feature", "Features")
+                                      .addField(DynamicField.primaryKey("id", "BIGINT"))
+                                      .addField(DynamicField.of("enabled", "BOOLEAN"))
+                                      .build();
+
+        SqlRequest request = FormDataSqlRenderer.create(conditionRenderer(), RdbDialect.oracle())
+                                                 .select(form, ConditionGroup.and()
+                                                                             .where("enabled", "=", true)
+                                                                             .build());
+
+        assertEquals(List.of(1), request.parameters());
+    }
+
+    /** PostgreSQL ARRAY 条件和续页游标都必须从动态结果 List 恢复成驱动需要的强类型数组。 */
+    @Test
+    void encodesArrayConditionAndCursorThroughTheDynamicField() {
+        DynamicForm form = DynamicForm.builder("array", "array_records")
+                                      .addField(DynamicField.primaryKey("id", "BIGINT"))
+                                      .addField(DynamicField.of("tags", "VARCHAR[]").withNullable(false))
+                                      .build();
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(conditionRenderer(), RdbDialect.postgresql());
+
+        SqlRequest condition = renderer.select(
+                form, ConditionGroup.and().where("tags", "=", new Object[]{"a", "b"}).build());
+        SqlRequest cursor = renderer.select(
+                form,
+                ConditionGroup.and().build(),
+                CursorPageQuery.after(2, List.of(List.of("a", "b"), 7L), CursorSort.asc("tags")));
+
+        assertArrayEquals(new String[]{"a", "b"}, (String[]) condition.parameters().getFirst());
+        assertArrayEquals(new String[]{"a", "b"}, (String[]) cursor.parameters().get(0));
+        assertArrayEquals(new String[]{"a", "b"}, (String[]) cursor.parameters().get(1));
+        assertEquals(List.of(7L, 3, 0L), cursor.parameters().subList(2, 5));
     }
 
     @Test

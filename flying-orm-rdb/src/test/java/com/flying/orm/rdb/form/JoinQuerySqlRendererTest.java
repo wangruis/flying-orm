@@ -14,6 +14,8 @@ import com.flying.orm.core.sql.render.RelationTermPackage;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import org.junit.jupiter.api.Test;
 
+import java.time.OffsetTime;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -182,6 +184,31 @@ class JoinQuerySqlRendererTest {
                              + "where ou.user_id = t0.id and ou.org_id = ?)",
                      request.sql());
         assertEquals(java.util.List.of("org-1"), request.parameters());
+    }
+
+    /** JOIN 各数据源的标准条件也必须按字段和方言编码，而不是退回通用 Java codec。 */
+    @Test
+    void encodesJoinBusinessConditionThroughTheSourceDynamicField() {
+        DynamicForm schedules = DynamicForm.builder("schedule", "schedules")
+                                           .addField(DynamicField.primaryKey("id", "BIGINT"))
+                                           .addField(DynamicField.of("meeting_time", "OFFSET_TIME"))
+                                           .build();
+        DynamicForm rooms = form("rooms", "id", "schedule_id");
+        JoinQuerySpec.Builder builder = JoinQuerySpec.builder(schedules);
+        JoinSource root = builder.root();
+        builder.join(JoinType.LEFT, rooms, root, "id", "schedule_id");
+        JoinQuerySpec spec = builder.select(root, "id")
+                                    .where(root, ConditionGroup.and()
+                                                               .where("meeting_time", "=",
+                                                                      OffsetTime.parse("13:40:00+08:00"))
+                                                               .build())
+                                    .build();
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.mysql());
+
+        SqlRequest request = renderer.joinQueries().select(spec, Map.of());
+
+        assertEquals(List.of("13:40+08:00"), request.parameters());
     }
 
     private static FormDataSqlRenderer renderer() {

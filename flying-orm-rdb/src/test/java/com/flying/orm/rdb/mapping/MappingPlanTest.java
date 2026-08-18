@@ -42,6 +42,29 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /** 覆盖 record/bean 映射计划对列别名、共享 codec 和复杂字段类型的处理。 */
 class MappingPlanTest {
 
+    /** 映射监听器拿到的是独立现场，不能借可变 JDBC 时间对象改写随后执行的实体值。 */
+    @Test
+    void snapshotsMutableJdbcTimeValuesAtTheMappingEventBoundary() {
+        Timestamp source = Timestamp.valueOf("2026-08-18 10:11:12.123456789");
+        long expectedMillis = source.getTime();
+        int expectedNanos = source.getNanos();
+        EntityMetadata<RecordUser> metadata = EntityMetadataResolver.createUncached(RecordUser.class);
+        EntityMappingEvent event = new EntityMappingEvent(
+                metadata,
+                new RecordUser(1, true, Status.ACTIVE, LocalDateTime.of(2026, 8, 18, 10, 11)),
+                Map.of("created_at", source));
+
+        source.setTime(0L);
+        Timestamp exposed = (Timestamp) event.values().get("created_at");
+        exposed.setTime(1L);
+
+        Timestamp stable = (Timestamp) event.values().get("created_at");
+        assertNotSame(source, stable);
+        assertNotSame(exposed, stable);
+        assertEquals(expectedMillis, stable.getTime());
+        assertEquals(expectedNanos, stable.getNanos());
+    }
+
     @Test
     void entityModelRegistryHonorsConfiguredMappingCachePolicy() {
         EntityModelRegistry disabled = EntityModelRegistry.create(CacheRegionPolicy.disabled());

@@ -21,6 +21,7 @@ import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -113,6 +114,32 @@ class PostgresqlVectorSupportTest {
                      () -> VectorValueCodec.write(List.of(0.1, 0.2), 3));
         assertThrows(IllegalArgumentException.class,
                      () -> VectorValueCodec.write(List.of(0.1, Double.NaN, 0.3), 3));
+    }
+
+    /** 最近邻查询的普通条件必须复用 DynamicForm 字段 codec，不能把 UUID 原样绑定到 VARCHAR。 */
+    @Test
+    void convertsNearestQueryConditionsWithDynamicFieldMetadata() {
+        PostgresqlVectorQueryRenderer renderer = PostgresqlVectorQueryRenderer.create(defaultRenderer());
+        UUID tenantId = UUID.fromString("d6e696a0-4892-4dd5-9d4d-da2490c8aaad");
+        DynamicForm form = DynamicForm.builder("documents", "documents")
+                                      .addField(DynamicField.primaryKey("id", "BIGINT"))
+                                      .addField(DynamicField.of("tenant_id", "VARCHAR"))
+                                      .addField(DynamicField.of("embedding", "VECTOR").withLength(3))
+                                      .build();
+
+        SqlRequest request = renderer.nearest(
+                form,
+                List.of("id", "tenant_id"),
+                "embedding",
+                List.of(0.1, 0.2, 0.3),
+                VectorMetric.COSINE,
+                ConditionGroup.and().where("TENANT_ID", "=", tenantId).build(),
+                10);
+
+        assertEquals("select \"id\", \"tenant_id\", \"embedding\" <=> cast(? as vector) as \"_distance\" "
+                             + "from \"documents\" where \"tenant_id\" = ? order by \"_distance\" asc limit ?",
+                     request.sql());
+        assertEquals(tenantId.toString(), request.parameters().get(1));
     }
 
     /** 超大 Collection 必须按向量维度上限有界读取，不能先调用 toArray 复制全部输入。 */

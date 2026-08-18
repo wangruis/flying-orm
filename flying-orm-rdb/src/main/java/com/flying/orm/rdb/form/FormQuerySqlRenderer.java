@@ -40,7 +40,7 @@ final class FormQuerySqlRenderer {
 
     SqlRequest select(DynamicForm form, ConditionGroup where) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        FormSqlRenderSupport.ConditionSql whereFragment = support.condition(where);
+        FormSqlRenderSupport.ConditionSql whereFragment = support.condition(safeForm, where);
         List<String> fields = support.fieldNames(safeForm.fields());
         return support.request("select", safeForm, fields, whereFragment, "", "", "",
                                whereFragment.parameters(), fields,
@@ -50,7 +50,7 @@ final class FormQuerySqlRenderer {
     SqlRequest select(DynamicForm form, ConditionGroup where, PageQuery page) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
         PageQuery safePage = Objects.requireNonNull(page, "page query must not be null");
-        FormSqlRenderSupport.ConditionSql whereFragment = support.condition(where);
+        FormSqlRenderSupport.ConditionSql whereFragment = support.condition(safeForm, where);
         List<String> fields = support.fieldNames(safeForm.fields());
         String sortShape = pageSortShape(safeForm, safePage.sorts());
         List<Object> parameters = paginationDialect.paginationParameters(whereFragment.parameters(), safePage);
@@ -69,7 +69,7 @@ final class FormQuerySqlRenderer {
         List<String> fields = List.copyOf(Objects.requireNonNull(
                 visibleFields, "visible fields must not be null"));
         PageQuery safePage = Objects.requireNonNull(page, "page query must not be null");
-        FormSqlRenderSupport.ConditionSql whereFragment = support.condition(where);
+        FormSqlRenderSupport.ConditionSql whereFragment = support.condition(safeForm, where);
         String sortShape = pageSortShape(safeForm, safePage.sorts());
         List<Object> parameters = paginationDialect.paginationParameters(whereFragment.parameters(), safePage);
         return support.request("select-page-protected", safeForm, fields, whereFragment, "", sortShape, "offset",
@@ -81,7 +81,7 @@ final class FormQuerySqlRenderer {
     SqlRequest selectOrdered(DynamicForm form, ConditionGroup where, List<PageSort> sorts) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
         List<PageSort> safeSorts = List.copyOf(Objects.requireNonNull(sorts, "page sorts must not be null"));
-        FormSqlRenderSupport.ConditionSql whereFragment = support.condition(where);
+        FormSqlRenderSupport.ConditionSql whereFragment = support.condition(safeForm, where);
         List<String> fields = support.fieldNames(safeForm.fields());
         String sortShape = pageSortShape(safeForm, safeSorts);
         return support.request("select-ordered", safeForm, fields, whereFragment, "", sortShape, "",
@@ -104,7 +104,7 @@ final class FormQuerySqlRenderer {
         }
         List<String> selectedFields = safeProjections.stream().map(safeForm::field).map(DynamicField::name).toList();
         List<String> groupedFields = safeGroups.stream().map(safeForm::field).map(DynamicField::name).toList();
-        FormSqlRenderSupport.ConditionSql whereFragment = support.condition(where);
+        FormSqlRenderSupport.ConditionSql whereFragment = support.condition(safeForm, where);
         String groupShape = String.join(",", groupedFields);
         String sortShape = pageSortShape(safeForm, safeSorts);
         return support.request("select-projected", safeForm, selectedFields, whereFragment, groupShape, sortShape, "",
@@ -124,12 +124,12 @@ final class FormQuerySqlRenderer {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
         CursorPageQuery safePage = CursorPageNormalizer.normalize(
                 safeForm, Objects.requireNonNull(page, "cursor page query must not be null"));
-        FormSqlRenderSupport.ConditionSql whereFragment = support.condition(where);
+        FormSqlRenderSupport.ConditionSql whereFragment = support.condition(safeForm, where);
         List<String> fields = support.fieldNames(safeForm.fields());
         String sortShape = cursorSortShape(safeForm, safePage.sorts());
         List<Object> baseParameters = new ArrayList<>(whereFragment.parameters());
         if (!safePage.firstPage()) {
-            addCursorParameters(safePage, baseParameters);
+            addCursorParameters(safeForm, safePage, baseParameters);
         }
         PageQuery limit = PageQuery.of(1, safePage.size() + 1);
         List<Object> parameters = paginationDialect.paginationParameters(baseParameters, limit);
@@ -149,11 +149,11 @@ final class FormQuerySqlRenderer {
                 visibleFields, "visible fields must not be null"));
         CursorPageQuery safePage = CursorPageNormalizer.normalize(
                 safeForm, Objects.requireNonNull(page, "cursor page query must not be null"));
-        FormSqlRenderSupport.ConditionSql whereFragment = support.condition(where);
+        FormSqlRenderSupport.ConditionSql whereFragment = support.condition(safeForm, where);
         String sortShape = cursorSortShape(safeForm, safePage.sorts());
         List<Object> baseParameters = new ArrayList<>(whereFragment.parameters());
         if (!safePage.firstPage()) {
-            addCursorParameters(safePage, baseParameters);
+            addCursorParameters(safeForm, safePage, baseParameters);
         }
         PageQuery limit = PageQuery.of(1, safePage.size() + 1);
         List<Object> parameters = paginationDialect.paginationParameters(baseParameters, limit);
@@ -165,7 +165,7 @@ final class FormQuerySqlRenderer {
 
     SqlRequest count(DynamicForm form, ConditionGroup where) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        FormSqlRenderSupport.ConditionSql whereFragment = support.condition(where);
+        FormSqlRenderSupport.ConditionSql whereFragment = support.condition(safeForm, where);
         return support.request("count", safeForm, List.of(), whereFragment, "", "", "",
                                whereFragment.parameters(), List.of("total"), () -> {
                            StringBuilder sql = new StringBuilder("select count(*) as total from ")
@@ -221,13 +221,15 @@ final class FormQuerySqlRenderer {
         return alternatives.toString();
     }
 
-    private void addCursorParameters(CursorPageQuery page, List<Object> parameters) {
+    private void addCursorParameters(DynamicForm form, CursorPageQuery page, List<Object> parameters) {
         List<Object> cursor = page.cursor();
         for (int pivot = 0; pivot < page.sorts().size(); pivot++) {
             for (int prefix = 0; prefix < pivot; prefix++) {
-                parameters.add(support.valueCodecs.write(cursor.get(prefix)));
+                DynamicField field = support.field(form, page.sorts().get(prefix).field());
+                parameters.add(support.writeValue(field, cursor.get(prefix)));
             }
-            parameters.add(support.valueCodecs.write(cursor.get(pivot)));
+            DynamicField field = support.field(form, page.sorts().get(pivot).field());
+            parameters.add(support.writeValue(field, cursor.get(pivot)));
         }
     }
 

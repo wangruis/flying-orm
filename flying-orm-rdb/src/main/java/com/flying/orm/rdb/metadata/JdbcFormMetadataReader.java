@@ -17,7 +17,8 @@ import java.util.Objects;
  * <p>它只依赖同步 SQL 执行契约，不创建 Reactor、不调用 {@code block()}，也不通过响应式 reader
  * 做同步等待。方言 SQL 仍由现有 reader 提供，字段、索引、外键的转换仍由共享转换器完成。</p>
  *
- * <p>这里不做缓存。缓存由外层共享元数据缓存层统一管理，避免 JDBC 和 R2DBC 各自维护一套缓存状态。</p>
+ * <p>可选的有界缓存只服务事务外共享读取。外部事务可能看到尚未提交的 DDL，因此事务内直接读取数据库字典，
+ * 既不读取也不写入进程级共享缓存。</p>
  *
  * @author wangr
  * @version v2.0.0
@@ -58,6 +59,9 @@ public final class JdbcFormMetadataReader implements MetadataCacheInvalidator {
     /** 按 schema 和物理表名读取动态表单。 */
     public DynamicForm readForm(String formId, String schema, String table) {
         MetadataCacheKey key = MetadataCacheKey.form(formId, executor.metadataCachePartition(), schema, table);
+        if (externalTransactionActive()) {
+            return loadForm(formId, schema, table);
+        }
         return forms.get(key, ignored -> loadForm(formId, schema, table));
     }
 
@@ -78,7 +82,14 @@ public final class JdbcFormMetadataReader implements MetadataCacheInvalidator {
     /** 按 schema 和物理表名读取表元数据。 */
     public TableMetadata readTable(String schema, String table) {
         MetadataCacheKey key = MetadataCacheKey.table(executor.metadataCachePartition(), schema, table);
+        if (externalTransactionActive()) {
+            return loadTable(schema, table);
+        }
         return tables.get(key, ignored -> loadTable(schema, table));
+    }
+
+    private boolean externalTransactionActive() {
+        return executor.currentTransaction().isPresent();
     }
 
     private TableMetadata loadTable(String schema, String table) {

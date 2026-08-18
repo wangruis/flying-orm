@@ -3,6 +3,8 @@ package com.flying.orm.rdb.form;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.page.CursorPageQuery;
+import com.flying.orm.core.page.CursorSort;
 import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.EncryptedSearchMode;
@@ -15,6 +17,7 @@ import com.flying.orm.rdb.protection.ProtectedFieldKeyRing;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 import org.junit.jupiter.api.Test;
 
+import java.time.OffsetTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
@@ -135,6 +138,39 @@ class ProtectedContainsSqlPlannerTest {
         }
     }
 
+    /** CONTAINS 候选回表的剩余业务条件必须继续执行字段和方言转换。 */
+    @Test
+    void encodesRemainingContainsConditionThroughThePhysicalDynamicField() {
+        try (ProtectedFieldKeyRing keys = ProtectedFieldKeyRing.single("v1", key(1))) {
+            FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                    SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.mysql())
+                    .withProtectedFields(ProtectedFieldRuntime.create(keys));
+            DynamicForm form = DynamicForm.builder("customer", "customer")
+                                          .addField(DynamicField.primaryKey("id", "BIGINT"))
+                                          .addField(DynamicField.of("contact", "VARCHAR"))
+                                          .addField(DynamicField.of("meeting_time", "OFFSET_TIME"))
+                                          .encrypted("contact", EncryptedFieldDefinition.builder()
+                                                                                         .searchModes(
+                                                                                                 EncryptedSearchMode.CONTAINS)
+                                                                                         .build())
+                                          .build();
+            ProtectedFieldRuntime.PreparedContainsQuery query = renderer.protection()
+                    .prepareContainsQuery(
+                            form,
+                            ConditionGroup.and()
+                                          .add(ProtectedConditions.contains("contact", "ABCDE"))
+                                          .where("meeting_time", "=", OffsetTime.parse("13:40:00+08:00"))
+                                          .build(),
+                            DataScope.none())
+                    .orElseThrow();
+
+            SqlRequest request = renderer.protection().containsRows(
+                    query, List.of(PageSort.asc("id")), 100);
+
+            assertTrue(request.parameters().contains("13:40+08:00"));
+        }
+    }
+
     /** 物理表单会移除保护声明，排序校验必须保留逻辑表单的全部加密字段集合。 */
     @Test
     void rejectsOrderingContainsCandidatesByAnotherEncryptedField() {
@@ -156,6 +192,40 @@ class ProtectedContainsSqlPlannerTest {
                             query, List.of(PageSort.asc("secret_rank")), 100));
 
             assertEquals("encrypted field cannot be used for protected contains ordering", error.getMessage());
+        }
+    }
+
+    /** CONTAINS 回表游标同样不能把特殊类型交给普通大小比较。 */
+    @Test
+    void rejectsUnsupportedCursorOrderingBeforeProtectedContainsSql() {
+        try (ProtectedFieldKeyRing keys = ProtectedFieldKeyRing.single("v1", key(1))) {
+            FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                    SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql())
+                    .withProtectedFields(ProtectedFieldRuntime.create(keys));
+            DynamicForm form = DynamicForm.builder("customer", "customer")
+                                          .addField(DynamicField.primaryKey("id", "BIGINT"))
+                                          .addField(DynamicField.of("contact", "VARCHAR"))
+                                          .addField(DynamicField.of("profile", "JSONB")
+                                                                .withNullable(false))
+                                          .encrypted("contact", EncryptedFieldDefinition.builder()
+                                                                                         .searchModes(
+                                                                                                 EncryptedSearchMode.CONTAINS)
+                                                                                         .build())
+                                          .build();
+            ProtectedFieldRuntime.PreparedContainsQuery query = renderer.protection()
+                    .prepareContainsQuery(
+                            form,
+                            ConditionGroup.and().add(
+                                    ProtectedConditions.contains("contact", "ABCDE")).build(),
+                            DataScope.none())
+                    .orElseThrow();
+
+            IllegalArgumentException failure = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> renderer.protection().containsRows(
+                            query, CursorPageQuery.first(10, CursorSort.asc("profile")), 100));
+
+            assertEquals("cursor ordering does not support this field type: profile", failure.getMessage());
         }
     }
 

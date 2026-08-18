@@ -2,6 +2,7 @@ package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.batch.BatchMemoryBudget;
+import com.flying.orm.rdb.execution.GeneratedKeyReadException;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlResultMemoryLimitExceededException;
 import com.flying.orm.rdb.execution.SqlRowLimitExceededException;
@@ -68,7 +69,8 @@ final class R2dbcGeneratedKeyWriter {
         Accumulator accumulator = new Accumulator(options, largeObjects);
         return Flux.from(statement.execute())
                    .concatMap(result -> Flux.from(result.flatMap(segment -> segment(segment, accumulator))), 1)
-                   .then(Mono.fromSupplier(accumulator::result));
+                   .then(Mono.fromSupplier(accumulator::result))
+                   .onErrorMap(accumulator::wrapFailure);
     }
 
     private static Mono<Void> segment(Result.Segment segment, Accumulator accumulator) {
@@ -94,6 +96,8 @@ final class R2dbcGeneratedKeyWriter {
         private long affectedRows;
         private long estimatedBytes;
         private boolean updateCountSeen;
+        private long generatedRowsSeen;
+        private boolean writeObserved;
 
         private Accumulator(SqlExecutionOptions options,
                             R2dbcLargeObjectScope largeObjects) {
@@ -102,11 +106,14 @@ final class R2dbcGeneratedKeyWriter {
         }
 
         private void addAffectedRows(long rows) {
+            writeObserved = true;
             updateCountSeen = true;
             affectedRows = R2dbcExecutionCounts.add(affectedRows, rows);
         }
 
         private Mono<Void> addKey(Result.RowSegment segment) {
+            writeObserved = true;
+            generatedRowsSeen = R2dbcExecutionCounts.add(generatedRowsSeen, 1L);
             if (options.maxRows() > 0 && keys.size() >= options.maxRows()) {
                 return Mono.error(new SqlRowLimitExceededException(
                         SqlStatementType.INSERT, options.maxRows(), keys.size()));
@@ -124,8 +131,17 @@ final class R2dbcGeneratedKeyWriter {
 
         private SqlWriteResult result() {
             // 有些驱动只发布生成键行而不发布 UpdateCount；单行 insert 时每个键行代表一条成功写入。
-            long rows = updateCountSeen ? affectedRows : keys.size();
+            long rows = updateCountSeen ? affectedRows : generatedRowsSeen;
             return new SqlWriteResult(rows, keys);
+        }
+
+        private Throwable wrapFailure(Throwable failure) {
+            VirtualMachineError fatal = ReactiveSqlExecutionProtection.findVirtualMachineError(failure);
+            if (fatal != null || !writeObserved || failure instanceof GeneratedKeyReadException) {
+                return fatal == null ? failure : fatal;
+            }
+            long rows = updateCountSeen ? affectedRows : generatedRowsSeen;
+            return new GeneratedKeyReadException(rows, failure);
         }
 
         private static long saturatedAdd(long left, long right) {

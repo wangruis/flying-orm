@@ -15,6 +15,7 @@ import com.flying.orm.rdb.protection.ProtectedContainsLayout;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 import com.flying.orm.rdb.result.DynamicRow;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -70,15 +71,16 @@ final class FormProtectionSqlSupport {
                                                 SqlRequest writeRequest,
                                                 ProtectedFieldRuntime.PreparedQuery ownerQuery,
                                                 ProtectedWriteWork.Kind kind) {
+        Map<String, Object> canonicalValues = canonicalValues(form, logicalValues);
         if (kind == ProtectedWriteWork.Kind.UPDATE
                 && hasContainsIndex(form)
                 && form.fields().stream().anyMatch(field -> field.primaryKey()
-                        && logicalValues.containsKey(field.name()))) {
+                        && canonicalValues.containsKey(field.name()))) {
             throw new IllegalArgumentException(
                     "protected contains update must not change primary key");
         }
         List<ProtectedFieldRuntime.ContainsFieldTokens> tokens = protectedFields.prepareContainsTokens(
-                form, logicalValues, scope, support.valueCodecs);
+                form, canonicalValues, scope, support.valueCodecs);
         if (tokens.isEmpty()) {
             return Optional.empty();
         }
@@ -90,8 +92,8 @@ final class FormProtectionSqlSupport {
         Map<String, Object> knownOwner = new java.util.LinkedHashMap<>();
         if (kind != ProtectedWriteWork.Kind.UPDATE) {
             owners.forEach(field -> {
-                if (logicalValues.containsKey(field)) {
-                    knownOwner.put(field, logicalValues.get(field));
+                if (canonicalValues.containsKey(field)) {
+                    knownOwner.put(field, canonicalValues.get(field));
                 }
             });
         }
@@ -121,6 +123,20 @@ final class FormProtectionSqlSupport {
                         + support.identifier("field_tag") + ", " + support.identifier("token_hash")
                         + ") values (" + markers + ")",
                 fields));
+    }
+
+    private Map<String, Object> canonicalValues(DynamicForm form, Map<String, Object> values) {
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        Map<String, Object> safeValues = Objects.requireNonNull(values, "protected write values must not be null");
+        Map<String, Object> canonical = new LinkedHashMap<>(Math.max(16, safeValues.size() * 2));
+        for (Map.Entry<String, Object> entry : safeValues.entrySet()) {
+            String field = support.field(safeForm, entry.getKey()).name();
+            if (canonical.containsKey(field)) {
+                throw new IllegalArgumentException("duplicate normalized protected write field");
+            }
+            canonical.put(field, entry.getValue());
+        }
+        return canonical;
     }
 
     ProtectedFieldRuntime.PreparedQuery prepareQuery(DynamicForm form,

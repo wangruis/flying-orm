@@ -21,8 +21,11 @@ import com.flying.orm.rdb.protection.ProtectedContainsLayout;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
 import com.flying.orm.rdb.transaction.JdbcTransactionContext;
+import com.flying.orm.rdb.transaction.JdbcTransactionCompletion;
 import com.flying.orm.rdb.transaction.JdbcTransactionParticipant;
+import com.flying.orm.rdb.transaction.TransactionOutcome;
 import org.junit.jupiter.api.Test;
+import reactor.core.publisher.Mono;
 
 import java.lang.reflect.Proxy;
 import java.sql.Connection;
@@ -166,6 +169,40 @@ class JdbcSchemaClientTest {
         assertEquals(List.of(), executor.sqlTexts());
     }
 
+    /** JDBC 外部事务 DDL 在 SQL 后立即失效，并在真实回滚后再次清掉可能重载的未提交结构。 */
+    @Test
+    void invalidatesJdbcMetadataAgainAfterExternalDdlTransactionCompletes() {
+        RecordingExecutor executor = new RecordingExecutor();
+        RecordingJdbcCompletion completion = new RecordingJdbcCompletion();
+        JdbcTransactionParticipant participant = () -> Optional.of(
+                JdbcTransactionContext.external(connectionProxy(), "primary", completion));
+        List<String> invalidated = new ArrayList<>();
+        JdbcSchemaClient client = JdbcSchemaClient.create(executor, RdbDialect.postgresql(), participant)
+                                                   .withMetadataInvalidator(invalidated::add);
+
+        assertEquals(1L, client.createTable(form()));
+        assertEquals(List.of("Users"), invalidated);
+
+        completion.complete(TransactionOutcome.ROLLED_BACK);
+
+        assertEquals(List.of("Users", "Users"), invalidated);
+    }
+
+    /** JDBC 事务适配器没有完成通知时，事务型 DDL 也必须在第一条 SQL 前失败关闭。 */
+    @Test
+    void rejectsExternalJdbcDdlWithoutTransactionCompletionNotification() {
+        RecordingExecutor executor = new RecordingExecutor();
+        JdbcTransactionParticipant participant = () -> Optional.of(
+                JdbcTransactionContext.external(connectionProxy(), "primary"));
+        JdbcSchemaClient client = JdbcSchemaClient.create(executor, RdbDialect.postgresql(), participant);
+
+        SchemaMigrationRejectedException error = assertThrows(
+                SchemaMigrationRejectedException.class, () -> client.createTable(form()));
+
+        assertEquals(SchemaMigrationFailureCode.DDL_TRANSACTION_NOT_SUPPORTED, error.failureCode());
+        assertEquals(List.of(), executor.sqlTexts());
+    }
+
     @Test
     void executesReviewedPlanAndInvalidatesAfterNativeExecution() {
         RecordingExecutor executor = new RecordingExecutor();
@@ -215,7 +252,7 @@ class JdbcSchemaClientTest {
                 "alter table Users add column email VARCHAR", workFailure, cleanupFailure);
         List<String> invalidated = new ArrayList<>();
         JdbcTransactionParticipant participant = () -> Optional.of(
-                JdbcTransactionContext.external(connectionProxy(), "primary"));
+                JdbcTransactionContext.external(connectionProxy(), "primary", new RecordingJdbcCompletion()));
         JdbcSchemaClient client = JdbcSchemaClient.create(executor, RdbDialect.postgresql(), participant)
                                                    .withMetadataInvalidator(invalidated::add)
                                                    .withDefaultMigrationExecutionOptions(
@@ -240,7 +277,7 @@ class JdbcSchemaClientTest {
     void usesCleanupTimeoutForJdbcSessionCleanupPhase() {
         RecordingExecutor executor = new RecordingExecutor();
         JdbcTransactionParticipant participant = () -> Optional.of(
-                JdbcTransactionContext.external(connectionProxy(), "primary"));
+                JdbcTransactionContext.external(connectionProxy(), "primary", new RecordingJdbcCompletion()));
         SqlExecutionOptions sqlOptions = SqlExecutionOptions.unlimited()
                                                          .withCleanupTimeout(Duration.ofSeconds(17));
         SchemaMigrationExecutionOptions migrationOptions = new SchemaMigrationExecutionOptions(
@@ -263,7 +300,7 @@ class JdbcSchemaClientTest {
         OutOfMemoryError fatal = new OutOfMemoryError("ddl work fatal");
         FatalWorkExecutor executor = new FatalWorkExecutor("alter table Users add column email VARCHAR", fatal);
         JdbcTransactionParticipant participant = () -> Optional.of(
-                JdbcTransactionContext.external(connectionProxy(), "primary"));
+                JdbcTransactionContext.external(connectionProxy(), "primary", new RecordingJdbcCompletion()));
         JdbcSchemaClient client = JdbcSchemaClient.create(executor, RdbDialect.postgresql(), participant)
                                                    .withDefaultMigrationExecutionOptions(
                                                            SchemaMigrationExecutionOptions.defaults());
@@ -287,7 +324,7 @@ class JdbcSchemaClientTest {
                 "alter table Users add column email VARCHAR",
                 new IllegalStateException("driver wrapper", fatal));
         JdbcTransactionParticipant participant = () -> Optional.of(
-                JdbcTransactionContext.external(connectionProxy(), "primary"));
+                JdbcTransactionContext.external(connectionProxy(), "primary", new RecordingJdbcCompletion()));
         JdbcSchemaClient client = JdbcSchemaClient.create(executor, RdbDialect.postgresql(), participant)
                                                    .withDefaultMigrationExecutionOptions(
                                                            SchemaMigrationExecutionOptions.defaults());
@@ -309,7 +346,7 @@ class JdbcSchemaClientTest {
                 workFailure,
                 new IllegalStateException("cleanup wrapper", fatal));
         JdbcTransactionParticipant participant = () -> Optional.of(
-                JdbcTransactionContext.external(connectionProxy(), "primary"));
+                JdbcTransactionContext.external(connectionProxy(), "primary", new RecordingJdbcCompletion()));
         JdbcSchemaClient client = JdbcSchemaClient.create(executor, RdbDialect.postgresql(), participant)
                                                    .withDefaultMigrationExecutionOptions(
                                                            SchemaMigrationExecutionOptions.defaults());
@@ -325,6 +362,21 @@ class JdbcSchemaClientTest {
                 new SchemaMigrationPlan(form(), List.of(), true, List.of(request), List.of()),
                 new SchemaRollbackPlan(List.of(), List.of()),
                 new OnlineDdlReview(OnlineDdlMode.ALLOW_BLOCKING, List.of()));
+    }
+
+    private static final class RecordingJdbcCompletion implements JdbcTransactionCompletion {
+
+        private Listener listener;
+
+        @Override
+        public boolean register(Listener listener) {
+            this.listener = listener;
+            return true;
+        }
+
+        private void complete(TransactionOutcome outcome) {
+            Mono.from(listener.afterCompletion(outcome)).block();
+        }
     }
 
     private static DynamicForm containsProtectedForm() {

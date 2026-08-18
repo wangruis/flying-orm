@@ -216,6 +216,28 @@ class CachedReactiveFormMetadataReaderTest {
         assertEquals(2, delegate.formReads());
     }
 
+    /** 外部事务可见未提交 DDL，元数据结果必须旁路共享缓存，事务外读取仍正常复用。 */
+    @Test
+    void bypassesSharedMetadataCacheInsideExternalTransaction() {
+        CountingMetadataReader delegate = new CountingMetadataReader();
+        ReactiveFormMetadataReader reader = ReactiveFormMetadataReaders.cached(delegate);
+        R2dbcTransactionContext transaction = R2dbcTransactionContext.external(
+                externalConnection(), "primary");
+
+        DynamicForm first = reader.readForm("users", "Users")
+                                  .contextWrite(context -> R2dbcTransactionParticipant.bind(context, transaction))
+                                  .block();
+        DynamicForm second = reader.readForm("users", "Users")
+                                   .contextWrite(context -> R2dbcTransactionParticipant.bind(context, transaction))
+                                   .block();
+        DynamicForm outside = reader.readForm("users", "Users").block();
+
+        assertNotSame(first, second);
+        assertNotSame(second, outside);
+        assertSame(outside, reader.readForm("users", "Users").block());
+        assertEquals(3, delegate.formReads());
+    }
+
     /** 已锁定的外部事务与本次隔离路由冲突时，缓存命中前也必须拒绝。 */
     @Test
     void rejectsConflictingIsolationRouteBeforeMetadataCacheHit() {

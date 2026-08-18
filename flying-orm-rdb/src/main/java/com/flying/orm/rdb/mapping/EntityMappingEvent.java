@@ -3,7 +3,6 @@ package com.flying.orm.rdb.mapping;
 import com.fasterxml.jackson.databind.JsonNode;
 
 import java.lang.reflect.Array;
-import java.nio.ByteBuffer;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -21,8 +20,8 @@ import java.util.Set;
  * 一次实体读写映射的只读现场。
  *
  * <p>写事件里的 {@code values} 是即将交给 Repository 的列值快照；读事件里则是数据库返回的原始行。
- * 事件会复制 Map、数组、ByteBuffer、标准容器图和 Jackson 树，因此监听器不能借这些受支持的可变值改写执行参数，
- * 也不会在响应式异步链里看到调用方随后做的修改。标准容器和 Jackson 树最多嵌套 64 层，非法循环容器图
+ * 事件会复制 Map、数组、ByteBuffer、JDK 旧式可变时间值、标准容器图和 Jackson 树，因此监听器不能借这些受支持的可变值
+ * 改写执行参数，也不会在响应式异步链里看到调用方随后做的修改。标准容器和 Jackson 树最多嵌套 64 层，非法循环容器图
  * 会在递归复制前稳定拒绝，避免耗尽 JVM 栈。其他自定义对象继续遵守映射层的受信任交接契约。</p>
  *
  * @param metadata 当前实体的只读元数据
@@ -45,7 +44,7 @@ public record EntityMappingEvent(EntityMetadata<?> metadata,
     }
 
     /**
-     * @return 重新复制数组、ByteBuffer、标准容器图和 Jackson 树后的只读现场；其他自定义值仍遵守映射层交接契约
+     * @return 重新复制数组、ByteBuffer、JDK 旧式可变时间值、标准容器图和 Jackson 树后的只读现场；其他自定义值仍遵守映射层交接契约
      */
     @Override
     public Map<String, Object> values() {
@@ -84,10 +83,10 @@ public record EntityMappingEvent(EntityMetadata<?> metadata,
             requireSafeNesting(depth);
             return snapshotArray(value, snapshots, active, depth);
         }
-        if (value instanceof ByteBuffer buffer) {
-            ByteBuffer copy = snapshotBuffer(buffer);
-            snapshots.put(value, copy);
-            return copy;
+        Object scalarCopy = MappingScalarSnapshots.copy(value);
+        if (scalarCopy != value) {
+            snapshots.put(value, scalarCopy);
+            return scalarCopy;
         }
         if (value instanceof JsonNode node) {
             requireSafeJsonTree(node, depth);
@@ -212,8 +211,8 @@ public record EntityMappingEvent(EntityMetadata<?> metadata,
         Class<?> snapshotType;
         if (value.getClass().isArray()) {
             snapshotType = snapshotArrayType(value, inspecting, depth);
-        } else if (value instanceof ByteBuffer) {
-            snapshotType = ByteBuffer.class;
+        } else if (MappingScalarSnapshots.supports(value)) {
+            snapshotType = MappingScalarSnapshots.snapshotType(value);
         } else if (value instanceof Map<?, ?>) {
             snapshotType = Map.class;
         } else if (value instanceof List<?>) {
@@ -284,15 +283,4 @@ public record EntityMappingEvent(EntityMetadata<?> metadata,
         }
     }
 
-    private static ByteBuffer snapshotBuffer(ByteBuffer source) {
-        ByteBuffer readable = source.duplicate();
-        int position = readable.position();
-        int limit = readable.limit();
-        readable.position(0);
-        ByteBuffer copy = ByteBuffer.allocate(limit).order(source.order());
-        copy.put(readable);
-        copy.flip();
-        copy.position(position);
-        return copy;
-    }
 }

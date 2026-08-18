@@ -2,6 +2,7 @@ package com.flying.orm.rdb.jdbc;
 
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.exception.RdbException;
+import com.flying.orm.rdb.execution.GeneratedKeyReadException;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlWriteResult;
@@ -152,8 +153,15 @@ final class JdbcProtectedWriteExecutor {
             }
             if (!rollback.confirmed() && !isUnknown(error)) {
                 RdbException unknown = rollbackUnknown(error);
-                failure = unknown;
-                throw unknown;
+                RuntimeException unresolved = error instanceof GeneratedKeyReadException keyFailure
+                        ? new GeneratedKeyReadException(keyFailure.affectedRows(), unknown)
+                        : unknown;
+                failure = unresolved;
+                throw unresolved;
+            }
+            if (!external && rollback.confirmed() && error instanceof GeneratedKeyReadException keyFailure) {
+                failure = keyFailure.getCause();
+                rethrowGeneratedKeyCause(keyFailure);
             }
             throw error;
         } finally {
@@ -209,8 +217,21 @@ final class JdbcProtectedWriteExecutor {
             }
             try (ResultSet generated = statement.getGeneratedKeys()) {
                 return new SqlWriteResult(rows, JdbcResultSetReader.readGeneratedKeys(generated, options));
+            } catch (SQLException | RuntimeException | Error failure) {
+                throw new GeneratedKeyReadException(rows, failure);
             }
         }
+    }
+
+    private static void rethrowGeneratedKeyCause(GeneratedKeyReadException failure) throws SQLException {
+        Throwable cause = failure.getCause();
+        if (cause instanceof SQLException sqlFailure) {
+            throw sqlFailure;
+        }
+        if (cause instanceof RuntimeException runtimeFailure) {
+            throw runtimeFailure;
+        }
+        throw (Error) cause;
     }
 
     private static String generatedKeyColumn(ProtectedWriteWork work) {

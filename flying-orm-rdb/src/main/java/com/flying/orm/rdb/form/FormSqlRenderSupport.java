@@ -53,6 +53,7 @@ final class FormSqlRenderSupport {
     private final JsonDialect jsonDialect;
     private final UnaryOperator<String> identifierRenderer;
     private final StructuralPlanCaches planCaches;
+    private final FormConditionValueNormalizer conditionValues;
 
     FormSqlRenderSupport(SqlRenderer conditionRenderer,
                          JsonDialect jsonDialect,
@@ -68,6 +69,7 @@ final class FormSqlRenderSupport {
         this.identifierRenderer = Objects.requireNonNull(identifierRenderer,
                                                          "sql identifier renderer must not be null");
         this.planCaches = Objects.requireNonNull(planCaches, "structural plan caches must not be null");
+        this.conditionValues = new FormConditionValueNormalizer(this);
     }
 
     FormSqlRenderSupport withPlanCaches(StructuralPlanCaches caches) {
@@ -83,16 +85,21 @@ final class FormSqlRenderSupport {
         return conditionRenderer.terms();
     }
 
-    ConditionSql condition(ConditionGroup where) {
+    ConditionSql condition(DynamicForm form, ConditionGroup where) {
+        ConditionGroup normalized = normalizeCondition(form, where);
         ConditionStructurePlan plan = planCaches.condition(
                 dialectName,
-                Objects.requireNonNull(where, "where condition must not be null"),
+                normalized,
                 conditionRenderer);
         return new ConditionSql(plan.plan().sql(), plan.parameters(), plan.shape(), plan.cacheable());
     }
 
-    ConditionSql requiredWhere(ConditionGroup where, String operation) {
-        ConditionSql fragment = condition(where);
+    ConditionGroup normalizeCondition(DynamicForm form, ConditionGroup where) {
+        return conditionValues.normalize(form, where);
+    }
+
+    ConditionSql requiredWhere(DynamicForm form, ConditionGroup where, String operation) {
+        ConditionSql fragment = condition(form, where);
         if (fragment.sql().isBlank()) {
             throw new IllegalArgumentException(operation + " where condition must not be empty");
         }
@@ -210,6 +217,18 @@ final class FormSqlRenderSupport {
             return uuid.toString();
         }
         return encoded;
+    }
+
+    Object writeConditionValue(DynamicField field, Object value) {
+        DynamicField safeField = Objects.requireNonNull(field, "condition dynamic field must not be null");
+        if (isJson(safeField) && !"?".equals(valueExpression(safeField))) {
+            throw new IllegalArgumentException(
+                    "JSON equality and ordering require a registered JSON condition term for this dialect");
+        }
+        if (VectorValueCodec.isVectorDataType(safeField.dataType())) {
+            throw new IllegalArgumentException("VECTOR comparison requires a registered vector condition term");
+        }
+        return writeValue(safeField, value);
     }
 
     Class<?> parameterType(DynamicField field) {

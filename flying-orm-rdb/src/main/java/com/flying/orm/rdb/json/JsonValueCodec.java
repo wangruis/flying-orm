@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.flying.orm.rdb.internal.ReflectionFailureSupport;
 
 import java.io.IOException;
 import java.lang.invoke.MethodHandle;
@@ -84,6 +85,7 @@ public final class JsonValueCodec {
             }
             return MAPPER.writeValueAsString(value);
         } catch (IOException error) {
+            ReflectionFailureSupport.rethrowVirtualMachineError(error);
             throw new IllegalArgumentException("json value cannot be serialized", error);
         }
     }
@@ -95,6 +97,7 @@ public final class JsonValueCodec {
         try {
             return MAPPER.writeValueAsString(Objects.requireNonNull(value, "json literal must not be null"));
         } catch (IOException error) {
+            ReflectionFailureSupport.rethrowVirtualMachineError(error);
             throw new IllegalArgumentException("json literal cannot be serialized", error);
         }
     }
@@ -138,6 +141,7 @@ public final class JsonValueCodec {
             }
             return MAPPER.readValue(json, safeType);
         } catch (IOException error) {
+            ReflectionFailureSupport.rethrowVirtualMachineError(error);
             throw new IllegalArgumentException("json value cannot be converted to " + safeType.getName(), error);
         }
     }
@@ -152,6 +156,7 @@ public final class JsonValueCodec {
         try {
             return MAPPER.readValue(jsonText(value), Object.class);
         } catch (IOException error) {
+            ReflectionFailureSupport.rethrowVirtualMachineError(error);
             throw new IllegalArgumentException("json value cannot be decoded", error);
         }
     }

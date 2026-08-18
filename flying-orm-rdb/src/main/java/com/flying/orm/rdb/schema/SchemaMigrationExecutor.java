@@ -10,6 +10,7 @@ import com.flying.orm.rdb.observation.SqlExecutionStatus;
 import com.flying.orm.rdb.observation.SqlFailureCategory;
 import com.flying.orm.rdb.reactive.ConnectionScopedReactiveSqlExecutor;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
+import com.flying.orm.rdb.transaction.R2dbcTransactionContext;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -83,7 +84,7 @@ final class SchemaMigrationExecutor {
         return Mono.defer(() -> {
             AtomicBoolean started = new AtomicBoolean();
             AtomicBoolean invalidated = new AtomicBoolean();
-            return guardExternalTransaction(requests, false)
+            return guardExternalTransaction(requests, false, safeTables, metadataInvalidator)
                     .then(Mono.defer(() -> {
                         started.set(true);
                         return executeRequests(requests, options);
@@ -113,7 +114,8 @@ final class SchemaMigrationExecutor {
             AtomicBoolean observed = new AtomicBoolean();
             AtomicBoolean executionStarted = new AtomicBoolean();
             AtomicBoolean invalidated = new AtomicBoolean();
-            return executeReviewedPlan(safePlan, safeOptions, executionStarted)
+            return executeReviewedPlan(
+                    safePlan, safeOptions, executionStarted, safeTables, safeInvalidator)
                     .doOnSuccess(result -> observe(observed, safePlan, result, startedAt,
                                                    SqlExecutionStatus.SUCCESS, null))
                     .doOnError(error -> observe(observed, safePlan, null, startedAt,
@@ -131,12 +133,15 @@ final class SchemaMigrationExecutor {
 
     private Mono<SchemaMigrationResult> executeReviewedPlan(ReviewedSchemaMigrationPlan plan,
                                                              SchemaMigrationExecutionOptions options,
-                                                             AtomicBoolean executionStarted) {
+                                                             AtomicBoolean executionStarted,
+                                                             List<String> tables,
+                                                             Consumer<String> metadataInvalidator) {
         List<SqlRequest> requests = plan.requestsForExecution(options.approval());
         if (requests.isEmpty()) {
             return Mono.just(new SchemaMigrationResult(plan.migration(), 0L, List.of()));
         }
-        return guardExternalTransaction(requests, plan.onlineDdl().requiresNonTransactionalExecution())
+        return guardExternalTransaction(
+                requests, plan.onlineDdl().requiresNonTransactionalExecution(), tables, metadataInvalidator)
                 .then(Mono.defer(() -> executeReviewedRequests(plan, options, executionStarted, requests)));
     }
 
@@ -168,17 +173,38 @@ final class SchemaMigrationExecutor {
      */
     private Mono<Void> guardExternalTransaction(List<SqlRequest> requests,
                                                 boolean requiresNonTransactionalExecution) {
-        if (requests.isEmpty()
-                || (ddlTransactionSupport.allowsExternalTransaction()
-                    && !requiresNonTransactionalExecution)) {
+        return guardExternalTransaction(requests, requiresNonTransactionalExecution, null, null);
+    }
+
+    private Mono<Void> guardExternalTransaction(List<SqlRequest> requests,
+                                                boolean requiresNonTransactionalExecution,
+                                                List<String> tables,
+                                                Consumer<String> metadataInvalidator) {
+        if (requests.isEmpty()) {
             return Mono.empty();
         }
         return executor.currentTransaction()
-                       .flatMap(ignored -> Mono.error(new SchemaMigrationRejectedException(
-                               SchemaMigrationFailureCode.DDL_TRANSACTION_NOT_SUPPORTED,
-                               "DDL cannot join the current external transaction: support="
-                                       + ddlTransactionSupport)))
+                       .flatMap(transaction -> guardExternalTransaction(
+                               transaction, requiresNonTransactionalExecution, tables, metadataInvalidator))
                        .then();
+    }
+
+    private Mono<Void> guardExternalTransaction(R2dbcTransactionContext transaction,
+                                                boolean requiresNonTransactionalExecution,
+                                                List<String> tables,
+                                                Consumer<String> metadataInvalidator) {
+        if (!ddlTransactionSupport.allowsExternalTransaction() || requiresNonTransactionalExecution) {
+            return Mono.error(new SchemaMigrationRejectedException(
+                    SchemaMigrationFailureCode.DDL_TRANSACTION_NOT_SUPPORTED,
+                    "DDL cannot join the current external transaction: support=" + ddlTransactionSupport));
+        }
+        if (tables != null && !transaction.completion().register(
+                ignored -> Mono.fromRunnable(() -> invalidateTables(metadataInvalidator, tables)))) {
+            return Mono.error(new SchemaMigrationRejectedException(
+                    SchemaMigrationFailureCode.DDL_TRANSACTION_NOT_SUPPORTED,
+                    "external DDL requires transaction completion notification for metadata consistency"));
+        }
+        return Mono.empty();
     }
 
     private void observe(AtomicBoolean observed,
@@ -239,6 +265,10 @@ final class SchemaMigrationExecutor {
         if (!started.get() || !invalidated.compareAndSet(false, true)) {
             return;
         }
+        invalidateTables(metadataInvalidator, tables);
+    }
+
+    private static void invalidateTables(Consumer<String> metadataInvalidator, List<String> tables) {
         for (String table : tables) {
             try {
                 metadataInvalidator.accept(table);

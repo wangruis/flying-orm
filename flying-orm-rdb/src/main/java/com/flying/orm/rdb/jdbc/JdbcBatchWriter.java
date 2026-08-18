@@ -134,7 +134,15 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
         List<BatchChunkResult> results = new ArrayList<>();
         try (JdbcBatchRows rows = new JdbcBatchRows(
                 request.rows(), request.parameterCount(), request.options().maxBufferedBytes())) {
-            try (JdbcConnectionProvider.JdbcConnectionLease lease = connections.acquire()) {
+            JdbcConnectionProvider.JdbcConnectionLease acquired;
+            try {
+                acquired = connections.acquire();
+            } catch (SQLException | RuntimeException error) {
+                rethrowSuppressedVirtualMachineError(error);
+                throw failure("jdbc atomic batch connection acquisition failed", error,
+                              failedBeforeTransaction(error));
+            }
+            try (JdbcConnectionProvider.JdbcConnectionLease lease = acquired) {
                 context.transactionSource(lease.transactionSource() == SqlTransactionSource.EXTERNAL
                         ? SqlTransactionSource.EXTERNAL : SqlTransactionSource.INTERNAL);
                 JdbcBatchSupport.BatchDeadline deadline = JdbcBatchSupport.BatchDeadline.start(
@@ -165,6 +173,12 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
             throw failure("jdbc atomic batch failed", error,
                           BatchWriteResult.from(BatchWriteOptions.Mode.ATOMIC, unknown(results, error)));
         }
+    }
+
+    private static BatchWriteResult failedBeforeTransaction(Throwable error) {
+        return BatchWriteResult.from(
+                BatchWriteOptions.Mode.ATOMIC,
+                List.of(BatchChunkResult.failed(0, 0L, 0, error)));
     }
 
     private BatchWriteResult executeOwnedAtomic(JdbcConnectionProvider.JdbcConnectionLease lease,

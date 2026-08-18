@@ -3,10 +3,12 @@ package com.flying.orm.core.scope;
 import com.flying.orm.core.condition.TermCondition;
 import org.junit.jupiter.api.Test;
 
+import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /**
@@ -27,6 +29,34 @@ class TimeScopeTest {
         assertTerms(TimeScope.closed("created_at", start, end), List.of(">=", "<="), List.of(start, end));
         assertTerms(TimeScope.from("created_at", start), List.of(">="), List.of(start));
         assertTerms(TimeScope.before("created_at", end), List.of("<"), List.of(end));
+    }
+
+    /** 旧 JDBC 时间对象可变，Scope 构造和访问两端都必须与调用方对象隔离。 */
+    @Test
+    void snapshotsMutableJdbcTimeBoundariesAtBothBoundaries() {
+        Timestamp start = Timestamp.valueOf("2026-07-01 00:00:00.123456789");
+        Timestamp end = Timestamp.valueOf("2026-08-01 00:00:00.987654321");
+        long expectedStartMillis = start.getTime();
+        int expectedStartNanos = start.getNanos();
+        long expectedEndMillis = end.getTime();
+        int expectedEndNanos = end.getNanos();
+        TimeScope scope = TimeScope.between("created_at", start, end);
+
+        start.setTime(0L);
+        end.setTime(0L);
+        Timestamp exposed = (Timestamp) scope.start();
+        exposed.setTime(1L);
+
+        Timestamp stableStart = (Timestamp) scope.start();
+        Timestamp stableEnd = (Timestamp) scope.end();
+        assertNotSame(start, stableStart);
+        assertNotSame(exposed, stableStart);
+        assertEquals(expectedStartMillis, stableStart.getTime());
+        assertEquals(expectedStartNanos, stableStart.getNanos());
+        assertEquals(expectedEndMillis, stableEnd.getTime());
+        assertEquals(expectedEndNanos, stableEnd.getNanos());
+        assertEquals(expectedStartMillis,
+                     ((Timestamp) ((TermCondition) scope.toCondition().children().getFirst()).value()).getTime());
     }
 
     @Test

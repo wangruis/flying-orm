@@ -88,7 +88,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
         // 驱动能力只在装配时识别一次，热路径不重复读取 ConnectionFactory 元数据。
         this.bindMarkers = R2dbcBindMarkers.from(connectionFactory);
         this.observationSupport = ReactiveSqlExecutionObservationSupport.create(
-                observer, batchObserver, this.transactionParticipant::currentTransaction);
+                observer, batchObserver, this::currentTransaction);
         this.executionSession = new R2dbcExecutionSession(connectionFactory,
                                                            bindMarkers,
                                                            observer,

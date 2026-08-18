@@ -11,8 +11,10 @@ import com.flying.orm.rdb.jdbc.JdbcSqlExecutor;
 import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.observation.SqlStatementType;
 import com.flying.orm.rdb.result.DynamicRow;
+import com.flying.orm.rdb.transaction.JdbcTransactionContext;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.Objects;
 import javax.sql.DataSource;
 
@@ -34,6 +36,15 @@ public interface SyncSqlExecutor {
     @InternalApi
     default String metadataCachePartition() {
         return null;
+    }
+
+    /**
+     * 返回当前线程正在参与的外部事务。自定义执行器支持上层事务时必须覆盖，Repository 用完成通知把
+     * POST 生命周期延迟到真正提交之后，并避免把“已加入事务”错误报告为“已提交”。
+     */
+    @InternalApi
+    default Optional<JdbcTransactionContext> currentTransaction() {
+        return Optional.empty();
     }
 
     /**

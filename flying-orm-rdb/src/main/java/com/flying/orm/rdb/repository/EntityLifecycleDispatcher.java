@@ -32,6 +32,11 @@ final class EntityLifecycleDispatcher<T> {
     }
 
     Mono<Void> fire(EntityLifecyclePhase phase, T entity, Object result) {
+        return fire(phase, entity, result, true);
+    }
+
+    /** 分发一次生命周期事件；只有已经确认提交的 POST 失败才转换为提交后回调异常。 */
+    Mono<Void> fire(EntityLifecyclePhase phase, T entity, Object result, boolean committed) {
         if (!listenerConfigured) {
             return Mono.empty();
         }
@@ -44,17 +49,19 @@ final class EntityLifecycleDispatcher<T> {
                     listener.onEvent(event), "entity lifecycle listener must return a Publisher");
             return Mono.from(completion);
         });
-        return switch (safePhase) {
-            case POST_PERSIST, POST_UPDATE, POST_REMOVE -> callback.onErrorMap(error -> {
-                Throwable preferred = RepositoryFailureSupport.preferVirtualMachineError(error);
-                return preferred instanceof VirtualMachineError fatal
-                        ? fatal
-                        : error instanceof CommittedEntityLifecycleException
-                        ? error
-                        : new CommittedEntityLifecycleException(safePhase, result, error);
-            });
-            default -> callback;
-        };
+        if (!committed || (safePhase != EntityLifecyclePhase.POST_PERSIST
+                && safePhase != EntityLifecyclePhase.POST_UPDATE
+                && safePhase != EntityLifecyclePhase.POST_REMOVE)) {
+            return callback;
+        }
+        return callback.onErrorMap(error -> {
+            Throwable preferred = RepositoryFailureSupport.preferVirtualMachineError(error);
+            return preferred instanceof VirtualMachineError fatal
+                    ? fatal
+                    : error instanceof CommittedEntityLifecycleException
+                    ? error
+                    : new CommittedEntityLifecycleException(safePhase, result, error);
+        });
     }
 
     /** 没有监听器就没有生命周期工作，批量路径也不需要暂存实体引用。 */

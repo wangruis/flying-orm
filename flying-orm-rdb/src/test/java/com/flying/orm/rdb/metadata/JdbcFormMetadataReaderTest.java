@@ -7,16 +7,22 @@ import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
+import com.flying.orm.rdb.transaction.JdbcTransactionContext;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Proxy;
+import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -146,6 +152,47 @@ class JdbcFormMetadataReaderTest {
         assertEquals(2, executor.queries.get());
     }
 
+    /** 外部事务可能看到未提交 DDL，事务内元数据不能读写进程级共享缓存。 */
+    @Test
+    void bypassesSharedMetadataCacheInsideExternalTransaction() {
+        RepeatingExecutor executor = new RepeatingExecutor();
+        JdbcFormMetadataReader reader = JdbcFormMetadataReaders.cached(
+                executor, RdbDialect.h2(), CacheRegionPolicy.metadataDefaults(), MetadataCacheInvalidator.none());
+        executor.transaction.set(JdbcTransactionContext.external(transactionConnection(), "primary"));
+
+        var first = reader.readForm("users", "USERS");
+        var second = reader.readForm("users", "USERS");
+        executor.transaction.set(null);
+        var outside = reader.readForm("users", "USERS");
+
+        assertNotSame(first, second);
+        assertNotSame(second, outside);
+        assertSame(outside, reader.readForm("users", "USERS"));
+        assertEquals(3, executor.queries.get());
+    }
+
+    /** 表级元数据包含字段、索引和外键，整组结果在外部事务中都必须旁路共享缓存。 */
+    @Test
+    void bypassesSharedTableMetadataCacheInsideExternalTransaction() {
+        RecordingExecutor executor = new RecordingExecutor(
+                List.of(row("COLUMN_NAME", "id", "DATA_TYPE", "bigint", "PRIMARY_KEY", true)),
+                List.of(),
+                List.of());
+        JdbcFormMetadataReader reader = JdbcFormMetadataReaders.cached(
+                executor, RdbDialect.h2(), CacheRegionPolicy.metadataDefaults(), MetadataCacheInvalidator.none());
+        executor.transaction.set(JdbcTransactionContext.external(transactionConnection(), "primary"));
+
+        var first = reader.readTable("PUBLIC", "USERS");
+        var second = reader.readTable("PUBLIC", "USERS");
+        executor.transaction.set(null);
+        var outside = reader.readTable("PUBLIC", "USERS");
+
+        assertNotSame(first, second);
+        assertNotSame(second, outside);
+        assertSame(outside, reader.readTable("PUBLIC", "USERS"));
+        assertEquals(9, executor.requests.size());
+    }
+
     private static Map<String, Object> row(Object... values) {
         Map<String, Object> row = new LinkedHashMap<>();
         for (int index = 0; index < values.length; index += 2) {
@@ -158,6 +205,7 @@ class JdbcFormMetadataReaderTest {
 
         private final List<List<DynamicRow>> results;
         private final List<SqlRequest> requests = new ArrayList<>();
+        private final AtomicReference<JdbcTransactionContext> transaction = new AtomicReference<>();
 
         private RecordingExecutor(List<Map<String, Object>> columns) {
             this(columns, List.of(), List.of());
@@ -173,7 +221,12 @@ class JdbcFormMetadataReaderTest {
         public List<DynamicRow> query(SqlRequest request) {
             requests.add(request);
             int index = requests.size() - 1;
-            return index < results.size() ? results.get(index) : List.of();
+            return results.get(index % results.size());
+        }
+
+        @Override
+        public Optional<JdbcTransactionContext> currentTransaction() {
+            return Optional.ofNullable(transaction.get());
         }
 
         @Override
@@ -194,10 +247,16 @@ class JdbcFormMetadataReaderTest {
     private static final class RepeatingExecutor implements SyncSqlExecutor {
         private final AtomicInteger queries = new AtomicInteger();
         private final AtomicReference<String> partition = new AtomicReference<>();
+        private final AtomicReference<JdbcTransactionContext> transaction = new AtomicReference<>();
 
         @Override
         public String metadataCachePartition() {
             return partition.get();
+        }
+
+        @Override
+        public Optional<JdbcTransactionContext> currentTransaction() {
+            return Optional.ofNullable(transaction.get());
         }
 
         @Override
@@ -216,5 +275,11 @@ class JdbcFormMetadataReaderTest {
         public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
             throw new UnsupportedOperationException("metadata test executor does not write");
         }
+    }
+
+    private static Connection transactionConnection() {
+        return (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(),
+                                                    new Class<?>[]{Connection.class},
+                                                    (proxy, method, arguments) -> null);
     }
 }

@@ -1,9 +1,10 @@
 package com.flying.orm.core.scope;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.ConditionValueShape;
 import com.flying.orm.core.internal.condition.ConditionValueNormalizer;
 import com.flying.orm.core.internal.condition.ConditionValuePolicy;
-import com.flying.orm.core.condition.ConditionValueShape;
+import com.flying.orm.core.internal.value.BindableValueSnapshots;
 
 import java.util.Objects;
 
@@ -35,6 +36,18 @@ public record TimeScope(String field,
         start = normalizeBoundary(start);
         end = normalizeBoundary(end);
         validateRange(start, startBoundary, end, endBoundary);
+    }
+
+    /** @return 与构造入参和上一次读取隔离的开始边界 */
+    @Override
+    public Object start() {
+        return BindableValueSnapshots.immutableValue(start);
+    }
+
+    /** @return 与构造入参和上一次读取隔离的结束边界 */
+    @Override
+    public Object end() {
+        return BindableValueSnapshots.immutableValue(end);
     }
 
     /**
@@ -139,9 +152,10 @@ public record TimeScope(String field,
         if (value.getClass().isArray()) {
             throw new IllegalArgumentException("time boundary must not be an array");
         }
-        return ConditionValueNormalizer.normalize(ConditionValueShape.SCALAR,
-                                                  value,
-                                                  ConditionValuePolicy.REJECT_EMPTY)
-                                       .value();
+        Object normalized = ConditionValueNormalizer.normalize(ConditionValueShape.SCALAR,
+                                                               value,
+                                                               ConditionValuePolicy.REJECT_EMPTY)
+                                                    .value();
+        return BindableValueSnapshots.immutableValue(normalized);
     }
 }

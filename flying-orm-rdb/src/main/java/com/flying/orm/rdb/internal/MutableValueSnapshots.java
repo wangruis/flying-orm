@@ -1,12 +1,14 @@
 package com.flying.orm.rdb.internal;
 
 import java.lang.reflect.Array;
+import java.sql.Time;
+import java.sql.Timestamp;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.IdentityHashMap;
 
 /**
- * 为发布后不可变的 RDB 规格复制直接数组值的完整数组可达图。
+ * 为发布后不可变的 RDB 规格复制直接数组值的完整数组可达图和 JDK 旧式可变时间值。
  *
  * <p>只沿数组节点继续复制，普通业务对象仍按既有可信交接语义保留；迭代式身份遍历同时支持共享数组、
  * 自引用和互引用，不会因为深数组耗尽 JVM 栈。</p>
@@ -22,12 +24,18 @@ public final class MutableValueSnapshots {
     }
 
     /**
-     * 复制数组值及其经由数组元素可达的全部数组节点；非数组值保持原对象。
+     * 复制数组值及其经由数组元素可达的全部数组节点，并隔离项目支持的 JDK 旧式可变时间值；其他非数组值保持原对象。
      *
      * @param value 待发布的值
-     * @return 独立数组图，或原非数组对象
+     * @return 独立数组图、JDK 旧式可变时间副本，或原非数组对象
      */
     public static Object arrayGraph(Object value) {
+        if (value instanceof java.util.Date date) {
+            Object temporalCopy = copyLegacyTemporal(date);
+            if (temporalCopy != value) {
+                return temporalCopy;
+            }
+        }
         if (value == null || !value.getClass().isArray()) {
             return value;
         }
@@ -46,6 +54,13 @@ public final class MutableValueSnapshots {
             int length = Array.getLength(source);
             for (int index = 0; index < length; index++) {
                 Object item = Array.get(source, index);
+                if (item instanceof java.util.Date date) {
+                    Object itemTemporalCopy = copyLegacyTemporal(date);
+                    if (itemTemporalCopy != item) {
+                        Array.set(target, index, itemTemporalCopy);
+                        continue;
+                    }
+                }
                 if (item == null || !item.getClass().isArray()) {
                     Array.set(target, index, item);
                     continue;
@@ -76,5 +91,24 @@ public final class MutableValueSnapshots {
         Object copy = Array.newInstance(componentType, length);
         System.arraycopy(source, 0, copy, 0, length);
         return copy;
+    }
+
+    private static Object copyLegacyTemporal(java.util.Date value) {
+        if (value.getClass() == Timestamp.class) {
+            Timestamp source = (Timestamp) value;
+            Timestamp copy = new Timestamp(source.getTime());
+            copy.setNanos(source.getNanos());
+            return copy;
+        }
+        if (value.getClass() == java.sql.Date.class) {
+            return new java.sql.Date(((java.sql.Date) value).getTime());
+        }
+        if (value.getClass() == Time.class) {
+            return new Time(((Time) value).getTime());
+        }
+        if (value.getClass() == java.util.Date.class) {
+            return new java.util.Date(((java.util.Date) value).getTime());
+        }
+        return value;
     }
 }

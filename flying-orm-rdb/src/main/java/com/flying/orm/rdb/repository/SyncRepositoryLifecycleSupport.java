@@ -4,11 +4,18 @@ import com.flying.orm.core.page.PageResult;
 import com.flying.orm.rdb.lifecycle.EntityLifecyclePhase;
 import com.flying.orm.rdb.lifecycle.ReactiveEntityListener;
 import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.transaction.JdbcTransactionContext;
+import com.flying.orm.rdb.transaction.TransactionOutcome;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import java.util.function.LongSupplier;
+import java.util.function.Supplier;
 
 /**
  * 同步 Repository 的生命周期边界。
@@ -40,28 +47,24 @@ final class SyncRepositoryLifecycleSupport<T> {
         awaiter.rejectNonBlockingThread();
     }
 
-    long persist(T entity, LongSupplier operation) {
+    long persist(T entity,
+                 Supplier<Optional<JdbcTransactionContext>> currentTransaction,
+                 Function<Boolean, Long> operation) {
         T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
-        fire(EntityLifecyclePhase.PRE_PERSIST, safeEntity, null);
-        long rows = requireOperation(operation).getAsLong();
-        fire(EntityLifecyclePhase.POST_PERSIST, safeEntity, rows);
-        return rows;
+        return write(safeEntity, EntityLifecyclePhase.PRE_PERSIST, EntityLifecyclePhase.POST_PERSIST,
+                     currentTransaction, operation);
     }
 
-    long update(T entity, LongSupplier operation) {
+    long update(T entity, Supplier<Optional<JdbcTransactionContext>> currentTransaction, LongSupplier operation) {
         T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
-        fire(EntityLifecyclePhase.PRE_UPDATE, safeEntity, null);
-        long rows = requireOperation(operation).getAsLong();
-        fire(EntityLifecyclePhase.POST_UPDATE, safeEntity, rows);
-        return rows;
+        return write(safeEntity, EntityLifecyclePhase.PRE_UPDATE, EntityLifecyclePhase.POST_UPDATE,
+                     currentTransaction, ignored -> operation.getAsLong());
     }
 
-    long remove(T entity, LongSupplier operation) {
+    long remove(T entity, Supplier<Optional<JdbcTransactionContext>> currentTransaction, LongSupplier operation) {
         T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
-        fire(EntityLifecyclePhase.PRE_REMOVE, safeEntity, null);
-        long rows = requireOperation(operation).getAsLong();
-        fire(EntityLifecyclePhase.POST_REMOVE, safeEntity, rows);
-        return rows;
+        return write(safeEntity, EntityLifecyclePhase.PRE_REMOVE, EntityLifecyclePhase.POST_REMOVE,
+                     currentTransaction, ignored -> operation.getAsLong());
     }
 
     List<T> postLoad(List<T> entities) {
@@ -88,14 +91,70 @@ final class SyncRepositoryLifecycleSupport<T> {
     }
 
     void fire(EntityLifecyclePhase phase, T entity, Object result) {
+        fire(phase, entity, result, true);
+    }
+
+    void fire(EntityLifecyclePhase phase, T entity, Object result, boolean committed) {
         EntityLifecyclePhase safePhase = Objects.requireNonNull(phase, "entity lifecycle phase must not be null");
         if (dispatcher.hasWork(safePhase)) {
             // 生命周期监听器本来就是 Publisher 契约。这里是同步调用唯一允许等待它的位置。
-            awaiter.awaitCompletion(dispatcher.fire(safePhase, entity, result));
+            awaiter.awaitCompletion(dispatcher.fire(safePhase, entity, result, committed));
         }
     }
 
-    private static LongSupplier requireOperation(LongSupplier operation) {
-        return Objects.requireNonNull(operation, "repository write operation must not be null");
+    private long write(T entity,
+                       EntityLifecyclePhase prePhase,
+                       EntityLifecyclePhase postPhase,
+                       Supplier<Optional<JdbcTransactionContext>> currentTransaction,
+                       Function<Boolean, Long> operation) {
+        fire(prePhase, entity, null);
+        Function<Boolean, Long> safeOperation = Objects.requireNonNull(
+                operation, "repository write operation must not be null");
+        if (!hasWork(postPhase)) {
+            return safeOperation.apply(false);
+        }
+        Optional<JdbcTransactionContext> transaction = Objects.requireNonNull(
+                Objects.requireNonNull(currentTransaction, "repository transaction lookup must not be null").get(),
+                "repository transaction lookup must not return null");
+        if (transaction.isPresent()) {
+            return executeEnlisted(entity, postPhase, transaction.orElseThrow(), safeOperation);
+        }
+        long rows = safeOperation.apply(false);
+        fire(postPhase, entity, rows);
+        return rows;
+    }
+
+    private long executeEnlisted(T entity,
+                                 EntityLifecyclePhase postPhase,
+                                 JdbcTransactionContext transaction,
+                                 Function<Boolean, Long> operation) {
+        AtomicReference<Long> result = new AtomicReference<>();
+        AtomicBoolean executed = new AtomicBoolean();
+        AtomicBoolean notified = new AtomicBoolean();
+        final boolean registered;
+        try {
+            registered = transaction.completion().register(outcome -> {
+                if (!notified.compareAndSet(false, true)
+                        || outcome != TransactionOutcome.COMMITTED
+                        || !executed.get()) {
+                    return reactor.core.publisher.Mono.empty();
+                }
+                return dispatcher.fire(postPhase, entity, result.get());
+            });
+        } catch (RuntimeException failure) {
+            Throwable preferred = RepositoryFailureSupport.preferVirtualMachineError(failure);
+            if (preferred instanceof VirtualMachineError fatal) {
+                throw fatal;
+            }
+            throw failure;
+        }
+        if (!registered) {
+            throw new IllegalStateException(
+                    "external transaction completion is required for POST entity lifecycle");
+        }
+        long rows = operation.apply(true);
+        result.set(rows);
+        executed.set(true);
+        return rows;
     }
 }

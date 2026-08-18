@@ -77,33 +77,38 @@ final class CachedReactiveFormMetadataReader implements ReactiveFormMetadataCach
     @Override
     public Mono<DynamicForm> readForm(String formId, String table) {
         MetadataCacheKey key = MetadataCacheKey.form(formId, null, table);
-        return contextual(key, contextualKey -> cached(
-                formStats, contextualKey, () -> delegate.readForm(formId, table)));
+        return contextual(key, formStats, () -> delegate.readForm(formId, table));
     }
 
     @Override
     public Mono<DynamicForm> readForm(String formId, String schema, String table) {
         MetadataCacheKey key = MetadataCacheKey.form(formId, schema, table);
-        return contextual(key, contextualKey -> cached(
-                formStats, contextualKey, () -> delegate.readForm(formId, schema, table)));
+        return contextual(key, formStats, () -> delegate.readForm(formId, schema, table));
     }
 
     @Override
     public Mono<TableMetadata> readTable(String table) {
         MetadataCacheKey key = MetadataCacheKey.table(null, table);
-        return contextual(key, contextualKey -> cached(tableStats, contextualKey, () -> delegate.readTable(table)));
+        return contextual(key, tableStats, () -> delegate.readTable(table));
     }
 
     @Override
     public Mono<TableMetadata> readTable(String schema, String table) {
         MetadataCacheKey key = MetadataCacheKey.table(schema, table);
-        return contextual(key, contextualKey -> cached(
-                tableStats, contextualKey, () -> delegate.readTable(schema, table)));
+        return contextual(key, tableStats, () -> delegate.readTable(schema, table));
     }
 
-    private static <T> Mono<T> contextual(MetadataCacheKey key,
-                                          java.util.function.Function<MetadataCacheKey, Mono<T>> operation) {
-        return Mono.deferContextual(context -> operation.apply(withIsolation(key, context)));
+    private <T> Mono<T> contextual(MetadataCacheKey key,
+                                   MetadataCacheRegionStats stats,
+                                   Supplier<Mono<T>> loader) {
+        return Mono.deferContextual(context -> {
+            MetadataCacheKey contextualKey = withIsolation(key, context);
+            if (context.hasKey(R2dbcTransactionContext.class)) {
+                // 外部事务可看到尚未提交的 DDL；该结果不能进入按路由共享的进程级缓存。
+                return Mono.defer(loader);
+            }
+            return cached(stats, contextualKey, loader);
+        });
     }
 
     private static MetadataCacheKey withIsolation(MetadataCacheKey key, ContextView context) {

@@ -260,7 +260,7 @@ class ProtectedFormClientTest {
                     .then(client.writeBatch(BatchSpec.upsert(
                             form,
                             Flux.just(Map.<String, Object>of(
-                                    "id", 1L, "contact", "AlphaBeta", "version", 1)))))
+                                    "ID", 1L, "contact", "AlphaBeta", "version", 1)))))
                     .then(client.writeBatch(BatchSpec.update(form, Flux.just(update))))
                     .then(Mono.zip(matchingIds(client, form, "PHAB"),
                                    matchingIds(client, form, "MEGA")))
@@ -292,7 +292,7 @@ class ProtectedFormClientTest {
             client.writeBatch(BatchSpec.upsert(
                     form,
                     Flux.just(Map.<String, Object>of(
-                            "id", 1L, "contact", "AlphaBeta", "version", 1))));
+                            "ID", 1L, "contact", "AlphaBeta", "version", 1))));
             client.writeBatch(BatchSpec.update(form, Flux.just(new BatchOptimisticUpdate(
                     Map.of("contact", "OmegaBeta"),
                     ConditionGroup.and().where("id", "=", 1L).build(),
@@ -442,7 +442,7 @@ class ProtectedFormClientTest {
                     IllegalArgumentException.class,
                     () -> client.update(WriteSpec.update(
                             protectedContainsForm(),
-                            Map.of("id", 2L),
+                            Map.of("ID", 2L),
                             ConditionGroup.and().where("id", "=", 1L).build())));
 
             assertEquals("protected contains update must not change primary key", error.getMessage());

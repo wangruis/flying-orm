@@ -5,6 +5,9 @@ import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.page.CursorDirection;
 import com.flying.orm.core.page.CursorPageQuery;
 import com.flying.orm.core.page.CursorSort;
+import com.flying.orm.rdb.codec.LargeObjectValueCodec;
+import com.flying.orm.rdb.json.JsonValueCodec;
+import com.flying.orm.rdb.vector.VectorValueCodec;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -79,6 +82,12 @@ final class CursorPageNormalizer {
                                          "cursor sort field does not exist"));
         if (field.nullable()) {
             throw new IllegalArgumentException("cursor sort field must not be nullable: " + field.name());
+        }
+        if (JsonValueCodec.isJsonDataType(field.dataType())
+                || VectorValueCodec.isVectorDataType(field.dataType())
+                || LargeObjectValueCodec.isLargeObjectDataType(field.dataType())) {
+            throw new IllegalArgumentException(
+                    "cursor ordering does not support this field type: " + field.name());
         }
         return field;
     }

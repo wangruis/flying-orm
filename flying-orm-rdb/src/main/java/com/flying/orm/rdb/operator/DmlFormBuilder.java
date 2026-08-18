@@ -1,5 +1,8 @@
 package com.flying.orm.rdb.operator;
 
+import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.ConditionNode;
+import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.form.LogicDeleteDefinition;
@@ -30,9 +33,18 @@ final class DmlFormBuilder {
                             Set<String> fields,
                             OptimisticLockOptions lock,
                             LogicDeleteDefinition logicDelete) {
+        return form(table, fields, lock, logicDelete, ConditionGroup.and().build());
+    }
+
+    static DynamicForm form(String table,
+                            Set<String> fields,
+                            OptimisticLockOptions lock,
+                            LogicDeleteDefinition logicDelete,
+                            ConditionGroup where) {
         String safeTable = SqlIdentifiers.requireIdentifier(table, "operator table");
         // LinkedHashSet 既去重又保留 set 调用顺序，使生成的 UPDATE SET 顺序和参数顺序稳定。
         Set<String> names = new LinkedHashSet<>(Objects.requireNonNull(fields, "operator fields must not be null"));
+        collectConditionFields(Objects.requireNonNull(where, "operator where must not be null"), names);
         if (lock != null) {
             names.add(lock.field());
         }
@@ -48,5 +60,15 @@ final class DmlFormBuilder {
             builder.logicDelete(logicDelete.fieldName(), logicDelete.notDeletedValue(), logicDelete.deletedValue());
         }
         return builder.build();
+    }
+
+    private static void collectConditionFields(ConditionGroup group, Set<String> names) {
+        for (ConditionNode child : group.children()) {
+            if (child instanceof ConditionGroup nested) {
+                collectConditionFields(nested, names);
+            } else {
+                names.add(((TermCondition) child).field());
+            }
+        }
     }
 }

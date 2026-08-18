@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.jdbc;
 
 import com.flying.orm.rdb.exception.RdbExceptionTranslator;
+import com.flying.orm.rdb.execution.GeneratedKeyReadException;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.observation.SqlExecutionOperation;
@@ -49,7 +50,9 @@ final class JdbcProtectedWriteObservation {
             throw fatal;
         }
         RuntimeException translated = RdbExceptionTranslator.translate(error);
-        observations.failure(SqlExecutionOperation.UPDATE, work.writeRequest(), 0L, startedAt,
+        long affectedRows = error instanceof GeneratedKeyReadException keyFailure
+                ? keyFailure.affectedRows() : 0L;
+        observations.failure(SqlExecutionOperation.UPDATE, work.writeRequest(), affectedRows, startedAt,
                              translated, transactionSource);
         return translated;
     }

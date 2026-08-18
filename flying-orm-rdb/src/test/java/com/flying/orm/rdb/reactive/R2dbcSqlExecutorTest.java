@@ -11,6 +11,7 @@ import com.flying.orm.rdb.batch.BatchWriteResult;
 import com.flying.orm.rdb.exception.RdbErrorKind;
 import com.flying.orm.rdb.exception.RdbException;
 import com.flying.orm.rdb.exception.RdbExceptionTranslator;
+import com.flying.orm.rdb.execution.GeneratedKeyReadException;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.execution.SqlExecutionSequence;
@@ -94,6 +95,63 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * @version v1.0
  */
 class R2dbcSqlExecutorTest {
+
+    /** INSERT 已发布更新计数后，生成键行读取失败必须保留“写入已执行”的稳定证据。 */
+    @Test
+    void reportsGeneratedKeyReadFailureAfterObservedWrite() {
+        IllegalStateException keyFailure = new IllegalStateException("generated key stream failed");
+        RecordingConnectionFactory factory = new RecordingConnectionFactory(
+                List.of(Map.of("id", Blob.from(Flux.error(keyFailure)))), 1L);
+
+        StepVerifier.create(R2dbcSqlExecutor.create(factory).rowsUpdatedReturningKeys(
+                            new SqlRequest("insert into device(name) values (?)", List.of("sensor")),
+                            SqlExecutionOptions.safeDefaults()))
+                    .expectErrorSatisfies(error -> {
+                        GeneratedKeyReadException observed = assertInstanceOf(
+                                GeneratedKeyReadException.class, error);
+                        assertEquals(1L, observed.affectedRows());
+                        assertSame(keyFailure, observed.getCause());
+                    })
+                    .verify();
+    }
+
+    /** 受保护写生成键读取失败后若自有事务已确认回滚，必须恢复原始读取失败而不能继续报告 UNKNOWN。 */
+    @Test
+    void unwrapsGeneratedKeyReadFailureAfterConfirmedProtectedRollback() {
+        IllegalStateException keyFailure = new IllegalStateException("protected generated key stream failed");
+        RecordingConnectionFactory factory = new RecordingConnectionFactory(
+                List.of(Map.of("id", Blob.from(Flux.error(keyFailure)))), 1L);
+
+        StepVerifier.create(R2dbcSqlExecutor.create(factory).atomicProtectedWrite(
+                            protectedGeneratedKeyWork(), SqlExecutionOptions.safeDefaults()))
+                    .expectErrorMatches(error -> error == keyFailure)
+                    .verify();
+
+        assertEquals(1, factory.rollbackCount());
+        assertEquals(0, factory.commitCount());
+    }
+
+    /** 受保护写生成键读取失败且回滚无法确认时，UNKNOWN 仍须保留驱动已报告的影响行数。 */
+    @Test
+    void preservesAffectedRowsWhenProtectedGeneratedKeyRollbackIsUnknown() {
+        IllegalStateException keyFailure = new IllegalStateException("protected generated key stream failed");
+        IllegalStateException rollbackFailure = new IllegalStateException("protected rollback failed");
+        RecordingConnectionFactory factory = new RecordingConnectionFactory(
+                List.of(Map.of("id", Blob.from(Flux.error(keyFailure)))), 1L).failRollback(rollbackFailure);
+
+        StepVerifier.create(R2dbcSqlExecutor.create(factory).atomicProtectedWrite(
+                            protectedGeneratedKeyWork(), SqlExecutionOptions.safeDefaults()))
+                    .expectErrorSatisfies(error -> {
+                        GeneratedKeyReadException failure = assertInstanceOf(GeneratedKeyReadException.class, error);
+                        assertEquals(1L, failure.affectedRows());
+                        RdbException unknown = assertInstanceOf(RdbException.class, failure.getCause());
+                        assertEquals(RdbErrorKind.UNKNOWN, unknown.kind());
+                    })
+                    .verify();
+
+        assertEquals(1, factory.rollbackCount());
+        assertEquals(0, factory.commitCount());
+    }
 
     /** 受保护业务写和 CONTAINS 令牌必须在一个冷 R2DBC 事务中顺序提交。 */
     @Test
@@ -1027,6 +1085,45 @@ class R2dbcSqlExecutorTest {
         assertEquals(0, factory.closedCount());
     }
 
+    /** 事务来源观测只能读取已校验的事务事实，不能让日志功能绕过数据库路由锁定。 */
+    @Test
+    void rejectsDatabaseRouteChangeWhenTransactionSourceObservationIsEnabled() {
+        RecordingConnectionFactory factory = new RecordingConnectionFactory(List.of(), 1);
+        Connection externalConnection = factory.connection();
+        SqlExecutionObserver observer = new SqlExecutionObserver() {
+            @Override
+            public boolean requiresTransactionSource() {
+                return true;
+            }
+
+            @Override
+            public void onExecution(SqlExecutionObservation observation) {
+                // 本测试只验证事务来源观测不会改变路由安全结果。
+            }
+        };
+        R2dbcSqlExecutor executor = R2dbcSqlExecutor.create(factory)
+                .withTransactionParticipant(() -> Mono.just(
+                        R2dbcTransactionContext.external(externalConnection, "tenant-db-a")))
+                .withObserver(observer);
+
+        Mono<Long> update = IsolationContexts.with(
+                executor.rowsUpdated(new SqlRequest(
+                        "update Users set name = ? where id = ?", List.of("Wang", "u1"))),
+                IsolationContext.database("tenant-7", "tenant-db-b"));
+
+        StepVerifier.create(update)
+                    .expectErrorSatisfies(error -> {
+                        R2dbcTransactionParticipationException rejected = assertInstanceOf(
+                                R2dbcTransactionParticipationException.class, error);
+                        assertEquals(R2dbcTransactionParticipationException.Reason.ROUTING_IDENTITY_CHANGED,
+                                     rejected.reason());
+                    })
+                    .verify();
+        assertEquals(0, factory.createdCount());
+        assertTrue(factory.sqlHistory().isEmpty());
+        assertEquals(0, factory.closedCount());
+    }
+
     /**
      * ATOMIC 加入外部事务后只负责执行 SQL，不能再次 begin/commit/rollback。外层尚未提交时结果只能是 ENLISTED。
      */
@@ -1936,6 +2033,21 @@ class R2dbcSqlExecutorTest {
         StepVerifier.create(executor.resolveUnknown(token))
                     .assertNext(resolution -> assertEquals(BatchResolution.Status.UNKNOWN, resolution.status()))
                     .verifyComplete();
+    }
+
+    private static ProtectedWriteWork protectedGeneratedKeyWork() {
+        Map<String, Object> owner = new LinkedHashMap<>();
+        owner.put("id", null);
+        return new ProtectedWriteWork(
+                ProtectedWriteWork.Kind.INSERT,
+                new SqlRequest("insert into protected_customer(contact) values (?)", List.of(new byte[]{9})),
+                null,
+                List.of("id"),
+                owner,
+                "id = ?",
+                "delete from protected_customer_tokens where id = ? and field_tag = ?",
+                "insert into protected_customer_tokens(id, field_tag, token_hash) values (?, ?, ?)",
+                List.of(new ProtectedWriteWork.FieldTokens("contact", List.of(new byte[]{1, 2, 3}))));
     }
 
     private static ConnectionFactory neverConnectionFactory() {

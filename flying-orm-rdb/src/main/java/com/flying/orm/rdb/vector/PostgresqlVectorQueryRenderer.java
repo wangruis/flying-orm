@@ -7,6 +7,7 @@ import com.flying.orm.core.sql.render.SqlFragment;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.RdbDialect;
+import com.flying.orm.rdb.form.FormDataSqlRenderer;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -23,14 +24,14 @@ public final class PostgresqlVectorQueryRenderer {
 
     private static final int MAX_LIMIT = 10_000;
 
-    private final SqlRenderer conditions;
+    private final FormDataSqlRenderer formRenderer;
 
     private final RdbDialect dialect;
 
     private PostgresqlVectorQueryRenderer(SqlRenderer conditions) {
         this.dialect = RdbDialect.postgresql();
-        this.conditions = Objects.requireNonNull(conditions, "sql renderer must not be null")
-                                 .withIdentifierRenderer(dialect.schema()::identifier);
+        this.formRenderer = FormDataSqlRenderer.create(
+                Objects.requireNonNull(conditions, "sql renderer must not be null"), dialect);
     }
 
     public static PostgresqlVectorQueryRenderer create(SqlRenderer conditions) {
@@ -74,8 +75,8 @@ public final class PostgresqlVectorQueryRenderer {
         List<Object> parameters = new ArrayList<>();
         parameters.add(parameter);
 
-        SqlFragment whereFragment = conditions.renderWhere(Objects.requireNonNull(where,
-                                                                                   "where condition must not be null"));
+        SqlFragment whereFragment = formRenderer.renderCondition(
+                safeForm, Objects.requireNonNull(where, "where condition must not be null"));
         if (!whereFragment.sql().isBlank()) {
             sql.append(" where ").append(whereFragment.sql());
             parameters.addAll(whereFragment.parameters());

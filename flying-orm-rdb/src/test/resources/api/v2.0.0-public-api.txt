@@ -3602,6 +3602,22 @@ TYPE public abstract interface com.flying.orm.rdb.reactive.ReactiveSqlExecutor
   METHOD public default reactor.core.publisher.Mono<com.flying.orm.rdb.batch.BatchWriteResult> writeProtectedBatch(com.flying.orm.rdb.batch.BatchWriteRequest)
   METHOD public default reactor.core.publisher.Flux<com.flying.orm.rdb.batch.BatchChunkResult> writeProtectedBatchChunks(com.flying.orm.rdb.batch.BatchWriteRequest)
 END
+TYPE public final class com.flying.orm.rdb.repository.GeneratedKeyResolutionException extends java.lang.RuntimeException implements com.flying.orm.core.error.OrmErrorReportProvider
+  CONSTRUCTOR public <init>(long, com.flying.orm.rdb.repository.GeneratedKeyResolutionException$WriteState, java.lang.Throwable)
+  METHOD public long affectedRows()
+  METHOD public boolean committed()
+  METHOD public boolean enlisted()
+  METHOD public com.flying.orm.rdb.repository.GeneratedKeyResolutionException$WriteState state()
+  METHOD public com.flying.orm.core.error.OrmErrorReport toErrorReport()
+  METHOD public boolean unknown()
+END
+TYPE public static final enum com.flying.orm.rdb.repository.GeneratedKeyResolutionException$WriteState extends java.lang.Enum<com.flying.orm.rdb.repository.GeneratedKeyResolutionException$WriteState>
+  ENUM_CONSTANT COMMITTED
+  ENUM_CONSTANT ENLISTED
+  ENUM_CONSTANT UNKNOWN
+  METHOD public static com.flying.orm.rdb.repository.GeneratedKeyResolutionException$WriteState valueOf(java.lang.String)
+  METHOD public static com.flying.orm.rdb.repository.GeneratedKeyResolutionException$WriteState[] values()
+END
 TYPE public final class com.flying.orm.rdb.repository.ReactiveFormRepository<T>
   METHOD public static <T> com.flying.orm.rdb.repository.ReactiveFormRepository<T> create(com.flying.orm.rdb.form.ReactiveFormClient, com.flying.orm.core.form.DynamicForm, java.lang.Class<T>)
   METHOD public com.flying.orm.rdb.operator.EntityDmlDeleteOperator<T> createDelete()

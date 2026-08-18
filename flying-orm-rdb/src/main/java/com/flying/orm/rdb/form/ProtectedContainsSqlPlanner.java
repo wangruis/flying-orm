@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.form;
 
+import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.page.CursorDirection;
 import com.flying.orm.core.page.CursorPageQuery;
 import com.flying.orm.core.page.PageSort;
@@ -75,12 +76,15 @@ final class ProtectedContainsSqlPlanner {
     SqlRequest rows(ProtectedFieldRuntime.PreparedContainsQuery query,
                     CursorPageQuery page,
                     int candidateLimit) {
-        CursorPageQuery safePage = Objects.requireNonNull(page, "cursor page query must not be null");
+        ProtectedFieldRuntime.PreparedContainsQuery safeQuery = Objects.requireNonNull(
+                query, "protected contains query must not be null");
+        CursorPageQuery safePage = CursorPageNormalizer.normalize(
+                safeQuery.physicalForm(), Objects.requireNonNull(page, "cursor page query must not be null"));
         List<PageSort> sorts = safePage.sorts().stream()
                 .map(sort -> sort.direction() == CursorDirection.ASC
                         ? PageSort.asc(sort.field()) : PageSort.desc(sort.field()))
                 .toList();
-        return rows(query, sorts, safePage, candidateLimit);
+        return rows(safeQuery, sorts, safePage, candidateLimit);
     }
 
     private SqlRequest rows(ProtectedFieldRuntime.PreparedContainsQuery query,
@@ -136,9 +140,10 @@ final class ProtectedContainsSqlPlanner {
      */
     private SqlFragment businessCondition(ProtectedFieldRuntime.PreparedContainsQuery query,
                                            String businessAlias) {
+        ConditionGroup normalized = support.normalizeCondition(query.physicalForm(), query.remainingWhere());
         return support.conditionRenderer.withFieldIdentifierRenderer(name -> qualified(
                         businessAlias, query.physicalForm().field(name).name()))
-                .renderWhere(query.remainingWhere());
+                .renderWhere(normalized);
     }
 
     private String cursorWhere(ProtectedFieldRuntime.PreparedContainsQuery query,
@@ -150,14 +155,17 @@ final class ProtectedContainsSqlPlanner {
         for (int pivot = 0; pivot < page.sorts().size(); pivot++) {
             java.util.StringJoiner terms = new java.util.StringJoiner(" and ");
             for (int prefix = 0; prefix < pivot; prefix++) {
-                String field = query.physicalForm().field(page.sorts().get(prefix).field()).name();
+                com.flying.orm.core.form.DynamicField dynamicField = query.physicalForm().field(
+                        page.sorts().get(prefix).field());
+                String field = dynamicField.name();
                 terms.add(qualified(alias, field) + " = ?");
-                parameters.add(support.valueCodecs.write(cursor.get(prefix)));
+                parameters.add(support.writeValue(dynamicField, cursor.get(prefix)));
             }
             com.flying.orm.core.page.CursorSort sort = page.sorts().get(pivot);
-            String field = query.physicalForm().field(sort.field()).name();
+            com.flying.orm.core.form.DynamicField dynamicField = query.physicalForm().field(sort.field());
+            String field = dynamicField.name();
             terms.add(qualified(alias, field) + (sort.direction() == CursorDirection.ASC ? " > ?" : " < ?"));
-            parameters.add(support.valueCodecs.write(cursor.get(pivot)));
+            parameters.add(support.writeValue(dynamicField, cursor.get(pivot)));
             alternatives.add(pivot == 0 ? terms.toString() : "(" + terms + ")");
         }
         return alternatives.toString();

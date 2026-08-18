@@ -4,10 +4,16 @@ import com.flying.orm.core.page.PageResult;
 import com.flying.orm.rdb.lifecycle.EntityLifecyclePhase;
 import com.flying.orm.rdb.lifecycle.ReactiveEntityListener;
 import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.transaction.R2dbcTransactionContext;
+import com.flying.orm.rdb.transaction.TransactionOutcome;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import java.util.function.Supplier;
 
 /**
@@ -40,18 +46,36 @@ final class ReactiveRepositoryLifecycleSupport<T> {
         return dispatcher.fire(phase, entity, result);
     }
 
-    Mono<Long> update(T entity, Supplier<Mono<Long>> operation) {
-        T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
-        return fire(EntityLifecyclePhase.PRE_UPDATE, safeEntity, null)
-                .then(Mono.defer(Objects.requireNonNull(operation, "repository update operation must not be null")))
-                .flatMap(rows -> fire(EntityLifecyclePhase.POST_UPDATE, safeEntity, rows).thenReturn(rows));
+    Mono<Void> fire(EntityLifecyclePhase phase, T entity, Object result, boolean committed) {
+        return dispatcher.fire(phase, entity, result, committed);
     }
 
-    Mono<Long> remove(T entity, Supplier<Mono<Long>> operation) {
+    boolean hasWork(EntityLifecyclePhase phase) {
+        return dispatcher.hasWork(phase);
+    }
+
+    Mono<Long> persist(T entity,
+                       Supplier<Mono<R2dbcTransactionContext>> currentTransaction,
+                       Function<Boolean, Mono<Long>> operation) {
         T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
-        return fire(EntityLifecyclePhase.PRE_REMOVE, safeEntity, null)
-                .then(Mono.defer(Objects.requireNonNull(operation, "repository delete operation must not be null")))
-                .flatMap(rows -> fire(EntityLifecyclePhase.POST_REMOVE, safeEntity, rows).thenReturn(rows));
+        return write(safeEntity, EntityLifecyclePhase.PRE_PERSIST, EntityLifecyclePhase.POST_PERSIST,
+                     currentTransaction, operation);
+    }
+
+    Mono<Long> update(T entity,
+                      Supplier<Mono<R2dbcTransactionContext>> currentTransaction,
+                      Supplier<Mono<Long>> operation) {
+        T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
+        return write(safeEntity, EntityLifecyclePhase.PRE_UPDATE, EntityLifecyclePhase.POST_UPDATE,
+                     currentTransaction, ignored -> operation.get());
+    }
+
+    Mono<Long> remove(T entity,
+                      Supplier<Mono<R2dbcTransactionContext>> currentTransaction,
+                      Supplier<Mono<Long>> operation) {
+        T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
+        return write(safeEntity, EntityLifecyclePhase.PRE_REMOVE, EntityLifecyclePhase.POST_REMOVE,
+                     currentTransaction, ignored -> operation.get());
     }
 
     Flux<T> postLoad(Flux<T> entities) {
@@ -65,5 +89,63 @@ final class ReactiveRepositoryLifecycleSupport<T> {
         return postLoad(Flux.fromIterable(safePage.rows()))
                 .collectList()
                 .map(rows -> new PageResult<>(rows, safePage.total(), safePage.page(), safePage.size()));
+    }
+
+    private Mono<Long> write(T entity,
+                             EntityLifecyclePhase prePhase,
+                             EntityLifecyclePhase postPhase,
+                             Supplier<Mono<R2dbcTransactionContext>> currentTransaction,
+                             Function<Boolean, Mono<Long>> operation) {
+        Function<Boolean, Mono<Long>> safeOperation = Objects.requireNonNull(
+                operation, "repository write operation must not be null");
+        Supplier<Mono<R2dbcTransactionContext>> safeTransaction = Objects.requireNonNull(
+                currentTransaction, "repository transaction lookup must not be null");
+        return fire(prePhase, entity, null).then(Mono.defer(() -> {
+            if (!hasWork(postPhase)) {
+                return requireOperation(safeOperation.apply(false));
+            }
+            return Objects.requireNonNull(safeTransaction.get(), "repository transaction lookup must return a Mono")
+                    .map(Optional::of)
+                    .defaultIfEmpty(Optional.empty())
+                    .flatMap(transaction -> transaction.isPresent()
+                            ? executeEnlisted(entity, postPhase, transaction.orElseThrow(), safeOperation)
+                            : requireOperation(safeOperation.apply(false))
+                                    .flatMap(rows -> fire(postPhase, entity, rows).thenReturn(rows)));
+        }));
+    }
+
+    private Mono<Long> executeEnlisted(T entity,
+                                       EntityLifecyclePhase postPhase,
+                                       R2dbcTransactionContext transaction,
+                                       Function<Boolean, Mono<Long>> operation) {
+        AtomicReference<Long> result = new AtomicReference<>();
+        AtomicBoolean executed = new AtomicBoolean();
+        AtomicBoolean notified = new AtomicBoolean();
+        final boolean registered;
+        try {
+            registered = transaction.completion().register(outcome -> {
+                if (!notified.compareAndSet(false, true)
+                        || outcome != TransactionOutcome.COMMITTED
+                        || !executed.get()) {
+                    return Mono.empty();
+                }
+                return fire(postPhase, entity, result.get());
+            });
+        } catch (RuntimeException failure) {
+            Throwable preferred = RepositoryFailureSupport.preferVirtualMachineError(failure);
+            return preferred instanceof VirtualMachineError fatal ? Mono.error(fatal) : Mono.error(failure);
+        }
+        if (!registered) {
+            return Mono.error(new IllegalStateException(
+                    "external transaction completion is required for POST entity lifecycle"));
+        }
+        return requireOperation(operation.apply(true)).doOnNext(rows -> {
+            result.set(rows);
+            executed.set(true);
+        });
+    }
+
+    private static Mono<Long> requireOperation(Mono<Long> operation) {
+        return Objects.requireNonNull(operation, "repository write operation must return a Mono");
     }
 }

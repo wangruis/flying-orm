@@ -4,6 +4,7 @@ import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.exception.RdbErrorKind;
 import com.flying.orm.rdb.exception.RdbException;
+import com.flying.orm.rdb.execution.GeneratedKeyReadException;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlWriteResult;
@@ -202,11 +203,22 @@ final class R2dbcProtectedWriteExecutor {
         }
         return switch (resource.state()) {
             case ACTIVE -> connections.rollback(resource)
-                    .onErrorResume(rollbackFailure -> Mono.error(unknown(error, rollbackFailure)))
-                    .then(Mono.error(error));
+                    .onErrorResume(rollbackFailure -> Mono.error(rollbackUnknown(error, rollbackFailure)))
+                    .then(Mono.defer(() -> Mono.error(confirmedRollbackFailure(error))));
             case NEW, COMMITTING -> Mono.error(unknown(error, null));
             case COMMITTED, ROLLED_BACK -> Mono.error(error);
         };
+    }
+
+    private static Throwable confirmedRollbackFailure(Throwable error) {
+        return error instanceof GeneratedKeyReadException keyFailure ? keyFailure.getCause() : error;
+    }
+
+    private static Throwable rollbackUnknown(Throwable error, Throwable rollbackFailure) {
+        RdbException uncertainty = unknown(error, rollbackFailure);
+        return error instanceof GeneratedKeyReadException keyFailure
+                ? new GeneratedKeyReadException(keyFailure.affectedRows(), uncertainty)
+                : uncertainty;
     }
 
     private static Map<String, Object> resolveInsertOwner(ProtectedWriteWork work, SqlWriteResult result) {

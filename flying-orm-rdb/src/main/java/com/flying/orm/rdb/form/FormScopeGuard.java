@@ -58,7 +58,7 @@ final class FormScopeGuard {
         ConditionGroup businessWhere = requireBusinessWhere(where);
         DataScope effectiveScope = effectiveScope(scope);
         requireTenantScope(safeForm, effectiveScope);
-        return FormDataScopes.apply(businessWhere, effectiveScope);
+        return FormDataScopes.apply(safeForm, businessWhere, effectiveScope);
     }
 
     ScopedRead scopedRead(DynamicForm form, ConditionGroup where, DataScope scope) {
@@ -85,7 +85,7 @@ final class FormScopeGuard {
         validateWritableValues(form, values, effectiveScope);
         requireTenantScope(form, effectiveScope);
         validateTenantUpdateValue(form, values, effectiveScope);
-        return FormLogicDeletes.activeWhere(form, FormDataScopes.apply(businessWhere, effectiveScope));
+        return FormLogicDeletes.activeWhere(form, FormDataScopes.apply(form, businessWhere, effectiveScope));
     }
 
     /**
@@ -101,7 +101,7 @@ final class FormScopeGuard {
         validateWritableValues(form, safeUpdate.values(), safeScope);
         requireTenantScope(form, safeScope);
         validateTenantUpdateValue(form, safeUpdate.values(), safeScope);
-        return FormLogicDeletes.activeWhere(form, FormDataScopes.apply(businessWhere, safeScope));
+        return FormLogicDeletes.activeWhere(form, FormDataScopes.apply(form, businessWhere, safeScope));
     }
 
     Map<String, Object> prepareWriteValues(DynamicForm form,
@@ -144,7 +144,7 @@ final class FormScopeGuard {
     private ScopedRead buildScopedRead(DynamicForm form, ConditionGroup where, DataScope effectiveScope) {
         requireTenantScope(form, effectiveScope);
         DynamicForm readableForm = readableForm(form, effectiveScope.fields());
-        ConditionGroup scopedWhere = FormDataScopes.apply(where, effectiveScope);
+        ConditionGroup scopedWhere = FormDataScopes.apply(readableForm, where, effectiveScope);
         return new ScopedRead(readableForm, FormLogicDeletes.activeWhere(form, scopedWhere), effectiveScope);
     }
 
@@ -307,13 +307,32 @@ final class FormScopeGuard {
                                                    TenantDefinition tenant,
                                                    Object suppliedValue,
                                                    Object scopedValue) {
-        if (!Objects.equals(suppliedValue, scopedValue)) {
+        if (!tenantValuesEqual(suppliedValue, scopedValue)) {
             throw scopeError(ScopeErrorCode.TENANT_VALUE_MISMATCH,
                              form,
                              tenant.fieldName(),
                              "tenant field [" + tenant.fieldName() + "] does not match scope for form ["
                                      + form.id() + "]");
         }
+    }
+
+    private static boolean tenantValuesEqual(Object suppliedValue, Object scopedValue) {
+        String suppliedText = canonicalText(suppliedValue);
+        String scopedText = canonicalText(scopedValue);
+        if (suppliedText != null && scopedText != null) {
+            return suppliedText.equals(scopedText);
+        }
+        return Objects.deepEquals(suppliedValue, scopedValue);
+    }
+
+    /** 只规范化 TextValueCodec 明确定义的文本形状，不调用任意业务对象的 toString。 */
+    private static String canonicalText(Object value) {
+        return switch (value) {
+            case CharSequence text -> text.toString();
+            case Character character -> character.toString();
+            case char[] characters -> new String(characters);
+            case null, default -> null;
+        };
     }
 
     private static ScopeAccessException scopeError(ScopeErrorCode code,

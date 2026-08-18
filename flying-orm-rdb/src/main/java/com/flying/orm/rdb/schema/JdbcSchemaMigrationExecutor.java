@@ -11,6 +11,8 @@ import com.flying.orm.rdb.observation.SqlExecutionStatus;
 import com.flying.orm.rdb.observation.SqlFailureCategory;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
 import com.flying.orm.rdb.transaction.JdbcTransactionParticipant;
+import com.flying.orm.rdb.transaction.JdbcTransactionContext;
+import reactor.core.publisher.Mono;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -32,7 +34,6 @@ import java.util.function.Consumer;
  * <p>元数据失效是旁路动作。DDL 已经发给数据库后，即使失效回调失败，也不能把已经发生的结构变化说成失败。</p>
  */
 final class JdbcSchemaMigrationExecutor {
-
     private final SyncSqlExecutor executor;
     private final FormSchemaSqlRenderer renderer;
     private final SchemaMigrationObserver observer;
@@ -56,7 +57,6 @@ final class JdbcSchemaMigrationExecutor {
         this.metadataInvalidator = Objects.requireNonNull(
                 metadataInvalidator, "schema metadata invalidator must not be null");
     }
-
     long execute(List<SqlRequest> requests, SqlExecutionOptions options) {
         List<SqlRequest> safeRequests = safeRequests(requests);
         if (safeRequests.isEmpty()) {
@@ -67,7 +67,6 @@ final class JdbcSchemaMigrationExecutor {
         state.started = true;
         return executeWork(safeRequests, options, state);
     }
-
     long executeWithInvalidation(List<SqlRequest> requests,
                                  List<String> tables,
                                  Consumer<String> invalidator,
@@ -79,7 +78,7 @@ final class JdbcSchemaMigrationExecutor {
         List<String> safeTables = safeTables(tables);
         Consumer<String> safeInvalidator = Objects.requireNonNull(
                 invalidator, "schema metadata invalidator must not be null");
-        guardExternalTransaction(safeRequests, false);
+        guardExternalTransaction(safeRequests, false, safeTables, safeInvalidator);
         ExecutionState state = new ExecutionState();
         state.started = true;
         try {
@@ -88,7 +87,6 @@ final class JdbcSchemaMigrationExecutor {
             invalidateAfterExecution(state, safeTables, safeInvalidator);
         }
     }
-
     SchemaMigrationResult executeReviewed(ReviewedSchemaMigrationPlan plan,
                                           List<String> tables,
                                           SchemaMigrationExecutionOptions options) {
@@ -101,7 +99,11 @@ final class JdbcSchemaMigrationExecutor {
         long startedAt = System.nanoTime();
         try {
             List<SqlRequest> requests = safePlan.requestsForExecution(safeOptions.approval());
-            guardExternalTransaction(requests, safePlan.onlineDdl().requiresNonTransactionalExecution());
+            guardExternalTransaction(
+                    requests,
+                    safePlan.onlineDdl().requiresNonTransactionalExecution(),
+                    safeTables,
+                    metadataInvalidator);
             long rows = requests.isEmpty()
                     ? 0L
                     : executeReviewedRequests(requests, safePlan, safeOptions, state);
@@ -115,7 +117,6 @@ final class JdbcSchemaMigrationExecutor {
             invalidateAfterExecution(state, safeTables, metadataInvalidator);
         }
     }
-
     private long executeReviewedRequests(List<SqlRequest> requests,
                                          ReviewedSchemaMigrationPlan plan,
                                          SchemaMigrationExecutionOptions options,
@@ -134,7 +135,6 @@ final class JdbcSchemaMigrationExecutor {
         SchemaDdlSessionGuard guard = renderer.lockTimeoutGuard(options.lockTimeout());
         return executeSession(guard, requests, options.sqlExecutionOptions(), state);
     }
-
     private long executeSession(SchemaDdlSessionGuard guard,
                                 List<SqlRequest> requests,
                                 SqlExecutionOptions options,
@@ -274,16 +274,31 @@ final class JdbcSchemaMigrationExecutor {
 
     private void guardExternalTransaction(List<SqlRequest> requests,
                                           boolean requiresNonTransactionalExecution) {
-        if (requests.isEmpty()
-                || (ddlTransactionSupport.allowsExternalTransaction()
-                    && !requiresNonTransactionalExecution)) {
+        guardExternalTransaction(requests, requiresNonTransactionalExecution, null, null);
+    }
+
+    private void guardExternalTransaction(List<SqlRequest> requests,
+                                          boolean requiresNonTransactionalExecution,
+                                          List<String> tables,
+                                          Consumer<String> invalidator) {
+        if (requests.isEmpty()) {
             return;
         }
-        if (transactionParticipant.currentTransactionForExecution().isPresent()) {
+        java.util.Optional<JdbcTransactionContext> current = transactionParticipant.currentTransactionForExecution();
+        if (current.isEmpty()) {
+            return;
+        }
+        if (!ddlTransactionSupport.allowsExternalTransaction() || requiresNonTransactionalExecution) {
             throw new SchemaMigrationRejectedException(
                     SchemaMigrationFailureCode.DDL_TRANSACTION_NOT_SUPPORTED,
                     "JDBC DDL cannot join the current external transaction: support="
                             + ddlTransactionSupport);
+        }
+        if (tables != null && !current.get().completion().register(
+                ignored -> Mono.fromRunnable(() -> invalidateTables(invalidator, tables)))) {
+            throw new SchemaMigrationRejectedException(
+                    SchemaMigrationFailureCode.DDL_TRANSACTION_NOT_SUPPORTED,
+                    "external JDBC DDL requires transaction completion notification for metadata consistency");
         }
     }
 
@@ -327,6 +342,10 @@ final class JdbcSchemaMigrationExecutor {
             return;
         }
         state.invalidated = true;
+        invalidateTables(invalidator, tables);
+    }
+
+    private static void invalidateTables(Consumer<String> invalidator, List<String> tables) {
         for (String table : tables) {
             try {
                 invalidator.accept(table);

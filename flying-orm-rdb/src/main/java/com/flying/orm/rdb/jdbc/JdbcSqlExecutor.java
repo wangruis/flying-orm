@@ -5,6 +5,7 @@ import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.exception.RdbErrorKind;
 import com.flying.orm.rdb.exception.RdbException;
 import com.flying.orm.rdb.exception.RdbExceptionTranslator;
+import com.flying.orm.rdb.execution.GeneratedKeyReadException;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.execution.SqlWriteResult;
@@ -98,6 +99,12 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
     @Override
     public String metadataCachePartition() {
         return connections.currentRoutingIdentity();
+    }
+
+    @InternalApi
+    @Override
+    public java.util.Optional<com.flying.orm.rdb.transaction.JdbcTransactionContext> currentTransaction() {
+        return connections.currentTransaction();
     }
 
     @Override
@@ -227,6 +234,7 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
         PreparedStatement statement = null;
         Throwable operationFailure = null;
         boolean outcomeConfirmed = false;
+        boolean executionAttempted = false;
         try {
             connection = lease.connection();
             requireConnectionSingle(connection, request);
@@ -235,6 +243,7 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
             JdbcStatementBinder.bind(statement, request.parameters());
             JdbcStatementControl.requireNotInterrupted(statement);
             long affectedRows;
+            executionAttempted = true;
             try {
                 affectedRows = statement.executeLargeUpdate();
             } catch (SQLFeatureNotSupportedException | AbstractMethodError unsupported) {
@@ -246,7 +255,7 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
             operationFailure = error;
             throw error;
         } finally {
-            discardConnectionFailure(lease, operationFailure);
+            discardWriteConnectionFailure(lease, operationFailure, executionAttempted);
             JdbcResources.close(SqlExecutionOperation.UPDATE, outcomeConfirmed, operationFailure,
                                 observations, statement, lease);
         }
@@ -261,6 +270,9 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
         ResultSet generatedKeys = null;
         Throwable operationFailure = null;
         boolean outcomeConfirmed = false;
+        boolean executionAttempted = false;
+        boolean writeCompleted = false;
+        long affectedRows = 0L;
         try {
             connection = lease.connection();
             requireConnectionSingle(connection, request);
@@ -270,33 +282,64 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
             JdbcStatementOptions.apply(statement, options);
             JdbcStatementBinder.bind(statement, request.parameters());
             JdbcStatementControl.requireNotInterrupted(statement);
-            long affectedRows;
+            executionAttempted = true;
             try {
                 affectedRows = statement.executeLargeUpdate();
             } catch (SQLFeatureNotSupportedException | AbstractMethodError unsupported) {
                 affectedRows = statement.executeUpdate();
             }
+            writeCompleted = true;
             generatedKeys = statement.getGeneratedKeys();
             List<DynamicRow> keys = JdbcResultSetReader.readGeneratedKeys(generatedKeys, options);
             outcomeConfirmed = true;
             return new SqlWriteResult(affectedRows, keys);
         } catch (SQLException | RuntimeException | Error error) {
+            VirtualMachineError fatal = JdbcThrowableGraph.findVirtualMachineError(error);
+            if (fatal != null) {
+                operationFailure = fatal;
+                throw fatal;
+            }
+            if (writeCompleted && !(error instanceof GeneratedKeyReadException)) {
+                GeneratedKeyReadException resolution = new GeneratedKeyReadException(affectedRows, error);
+                operationFailure = resolution;
+                lease.discardAfterUncertainTransaction(error);
+                throw resolution;
+            }
             operationFailure = error;
             throw error;
         } finally {
-            discardConnectionFailure(lease, operationFailure);
+            discardWriteConnectionFailure(lease, operationFailure, executionAttempted);
             JdbcResources.close(SqlExecutionOperation.UPDATE, outcomeConfirmed, operationFailure,
                                 observations, generatedKeys, statement, lease);
         }
     }
 
     private static void discardConnectionFailure(JdbcConnectionProvider.JdbcConnectionLease lease,
-                                                 Throwable operationFailure) {
+                                                  Throwable operationFailure) {
         if (operationFailure == null) {
             return;
         }
         RuntimeException translated = RdbExceptionTranslator.translate(operationFailure);
         if (translated instanceof RdbException rdbError && rdbError.kind() == RdbErrorKind.CONNECTION) {
+            lease.discardAfterUncertainTransaction(operationFailure);
+        }
+    }
+
+    private static void discardWriteConnectionFailure(JdbcConnectionProvider.JdbcConnectionLease lease,
+                                                       Throwable operationFailure,
+                                                       boolean executionAttempted) {
+        if (operationFailure == null) {
+            return;
+        }
+        RuntimeException translated = RdbExceptionTranslator.translate(operationFailure);
+        if (!(translated instanceof RdbException rdbError)) {
+            return;
+        }
+        boolean uncertainWrite = executionAttempted && switch (rdbError.kind()) {
+            case TIMEOUT, CANCELLED, UNKNOWN -> true;
+            default -> false;
+        };
+        if (rdbError.kind() == RdbErrorKind.CONNECTION || uncertainWrite) {
             lease.discardAfterUncertainTransaction(operationFailure);
         }
     }

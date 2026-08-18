@@ -129,6 +129,31 @@ class SyncFormOperationsTest {
         assertEquals(requestsBeforeRejection, executor.requests.size());
     }
 
+    /** 游标分页依赖普通大小比较，JSON、Vector 和数据库 LOB 必须在首屏 SQL 前拒绝。 */
+    @Test
+    void rejectsFieldsWithoutOrdinaryCursorComparisonBeforeExecution() {
+        RecordingSyncSqlExecutor executor = new RecordingSyncSqlExecutor();
+        SyncFormOperations operations = operations(executor, SqlExecutionOptions.safeDefaults());
+
+        for (String dataType : List.of("JSON", "VECTOR(3)", "BLOB", "CLOB", "TEXT",
+                                           "BINARY(16)", "VARBINARY(32)", "BYTEA")) {
+            DynamicForm unsupported = DynamicForm.builder("cursor-" + dataType, "cursor_values")
+                                                 .addField(DynamicField.primaryKey("id", "BIGINT"))
+                                                 .addField(DynamicField.of("value", dataType)
+                                                                       .withNullable(false))
+                                                 .build();
+
+            IllegalArgumentException failure = assertThrows(
+                    IllegalArgumentException.class,
+                    () -> operations.cursorPage(
+                            QuerySpec.of(unsupported, ConditionGroup.and().build()),
+                            CursorPageQuery.first(10, CursorSort.asc("value"))));
+
+            assertEquals("cursor ordering does not support this field type: value", failure.getMessage());
+        }
+        assertEquals(List.of(), executor.requests);
+    }
+
     /** 简单字段分组只允许显式选择和排序分组字段，不能把跨库非法 SQL 推给驱动。 */
     @Test
     void enforcesCompleteGroupedQueryShapeBeforeExecution() {

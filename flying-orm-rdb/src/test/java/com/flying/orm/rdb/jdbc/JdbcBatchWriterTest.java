@@ -1216,6 +1216,27 @@ class JdbcBatchWriterTest {
         assertFalse(rows.subscribed());
     }
 
+    /** ATOMIC 尚未取得连接时没有事务或 SQL 结果，连接失败不能被伪装成提交结果 UNKNOWN。 */
+    @Test
+    void reportsFailedBeforeTransactionWhenAtomicConnectionAcquisitionFails() {
+        SQLException acquisitionFailure = new SQLException("database connection unavailable", "08001");
+        AtomicInteger acquisitionCalls = new AtomicInteger();
+        TrackingPublisher rows = new TrackingPublisher(List.<Object[]>of(new Object[]{"a"}));
+
+        BatchWriteException failure = assertThrows(
+                BatchWriteException.class,
+                () -> JdbcBatchWriter.create(failingDataSource(acquisitionFailure, acquisitionCalls))
+                        .writeBatch(request(rows, BatchWriteOptions.atomic(1))));
+
+        assertEquals(1, acquisitionCalls.get());
+        assertFalse(rows.subscribed());
+        assertSame(acquisitionFailure, failure.getCause());
+        assertEquals(BatchWriteResult.Status.ROLLED_BACK, failure.result().status());
+        assertEquals(1, failure.result().chunks().size());
+        assertEquals(BatchChunkResult.Status.FAILED, failure.result().chunks().getFirst().status());
+        assertEquals(0, failure.result().chunks().getFirst().inputCount());
+    }
+
     @Test
     void reportsUnknownWhenTheCommitReplyIsLost() throws Exception {
         JdbcDataSource source = dataSource("unknown_commit");
@@ -1713,6 +1734,32 @@ class JdbcBatchWriterTest {
         dataSource.setURL("jdbc:h2:mem:" + name + ";DB_CLOSE_DELAY=-1");
         dataSource.setUser("sa");
         return dataSource;
+    }
+
+    private static DataSource failingDataSource(SQLException failure, AtomicInteger acquisitionCalls) {
+        return new DataSource() {
+            @Override
+            public Connection getConnection() throws SQLException {
+                acquisitionCalls.incrementAndGet();
+                throw failure;
+            }
+
+            @Override
+            public Connection getConnection(String username, String password) throws SQLException {
+                acquisitionCalls.incrementAndGet();
+                throw failure;
+            }
+
+            @Override public PrintWriter getLogWriter() { return null; }
+            @Override public void setLogWriter(PrintWriter out) { }
+            @Override public void setLoginTimeout(int seconds) { }
+            @Override public int getLoginTimeout() { return 0; }
+            @Override public Logger getParentLogger() { return Logger.getGlobal(); }
+            @Override public <T> T unwrap(Class<T> type) throws SQLException {
+                throw new SQLException("failing data source cannot be unwrapped");
+            }
+            @Override public boolean isWrapperFor(Class<?> type) { return false; }
+        };
     }
 
     private static Publisher<Object[]> delayedRows(Duration delay) {
