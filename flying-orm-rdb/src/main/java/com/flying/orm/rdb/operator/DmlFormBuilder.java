@@ -17,8 +17,8 @@ import java.util.Set;
  * Operator 是轻门面，没有完整表单元数据时，用本次链式命令出现过的字段拼一个最小 DynamicForm。
  * 这个表单只用于复用统一的 FormClient 安全与渲染流程，不会写入元数据缓存，也不代表数据库完整表结构。
  *
- * <p>临时字段使用通用逻辑类型，实际 Java 值仍按参数绑定交给驱动。需要 JSON、Array、LOB 等字段语义时，
- * 应使用完整 DynamicForm/Repository 入口。</p>
+ * <p>临时字段使用不声明文本或数值目标的 {@code OTHER}，实际 Java 值仍按参数绑定交给驱动。需要 JSON、
+ * Array、LOB 等字段语义时，应使用完整 DynamicForm/Repository 入口。</p>
  */
 final class DmlFormBuilder {
 
@@ -54,7 +54,7 @@ final class DmlFormBuilder {
 
         DynamicForm.Builder builder = DynamicForm.builder(safeTable, safeTable);
         for (String name : names) {
-            builder.addField(DynamicField.of(SqlIdentifiers.requireIdentifier(name, "operator field"), "VARCHAR"));
+            builder.addField(DynamicField.of(SqlIdentifiers.requireIdentifier(name, "operator field"), "OTHER"));
         }
         if (logicDelete != null) {
             builder.logicDelete(logicDelete.fieldName(), logicDelete.notDeletedValue(), logicDelete.deletedValue());

@@ -36,6 +36,7 @@ import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -245,6 +246,46 @@ class DatabaseOperatorTest {
 
         assertEquals("delete from `Users` where `id` = ?", executor.requests().getFirst().sql());
         assertEquals(List.of(1L), executor.requests().getFirst().parameters());
+    }
+
+    /** 无完整表单元数据的动态更新必须把 UUID 条件原样交给 PostgreSQL 驱动。 */
+    @Test
+    void dmlUpdateOperatorPreservesUuidConditionValue() {
+        RecordingSqlExecutor executor = new RecordingSqlExecutor();
+        DatabaseOperator operator = DatabaseOperator.create(executor,
+                                                            SqlRenderer.builder().addDefaultTerms().build(),
+                                                            RdbDialect.postgresql());
+        UUID id = UUID.fromString("51430ea7-78c5-453e-b80d-8223c023ee70");
+
+        StepVerifier.create(operator.dml()
+                                    .update("devices")
+                                    .set("name", "sensor")
+                                    .where(where -> where.is("id", id))
+                                    .execute())
+                    .expectNext(1L)
+                    .verifyComplete();
+
+        assertSame(id, executor.requests().getFirst().parameters().get(1));
+    }
+
+    /** 无完整表单元数据的物理删除必须保留 UUID 条件的驱动绑定类型。 */
+    @Test
+    void dmlDeleteOperatorPreservesUuidConditionValue() {
+        RecordingSqlExecutor executor = new RecordingSqlExecutor();
+        DatabaseOperator operator = DatabaseOperator.create(executor,
+                                                            SqlRenderer.builder().addDefaultTerms().build(),
+                                                            RdbDialect.postgresql());
+        UUID id = UUID.fromString("d63e85bd-eaa1-4846-bec7-a6d48e50ed08");
+
+        StepVerifier.create(operator.dml()
+                                    .delete("devices")
+                                    .where(where -> where.is("id", id))
+                                    .physical()
+                                    .execute())
+                    .expectNext(1L)
+                    .verifyComplete();
+
+        assertSame(id, executor.requests().getFirst().parameters().getFirst());
     }
 
     @Test
