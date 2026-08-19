@@ -10,8 +10,10 @@ import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.form.FormDataSqlRenderer;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
 import java.util.StringJoiner;
 
 /**
@@ -23,6 +25,8 @@ import java.util.StringJoiner;
 public final class PostgresqlVectorQueryRenderer {
 
     private static final int MAX_LIMIT = 10_000;
+
+    private static final String DISTANCE_LABEL = "_distance";
 
     private final FormDataSqlRenderer formRenderer;
 
@@ -60,8 +64,16 @@ public final class PostgresqlVectorQueryRenderer {
             throw new IllegalArgumentException("vector projections must not be empty");
         }
         StringJoiner selected = new StringJoiner(", ");
+        Set<String> selectedLabels = new HashSet<>();
         for (String projection : safeProjections) {
-            selected.add(dialect.schema().identifier(safeForm.field(projection).name()));
+            String selectedLabel = safeForm.field(projection).name();
+            if (DISTANCE_LABEL.equals(selectedLabel)) {
+                throw new IllegalArgumentException("vector projections must not use the reserved distance label");
+            }
+            if (!selectedLabels.add(selectedLabel)) {
+                throw new IllegalArgumentException("vector projections must have unique output labels");
+            }
+            selected.add(dialect.schema().identifier(selectedLabel));
         }
 
         float[] parameter = VectorValueCodec.write(vector, field.length());
@@ -70,7 +82,7 @@ public final class PostgresqlVectorQueryRenderer {
                 + " cast(? as vector)";
         StringBuilder sql = new StringBuilder("select ")
                 .append(selected).append(", ").append(distance)
-                .append(" as ").append(dialect.schema().identifier("_distance"))
+                .append(" as ").append(dialect.schema().identifier(DISTANCE_LABEL))
                 .append(" from ").append(dialect.schema().identifier(safeForm.table()));
         List<Object> parameters = new ArrayList<>();
         parameters.add(parameter);
@@ -81,7 +93,7 @@ public final class PostgresqlVectorQueryRenderer {
             sql.append(" where ").append(whereFragment.sql());
             parameters.addAll(whereFragment.parameters());
         }
-        sql.append(" order by ").append(dialect.schema().identifier("_distance")).append(" asc limit ?");
+        sql.append(" order by ").append(dialect.schema().identifier(DISTANCE_LABEL)).append(" asc limit ?");
         parameters.add(limit);
         return new SqlRequest(sql.toString(), parameters);
     }
