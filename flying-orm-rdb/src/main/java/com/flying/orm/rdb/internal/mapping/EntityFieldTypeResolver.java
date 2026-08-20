@@ -1,9 +1,9 @@
 package com.flying.orm.rdb.internal.mapping;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.flying.orm.core.annotation.EnumValue;
 import com.flying.orm.rdb.mapping.EntityEnumStorage;
 import com.flying.orm.rdb.mapping.MappingException;
+import tools.jackson.databind.JsonNode;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
@@ -17,6 +17,8 @@ import java.util.Map;
 
 /** 从 Java 字段类型和自有 @EnumValue 声明推断跨方言逻辑数据类型。 */
 final class EntityFieldTypeResolver {
+
+    private static final String JACKSON_2_JSON_NODE = "com.fasterxml.jackson.databind.JsonNode";
 
     private EntityFieldTypeResolver() {
     }
@@ -68,6 +70,10 @@ final class EntityFieldTypeResolver {
 
     private static String dataType(Class<?> type) {
         Class<?> safeType = wrap(type);
+        if (isJackson2JsonNode(safeType)) {
+            throw new MappingException("Jackson 2 JsonNode entity fields are not supported; "
+                                               + "migrate the field type to tools.jackson.databind.JsonNode");
+        }
         if (Map.class.isAssignableFrom(safeType)
                 || java.util.Collection.class.isAssignableFrom(safeType)
                 || JsonNode.class.isAssignableFrom(safeType)) {
@@ -108,6 +114,15 @@ final class EntityFieldTypeResolver {
         }
         // 未知业务类型保守按文本交给 codec；RDB 层仍可使用动态表单显式覆盖。
         return "VARCHAR";
+    }
+
+    private static boolean isJackson2JsonNode(Class<?> type) {
+        for (Class<?> current = type; current != null; current = current.getSuperclass()) {
+            if (JACKSON_2_JSON_NODE.equals(current.getName())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     static Object typedValue(String value, Class<?> type) {

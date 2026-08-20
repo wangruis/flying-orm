@@ -1,6 +1,6 @@
 package com.flying.orm.rdb.mapping;
 
-import com.fasterxml.jackson.databind.JsonNode;
+import tools.jackson.databind.JsonNode;
 
 import java.lang.reflect.Array;
 import java.util.ArrayDeque;
@@ -267,13 +267,13 @@ public record EntityMappingEvent(EntityMetadata<?> metadata,
             if (active.put(node, Boolean.TRUE) != null) {
                 throw new IllegalArgumentException("entity mapping JSON tree must not contain cycles");
             }
-            if (node.isContainerNode()) {
+            if (node.isContainer()) {
                 requireSafeNesting(depth);
             }
             nodes.push(node);
             depths.push(depth);
             exits.push(true);
-            node.elements().forEachRemaining(child -> {
+            node.iterator().forEachRemaining(child -> {
                 if (child != null) {
                     nodes.push(child);
                     depths.push(depth + 1);

@@ -1,23 +1,30 @@
 package com.flying.orm.rdb.json;
 
-import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.flying.orm.rdb.internal.ReflectionFailureSupport;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.JsonGenerator;
+import tools.jackson.core.type.TypeReference;
+import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.SerializationContext;
+import tools.jackson.databind.ValueSerializer;
+import tools.jackson.databind.json.JsonMapper;
+import tools.jackson.databind.module.SimpleModule;
 
-import java.io.IOException;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Modifier;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * JSON 字段的值转换器。ObjectMapper 完成初始化后只读复用，可以安全地被并发请求共享。
@@ -31,7 +38,12 @@ import java.util.Optional;
  */
 public final class JsonValueCodec {
 
-    private static final ObjectMapper MAPPER = JsonMapper.builder().build();
+    private static final String JACKSON_2_JSON_NODE = "com.fasterxml.jackson.databind.JsonNode";
+
+    private static final String JACKSON_2_MIGRATION_MESSAGE = "Jackson 2 JsonNode values are not supported; "
+            + "migrate to tools.jackson.databind.JsonNode";
+
+    private static final ObjectMapper MAPPER = createMapper();
 
     private static final TypeReference<LinkedHashMap<String, Object>> MAP_TYPE = new TypeReference<>() {
     };
@@ -69,6 +81,33 @@ public final class JsonValueCodec {
     private JsonValueCodec() {
     }
 
+    private static ObjectMapper createMapper() {
+        JsonMapper.Builder builder = JsonMapper.builder();
+        jackson2JsonNodeType().ifPresent(type -> {
+            SimpleModule migrationGuard = new SimpleModule("flying-orm-jackson2-migration-guard");
+            addJackson2MigrationGuard(migrationGuard, type);
+            builder.addModule(migrationGuard);
+        });
+        return builder.build();
+    }
+
+    private static Optional<Class<?>> jackson2JsonNodeType() {
+        try {
+            return Optional.of(Class.forName(JACKSON_2_JSON_NODE, false, JsonValueCodec.class.getClassLoader()));
+        } catch (ClassNotFoundException ignored) {
+            return Optional.empty();
+        }
+    }
+
+    private static <T> void addJackson2MigrationGuard(SimpleModule module, Class<T> type) {
+        module.addSerializer(type, new ValueSerializer<>() {
+            @Override
+            public void serialize(T value, JsonGenerator generator, SerializationContext context) {
+                throw new Jackson2MigrationException();
+            }
+        });
+    }
+
     /**
      * 把 JSON 字段值变成紧凑 JSON 文本。字符串也会先解析，坏 JSON 不会被写进数据库。
      */
@@ -76,6 +115,7 @@ public final class JsonValueCodec {
         if (value == null) {
             return null;
         }
+        rejectJackson2JsonNode(value.getClass());
         try {
             if (value instanceof CharSequence text) {
                 return MAPPER.writeValueAsString(MAPPER.readTree(text.toString()));
@@ -84,8 +124,9 @@ public final class JsonValueCodec {
                 return MAPPER.writeValueAsString(MAPPER.readTree(bytes));
             }
             return MAPPER.writeValueAsString(value);
-        } catch (IOException error) {
+        } catch (JacksonException error) {
             ReflectionFailureSupport.rethrowVirtualMachineError(error);
+            rethrowJackson2Migration(error);
             throw new IllegalArgumentException("json value cannot be serialized", error);
         }
     }
@@ -94,10 +135,13 @@ public final class JsonValueCodec {
      * 条件里的单个 JSON 元素按普通值编码。和 write 不同，字符串在这里是字符串值，不是整段 JSON 文本。
      */
     static String writeLiteral(Object value) {
+        Object safeValue = Objects.requireNonNull(value, "json literal must not be null");
+        rejectJackson2JsonNode(safeValue.getClass());
         try {
-            return MAPPER.writeValueAsString(Objects.requireNonNull(value, "json literal must not be null"));
-        } catch (IOException error) {
+            return MAPPER.writeValueAsString(safeValue);
+        } catch (JacksonException error) {
             ReflectionFailureSupport.rethrowVirtualMachineError(error);
+            rethrowJackson2Migration(error);
             throw new IllegalArgumentException("json literal cannot be serialized", error);
         }
     }
@@ -125,6 +169,7 @@ public final class JsonValueCodec {
      */
     public static Object read(Object value, Class<?> targetType) {
         Class<?> safeType = Objects.requireNonNull(targetType, "json target type must not be null");
+        rejectJackson2JsonNode(safeType);
         if (value == null || safeType.isInstance(value)) {
             return value;
         }
@@ -140,7 +185,7 @@ public final class JsonValueCodec {
                 return MAPPER.readValue(json, LIST_TYPE);
             }
             return MAPPER.readValue(json, safeType);
-        } catch (IOException error) {
+        } catch (JacksonException error) {
             ReflectionFailureSupport.rethrowVirtualMachineError(error);
             throw new IllegalArgumentException("json value cannot be converted to " + safeType.getName(), error);
         }
@@ -150,12 +195,15 @@ public final class JsonValueCodec {
      * 动态表单没有固定 Java 类型，按 JSON 自身结构还原成 Map、List 或标量值。
      */
     public static Object read(Object value) {
+        if (value != null) {
+            rejectJackson2JsonNode(value.getClass());
+        }
         if (value == null || value instanceof Map<?, ?> || value instanceof Collection<?> || value instanceof JsonNode) {
             return value;
         }
         try {
             return MAPPER.readValue(jsonText(value), Object.class);
-        } catch (IOException error) {
+        } catch (JacksonException error) {
             ReflectionFailureSupport.rethrowVirtualMachineError(error);
             throw new IllegalArgumentException("json value cannot be decoded", error);
         }
@@ -181,5 +229,30 @@ public final class JsonValueCodec {
         }
         throw new IllegalArgumentException("json database value must be text or bytes, but was "
                                                    + value.getClass().getName());
+    }
+
+    private static void rejectJackson2JsonNode(Class<?> type) {
+        for (Class<?> current = type; current != null; current = current.getSuperclass()) {
+            if (JACKSON_2_JSON_NODE.equals(current.getName())) {
+                throw new IllegalArgumentException(JACKSON_2_MIGRATION_MESSAGE);
+            }
+        }
+    }
+
+    private static void rethrowJackson2Migration(Throwable failure) {
+        Set<Throwable> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (Throwable current = failure; current != null && visited.add(current); current = current.getCause()) {
+            if (current instanceof Jackson2MigrationException) {
+                throw new IllegalArgumentException(JACKSON_2_MIGRATION_MESSAGE);
+            }
+        }
+    }
+
+    @SuppressWarnings("serial")
+    private static final class Jackson2MigrationException extends RuntimeException {
+
+        private Jackson2MigrationException() {
+            super(JACKSON_2_MIGRATION_MESSAGE);
+        }
     }
 }

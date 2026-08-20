@@ -54,6 +54,7 @@ final class SqlStatementBoundary {
             } else if (current == '#' && hashLineComments) {
                 index = lineCommentEnd(sql, index + 1);
             } else if (current == '/' && index + 1 < sql.length() && sql.charAt(index + 1) == '*') {
+                rejectMySqlExecutableComment(sql, index, mysqlDialect);
                 index = blockCommentEnd(sql, index + 2, nestedBlockComments);
             } else if (current == '$' && index + 1 < sql.length() && sql.charAt(index + 1) == '{') {
                 hasContent = true;
@@ -129,9 +130,24 @@ final class SqlStatementBoundary {
             return lineCommentEnd(sql, offset + 1);
         }
         if (current == '/' && offset + 1 < sql.length() && sql.charAt(offset + 1) == '*') {
+            rejectMySqlExecutableComment(sql, offset, mysqlDialect);
             return blockCommentEnd(sql, offset + 2, nestedBlockComments);
         }
         throw multipleStatements();
+    }
+
+    private static void rejectMySqlExecutableComment(String sql, int offset, boolean mysqlDialect) {
+        if (!mysqlDialect || offset + 2 >= sql.length()) {
+            return;
+        }
+        char marker = sql.charAt(offset + 2);
+        boolean mysqlExecutable = marker == '!';
+        boolean mariaDbExecutable = (marker == 'M' || marker == 'm')
+                && offset + 3 < sql.length()
+                && sql.charAt(offset + 3) == '!';
+        if (mysqlExecutable || mariaDbExecutable) {
+            throw new IllegalArgumentException("MySQL executable comments are not allowed");
+        }
     }
 
     private static boolean isDoubleDashCommentStart(String sql, int offset, boolean mysqlDialect) {

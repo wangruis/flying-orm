@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.ConditionGroups;
 import com.flying.orm.core.condition.StructuredConditionInput;
 import com.flying.orm.core.condition.StructuredConditionPolicy;
 import com.flying.orm.core.form.DynamicForm;
@@ -119,9 +120,10 @@ final class FormScopeSupport {
     }
 
     private static ConditionGroup withExpectedVersion(ConditionGroup where, OptimisticLockOptions lock) {
-        ConditionGroup.Builder builder = ConditionGroup.and();
-        where.children().forEach(builder::add);
-        return builder.where(lock.field(), "=", lock.expectedValue()).build();
+        ConditionGroup expectedVersion = ConditionGroup.and()
+                                                        .where(lock.field(), "=", lock.expectedValue())
+                                                        .build();
+        return ConditionGroups.and(where, expectedVersion);
     }
 
     record PreparedBatchUpdate(DynamicForm form,

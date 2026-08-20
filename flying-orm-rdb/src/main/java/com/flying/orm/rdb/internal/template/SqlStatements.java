@@ -54,7 +54,7 @@ public final class SqlStatements {
 
     private static String requireSingle(String sql, String dialectName) {
         String normalized = dialectName.trim().toLowerCase(Locale.ROOT);
-        boolean mysql = normalized.contains("mysql");
+        boolean mysql = normalized.contains("mysql") || normalized.contains("mariadb");
         boolean nestedBlockComments = normalized.contains("postgres")
                 || normalized.contains("sql server")
                 || normalized.contains("sqlserver")

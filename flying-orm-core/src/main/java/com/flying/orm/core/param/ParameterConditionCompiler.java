@@ -32,9 +32,7 @@ import java.util.Set;
 public final class ParameterConditionCompiler {
 
     private static final int DEFAULT_MAX_COLLECTION_SIZE = 1_000;
-
     private static final int MAX_COLLECTION_SIZE_LIMIT = 1_000;
-
     private static final int DEFAULT_MAX_STRING_LENGTH = 4_096;
 
     private final List<ParameterConditionSpec> specs;
@@ -136,7 +134,10 @@ public final class ParameterConditionCompiler {
                                        int maxStringLength) {
         // 先把 Iterable 快照并清理一次，后面的 converter 和 AST 构建复用同一份值，单次迭代器不会被判空耗尽。
         String parameter = spec.normalizedParameter();
-        Object value = indexedParameters.containsKey(parameter) ? indexedParameters.get(parameter) : null;
+        if (!indexedParameters.containsKey(parameter) && !spec.hasDefaultValue()) {
+            return EmptyValue.INSTANCE;
+        }
+        Object value = indexedParameters.get(parameter);
         ConditionValueShape shape = valueShape(spec.operator(), terms);
         Object normalized = normalizePresentValue(value, shape, maxCollectionSize, maxStringLength);
         if (normalized == EmptyValue.INSTANCE && spec.hasDefaultValue()) {

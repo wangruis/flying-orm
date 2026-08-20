@@ -85,8 +85,9 @@ final class JdbcStatementOptions {
         }
         try {
             statement.setLargeMaxRows(maxRows);
-        } catch (SQLFeatureNotSupportedException | AbstractMethodError unsupported) {
-            // int 版本没有足够表达力时不把限制截断成错误的更小值，读取方仍负责最终边界。
+        } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError unsupported) {
+            // 滚动结果集会直接交给回调，没有 ORM 读取循环兜底；宁可采用更小的安全上限，也不能退化为无界。
+            statement.setMaxRows(Integer.MAX_VALUE);
         }
     }
 }
