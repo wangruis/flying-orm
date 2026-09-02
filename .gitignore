@@ -1,0 +1,15 @@
+# Maven build output
+target/
+**/target/
+
+# IDE and local analysis state
+.idea/
+.codebase-memory/
+.tmp/
+
+# Local review and performance evidence is not part of the published library.
+.superpowers/
+
+# OS metadata
+.DS_Store
+Thumbs.db

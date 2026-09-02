@@ -1,0 +1,117 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<FindBugsFilter>
+    <!-- Public guard methods deliberately fail fast with unchecked contract errors. -->
+    <Match>
+        <Bug pattern="THROWS_METHOD_THROWS_RUNTIMEEXCEPTION"/>
+    </Match>
+    <!-- ORM SQL is structurally rendered and parameterized before JDBC prepares it. -->
+    <Match>
+        <Class name="~com\.flying\.orm\.rdb\.jdbc\..*"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <!-- Null arrays mean an absent optional value; an empty array has different binding semantics. -->
+    <Match>
+        <Or>
+            <Class name="com.flying.orm.rdb.execution.ProtectedBatchRows"/>
+            <Class name="com.flying.orm.rdb.form.FormProtectedBatchRows"/>
+            <Class name="com.flying.orm.rdb.vector.VectorValueCodec"/>
+        </Or>
+        <Bug pattern="PZLA_PREFER_ZERO_LENGTH_ARRAYS"/>
+    </Match>
+    <!-- Locks are acquired immediately before the enclosing try/finally. -->
+    <Match>
+        <Or>
+            <Class name="com.flying.orm.rdb.form.SyncBatchHeadState"/>
+            <Class name="com.flying.orm.rdb.jdbc.JdbcBatchRows"/>
+        </Or>
+        <Bug pattern="CWO_CLOSED_WITHOUT_OPENED"/>
+    </Match>
+    <!-- Execution exceptions retain structured, in-process result context by design. -->
+    <Match>
+        <Or>
+            <Class name="com.flying.orm.rdb.batch.BatchOptimisticLockException"/>
+            <Class name="com.flying.orm.rdb.batch.BatchWriteException"/>
+            <Class name="com.flying.orm.rdb.execution.SqlExecutionSequenceException"/>
+            <Class name="com.flying.orm.rdb.migration.DataMigrationException"/>
+            <Class name="com.flying.orm.rdb.reactive.R2dbcBatchChunkConflictFailure"/>
+            <Class name="com.flying.orm.rdb.reactive.R2dbcBatchChunkWriteFailure"/>
+            <Class name="com.flying.orm.rdb.schema.EntitySchemaSyncException"/>
+        </Or>
+        <Bug pattern="SE_BAD_FIELD"/>
+    </Match>
+    <!-- Private interface helpers are reached from nested record constructors or the composite observer. -->
+    <Match>
+        <Or>
+            <Class name="com.flying.orm.rdb.observation.BatchExecutionObservation"/>
+            <Class name="com.flying.orm.rdb.observation.BatchExecutionObserver"/>
+        </Or>
+        <Bug pattern="UPM_UNCALLED_PRIVATE_METHOD"/>
+    </Match>
+    <!-- Some drivers return null despite non-null metadata declarations. -->
+    <Match>
+        <Class name="com.flying.orm.rdb.reactive.R2dbcLargeObjectRows"/>
+        <Bug pattern="RCN_REDUNDANT_NULLCHECK_OF_NONNULL_VALUE"/>
+    </Match>
+    <!-- These accessors expose immutable values already frozen during construction. -->
+    <Match>
+        <Class name="com.flying.orm.core.codec.ValueCodecRegistry"/>
+        <Bug pattern="MS_EXPOSE_REP,SING_SINGLETON_HAS_NONPRIVATE_CONSTRUCTOR"/>
+    </Match>
+    <Match>
+        <Or>
+            <Class name="com.flying.orm.core.condition.StructuredConditionInput"/>
+            <Class name="com.flying.orm.core.form.DynamicFormChangeSet"/>
+            <Class name="com.flying.orm.core.metadata.ForeignKeyMetadata"/>
+            <Class name="com.flying.orm.core.param.ParameterConditionCompiler"/>
+            <Class name="com.flying.orm.core.protection.EncryptedFieldDefinition"/>
+            <Class name="com.flying.orm.core.scope.FieldScope"/>
+            <Class name="com.flying.orm.core.sql.render.SqlFragment"/>
+            <Class name="com.flying.orm.core.sql.render.SqlRequest"/>
+            <Class name="com.flying.orm.core.sql.render.SqlRenderer"/>
+            <Class name="com.flying.orm.core.type.DatabaseType"/>
+        </Or>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!-- These RDB values are immutable snapshots or deliberate live execution handles. -->
+    <Match>
+        <Or>
+            <Class name="com.flying.orm.rdb.bootstrap.FlyingOrmEnvironment"/>
+            <Class name="com.flying.orm.rdb.dialect.RdbDialect"/>
+            <Class name="com.flying.orm.rdb.execution.BatchRowSnapshotter$Snapshot"/>
+            <Class name="com.flying.orm.rdb.execution.ProtectedBatchRows$RowView"/>
+            <Class name="com.flying.orm.rdb.form.spec.WriteSpec"/>
+            <Class name="com.flying.orm.rdb.internal.plan.ConditionStructurePlan"/>
+            <Class name="com.flying.orm.rdb.form.spec.QuerySpec"/>
+            <Class name="com.flying.orm.rdb.internal.mapping.RepositoryUpsertValues"/>
+            <Class name="com.flying.orm.rdb.internal.protection.ProtectedOwnerBatchPlan$Match"/>
+            <Class name="com.flying.orm.rdb.internal.protection.ProtectedReplacementBatchPlan$Insertion"/>
+            <Class name="com.flying.orm.rdb.mapping.EntityMappingEvent"/>
+            <Class name="com.flying.orm.rdb.mapping.EntityMetadata"/>
+            <Class name="com.flying.orm.rdb.observation.ResourceCleanupObservation"/>
+            <Class name="com.flying.orm.rdb.observation.SqlExecutionObservation"/>
+            <Class name="com.flying.orm.rdb.operator.ColumnBuilder"/>
+            <Class name="com.flying.orm.rdb.operator.ForeignKeyBuilder"/>
+            <Class name="com.flying.orm.rdb.operator.IndexBuilder"/>
+            <Class name="com.flying.orm.rdb.operator.SyncColumnBuilder"/>
+            <Class name="com.flying.orm.rdb.operator.SyncDatabaseOperator$NativeComponents"/>
+            <Class name="com.flying.orm.rdb.operator.SyncForeignKeyBuilder"/>
+            <Class name="com.flying.orm.rdb.operator.SyncIndexBuilder"/>
+            <Class name="com.flying.orm.rdb.protection.ProtectedFieldRuntime$PreparedWrite"/>
+            <Class name="com.flying.orm.rdb.schema.EntitySchemaSynchronizer"/>
+            <Class name="com.flying.orm.rdb.schema.SchemaMigrationObservation"/>
+            <Class name="com.flying.orm.rdb.template.SqlTemplate"/>
+            <Class name="com.flying.orm.rdb.transaction.JdbcTransactionContext"/>
+            <Class name="com.flying.orm.rdb.transaction.R2dbcTransactionContext"/>
+        </Or>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+    <!-- Resources close in finally; awaitChange is called from the caller's state loop. -->
+    <Match>
+        <Class name="com.flying.orm.rdb.jdbc.JdbcAdvancedOperations"/>
+        <Bug pattern="OBL_UNSATISFIED_OBLIGATION"/>
+    </Match>
+    <Match>
+        <Class name="com.flying.orm.rdb.jdbc.JdbcBatchRows"/>
+        <Bug pattern="WA_AWAIT_NOT_IN_LOOP"/>
+    </Match>
+</FindBugsFilter>

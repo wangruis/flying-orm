@@ -1,0 +1,11 @@
+<?xml version="1.0"?>
+<!DOCTYPE suppressions PUBLIC
+        "-//Checkstyle//DTD SuppressionFilter Configuration 1.2//EN"
+        "https://checkstyle.org/dtds/suppressions_1_2.dtd">
+<suppressions>
+    <!-- These public facades intentionally keep related entry points together. -->
+    <suppress checks="MethodCount" files="SchemaMetadata\.java"/>
+    <suppress checks="MethodCount" files="SyncFormClient\.java"/>
+    <suppress checks="MethodCount" files="ReactiveFormRepository\.java"/>
+    <suppress checks="MethodCount" files="SyncFormRepository\.java"/>
+</suppressions>

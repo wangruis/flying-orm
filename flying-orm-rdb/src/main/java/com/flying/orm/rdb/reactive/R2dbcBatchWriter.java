@@ -1,0 +1,85 @@
+package com.flying.orm.rdb.reactive;
+
+import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchWriteOptions;
+import com.flying.orm.rdb.batch.BatchWriteRequest;
+import com.flying.orm.rdb.batch.BatchWriteResult;
+import com.flying.orm.rdb.observation.BatchExecutionObserver;
+import com.flying.orm.rdb.observation.SqlExecutionObserver;
+import com.flying.orm.rdb.transaction.R2dbcTransactionParticipant;
+import io.r2dbc.spi.ConnectionFactory;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import java.util.Objects;
+
+/**
+ * R2DBC 批量写入的内部稳定门面。
+ *
+ * <p>门面只负责检查请求模式并选择 ATOMIC 或 INDEPENDENT 协调器。分片、参数绑定、连接清理、事务状态、
+ * 结果拼装和回执身份各自只有一份实现，避免两种模式在安全边界上逐渐产生不同语义。</p>
+ *
+ * <p>本对象和内部协作者都不保存请求级状态，可以被多个订阅并发复用。每次订阅的截止时间、分片列表、
+ * 事务状态和结果集合都在 Reactor 链内部创建。</p>
+ *
+ * @author wangr
+ * @date 2026-07-24
+ * @version v1.0
+ */
+final class R2dbcBatchWriter {
+
+    private final R2dbcAtomicBatchWriter atomicWriter;
+    private final R2dbcIndependentBatchWriter independentWriter;
+    private final R2dbcBatchConnectionLifecycle connections;
+    private final R2dbcBindMarkers bindMarkers;
+
+    R2dbcBatchWriter(ConnectionFactory connectionFactory,
+                     BatchReceiptStore receiptStore,
+                      R2dbcBindMarkers bindMarkers,
+                      SqlExecutionObserver cleanupObserver,
+                      BatchExecutionObserver batchObserver,
+                      R2dbcTransactionParticipant transactionParticipant) {
+        this.bindMarkers = Objects.requireNonNull(bindMarkers, "r2dbc bind markers must not be null");
+        R2dbcBatchWriterChunks chunks = new R2dbcBatchWriterChunks(this.bindMarkers);
+        R2dbcBatchReceiptSupport receipts = new R2dbcBatchReceiptSupport();
+        this.connections = new R2dbcBatchConnectionLifecycle(
+                connectionFactory, cleanupObserver, transactionParticipant);
+        R2dbcBatchResultAssembler results = new R2dbcBatchResultAssembler();
+        R2dbcExternalBatchCompletion externalCompletion = new R2dbcExternalBatchCompletion(results, batchObserver);
+        this.atomicWriter = new R2dbcAtomicBatchWriter(
+                chunks, receiptStore, receipts, connections, results, externalCompletion);
+        this.independentWriter = new R2dbcIndependentBatchWriter(
+                chunks, receiptStore, receipts, connections, results);
+    }
+
+    Mono<ReactiveTransactionSourceResolver.Resolution> resolveTransaction() {
+        return connections.resolveTransaction();
+    }
+
+    Mono<BatchWriteResult> write(BatchWriteRequest request,
+                                 ReactiveTransactionSourceResolver.Resolution resolution) {
+        BatchWriteRequest safeRequest = Objects.requireNonNull(request, "batch write request must not be null");
+        ReactiveTransactionSourceResolver.Resolution safeResolution = Objects.requireNonNull(
+                resolution, "transaction resolution must not be null");
+        return Mono.defer(() -> {
+            String transportSql = bindMarkers.adapt(safeRequest);
+            Mono<BatchWriteResult> execution = safeRequest.options().mode() == BatchWriteOptions.Mode.INDEPENDENT
+                    ? independentWriter.write(safeRequest, safeResolution, transportSql)
+                    : atomicWriter.write(safeRequest, safeResolution, transportSql);
+            // 校验在获取连接、订阅输入和执行第一条 SQL 之前完成。
+            return connections.validate(safeRequest.options(), safeResolution).then(execution);
+        });
+    }
+
+    Flux<BatchChunkResult> writeChunks(BatchWriteRequest request,
+                                       ReactiveTransactionSourceResolver.Resolution resolution) {
+        BatchWriteRequest safeRequest = Objects.requireNonNull(request, "batch write request must not be null");
+        ReactiveTransactionSourceResolver.Resolution safeResolution = Objects.requireNonNull(
+                resolution, "transaction resolution must not be null");
+        return Flux.defer(() -> {
+            String transportSql = bindMarkers.adapt(safeRequest);
+            return connections.validate(safeRequest.options(), safeResolution)
+                    .thenMany(independentWriter.writeChunks(safeRequest, safeResolution, transportSql));
+        });
+    }
+}
