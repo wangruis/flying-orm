@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.jdbc;
 
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchWriteException;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
@@ -113,6 +114,13 @@ final class JdbcBatchExecutionObservationSupport {
                 return;
             }
             notifyObserver(BatchExecutionObservation.failedSummary(request, duration, safeError));
+        }
+
+        void evidence(BatchExecutionEvidence evidence) {
+            if (observer != null) {
+                observer.onExecutionEvidence(Objects.requireNonNull(
+                        evidence, "batch execution evidence must not be null"));
+            }
         }
 
         void cleanupFailure(Throwable error) {

@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.sql.render.SqlIdentifiers;
 import com.flying.orm.core.type.DatabaseType;
 
@@ -8,6 +9,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.StringJoiner;
+import java.util.HexFormat;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Small DDL type facade. Identifier quoting, type mapping and physical comparison have separate owners.
@@ -18,6 +21,7 @@ final class SchemaDialectTypeSupport {
     private final String quoteClose;
     private final SchemaTypeMapping mapping;
     private final SchemaTypeComparison comparison;
+    private final SchemaDialect.GeneratedValueStyle databaseStyle;
 
     SchemaDialectTypeSupport(String quoteOpen,
                              String quoteClose,
@@ -28,6 +32,7 @@ final class SchemaDialectTypeSupport {
         Map<String, String> mappings = Map.copyOf(new LinkedHashMap<>(typeMappings));
         SchemaDialect.GeneratedValueStyle style = Objects.requireNonNull(
                 databaseStyle, "database style must not be null");
+        this.databaseStyle = style;
         this.mapping = new SchemaTypeMapping(mappings, style);
         this.comparison = new SchemaTypeComparison(style);
     }
@@ -44,6 +49,47 @@ final class SchemaDialectTypeSupport {
         return quoted.toString();
     }
 
+    String identifier(RelationIdentity value) {
+        RelationIdentity relation = Objects.requireNonNull(value, "relation identity must not be null");
+        StringJoiner qualified = new StringJoiner(".");
+        if (relation.catalog().isPresent()) {
+            qualified.add(identifierSegment(relation.catalog().orElseThrow()));
+        }
+        if (relation.schema().isPresent()) {
+            qualified.add(identifierSegment(relation.schema().orElseThrow()));
+        }
+        qualified.add(identifierSegment(relation.table()));
+        return qualified.toString();
+    }
+
+    String namespaceObjectIdentifier(RelationIdentity value, String objectName) {
+        RelationIdentity relation = Objects.requireNonNull(value, "relation identity must not be null");
+        StringJoiner qualified = new StringJoiner(".");
+        if (relation.catalog().isPresent()) {
+            qualified.add(identifierSegment(relation.catalog().orElseThrow()));
+        }
+        if (relation.schema().isPresent()) {
+            qualified.add(identifierSegment(relation.schema().orElseThrow()));
+        }
+        qualified.add(identifierSegment(objectName));
+        return qualified.toString();
+    }
+
+    String schemaObjectIdentifier(RelationIdentity value, String objectName) {
+        RelationIdentity relation = Objects.requireNonNull(value, "relation identity must not be null");
+        StringJoiner qualified = new StringJoiner(".");
+        if (relation.schema().isPresent()) {
+            qualified.add(identifierSegment(relation.schema().orElseThrow()));
+        }
+        qualified.add(identifierSegment(objectName));
+        return qualified.toString();
+    }
+
+    private String identifierSegment(String value) {
+        String text = SqlIdentifiers.requireIdentifier(value, "identifier segment");
+        return quoteOpen == null ? text : quoteOpen + text + quoteClose;
+    }
+
     String dataType(String value) {
         return mapping.render(value);
     }
@@ -57,7 +103,16 @@ final class SchemaDialectTypeSupport {
     }
 
     String quoteLiteral(String value) {
-        return "'" + requireText(value, "literal").replace("'", "''") + "'";
+        return "'" + Objects.requireNonNull(value, "literal must not be null").replace("'", "''") + "'";
+    }
+
+    String valueLiteral(String value) {
+        if (databaseStyle == SchemaDialect.GeneratedValueStyle.MYSQL && value.indexOf('\\') >= 0) {
+            // Hex text has the same value with and without NO_BACKSLASH_ESCAPES.
+            return "_utf8mb4 X'" + HexFormat.of().formatHex(value.getBytes(StandardCharsets.UTF_8)) + "'";
+        }
+        return (databaseStyle == SchemaDialect.GeneratedValueStyle.SQL_SERVER ? "N" : "")
+                + quoteLiteral(value);
     }
 
     static boolean safeWideningDataType(String current, String target) {

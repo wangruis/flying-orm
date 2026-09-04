@@ -3,8 +3,12 @@ package com.flying.orm.rdb.form;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchCommitFact;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
+import com.flying.orm.rdb.batch.BatchExecutionState;
 import com.flying.orm.rdb.batch.BatchWriteCompletion;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
+import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
 import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
@@ -12,6 +16,7 @@ import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Function;
 
 /**
  * 负责逐行乐观锁批量更新及其分片结果流。
@@ -59,6 +64,31 @@ final class ReactiveFormBatchUpdateOperations extends ReactiveFormOperationSuppo
                                                DataScope scope,
                                                BatchWriteOptions options,
                                                BatchWriteCompletion completion) {
+        return executeBatch(form, updates, scope, options, completion,
+                            executor::writeBatch, executor::writeProtectedBatch,
+                            BatchWriteResult::empty);
+    }
+
+    Mono<BatchExecutionEvidence> updateBatchEvidence(DynamicForm form,
+                                                      Publisher<BatchOptimisticUpdate> updates,
+                                                      DataScope scope,
+                                                      BatchWriteOptions options,
+                                                      BatchWriteCompletion completion) {
+        return executeBatch(form, updates, scope, options, completion,
+                            executor::writeBatchEvidence, executor::writeProtectedBatchEvidence,
+                            mode -> BatchExecutionEvidence.of(
+                                    mode, BatchExecutionState.SUCCESS,
+                                    BatchCommitFact.NOT_APPLICABLE, List.of()));
+    }
+
+    private <R> Mono<R> executeBatch(DynamicForm form,
+                                     Publisher<BatchOptimisticUpdate> updates,
+                                     DataScope scope,
+                                     BatchWriteOptions options,
+                                     BatchWriteCompletion completion,
+                                     Function<BatchWriteRequest, Mono<R>> writer,
+                                     Function<BatchWriteRequest, Mono<R>> protectedWriter,
+                                     Function<BatchWriteOptions.Mode, R> emptyResult) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
         BatchWriteOptions safeOptions = Objects.requireNonNull(options, "batch write options must not be null");
         Flux<BatchOptimisticUpdate> source = Flux.from(Objects.requireNonNull(updates,
@@ -68,10 +98,12 @@ final class ReactiveFormBatchUpdateOperations extends ReactiveFormOperationSuppo
                     return Mono.error(Objects.requireNonNull(signal.getThrowable()));
                 }
                 if (!signal.hasValue()) {
-                    return Mono.just(BatchWriteResult.empty(safeOptions.mode()));
+                    return Mono.just(emptyResult.apply(safeOptions.mode()));
                 }
                 BatchOptimisticUpdate sourceFirst = signal.get();
                 DataScope effectiveScope = scopes.effectiveScope(scope);
+                FieldUseGuard.approveBatchUpdate(
+                        renderer, safeForm, sourceFirst, effectiveScope, fieldUsePolicy);
                 boolean protectedOperation = ReactiveProtectionCpuBoundary.writesEncryptedField(
                         safeForm, sourceFirst.ownedValues())
                         || ReactiveProtectionCpuBoundary.usesEncryptedCondition(safeForm, sourceFirst.where())
@@ -98,10 +130,10 @@ final class ReactiveFormBatchUpdateOperations extends ReactiveFormOperationSuppo
                                                               safeForm, first, plan,
                                                               indexed.getT2(), indexed.getT1(),
                                                               protectionLayout, batchScope, protection));
-                    com.flying.orm.rdb.batch.BatchWriteRequest request = plan.request(
+                    BatchWriteRequest request = plan.request(
                             parameters, safeOptions, completion);
                     return FormProtectedBatchRows.requiresProtectedExecution(protectionLayout)
-                            ? executor.writeProtectedBatch(request) : executor.writeBatch(request);
+                            ? protectedWriter.apply(request) : writer.apply(request);
                 });
             }).single();
     }
@@ -143,6 +175,8 @@ final class ReactiveFormBatchUpdateOperations extends ReactiveFormOperationSuppo
                 }
                 BatchOptimisticUpdate sourceFirst = signal.get();
                 DataScope effectiveScope = scopes.effectiveScope(scope);
+                FieldUseGuard.approveBatchUpdate(
+                        renderer, safeForm, sourceFirst, effectiveScope, fieldUsePolicy);
                 boolean protectedOperation = ReactiveProtectionCpuBoundary.writesEncryptedField(
                         safeForm, sourceFirst.ownedValues())
                         || ReactiveProtectionCpuBoundary.usesEncryptedCondition(safeForm, sourceFirst.where())

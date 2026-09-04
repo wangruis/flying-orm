@@ -84,7 +84,9 @@ public final class PostgresqlVectorQueryRenderer {
         StringBuilder sql = new StringBuilder("select ")
                 .append(selected).append(", ").append(distance)
                 .append(" as ").append(dialect.schema().identifier(DISTANCE_LABEL))
-                .append(" from ").append(dialect.schema().identifier(safeForm.table()));
+                .append(" from ").append(safeForm.relationIdentity()
+                        .map(dialect.schema()::relationIdentifier)
+                        .orElseGet(() -> dialect.schema().identifier(safeForm.table())));
         List<Object> parameters = new ArrayList<>();
         parameters.add(parameter);
 

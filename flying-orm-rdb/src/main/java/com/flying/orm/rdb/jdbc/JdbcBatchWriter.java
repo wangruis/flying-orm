@@ -1,6 +1,8 @@
 package com.flying.orm.rdb.jdbc;
 
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
+import com.flying.orm.rdb.batch.BatchExecutionEvidenceException;
 import com.flying.orm.rdb.batch.BatchWriteException;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
@@ -17,7 +19,6 @@ import com.flying.orm.rdb.transaction.JdbcTransactionParticipant;
 import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -35,6 +36,9 @@ import static com.flying.orm.rdb.jdbc.JdbcBatchSupport.rolledBack;
 import static com.flying.orm.rdb.jdbc.JdbcBatchSupport.rolledBackForAtomic;
 import static com.flying.orm.rdb.jdbc.JdbcBatchSupport.unknown;
 import static com.flying.orm.rdb.jdbc.JdbcBatchSupport.unknownAfterCommitFailure;
+import static com.flying.orm.rdb.jdbc.JdbcBatchAtomicSupport.failedBeforeTransaction;
+import static com.flying.orm.rdb.jdbc.JdbcBatchAtomicSupport.readFirstOwnedChunk;
+import static com.flying.orm.rdb.jdbc.JdbcBatchAtomicSupport.requireAtomicDeadline;
 
 /**
  * 原生 JDBC 批量写入器。
@@ -54,6 +58,7 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
     private final BatchExecutionObserver batchObserver;
     private final JdbcBatchExecutionObservationSupport observations;
     private final JdbcBatchChunkExecutor chunks = new JdbcBatchChunkExecutor();
+    private final JdbcBatchEvidenceExecutor evidence;
     private final JdbcIndependentBatchExecutor independent;
     private final JdbcExternalBatchCompletion externalCompletion = new JdbcExternalBatchCompletion();
 
@@ -71,6 +76,7 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
         }
         this.connections = new JdbcConnectionProvider(this.dataSource, transactionParticipant, cleanupObserver);
         this.observations = JdbcBatchExecutionObservationSupport.create(batchObserver, cleanupObserver);
+        this.evidence = new JdbcBatchEvidenceExecutor(connections, chunks);
         this.independent = new JdbcIndependentBatchExecutor(connections, transactionParticipant, chunks);
     }
 
@@ -95,6 +101,32 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
         BatchWriteRequest safeRequest = JdbcBatchSupport.requireSupportedRequest(request);
         JdbcBatchExecutionObservationSupport.BatchContext context = observations.begin(safeRequest);
         return execute(safeRequest, context);
+    }
+
+    /**
+     * 执行批量并返回 SQL 执行证据。外部事务路径在最后一片执行完成后立即返回，
+     * 不注册或等待事务 completion。
+     */
+    @Override
+    public BatchExecutionEvidence writeBatchEvidence(BatchWriteRequest request) {
+        BatchWriteRequest safeRequest = JdbcBatchSupport.requireSupportedRequest(request);
+        if (safeRequest.options().mode() != BatchWriteOptions.Mode.ATOMIC) {
+            throw new UnsupportedOperationException("jdbc batch evidence currently requires ATOMIC mode");
+        }
+        JdbcBatchExecutionObservationSupport.BatchContext context = observations.begin(safeRequest);
+        try {
+            BatchExecutionEvidence executionEvidence = evidence.write(safeRequest);
+            context.evidence(executionEvidence);
+            return executionEvidence;
+        } catch (BatchExecutionEvidenceException failure) {
+            context.evidence(failure.evidence());
+            throw failure;
+        }
+    }
+
+    @Override
+    public BatchExecutionEvidence writeProtectedBatchEvidence(BatchWriteRequest request) {
+        return writeBatchEvidence(request);
     }
 
     @Override
@@ -217,36 +249,6 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
             rethrowTryWithResourcesVirtualMachineError(error);
             throw error;
         }
-    }
-
-    /** 自有事务的首片沿用同一有界输入规则，但在真正需要连接之前不占用连接或启动 SQL 时限。 */
-    private static List<ProtectedBatchRows.RowView> readFirstOwnedChunk(JdbcBatchRows rows, BatchWriteRequest request) {
-        JdbcBatchSupport.ChunkReadProgress progress = new JdbcBatchSupport.ChunkReadProgress();
-        try {
-            return readChunk(rows, request, 0L, 0,
-                    JdbcBatchSupport.BatchDeadline.start(Duration.ZERO), progress);
-        } catch (RuntimeException | Error | InterruptedException | TimeoutException error) {
-            restoreInterrupt(error);
-            rethrowVirtualMachineError(error);
-            throw failure("jdbc atomic batch input failed", error,
-                          failedBeforeTransaction(error, progress.acceptedRows()));
-        }
-    }
-
-    private static void requireAtomicDeadline(JdbcBatchSupport.BatchDeadline deadline, int firstInputCount) {
-        try {
-            deadline.remaining();
-        } catch (RuntimeException | TimeoutException error) {
-            rethrowVirtualMachineError(error);
-            throw failure("jdbc atomic batch timed out before execution", error,
-                          failedBeforeTransaction(error, firstInputCount));
-        }
-    }
-
-    private static BatchWriteResult failedBeforeTransaction(Throwable error, int inputCount) {
-        return BatchWriteResult.from(
-                BatchWriteOptions.Mode.ATOMIC,
-                List.of(BatchChunkResult.failed(0, 0L, inputCount, error)));
     }
 
     private BatchWriteResult executeOwnedAtomic(JdbcConnectionProvider.JdbcConnectionLease lease,

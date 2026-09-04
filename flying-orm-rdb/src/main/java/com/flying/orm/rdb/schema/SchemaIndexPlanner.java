@@ -1,7 +1,9 @@
 package com.flying.orm.rdb.schema;
 
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.metadata.IndexDefinition;
 import com.flying.orm.core.metadata.IndexMetadata;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.sql.render.SqlRequest;
 
@@ -17,6 +19,22 @@ final class SchemaIndexPlanner {
 
     SchemaIndexPlanner(SchemaTableSqlRenderer tables) {
         this.tables = Objects.requireNonNull(tables, "schema table renderer must not be null");
+    }
+
+    /** 多表冷规划路径只发布规范 operation，不提前渲染方言 SQL。 */
+    static List<SchemaOperation> addOperations(RelationalTableDefinition target) {
+        RelationalTableDefinition safeTarget = Objects.requireNonNull(
+                target, "relational table definition must not be null");
+        return safeTarget.indexes().stream()
+                .sorted(java.util.Comparator.comparing(IndexDefinition::name))
+                .map(index -> SchemaOperation.of(
+                        SchemaOperation.Kind.ADD_INDEX,
+                        safeTarget.identity(),
+                        index.name(),
+                        null,
+                        index,
+                        SchemaOperation.Compatibility.REQUIRES_REVIEW))
+                .toList();
     }
 
     void addChanges(List<SqlRequest> requests,

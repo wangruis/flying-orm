@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.repository;
 
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchGeneratedKeys;
 import com.flying.orm.rdb.batch.BatchMemoryBudget;
 import com.flying.orm.rdb.batch.BatchWriteCompletion;
@@ -132,6 +133,24 @@ final class ReactiveRepositoryBatchCoordinator<T> {
         });
     }
 
+    <R> Mono<BatchExecutionEvidence> evidence(Publisher<T> entities,
+                                              Function<T, R> mapper,
+                                              EntityLifecyclePhase after,
+                                              BatchWriteOptions options,
+                                              boolean generatedKeyInsert,
+                                              EvidenceWriter<R> writer) {
+        return Mono.defer(() -> {
+            BatchWriteOptions safeOptions = Objects.requireNonNull(options, "batch write options must not be null");
+            boolean returnGeneratedKeys = generatedKeyInsert && ids.databaseGenerated();
+            if (lifecyclePlan(after, returnGeneratedKeys).tracked()) {
+                return Mono.error(new UnsupportedOperationException(
+                        "repository batch evidence cannot complete entity lifecycle or generated-key assignment"));
+            }
+            return writer.apply(directRows(entities, mapper),
+                                BatchWriteCompletion.noop(), BatchGeneratedKeys.none());
+        });
+    }
+
     private Mono<BatchWriteResult> finishFailure(Throwable error,
                                                  boolean awaitingExternalCompletion,
                                                  BatchLifecycleTracker<T> tracker,
@@ -228,6 +247,13 @@ final class ReactiveRepositoryBatchCoordinator<T> {
         Mono<BatchWriteResult> apply(Publisher<R> rows,
                                      BatchWriteCompletion completion,
                                      BatchGeneratedKeys generatedKeys);
+    }
+
+    @FunctionalInterface
+    interface EvidenceWriter<R> {
+        Mono<BatchExecutionEvidence> apply(Publisher<R> rows,
+                                           BatchWriteCompletion completion,
+                                           BatchGeneratedKeys generatedKeys);
     }
 
     @FunctionalInterface

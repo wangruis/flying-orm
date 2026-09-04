@@ -2,11 +2,13 @@ package com.flying.orm.core.sql.render;
 
 import com.flying.orm.core.condition.ConditionValueShape;
 import com.flying.orm.core.condition.TermCondition;
+import com.flying.orm.core.condition.TermExtensionDescriptor;
 import com.flying.orm.core.internal.value.OwnedBindableValues;
 import com.flying.orm.core.internal.Names;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * SQL term handler 负责把一个 term id 对应的结构化条件转换为参数化 SQL 片段。
@@ -29,6 +31,13 @@ public interface SqlTermHandler {
      */
     default ConditionValueShape shape() {
         return ConditionValueShape.SCALAR;
+    }
+
+    /**
+     * 可配置外部查询需要的显式描述器。空值继续表示既有启动期可信 handler。
+     */
+    default Optional<TermExtensionDescriptor> descriptor() {
+        return Optional.empty();
     }
 
     /**
@@ -250,6 +259,48 @@ public interface SqlTermHandler {
         return new SimpleSqlTermHandler(id, shape, renderer, false);
     }
 
+    /**
+     * 创建带稳定治理契约的 SQL term。只有显式选择此工厂的扩展才能进入受治理的可配置查询路径。
+     */
+    static SqlTermHandler of(TermExtensionDescriptor descriptor,
+                             ConditionValueShape shape,
+                             SqlTermRenderer renderer) {
+        return new DescribedSqlTermHandler(
+                Objects.requireNonNull(descriptor, "term extension descriptor must not be null"),
+                Objects.requireNonNull(shape, "sql term value shape must not be null"),
+                Objects.requireNonNull(renderer, "sql term renderer must not be null"));
+    }
+
+}
+
+/** 扩展专用实现把参数承诺放在扩展慢路核对，标准 term 不增加 Optional 或摘要读取。 */
+record DescribedSqlTermHandler(TermExtensionDescriptor extension,
+                               ConditionValueShape shape,
+                               SqlTermRenderer renderer) implements SqlTermHandler {
+
+    DescribedSqlTermHandler {
+        extension = Objects.requireNonNull(extension, "term extension descriptor must not be null");
+        shape = Objects.requireNonNull(shape, "sql term value shape must not be null");
+        renderer = Objects.requireNonNull(renderer, "sql term renderer must not be null");
+    }
+
+    @Override
+    public String id() {
+        return extension.id();
+    }
+
+    @Override
+    public Optional<TermExtensionDescriptor> descriptor() {
+        return Optional.of(extension);
+    }
+
+    @Override
+    public SqlFragment render(TermCondition term, SqlRenderContext context) {
+        SqlFragment fragment = Objects.requireNonNull(
+                renderer.render(term, context), "sql term renderer must not return null");
+        extension.requireParameterCount(fragment.parameters().size());
+        return fragment;
+    }
 }
 
 @FunctionalInterface

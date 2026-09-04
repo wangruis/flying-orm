@@ -65,7 +65,9 @@ public interface SqlTermPackage {
         }
         TermRegistry.Builder terms = TermRegistry.builder();
         for (SqlTermHandler handler : copiedHandlers) {
-            terms.add(TermHandler.simple(handler.id(), handler.shape()));
+            terms.add(handler.descriptor()
+                             .<TermHandler>map(descriptor -> TermHandler.described(descriptor, handler.shape()))
+                             .orElseGet(() -> TermHandler.simple(handler.id(), handler.shape())));
         }
         return new SimpleSqlTermPackage(name, copiedHandlers, terms.build());
     }

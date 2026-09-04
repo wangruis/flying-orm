@@ -5,7 +5,8 @@ final class EnumValueCodec implements ValueCodec {
 
     @Override
     public boolean supports(Class<?> targetType) {
-        return targetType.isEnum();
+        // 带独立方法实现的枚举常量，其运行时类型是枚举的子类，仍按声明名称绑定。
+        return Enum.class.isAssignableFrom(targetType);
     }
 
     @Override

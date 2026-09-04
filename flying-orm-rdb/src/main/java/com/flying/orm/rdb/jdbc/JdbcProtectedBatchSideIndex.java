@@ -35,7 +35,9 @@ final class JdbcProtectedBatchSideIndex {
     Prepared prepare(Connection connection,
                      BatchWriteRequest request,
                      List<ProtectedBatchRows.RowView> rows,
-                     JdbcBatchSupport.BatchDeadline deadline) throws SQLException, java.util.concurrent.TimeoutException {
+                     JdbcBatchSupport.BatchDeadline deadline,
+                     JdbcBatchEvidenceSupport.Counts evidence)
+            throws SQLException, java.util.concurrent.TimeoutException {
         if (rows.stream().noneMatch(row -> row.work() != null)) {
             return new Prepared(List.of(), request.options().maxBufferedBytes());
         }
@@ -47,7 +49,7 @@ final class JdbcProtectedBatchSideIndex {
         for (ProtectedOwnerBatchPlan plan : ProtectedOwnerBatchPlan.plans(
                 rows, request.options().maxBufferedBytes())) {
             deadline.remaining();
-            readOwners(connection, plan, states, options, deadline);
+            readOwners(connection, plan, states, options, deadline, evidence);
         }
         return new Prepared(states, request.options().maxBufferedBytes());
     }
@@ -142,13 +144,17 @@ final class JdbcProtectedBatchSideIndex {
                                    ProtectedOwnerBatchPlan plan,
                                    List<RowState> states,
                                    SqlExecutionOptions options,
-                                   JdbcBatchSupport.BatchDeadline deadline) throws SQLException,
+                                   JdbcBatchSupport.BatchDeadline deadline,
+                                   JdbcBatchEvidenceSupport.Counts evidence) throws SQLException,
             java.util.concurrent.TimeoutException {
         boolean[] matched = new boolean[plan.size()];
         try (PreparedStatement statement = connection.prepareStatement(plan.sql())) {
             applyTimeout(statement, deadline.remaining());
             JdbcStatementBinder.bind(statement, plan.parameters());
             JdbcStatementControl.requireNotInterrupted(statement);
+            if (evidence != null) {
+                evidence.markDatabaseWorkAttempted();
+            }
             try (ResultSet resultSet = statement.executeQuery()) {
                 JdbcDynamicRowFactory rowFactory = JdbcDynamicRowFactory.from(resultSet, options);
                 while (true) {

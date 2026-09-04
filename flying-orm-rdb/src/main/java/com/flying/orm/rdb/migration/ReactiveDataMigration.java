@@ -16,7 +16,6 @@ import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -64,32 +63,36 @@ public final class ReactiveDataMigration {
                                .concatMap(step -> rowsUpdated(step.forward())
                                                           .doOnNext(rows -> progress.results.add(
                                                                   DataMigrationStepResult.completed(step.id(), rows))))
-                               .then(Mono.fromSupplier(() -> new DataMigrationResult(
-                                       safePlan.id(), DataMigrationStatus.SUCCEEDED, progress.results)))
-                               .onErrorResume(failure -> progress.beginCleanup()
-                                       ? compensate(safePlan, progress.results, failure)
-                                       : Mono.error(failure)),
-                ignored -> Mono.empty(),
+                               .then(Mono.fromSupplier(() -> {
+                                   progress.result = new DataMigrationResult(
+                                           safePlan.id(), DataMigrationStatus.SUCCEEDED, progress.results);
+                                   return progress;
+                               }))
+                               .onErrorResume(failure -> {
+                                   progress.failure = failure;
+                                   return Mono.just(progress);
+                               }),
+                progress -> progress.failure == null ? Mono.empty() : compensate(safePlan, progress),
                 (ignored, failure) -> Mono.empty(),
-                progress -> progress.beginCleanup()
-                        ? rollback(safePlan, progress.results)
+                progress -> rollback(safePlan, progress.results)
                                 .flatMap(result -> result.status() == DataMigrationStatus.ROLLBACK_FAILED
                                         ? Mono.error(new DataMigrationException(
                                                 result,
                                                 new CancellationException("data migration subscription was cancelled")))
-                                        : Mono.empty())
-                        : Mono.empty());
+                                        : Mono.empty()))
+                .flatMap(progress -> progress.failure == null
+                        ? Mono.just(progress.result)
+                        : Mono.error(new DataMigrationException(progress.result, progress.failure)));
     }
 
-    private Mono<DataMigrationResult> compensate(DataMigrationPlan plan,
-                                                  List<DataMigrationStepResult> results,
-                                                  Throwable originalFailure) {
-        return rollback(plan, results)
-                .map(result -> result.status() == DataMigrationStatus.ROLLBACK_FAILED
+    /** 补偿属于 usingWhen 的终态清理，不再被下游取消中断；业务异常在清理后对外发布。 */
+    private Mono<Void> compensate(DataMigrationPlan plan, MigrationProgress progress) {
+        return rollback(plan, progress.results)
+                .doOnNext(result -> progress.result = result.status() == DataMigrationStatus.ROLLBACK_FAILED
                         ? result
                         : new DataMigrationResult(
                                 result.planId(), DataMigrationStatus.OUTCOME_UNKNOWN, result.steps()))
-                .flatMap(result -> Mono.error(new DataMigrationException(result, originalFailure)));
+                .then();
     }
 
     private Mono<DataMigrationResult> rollback(DataMigrationPlan plan,
@@ -153,13 +156,10 @@ public final class ReactiveDataMigration {
         return options == null ? executor.rowsUpdated(request) : executor.rowsUpdated(request, options);
     }
 
-    /** 每次订阅独享的进度。原子门闩避免错误和取消竞态时把同一步补偿两遍。 */
+    /** 每次订阅独享的执行事实；补偿所有权由 usingWhen 的单一终态保证。 */
     private static final class MigrationProgress {
         private final List<DataMigrationStepResult> results = new ArrayList<>();
-        private final AtomicBoolean cleanupStarted = new AtomicBoolean();
-
-        private boolean beginCleanup() {
-            return cleanupStarted.compareAndSet(false, true);
-        }
+        private Throwable failure;
+        private DataMigrationResult result;
     }
 }

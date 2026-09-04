@@ -5,31 +5,31 @@ import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.TermRegistry;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.ValueGeneration;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
+import com.flying.orm.core.sql.render.SqlFragment;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.core.sql.render.SqlStatementPlan;
 import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.rdb.codec.ArrayValueCodec;
-import com.flying.orm.rdb.codec.DialectScalarValueCodec;
 import com.flying.orm.rdb.codec.LargeObjectValueCodec;
 import com.flying.orm.rdb.codec.OffsetTimeValueCodec;
+import com.flying.orm.rdb.dialect.DialectCapabilities;
 import com.flying.orm.rdb.internal.plan.ConditionStructurePlan;
 import com.flying.orm.rdb.internal.plan.SqlPlanSpec;
 import com.flying.orm.rdb.internal.plan.SqlStatementCompiler;
 import com.flying.orm.rdb.internal.plan.SqlStructurePlan;
 import com.flying.orm.rdb.internal.plan.StructuralPlanCaches;
 import com.flying.orm.rdb.json.JsonDialect;
-import com.flying.orm.rdb.json.JsonValueCodec;
+import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
 import com.flying.orm.rdb.vector.VectorValueCodec;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.UUID;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
 
@@ -46,12 +46,15 @@ final class FormSqlRenderSupport {
     final ValueCodecRegistry valueCodecs;
     final String dialectName;
     final boolean nativeBoolean;
+    final DialectCapabilities dialectCapabilities;
 
     private final SqlRenderer normalizedConditionRenderer;
     private final JsonDialect jsonDialect;
     private final UnaryOperator<String> identifierRenderer;
+    private final Function<RelationIdentity, String> relationIdentifierRenderer;
     private final StructuralPlanCaches planCaches;
     private final FormConditionValueNormalizer conditionValues;
+    final Map<DynamicField, EntityTypeMappingRegistry.Mapping> customFieldCodecs;
 
     FormSqlRenderSupport(SqlRenderer conditionRenderer,
                          JsonDialect jsonDialect,
@@ -59,6 +62,43 @@ final class FormSqlRenderSupport {
                          boolean nativeBoolean,
                          UnaryOperator<String> identifierRenderer,
                          StructuralPlanCaches planCaches) {
+        this(conditionRenderer, jsonDialect, dialectName, nativeBoolean,
+             identifierRenderer, planCaches, Map.of(), DialectCapabilities.empty());
+    }
+
+    FormSqlRenderSupport(SqlRenderer conditionRenderer,
+                         JsonDialect jsonDialect,
+                         String dialectName,
+                         boolean nativeBoolean,
+                         UnaryOperator<String> identifierRenderer,
+                         StructuralPlanCaches planCaches,
+                         Map<DynamicField, EntityTypeMappingRegistry.Mapping> customFieldCodecs) {
+        this(conditionRenderer, jsonDialect, dialectName, nativeBoolean, identifierRenderer,
+             planCaches, customFieldCodecs, DialectCapabilities.empty());
+    }
+
+    FormSqlRenderSupport(SqlRenderer conditionRenderer,
+                         JsonDialect jsonDialect,
+                         String dialectName,
+                         boolean nativeBoolean,
+                         UnaryOperator<String> identifierRenderer,
+                         StructuralPlanCaches planCaches,
+                         Map<DynamicField, EntityTypeMappingRegistry.Mapping> customFieldCodecs,
+                         DialectCapabilities dialectCapabilities) {
+        this(conditionRenderer, jsonDialect, dialectName, nativeBoolean, identifierRenderer,
+             planCaches, customFieldCodecs, dialectCapabilities,
+             identity -> FormRelationIdentifierSupport.render(identifierRenderer, identity));
+    }
+
+    FormSqlRenderSupport(SqlRenderer conditionRenderer,
+                         JsonDialect jsonDialect,
+                         String dialectName,
+                         boolean nativeBoolean,
+                         UnaryOperator<String> identifierRenderer,
+                         StructuralPlanCaches planCaches,
+                         Map<DynamicField, EntityTypeMappingRegistry.Mapping> customFieldCodecs,
+                         DialectCapabilities dialectCapabilities,
+                         Function<RelationIdentity, String> relationIdentifierRenderer) {
         this.conditionRenderer = Objects.requireNonNull(conditionRenderer, "sql renderer must not be null");
         this.valueCodecs = conditionRenderer.valueCodecs();
         this.normalizedConditionRenderer = conditionRenderer.withValueCodecs(
@@ -66,19 +106,35 @@ final class FormSqlRenderSupport {
         this.jsonDialect = Objects.requireNonNull(jsonDialect, "json dialect must not be null");
         this.dialectName = Objects.requireNonNull(dialectName, "dialect name must not be null");
         this.nativeBoolean = nativeBoolean;
+        this.dialectCapabilities = Objects.requireNonNull(
+                dialectCapabilities, "dialect capabilities must not be null");
         this.identifierRenderer = Objects.requireNonNull(identifierRenderer,
                                                          "sql identifier renderer must not be null");
+        this.relationIdentifierRenderer = Objects.requireNonNull(
+                relationIdentifierRenderer, "relation identifier renderer must not be null");
         this.planCaches = Objects.requireNonNull(planCaches, "structural plan caches must not be null");
+        this.customFieldCodecs = Objects.requireNonNull(
+                customFieldCodecs, "custom entity field codecs must not be null");
         this.conditionValues = new FormConditionValueNormalizer(this);
     }
 
     FormSqlRenderSupport withPlanCaches(StructuralPlanCaches caches) {
-        return new FormSqlRenderSupport(conditionRenderer,
-                                        jsonDialect,
-                                        dialectName,
-                                        nativeBoolean,
+        return new FormSqlRenderSupport(conditionRenderer, jsonDialect, dialectName, nativeBoolean,
                                         identifierRenderer,
-                                        Objects.requireNonNull(caches, "structural plan caches must not be null"));
+                                        Objects.requireNonNull(caches, "structural plan caches must not be null"),
+                                        customFieldCodecs,
+                                        dialectCapabilities,
+                                        relationIdentifierRenderer);
+    }
+
+    FormSqlRenderSupport withCustomFieldCodecs(
+            Map<DynamicField, EntityTypeMappingRegistry.Mapping> mappings) {
+        return new FormSqlRenderSupport(conditionRenderer, jsonDialect, dialectName, nativeBoolean,
+                                        identifierRenderer, planCaches,
+                                        Objects.requireNonNull(mappings,
+                                                               "custom entity field codecs must not be null"),
+                                        dialectCapabilities,
+                                        relationIdentifierRenderer);
     }
 
     TermRegistry conditionTerms() {
@@ -91,11 +147,39 @@ final class FormSqlRenderSupport {
 
     ConditionSql condition(DynamicForm form, ConditionGroup where) {
         ConditionGroup normalized = normalizeCondition(form, where);
+        if (normalizedConditionRenderer.hasCorrelatedTerms()
+                && !normalized.executionView().cacheable(normalizedConditionRenderer.standardConditionTermMask())) {
+            String qualifier = identifier(form);
+            SqlFragment fragment = normalizedConditionRenderer.renderWhere(
+                    normalized, name -> qualifier + "." + identifier(form.field(name).name()),
+                    name -> qualifier);
+            return new ConditionSql(fragment.sql(), fragment.parameters(), "relation-condition", false);
+        }
         ConditionStructurePlan plan = planCaches.condition(
-                dialectName,
-                normalized,
-                normalizedConditionRenderer);
+                dialectName, normalized, normalizedConditionRenderer);
         return new ConditionSql(plan.plan().sql(), plan.parameters(), plan.shape(), plan.cacheable());
+    }
+
+    /**
+     * 聚合 HAVING 复用相同的字段感知值规范化，但把已验证别名渲染为对应分组或聚合表达式。
+     * 表达式只来自聚合 planner，不进入普通条件结构缓存。
+     */
+    ConditionSql condition(DynamicForm form, ConditionGroup where,
+                           UnaryOperator<String> fieldIdentifierRenderer) {
+        return condition(form, where, fieldIdentifierRenderer, null, null);
+    }
+
+    ConditionSql condition(DynamicForm form, ConditionGroup where,
+                           UnaryOperator<String> fieldIdentifierRenderer,
+                           UnaryOperator<String> correlatedFieldRenderer,
+                           UnaryOperator<String> outerQualifierRenderer) {
+        ConditionGroup normalized = normalizeCondition(form, where);
+        SqlRenderer renderer = normalizedConditionRenderer.withFieldIdentifierRenderer(Objects.requireNonNull(
+                        fieldIdentifierRenderer, "condition field identifier renderer must not be null"));
+        SqlFragment fragment = correlatedFieldRenderer == null
+                ? renderer.renderWhere(normalized)
+                : renderer.renderWhere(normalized, correlatedFieldRenderer, outerQualifierRenderer);
+        return new ConditionSql(fragment.sql(), fragment.parameters(), "aggregate-having", false);
     }
 
     ConditionGroup normalizeCondition(DynamicForm form, ConditionGroup where) {
@@ -110,8 +194,7 @@ final class FormSqlRenderSupport {
         return fragment;
     }
 
-    SqlRequest request(String operation,
-                       DynamicForm form,
+    SqlRequest request(String operation, DynamicForm form,
                        List<String> fields,
                        ConditionSql condition,
                        String groupShape,
@@ -185,73 +268,20 @@ final class FormSqlRenderSupport {
     }
 
     List<FieldValue> writeFields(DynamicForm form, Map<String, Object> values, Long batchRowIndex) {
-        Map<String, Object> safeValues = Objects.requireNonNull(values, "dynamic form values must not be null");
-        if (safeValues.isEmpty()) {
-            throw new IllegalArgumentException("dynamic form values must not be empty");
-        }
-        List<FieldValue> fieldValues = new ArrayList<>(safeValues.size());
-        Map<String, String> sourceNames = new HashMap<>(Math.max(16, safeValues.size() * 2));
-        for (Map.Entry<String, Object> entry : safeValues.entrySet()) {
-            DynamicField field = field(form, entry.getKey());
-            if (entry.getValue() instanceof UpdateDelta) {
-                if (batchRowIndex != null) {
-                    throw new IllegalArgumentException("batch write row [" + batchRowIndex + "] field ["
-                                                               + field.name() + "] does not allow update delta");
-                }
-                throw new IllegalArgumentException("update delta is only valid in an update SET clause: "
-                                                           + field.name());
-            }
-            if ("sqlserver".equalsIgnoreCase(dialectName)
-                    && field.generation().strategy() == ValueGeneration.Strategy.IDENTITY) {
-                throw new IllegalArgumentException("SQL Server identity field must be omitted from write values: "
-                                                           + field.name());
-            }
-            String previousName = sourceNames.putIfAbsent(field.normalizedName(), entry.getKey());
-            if (previousName != null) {
-                throw new IllegalArgumentException("duplicate normalized dynamic write field");
-            }
-            fieldValues.add(new FieldValue(field, writeValue(field, entry.getValue())));
-        }
-        return fieldValues;
+        return FormFieldValueSupport.writeFields(this, form, values, batchRowIndex);
     }
 
     Object writeValue(DynamicField field, Object value) {
-        if (field.databaseType().isArray()) {
-            return ArrayValueCodec.write(value, field.databaseType(), valueCodecs);
-        }
-        if (field.databaseType().logicalType() == LogicalType.VECTOR) {
-            if (!"postgresql".equalsIgnoreCase(dialectName)) {
-                throw new IllegalArgumentException("VECTOR fields are only supported by PostgreSQL");
-            }
-            return VectorValueCodec.write(value, field.length());
-        }
-        if (OffsetTimeValueCodec.isOffsetTimeDataType(field.databaseType())) {
-            return OffsetTimeValueCodec.write(value, field.databaseType(), dialectName);
-        }
-        if (isJson(field)) {
-            return JsonValueCodec.write(value);
-        }
-        if (LargeObjectValueCodec.isLargeObjectDataType(field.databaseType())) {
-            return LargeObjectValueCodec.write(value, field.databaseType(), dialectName);
-        }
-        if (scalarParameterType(field) != Object.class) {
-            return DialectScalarValueCodec.write(value,
-                                                 field.databaseType(),
-                                                 dialectName,
-                                                 nativeBoolean,
-                                                 valueCodecs);
-        }
-        Object encoded = valueCodecs.write(value);
-        if (encoded instanceof UUID uuid && parameterType(field) == String.class) {
-            // 应用 codec 优先；只有 codec 仍保留 UUID 时才执行跨方言 VARCHAR 默认回退。
-            return uuid.toString();
-        }
-        return encoded;
+        return FormFieldValueSupport.writeValue(this, field, value);
+    }
+
+    EntityTypeMappingRegistry.Mapping customFieldMapping(DynamicField field) {
+        return customFieldCodecs.get(field);
     }
 
     Object writeConditionValue(DynamicField field, Object value) {
         DynamicField safeField = Objects.requireNonNull(field, "condition dynamic field must not be null");
-        if (isJson(safeField) && !"?".equals(valueExpression(safeField))) {
+        if (FormFieldValueSupport.isJson(safeField) && !"?".equals(valueExpression(safeField))) {
             throw new IllegalArgumentException(
                     "JSON equality and ordering require a registered JSON condition term for this dialect");
         }
@@ -268,12 +298,12 @@ final class FormSqlRenderSupport {
     boolean requiresFieldAwareConditionEncoding(DynamicField field) {
         if (field.databaseType().isArray()
                 || OffsetTimeValueCodec.isOffsetTimeDataType(field.databaseType())
-                || isJson(field)
+                || FormFieldValueSupport.isJson(field)
                 || LargeObjectValueCodec.isLargeObjectDataType(field.databaseType())) {
             return true;
         }
         LogicalType logicalType = field.databaseType().logicalType();
-        Class<?> targetType = scalarParameterType(field);
+        Class<?> targetType = FormFieldValueSupport.scalarParameterType(this, field);
         return logicalType == LogicalType.BOOLEAN
                 || logicalType == LogicalType.OFFSET_TIMESTAMP
                 || logicalType == LogicalType.INTERVAL && targetType != Object.class
@@ -287,7 +317,7 @@ final class FormSqlRenderSupport {
             case ">", ">=", "<", "<=", "between", "not-between" -> true;
             default -> false;
         };
-        if (timelineOperator && isTextBackedOffsetTime(field)) {
+        if (timelineOperator && FormFieldValueSupport.isTextBackedOffsetTime(this, field)) {
             throw new IllegalArgumentException(
                     "text-backed OFFSET_TIME range comparison is not supported by dialect "
                             + dialectName + ": " + field.name());
@@ -295,7 +325,7 @@ final class FormSqlRenderSupport {
     }
 
     void requireStableOffsetTimeOrdering(DynamicField field) {
-        if (isTextBackedOffsetTime(field)) {
+        if (FormFieldValueSupport.isTextBackedOffsetTime(this, field)) {
             throw new IllegalArgumentException(
                     "text-backed OFFSET_TIME ordering is not supported by dialect "
                             + dialectName + ": " + field.name());
@@ -312,10 +342,10 @@ final class FormSqlRenderSupport {
         if (OffsetTimeValueCodec.isOffsetTimeDataType(field.databaseType())) {
             return OffsetTimeValueCodec.parameterType(field.databaseType(), dialectName);
         }
-        if (isJson(field)) {
+        if (FormFieldValueSupport.isJson(field)) {
             return String.class;
         }
-        Class<?> scalarType = scalarParameterType(field);
+        Class<?> scalarType = FormFieldValueSupport.scalarParameterType(this, field);
         if (scalarType != Object.class) {
             return scalarType;
         }
@@ -329,12 +359,22 @@ final class FormSqlRenderSupport {
     }
 
     String valueExpression(DynamicField field) {
-        return isJson(field) ? jsonDialect.valueExpression("?") : "?";
+        return FormFieldValueSupport.isJson(field) ? jsonDialect.valueExpression("?") : "?";
     }
 
     String identifier(String value) {
         return Objects.requireNonNull(
                 identifierRenderer.apply(value), "rendered identifier must not be null");
+    }
+
+    String identifier(DynamicForm form) {
+        return FormRelationIdentifierSupport.identifier(
+                form, identifierRenderer, relationIdentifierRenderer);
+    }
+
+    String derivedRelationIdentifier(DynamicForm owner, String localTable) {
+        return FormRelationIdentifierSupport.derivedIdentifier(
+                owner, localTable, identifierRenderer, relationIdentifierRenderer);
     }
 
     String columns(List<DynamicField> fields) {
@@ -344,34 +384,6 @@ final class FormSqlRenderSupport {
 
     String identifierColumns(List<String> fields) {
         return fields.stream().map(this::identifier).collect(java.util.stream.Collectors.joining(", "));
-    }
-
-    boolean needsScalarDecoding(DynamicField field) {
-        return scalarParameterType(field) != Object.class;
-    }
-
-    FormScalarReadPlan scalarReadPlan(DynamicField field) {
-        return FormScalarReadPlan.compile(field, dialectName, nativeBoolean, valueCodecs);
-    }
-
-    private Class<?> scalarParameterType(DynamicField field) {
-        return DialectScalarValueCodec.parameterType(field.databaseType(), dialectName, nativeBoolean);
-    }
-
-    Object readScalarValue(DynamicField field, Object value) {
-        FormScalarReadPlan plan = scalarReadPlan(field);
-        return plan == null ? DialectScalarValueCodec.read(value, field.databaseType(), valueCodecs) : plan.read(value);
-    }
-
-    private static boolean isJson(DynamicField field) {
-        return !field.databaseType().isArray() && field.databaseType().logicalType() == LogicalType.JSON;
-    }
-
-    private boolean isTextBackedOffsetTime(DynamicField field) {
-        return OffsetTimeValueCodec.isOffsetTimeDataType(field.databaseType())
-                && ("mysql".equalsIgnoreCase(dialectName)
-                    || "oracle".equalsIgnoreCase(dialectName)
-                    || "sqlserver".equalsIgnoreCase(dialectName));
     }
 
     record FieldValue(DynamicField field, Object value) {

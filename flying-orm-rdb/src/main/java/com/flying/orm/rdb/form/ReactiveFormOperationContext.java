@@ -1,6 +1,8 @@
 package com.flying.orm.rdb.form;
 
+import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
@@ -24,7 +26,9 @@ record ReactiveFormOperationContext(ReactiveSqlExecutor executor,
                                     DataScope defaultDataScope,
                                     SqlExecutionOptions defaultExecutionOptions,
                                     BatchWriteOptions defaultBatchWriteOptions,
-                                    EntityModelRegistry entityModels) {
+                                    EntityModelRegistry entityModels,
+                                    FieldUsePolicy fieldUsePolicy,
+                                    QueryShapeLimits queryShapeLimits) {
 
     ReactiveFormOperationContext {
         executor = Objects.requireNonNull(executor, "reactive sql executor must not be null");
@@ -37,32 +41,51 @@ record ReactiveFormOperationContext(ReactiveSqlExecutor executor,
         defaultBatchWriteOptions = Objects.requireNonNull(defaultBatchWriteOptions,
                                                           "default batch write options must not be null");
         entityModels = Objects.requireNonNull(entityModels, "entity model registry must not be null");
+        fieldUsePolicy = Objects.requireNonNull(fieldUsePolicy, "field use policy must not be null");
+        queryShapeLimits = Objects.requireNonNull(queryShapeLimits, "query shape limits must not be null");
     }
 
     ReactiveFormOperationContext withResolver(StructuredConditionResolver resolver) {
         return new ReactiveFormOperationContext(executor, renderer, resolver, defaultDataScope,
-                                                defaultExecutionOptions, defaultBatchWriteOptions, entityModels);
+                                                defaultExecutionOptions, defaultBatchWriteOptions, entityModels,
+                                                fieldUsePolicy, queryShapeLimits);
     }
 
     ReactiveFormOperationContext withExecutionOptions(SqlExecutionOptions options) {
         SqlExecutionOptions safeOptions = Objects.requireNonNull(options, "sql execution options must not be null");
         return new ReactiveFormOperationContext(executor.withDefaultExecutionOptions(safeOptions), renderer,
                                                 structuredConditionResolver, defaultDataScope, safeOptions,
-                                                defaultBatchWriteOptions, entityModels);
+                                                defaultBatchWriteOptions, entityModels,
+                                                fieldUsePolicy, queryShapeLimits);
     }
 
     ReactiveFormOperationContext withDataScope(DataScope scope) {
         return new ReactiveFormOperationContext(executor, renderer, structuredConditionResolver, scope,
-                                                defaultExecutionOptions, defaultBatchWriteOptions, entityModels);
+                                                defaultExecutionOptions, defaultBatchWriteOptions, entityModels,
+                                                fieldUsePolicy, queryShapeLimits);
     }
 
     ReactiveFormOperationContext withBatchWriteOptions(BatchWriteOptions options) {
         return new ReactiveFormOperationContext(executor, renderer, structuredConditionResolver, defaultDataScope,
-                                                defaultExecutionOptions, options, entityModels);
+                                                defaultExecutionOptions, options, entityModels,
+                                                fieldUsePolicy, queryShapeLimits);
     }
 
     ReactiveFormOperationContext withEntityModels(EntityModelRegistry registry) {
         return new ReactiveFormOperationContext(executor, renderer, structuredConditionResolver, defaultDataScope,
-                                                defaultExecutionOptions, defaultBatchWriteOptions, registry);
+                                                defaultExecutionOptions, defaultBatchWriteOptions, registry,
+                                                fieldUsePolicy, queryShapeLimits);
+    }
+
+    ReactiveFormOperationContext withFieldUsePolicy(FieldUsePolicy policy) {
+        return new ReactiveFormOperationContext(executor, renderer, structuredConditionResolver, defaultDataScope,
+                                                defaultExecutionOptions, defaultBatchWriteOptions, entityModels,
+                                                policy, queryShapeLimits);
+    }
+
+    ReactiveFormOperationContext withQueryShapeLimits(QueryShapeLimits limits) {
+        return new ReactiveFormOperationContext(executor, renderer, structuredConditionResolver, defaultDataScope,
+                                                defaultExecutionOptions, defaultBatchWriteOptions, entityModels,
+                                                fieldUsePolicy, limits);
     }
 }

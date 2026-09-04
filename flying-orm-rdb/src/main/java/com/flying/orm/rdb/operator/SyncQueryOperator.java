@@ -1,8 +1,12 @@
 package com.flying.orm.rdb.operator;
 
+import com.flying.orm.core.condition.QueryShapeLimits;
+import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.form.SyncFormClient;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
 
@@ -23,10 +27,19 @@ import java.util.function.Consumer;
 public final class SyncQueryOperator {
 
     private final SyncSqlExecutor executor;
+    private final SyncFormClient formClient;
     private final DmlQueryCommand command;
 
     /** 原生 JDBC 构造器，只保存同步执行能力和共享命令状态。 */
     SyncQueryOperator(SyncSqlExecutor executor, SqlRenderer renderer, DataScope defaultDataScope) {
+        this(null, executor, renderer, defaultDataScope);
+    }
+
+    SyncQueryOperator(SyncFormClient formClient,
+                      SyncSqlExecutor executor,
+                      SqlRenderer renderer,
+                      DataScope defaultDataScope) {
+        this.formClient = formClient;
         this.executor = Objects.requireNonNull(executor, "sync sql executor must not be null");
         this.command = new DmlQueryCommand(renderer, defaultDataScope);
     }
@@ -40,6 +53,17 @@ public final class SyncQueryOperator {
     /** 设置目标物理表。 */
     public SyncQueryOperator from(String table) {
         command.from(table);
+        return this;
+    }
+
+    /** 使用 DynamicForm 元数据和显式字段策略启用 governed DML；string 表入口仍为 trusted。 */
+    public SyncQueryOperator from(DynamicForm form, FieldUsePolicy policy) {
+        return from(form, policy, QueryShapeLimits.defaults());
+    }
+
+    /** 使用本次字段策略和查询形状预算启用 governed DML。 */
+    public SyncQueryOperator from(DynamicForm form, FieldUsePolicy policy, QueryShapeLimits limits) {
+        command.from(form, policy, limits);
         return this;
     }
 
@@ -68,11 +92,24 @@ public final class SyncQueryOperator {
 
     /** 使用默认执行保护返回完整的有界结果列表。 */
     public List<DynamicRow> fetchMap() {
-        return executor.query(command.toRequest());
+        if (!command.governed()) {
+            return executor.query(command.toRequest());
+        }
+        return executeGoverned(command.governedQuery(null));
     }
 
     /** 使用本次显式执行保护返回完整的有界结果列表。 */
     public List<DynamicRow> fetchMap(SqlExecutionOptions options) {
-        return executor.query(command.toRequest(), options);
+        if (!command.governed()) {
+            return executor.query(command.toRequest(), options);
+        }
+        return executeGoverned(command.governedQuery(
+                Objects.requireNonNull(options, "SQL execution options must not be null")));
+    }
+
+    private List<DynamicRow> executeGoverned(DmlQueryCommand.GovernedQuery query) {
+        SyncFormClient client = Objects.requireNonNull(
+                formClient, "governed query requires the form client");
+        return client.selectGoverned(query.spec(), query.policy(), query.limits());
     }
 }

@@ -1,12 +1,16 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.core.metadata.ForeignKeyDefinition;
 import com.flying.orm.core.metadata.ForeignKeyMetadata;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.TableMetadata;
 
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+import java.util.function.Predicate;
 
 /**
  * 只负责外键差异的报告。
@@ -17,6 +21,31 @@ import java.util.Set;
 final class SchemaForeignKeyPlanner {
 
     private SchemaForeignKeyPlanner() {
+    }
+
+    /**
+     * 多表第二阶段发布稳定外键 operation。不能由当前事实安全闭合的外键明确转成人工项，
+     * 不会退回到字符串说明或猜测执行。
+     */
+    static List<SchemaOperation> addOperations(
+            RelationalTableDefinition target,
+            Predicate<ForeignKeyDefinition> manualRequired) {
+        RelationalTableDefinition safeTarget = Objects.requireNonNull(
+                target, "relational table definition must not be null");
+        Predicate<ForeignKeyDefinition> safeManualRequired = Objects.requireNonNull(
+                manualRequired, "foreign key manual predicate must not be null");
+        return safeTarget.foreignKeys().stream()
+                .sorted(java.util.Comparator.comparing(ForeignKeyDefinition::name))
+                .map(foreignKey -> SchemaOperation.of(
+                        safeManualRequired.test(foreignKey)
+                                ? SchemaOperation.Kind.VERIFY_MANUALLY
+                                : SchemaOperation.Kind.ADD_FOREIGN_KEY,
+                        safeTarget.identity(),
+                        foreignKey.name(),
+                        null,
+                        foreignKey,
+                        SchemaOperation.Compatibility.REQUIRES_REVIEW))
+                .toList();
     }
 
     static void addChanges(List<SkippedSchemaChange> skipped,

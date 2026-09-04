@@ -1,7 +1,10 @@
 package com.flying.orm.rdb.metadata;
 
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.rdb.schema.SchemaSnapshot;
+import com.flying.orm.rdb.schema.SchemaSnapshotCoverage;
 import reactor.core.publisher.Mono;
 
 /**
@@ -12,6 +15,14 @@ import reactor.core.publisher.Mono;
  * @version v1.0
  */
 public interface ReactiveFormMetadataReader {
+
+    /**
+     * 声明该 reader 能稳定回读的结构事实。默认保守为无覆盖；只有确实返回完整规范快照的自定义
+     * reader 才应显式返回 {@link SchemaSnapshotCoverage#complete()}。
+     */
+    default SchemaSnapshotCoverage snapshotCoverage() {
+        return SchemaSnapshotCoverage.none();
+    }
 
     /**
      * 按物理表名读取动态表单结构。
@@ -33,6 +44,15 @@ public interface ReactiveFormMetadataReader {
     }
 
     /**
+     * 读取不会伪造未知属性的 Schema 快照。旧的自定义 reader 通过默认适配继续二进制兼容；内建 reader
+     * 会覆盖本方法，直接区分表不存在和字典属性未知。
+     */
+    default Mono<SchemaSnapshot> readSnapshot(String table) {
+        return readTable(table).map(metadata -> SchemaSnapshot.fromLegacy(
+                RelationIdentity.table(table), metadata));
+    }
+
+    /**
      * 按 schema 和物理表名读取动态表单结构。
      *
      * @param formId 表单 ID，由调用方决定怎么命名
@@ -51,6 +71,12 @@ public interface ReactiveFormMetadataReader {
      */
     default Mono<TableMetadata> readTable(String schema, String table) {
         return readForm(table, schema, table).map(DynamicForm::toTableMetadata);
+    }
+
+    /** 按明确 schema 读取三态 Schema 快照。 */
+    default Mono<SchemaSnapshot> readSnapshot(String schema, String table) {
+        return readTable(schema, table).map(metadata -> SchemaSnapshot.fromLegacy(
+                RelationIdentity.of(null, schema, table), metadata));
     }
 
     /**

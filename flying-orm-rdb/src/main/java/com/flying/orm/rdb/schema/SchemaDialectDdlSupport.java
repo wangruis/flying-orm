@@ -1,6 +1,8 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.rdb.internal.template.SqlLexicalScanner;
 
 import java.time.Duration;
 import java.util.List;
@@ -18,15 +20,18 @@ final class SchemaDialectDdlSupport {
 
     private final SchemaDialectTypeSupport types;
     private final SchemaDialect.ColumnCommentStyle columnCommentStyle;
+    private final SchemaDialect.TableCommentStyle tableCommentStyle;
     private final SchemaDialect.DropIndexStyle dropIndexStyle;
     private final SchemaDialect.RenameColumnStyle renameColumnStyle;
     private final SchemaDialect.GeneratedValueStyle databaseStyle;
     private final SchemaDialect.ColumnChangeStyle columnChangeStyle;
     private final SchemaOnlineDdlSupport onlineDdlSupport;
     private final SchemaLockTimeoutStyle lockTimeoutStyle;
+    private final SqlLexicalScanner.Rules lexicalRules;
 
     SchemaDialectDdlSupport(SchemaDialectTypeSupport types,
                             SchemaDialect.ColumnCommentStyle columnCommentStyle,
+                            SchemaDialect.TableCommentStyle tableCommentStyle,
                             SchemaDialect.DropIndexStyle dropIndexStyle,
                             SchemaDialect.RenameColumnStyle renameColumnStyle,
                             SchemaDialect.GeneratedValueStyle databaseStyle,
@@ -35,9 +40,12 @@ final class SchemaDialectDdlSupport {
                             SchemaLockTimeoutStyle lockTimeoutStyle) {
         this.types = Objects.requireNonNull(types, "type support must not be null");
         this.columnCommentStyle = Objects.requireNonNull(columnCommentStyle, "column comment style must not be null");
+        this.tableCommentStyle = Objects.requireNonNull(tableCommentStyle, "table comment style must not be null");
         this.dropIndexStyle = Objects.requireNonNull(dropIndexStyle, "drop index style must not be null");
         this.renameColumnStyle = Objects.requireNonNull(renameColumnStyle, "rename column style must not be null");
         this.databaseStyle = Objects.requireNonNull(databaseStyle, "database DDL style must not be null");
+        this.lexicalRules = SqlLexicalScanner.rulesFor(
+                databaseStyle == SchemaDialect.GeneratedValueStyle.SQL_SERVER ? "sqlserver" : databaseStyle.name());
         this.columnChangeStyle = Objects.requireNonNull(columnChangeStyle, "column change style must not be null");
         this.onlineDdlSupport = Objects.requireNonNull(onlineDdlSupport, "online DDL support must not be null");
         this.lockTimeoutStyle = Objects.requireNonNull(lockTimeoutStyle, "lock timeout style must not be null");
@@ -47,7 +55,57 @@ final class SchemaDialectDdlSupport {
         return columnCommentStyle == SchemaDialect.ColumnCommentStyle.INLINE;
     }
 
+    String commentLiteral(String comment) {
+        return MySqlSchemaCommentSupport.literal(
+                types, comment, tableCommentStyle == SchemaDialect.TableCommentStyle.MYSQL_OPTION);
+    }
+
+    String inlineTableCommentClause(String comment) {
+        if (comment == null || tableCommentStyle != SchemaDialect.TableCommentStyle.MYSQL_OPTION) {
+            return "";
+        }
+        return " comment = " + commentLiteral(comment);
+    }
+
+    Optional<String> tableCommentSql(String table, String comment) {
+        if (comment == null
+                || tableCommentStyle == SchemaDialect.TableCommentStyle.NONE
+                || tableCommentStyle == SchemaDialect.TableCommentStyle.MYSQL_OPTION) {
+            return Optional.empty();
+        }
+        if (tableCommentStyle == SchemaDialect.TableCommentStyle.SQL_SERVER_EXTENDED_PROPERTY) {
+            return Optional.of(sqlServerTableComment(table, comment));
+        }
+        return Optional.of("comment on table " + types.identifier(table)
+                                   + " is " + types.quoteLiteral(comment));
+    }
+
+    Optional<String> tableCommentSql(RelationIdentity table, String comment) {
+        if (comment == null
+                || tableCommentStyle == SchemaDialect.TableCommentStyle.NONE
+                || tableCommentStyle == SchemaDialect.TableCommentStyle.MYSQL_OPTION) {
+            return Optional.empty();
+        }
+        if (tableCommentStyle == SchemaDialect.TableCommentStyle.SQL_SERVER_EXTENDED_PROPERTY) {
+            return Optional.of(sqlServerTableComment(table, comment));
+        }
+        return Optional.of("comment on table " + types.identifier(table)
+                                   + " is " + types.quoteLiteral(comment));
+    }
+
     Optional<String> columnCommentSql(String table, String column, String comment) {
+        if (comment == null || columnCommentStyle == SchemaDialect.ColumnCommentStyle.NONE
+                || columnCommentStyle == SchemaDialect.ColumnCommentStyle.INLINE) {
+            return Optional.empty();
+        }
+        if (columnCommentStyle == SchemaDialect.ColumnCommentStyle.SQL_SERVER_EXTENDED_PROPERTY) {
+            return Optional.of(sqlServerColumnComment(table, column, comment));
+        }
+        return Optional.of("comment on column " + types.identifier(table) + "." + types.identifier(column)
+                                   + " is " + types.quoteLiteral(comment));
+    }
+
+    Optional<String> columnCommentSql(RelationIdentity table, String column, String comment) {
         if (comment == null || columnCommentStyle == SchemaDialect.ColumnCommentStyle.NONE
                 || columnCommentStyle == SchemaDialect.ColumnCommentStyle.INLINE) {
             return Optional.empty();
@@ -95,6 +153,17 @@ final class SchemaDialectDdlSupport {
             }
         }
         String sql = "drop index " + types.identifier(indexName);
+        return dropIndexStyle == SchemaDialect.DropIndexStyle.ON_TABLE
+                ? sql + " on " + types.identifier(table)
+                : sql;
+    }
+
+    String dropIndexSql(RelationIdentity table, String index) {
+        String indexName = requireUnqualifiedIdentifier(index, "drop index name");
+        String renderedIndex = dropIndexStyle == SchemaDialect.DropIndexStyle.NAME_ONLY
+                ? types.namespaceObjectIdentifier(table, indexName)
+                : types.identifier(indexName);
+        String sql = "drop index " + renderedIndex;
         return dropIndexStyle == SchemaDialect.DropIndexStyle.ON_TABLE
                 ? sql + " on " + types.identifier(table)
                 : sql;
@@ -188,11 +257,19 @@ final class SchemaDialectDdlSupport {
     }
 
     String addColumnSql(String table, String columnDefinition) {
+        return addColumnSqlForRenderedTable(types.identifier(table), columnDefinition);
+    }
+
+    String addColumnSql(RelationIdentity table, String columnDefinition) {
+        return addColumnSqlForRenderedTable(types.identifier(table), columnDefinition);
+    }
+
+    private String addColumnSqlForRenderedTable(String table, String columnDefinition) {
         String safeDefinition = requireColumnDefinition(columnDefinition);
         return switch (columnChangeStyle) {
-            case ORACLE -> "alter table " + types.identifier(table) + " add (" + safeDefinition + ")";
-            case SQL_SERVER -> "alter table " + types.identifier(table) + " add " + safeDefinition;
-            case STANDARD -> "alter table " + types.identifier(table) + " add column " + safeDefinition;
+            case ORACLE -> "alter table " + table + " add (" + safeDefinition + ")";
+            case SQL_SERVER -> "alter table " + table + " add " + safeDefinition;
+            case STANDARD -> "alter table " + table + " add column " + safeDefinition;
         };
     }
 
@@ -271,11 +348,37 @@ final class SchemaDialectDdlSupport {
         return sqlServerColumnComment(table, column, comment, "sp_addextendedproperty");
     }
 
+    private String sqlServerColumnComment(RelationIdentity table, String column, String comment) {
+        return sqlServerColumnComment(table, column, comment, "sp_addextendedproperty");
+    }
+
+    private String sqlServerTableComment(String table, String comment) {
+        String safeTable = com.flying.orm.core.sql.render.SqlIdentifiers.requireIdentifier(
+                table, "comment table");
+        String[] parts = safeTable.split("\\.");
+        if (parts.length != 2) {
+            throw new UnsupportedOperationException(
+                    "SQL Server table comments require a schema-qualified table");
+        }
+        return "exec sp_addextendedproperty @name = N'MS_Description', @value = " + unicode(comment)
+                + ", @level0type = N'SCHEMA', @level0name = " + unicode(parts[0])
+                + ", @level1type = N'TABLE', @level1name = " + unicode(parts[1]);
+    }
+
+    private String sqlServerTableComment(RelationIdentity table, String comment) {
+        RelationIdentity relation = requireSqlServerCommentRelation(table);
+        String sql = "exec sp_addextendedproperty @name = N'MS_Description', @value = " + unicode(comment)
+                + ", @level0type = N'SCHEMA', @level0name = " + sqlServerCommentSchema(relation)
+                + ", @level1type = N'TABLE', @level1name = " + unicode(relation.table());
+        return resolveSqlServerCommentSchema(relation, sql);
+    }
+
     private String sqlServerColumnComment(String table, String column, String comment, String procedure) {
         String safeTable = com.flying.orm.core.sql.render.SqlIdentifiers.requireIdentifier(table, "comment table");
         String[] parts = safeTable.split("\\.");
         if (parts.length != 2) {
-            throw new IllegalArgumentException("SQL Server column comments require a schema-qualified table");
+            throw new UnsupportedOperationException(
+                    "SQL Server column comments require a schema-qualified table");
         }
         String schema = parts[0];
         String tableName = parts[1];
@@ -290,6 +393,45 @@ final class SchemaDialectDdlSupport {
                 + ", @level2type = N'COLUMN', @level2name = " + unicode(safeColumn);
     }
 
+    private String sqlServerColumnComment(RelationIdentity table,
+                                          String column,
+                                          String comment,
+                                          String procedure) {
+        RelationIdentity relation = requireSqlServerCommentRelation(table);
+        String safeColumn = com.flying.orm.core.sql.render.SqlIdentifiers.requireIdentifier(
+                column, "comment column");
+        String sql = "exec " + procedure + " @name = N'MS_Description'";
+        if (comment != null) {
+            sql += ", @value = " + unicode(comment);
+        }
+        sql += ", @level0type = N'SCHEMA', @level0name = " + sqlServerCommentSchema(relation)
+                + ", @level1type = N'TABLE', @level1name = " + unicode(relation.table())
+                + ", @level2type = N'COLUMN', @level2name = " + unicode(safeColumn);
+        return resolveSqlServerCommentSchema(relation, sql);
+    }
+
+    private static RelationIdentity requireSqlServerCommentRelation(RelationIdentity table) {
+        RelationIdentity relation = Objects.requireNonNull(table, "comment table must not be null");
+        if (relation.catalog().isPresent()) {
+            throw new UnsupportedOperationException(
+                    "SQL Server comments do not support a catalog-qualified table");
+        }
+        return relation;
+    }
+
+    private String sqlServerCommentSchema(RelationIdentity relation) {
+        return relation.schema().map(this::unicode).orElse("@schema");
+    }
+
+    private String resolveSqlServerCommentSchema(RelationIdentity relation, String sql) {
+        if (relation.schema().isPresent()) {
+            return sql;
+        }
+        String resolved = "declare @schema sysname = object_schema_name(object_id("
+                + unicode(relation.table()) + ")); " + sql;
+        return "exec sp_executesql " + unicode(resolved);
+    }
+
     private String unicode(String value) {
         return "N" + types.quoteLiteral(value);
     }
@@ -299,15 +441,22 @@ final class SchemaDialectDdlSupport {
                                          List.of(new SqlRequest(cleanup, List.of())));
     }
 
-    private static String requireColumnDefinition(String value) {
+    private String requireColumnDefinition(String value) {
         String text = SchemaDialectTypeSupport.requireText(value, "column definition");
-        if (text.indexOf(';') >= 0 || text.contains("--") || text.contains("/*")) {
-            throw new IllegalArgumentException("column definition contains unsupported SQL syntax");
+        for (int index = 0; index < text.length();) {
+            if (text.charAt(index) == ';' || text.startsWith("--", index) || text.startsWith("/*", index)) {
+                throw new IllegalArgumentException("column definition contains unsupported SQL syntax");
+            }
+            long segment = SqlLexicalScanner.protectedSegmentAt(text, index, lexicalRules, false);
+            if (segment >= 0L && SqlLexicalScanner.segmentKind(segment) == SqlLexicalScanner.SegmentKind.LINE_COMMENT) {
+                throw new IllegalArgumentException("column definition contains unsupported SQL syntax");
+            }
+            index = segment < 0L ? index + 1 : SqlLexicalScanner.segmentEnd(segment);
         }
         return text;
     }
 
-    private static String sqlServerNullability(String columnDefinition) {
+    private String sqlServerNullability(String columnDefinition) {
         String normalized = requireColumnDefinition(columnDefinition).toLowerCase(Locale.ROOT);
         if (normalized.endsWith(" not null") || normalized.endsWith(" not null primary key")) {
             return " not null";

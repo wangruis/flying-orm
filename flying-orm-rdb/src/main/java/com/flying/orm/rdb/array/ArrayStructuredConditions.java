@@ -3,6 +3,7 @@ package com.flying.orm.rdb.array;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.StructuredConditionInput;
 import com.flying.orm.core.condition.StructuredConditionPolicy;
+import com.flying.orm.core.condition.TermRegistry;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.rdb.codec.ArrayValueCodec;
@@ -32,6 +33,7 @@ public final class ArrayStructuredConditions implements StructuredConditionResol
     public static final String ANY_EQUALS = "array-any-eq";
 
     private static final Set<String> OPERATORS = Set.of(CONTAINS, CONTAINED_BY, OVERLAPS, ANY_EQUALS);
+    private static final TermRegistry GOVERNED_TERMS = ArrayTermHandlers.postgresql().terms();
 
     private ArrayStructuredConditions() {
     }
@@ -63,7 +65,7 @@ public final class ArrayStructuredConditions implements StructuredConditionResol
         for (String operator : OPERATORS) {
             safePolicy = safePolicy.allowOperator(operator);
         }
-        return safePolicy;
+        return safePolicy.withAdditionalTerms(GOVERNED_TERMS);
     }
 
     private StructuredConditionInput adaptNode(DynamicForm form, StructuredConditionInput input) {

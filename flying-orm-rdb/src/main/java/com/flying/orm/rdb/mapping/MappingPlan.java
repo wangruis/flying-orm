@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.mapping;
 
+import com.flying.orm.core.codec.ValueCodec;
 import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.core.internal.error.ThrowableGraph;
@@ -93,10 +94,20 @@ final class MappingPlan<T> implements RowMapper<T> {
     static <T> MappingPlan<T> createUncached(Class<T> type,
                                               EntityMetadata<T> metadata,
                                               ValueCodecRegistry valueCodecs) {
+        return createUncached(type, metadata, valueCodecs, Map.of());
+    }
+
+    static <T> MappingPlan<T> createUncached(
+            Class<T> type,
+            EntityMetadata<T> metadata,
+            ValueCodecRegistry valueCodecs,
+            Map<String, EntityTypeMappingRegistry.Mapping> customMappings) {
+        Map<String, EntityTypeMappingRegistry.Mapping> safeCustomMappings = Objects.requireNonNull(
+                customMappings, "custom entity field mappings must not be null");
         if (type.isRecord()) {
-            return new MappingPlan<>(recordWriter(type, metadata), null, valueCodecs);
+            return new MappingPlan<>(recordWriter(type, metadata, safeCustomMappings), null, valueCodecs);
         }
-        return new MappingPlan<>(null, beanWriter(type, metadata), valueCodecs);
+        return new MappingPlan<>(null, beanWriter(type, metadata, safeCustomMappings), valueCodecs);
     }
 
     /** 映射计划的稳定逻辑重量，用反射写入槽数量近似长期占用，不在热路径扫描对象字节。 */
@@ -105,7 +116,10 @@ final class MappingPlan<T> implements RowMapper<T> {
                 : Math.max(1, beanWriter.writers().size());
     }
 
-    private static <T> RecordWriter<T> recordWriter(Class<T> type, EntityMetadata<T> metadata) {
+    private static <T> RecordWriter<T> recordWriter(
+            Class<T> type,
+            EntityMetadata<T> metadata,
+            Map<String, EntityTypeMappingRegistry.Mapping> customMappings) {
         try {
             RecordComponent[] components = type.getRecordComponents();
             Class<?>[] parameterTypes = Arrays.stream(components)
@@ -118,6 +132,7 @@ final class MappingPlan<T> implements RowMapper<T> {
             DatabaseType[] databaseTypes = new DatabaseType[components.length];
             EntityEnumStorage[] enumStorage = new EntityEnumStorage[components.length];
             EntityEnumValueCodec[] enumValues = new EntityEnumValueCodec[components.length];
+            ValueCodec[] customCodecs = new ValueCodec[components.length];
             Object[] defaultValues = new Object[components.length];
             for (int index = 0; index < components.length; index++) {
                 RecordComponent component = components[index];
@@ -131,6 +146,8 @@ final class MappingPlan<T> implements RowMapper<T> {
                 databaseTypes[index] = field.databaseType();
                 enumStorage[index] = field.enumStorage();
                 enumValues[index] = EntityRowValueConverter.enumValueCodec(component.getType(), field);
+                EntityTypeMappingRegistry.Mapping customMapping = customMappings.get(field.name());
+                customCodecs[index] = customMapping == null ? null : customMapping.codec();
             }
             return new RecordWriter<>(constructor,
                                       names,
@@ -138,6 +155,7 @@ final class MappingPlan<T> implements RowMapper<T> {
                                       databaseTypes,
                                       enumStorage,
                                       enumValues,
+                                      customCodecs,
                                       defaultValues);
         } catch (ReflectiveOperationException error) {
             throw new MappingException("record mapping plan cannot be created for " + type.getName(), error);
@@ -149,7 +167,10 @@ final class MappingPlan<T> implements RowMapper<T> {
         return type.isPrimitive() ? Array.get(Array.newInstance(type, 1), 0) : null;
     }
 
-    private static <T> BeanWriter<T> beanWriter(Class<T> type, EntityMetadata<T> metadata) {
+    private static <T> BeanWriter<T> beanWriter(
+            Class<T> type,
+            EntityMetadata<T> metadata,
+            Map<String, EntityTypeMappingRegistry.Mapping> customMappings) {
         try {
             Constructor<T> constructor = type.getDeclaredConstructor();
             requireAccessible(constructor, "bean constructor");
@@ -160,8 +181,10 @@ final class MappingPlan<T> implements RowMapper<T> {
                 EntityFieldMetadata field = metadata.findField(property.getName()).orElse(null);
                 if (writeMethod != null && field != null && !"class".equals(property.getName())) {
                     requireAccessible(writeMethod, "bean setter");
+                    EntityTypeMappingRegistry.Mapping customMapping = customMappings.get(field.name());
                     EntityValueWriter writer = EntityValueWriter.forMethod(
-                            writeMethod, writeMethod.getParameterTypes()[0], field);
+                            writeMethod, writeMethod.getParameterTypes()[0], field,
+                            customMapping == null ? null : customMapping.codec());
                     // 行数据可能来自 select name，也可能来自真实列 user_name，两种都能写回 Java 属性。
                     writers.put(EntityFieldNames.resultKey(property.getName()), writer);
                     writers.put(EntityFieldNames.resultKey(metadata.field(property.getName()).columnName()), writer);
@@ -174,8 +197,10 @@ final class MappingPlan<T> implements RowMapper<T> {
                         && persistentField != null
                         && !writers.containsKey(EntityFieldNames.resultKey(field.getName()))) {
                     requireAccessible(field, "bean field");
+                    EntityTypeMappingRegistry.Mapping customMapping = customMappings.get(persistentField.name());
                     EntityValueWriter writer = EntityValueWriter.forField(
-                            field, field.getType(), persistentField);
+                            field, field.getType(), persistentField,
+                            customMapping == null ? null : customMapping.codec());
                     // 没有 setter 的字段同样同时认 Java 字段名和数据库列名。
                     writers.put(EntityFieldNames.resultKey(field.getName()), writer);
                     writers.put(EntityFieldNames.resultKey(metadata.field(field.getName()).columnName()), writer);
@@ -216,6 +241,7 @@ final class MappingPlan<T> implements RowMapper<T> {
                                    DatabaseType[] databaseTypes,
                                    EntityEnumStorage[] enumStorage,
                                    EntityEnumValueCodec[] enumValues,
+                                   ValueCodec[] customCodecs,
                                    Object[] defaultValues) {
 
         private BoundWriter<T> bind(DynamicRow row) {
@@ -243,7 +269,8 @@ final class MappingPlan<T> implements RowMapper<T> {
                 arguments[i] = EntityRowValueConverter.convert(
                         indexes[i] < 0 ? null : row.value(indexes[i]),
                         writer.parameterTypes()[i], writer.databaseTypes()[i],
-                        writer.enumStorage()[i], writer.enumValues()[i], valueCodecs);
+                        writer.enumStorage()[i], writer.enumValues()[i],
+                        writer.customCodecs()[i], valueCodecs);
             }
             try {
                 return writer.constructor().newInstance(arguments);

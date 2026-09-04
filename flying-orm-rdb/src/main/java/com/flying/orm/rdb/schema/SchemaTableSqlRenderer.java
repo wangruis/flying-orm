@@ -6,8 +6,6 @@ import com.flying.orm.core.metadata.ColumnMetadata;
 import com.flying.orm.core.metadata.ForeignKeyMetadata;
 import com.flying.orm.core.metadata.IndexMetadata;
 import com.flying.orm.core.metadata.ValueGeneration;
-import com.flying.orm.core.type.DatabaseType;
-import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.core.sql.render.SqlIdentifiers;
 import com.flying.orm.core.sql.render.SqlRequest;
 import java.util.ArrayList;
@@ -22,10 +20,6 @@ import java.util.stream.Collectors;
  * 以后增加字段类型或索引写法时，不会把迁移计划代码一起搅乱。</p>
  */
 final class SchemaTableSqlRenderer {
-
-    private static final String TIME_MARKER = "[[flying-orm:v1:TIME]]";
-    private static final String OFFSET_TIME_MARKER = "[[flying-orm:v1:OFFSET_TIME]]";
-    private static final String COMMENT_ESCAPE = "[[flying-orm:v1:COMMENT]]";
 
     private final SchemaDialect dialect;
     private final SchemaSequenceSqlRenderer sequences;
@@ -115,7 +109,7 @@ final class SchemaTableSqlRenderer {
         }
         String storageComment = storageComment(safeField);
         if (dialect.inlineColumnComment() && storageComment != null) {
-            sql += " comment " + dialect.quoteLiteral(storageComment);
+            sql += " comment " + dialect.commentLiteral(storageComment);
         }
         return sql;
     }
@@ -247,7 +241,7 @@ final class SchemaTableSqlRenderer {
                            com.flying.orm.core.metadata.ColumnMetadata column,
                            DynamicField target) {
         validateCommentChange(table, column, target);
-        String previousComment = storageComment(column.databaseType(), column.comment());
+        String previousComment = storageComment(column);
         String targetComment = storageComment(target);
         if (Objects.equals(previousComment, targetComment)) {
             return;
@@ -275,7 +269,7 @@ final class SchemaTableSqlRenderer {
     void validateCommentChange(String table,
                                com.flying.orm.core.metadata.ColumnMetadata column,
                                DynamicField target) {
-        String previousComment = storageComment(column.databaseType(), column.comment());
+        String previousComment = storageComment(column);
         String targetComment = storageComment(target);
         if (Objects.equals(previousComment, targetComment)) {
             return;
@@ -309,48 +303,15 @@ final class SchemaTableSqlRenderer {
 
     String storageComment(DynamicField field) {
         DynamicField safeField = Objects.requireNonNull(field, "dynamic field must not be null");
-        return storageComment(safeField.databaseType(), safeField.comment());
+        return SchemaColumnCommentCodec.encode(
+                dialect, safeField.databaseType(), safeField.generation(), safeField.comment());
     }
 
     String storageComment(com.flying.orm.core.metadata.ColumnMetadata column) {
         com.flying.orm.core.metadata.ColumnMetadata safeColumn = Objects.requireNonNull(
                 column, "column metadata must not be null");
-        return storageComment(safeColumn.databaseType(), safeColumn.comment());
-    }
-
-    private String storageComment(DatabaseType dataType, String comment) {
-        SchemaDialect.GeneratedValueStyle style = dialect.generatedValueStyle();
-        boolean offsetTime = dataType.logicalType() == LogicalType.OFFSET_TIME;
-        if (style != SchemaDialect.GeneratedValueStyle.ORACLE
-                && style != SchemaDialect.GeneratedValueStyle.MYSQL
-                && style != SchemaDialect.GeneratedValueStyle.SQL_SERVER) {
-            return comment;
-        }
-        String marker;
-        if (offsetTime) {
-            marker = OFFSET_TIME_MARKER;
-        } else if (style == SchemaDialect.GeneratedValueStyle.ORACLE
-                && dataType.logicalType() == LogicalType.TIME) {
-            marker = TIME_MARKER;
-        } else {
-            return escapeReservedComment(comment);
-        }
-        if (comment == null || comment.isEmpty()) {
-            return marker;
-        }
-        return marker + comment;
-    }
-
-    /** 普通列可使用任意用户注释；与内部协议同前缀时写入转义标记，读取后仍恢复原文。 */
-    private static String escapeReservedComment(String comment) {
-        if (comment == null || comment.isEmpty()) {
-            return comment;
-        }
-        return comment.startsWith(TIME_MARKER)
-                || comment.startsWith(OFFSET_TIME_MARKER)
-                || comment.startsWith(COMMENT_ESCAPE)
-                ? COMMENT_ESCAPE + comment
-                : comment;
+        return SchemaColumnCommentCodec.encode(
+                dialect, safeColumn.databaseType(), safeColumn.generation(), safeColumn.comment());
     }
 
     void addColumnCommentChange(List<SqlRequest> requests,

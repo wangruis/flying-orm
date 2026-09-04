@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchChunkExecutionFact;
 import com.flying.orm.rdb.batch.BatchRowConflict;
 import com.flying.orm.rdb.batch.BatchRowCountPolicy;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
@@ -86,11 +87,35 @@ final class R2dbcBatchWriterChunks {
                                         BatchWriteRequest request,
                                         BatchChunk chunk,
                                         String transportSql) {
+        return executeChunk(resource, request, chunk, transportSql, null);
+    }
+
+    private Mono<BatchChunkResult> executeChunk(R2dbcBatchConnectionHandle resource,
+                                                BatchWriteRequest request,
+                                                BatchChunk chunk,
+                                                String transportSql, R2dbcBatchEvidenceCounts evidence) {
         Connection connection = resource.connection();
-        return protectedSideIndex.prepare(connection, request, chunk, resource::largeObjects)
+        return protectedSideIndex.prepare(
+                        connection, request, chunk, resource::largeObjects, evidence)
                 .flatMap(prepared -> executeBusinessChunk(
-                        resource, request, chunk, prepared, transportSql))
+                        resource, request, chunk, prepared, transportSql, evidence))
                 .onErrorMap(error -> chunkFailure(chunk, error));
+    }
+
+    /** evidence 入口复用同一分片执行逻辑；legacy 路径不会创建 fact。 */
+    Mono<BatchChunkExecutionFact> executeBatchEvidence(R2dbcBatchConnectionHandle resource,
+                                                       BatchWriteRequest request,
+                                                       BatchChunk chunk,
+                                                       String transportSql, R2dbcBatchEvidenceCounts evidence) {
+        return executeChunk(resource, request, chunk, transportSql, evidence)
+                .map(result -> BatchChunkExecutionFact.allSuccessful(
+                        chunk.chunkIndex(),
+                        chunk.startOffset(),
+                        chunk.rows().size(),
+                        evidence.affectedRows(result.affectedRows())))
+                .onErrorMap(error -> error instanceof Error
+                        ? error
+                        : R2dbcBatchEvidenceFailure.from(chunk, evidence, error));
     }
 
     private static Throwable chunkFailure(BatchChunk chunk, Throwable error) {
@@ -106,21 +131,21 @@ final class R2dbcBatchWriterChunks {
                                                          BatchWriteRequest request,
                                                          BatchChunk chunk,
                                                          R2dbcProtectedBatchSideIndex.Prepared prepared,
-                                                         String transportSql) {
+                                                         String transportSql, R2dbcBatchEvidenceCounts evidence) {
         Connection connection = resource.connection();
         if (request.generatedKeys().required()) {
-            return executeGeneratedKeyChunk(resource, request, chunk, prepared, transportSql);
+            return executeGeneratedKeyChunk(resource, request, chunk, prepared, transportSql, evidence);
         }
         Mono<BatchChunkResult> business;
         if (protectedSideIndex.hasOwnerRestrictedUpdates(prepared)) {
             business = executeOwnerRestrictedUpdateChunk(
-                    connection, request, chunk, prepared, transportSql);
+                    connection, request, chunk, prepared, transportSql, evidence);
         } else if (request.rowCountPolicy() == BatchRowCountPolicy.EXACTLY_ONE) {
-            business = executeExactlyOneChunk(connection, request, chunk, transportSql);
+            business = executeExactlyOneChunk(connection, request, chunk, transportSql, evidence);
         } else if (containsLargeObject(chunk)) {
-            business = executeLargeObjectChunk(connection, request, chunk, transportSql);
+            business = executeLargeObjectChunk(connection, request, chunk, transportSql, evidence);
         } else {
-            business = executeDriverBatch(connection, request, chunk, transportSql);
+            business = executeDriverBatch(connection, request, chunk, transportSql, evidence);
         }
         return business.flatMap(result -> protectedSideIndex.complete(connection, prepared, result)
                                                                .thenReturn(result));
@@ -133,7 +158,7 @@ final class R2dbcBatchWriterChunks {
                                                              BatchWriteRequest request,
                                                              BatchChunk chunk,
                                                              R2dbcProtectedBatchSideIndex.Prepared prepared,
-                                                             String transportSql) {
+                                                             String transportSql, R2dbcBatchEvidenceCounts evidence) {
         Connection connection = resource.connection();
         return Mono.defer(() -> {
             R2dbcProtectedBatchSideIndex.GeneratedTokenBatch generatedTokens =
@@ -145,8 +170,13 @@ final class R2dbcBatchWriterChunks {
                                     transportSql,
                                     chunk.rows().get(index),
                                     chunk.startOffset() + index,
-                                    resource::largeObjects)
+                                    resource::largeObjects,
+                                    evidence)
                             .flatMap(write -> {
+                                // 驱动已返回更新计数和生成键时，主表写事实已经成立；回调和侧索引不能抹掉它。
+                                recordRow(evidence, write.affectedRows());
+                                request.generatedKeys().accept(
+                                        chunk.startOffset() + index, write.generatedKey());
                                 Mono<Void> sideIndex;
                                 if (generatedTokens != null) {
                                     sideIndex = Mono.fromRunnable(
@@ -196,10 +226,11 @@ final class R2dbcBatchWriterChunks {
     private Mono<BatchChunkResult> executeLargeObjectChunk(Connection connection,
                                                           BatchWriteRequest request,
                                                           BatchChunk chunk,
-                                                          String transportSql) {
+                                                          String transportSql, R2dbcBatchEvidenceCounts evidence) {
         return Flux.fromIterable(chunk.rows())
                 .concatMap(parameters -> executeSingleRow(
-                        connection, request, parameters, transportSql))
+                        connection, request, parameters, transportSql, evidence)
+                        .doOnNext(count -> recordRow(evidence, count)))
                 .reduce(0L, R2dbcExecutionCounts::add)
                 .map(affectedRows -> BatchChunkResult.committed(chunk.chunkIndex(),
                                                                 chunk.startOffset(),
@@ -211,7 +242,7 @@ final class R2dbcBatchWriterChunks {
     private Mono<BatchChunkResult> executeDriverBatch(Connection connection,
                                                       BatchWriteRequest request,
                                                       BatchChunk chunk,
-                                                      String transportSql) {
+                                                      String transportSql, R2dbcBatchEvidenceCounts evidence) {
         return Mono.defer(() -> {
             Statement statement = connection.createStatement(transportSql);
             for (int i = 0; i < chunk.rows().size(); i++) {
@@ -220,8 +251,13 @@ final class R2dbcBatchWriterChunks {
                     statement.add();
                 }
             }
+            if (evidence != null) {
+                evidence.trackCounts();
+                evidence.markDatabaseWorkAttempted();
+            }
             return Flux.from(statement.execute())
                     .flatMap(Result::getRowsUpdated)
+                    .doOnNext(count -> record(evidence, count))
                     .reduce(0L, R2dbcExecutionCounts::add)
                     .map(affectedRows -> BatchChunkResult.committed(chunk.chunkIndex(),
                                                                      chunk.startOffset(),
@@ -237,11 +273,12 @@ final class R2dbcBatchWriterChunks {
     private Mono<BatchChunkResult> executeExactlyOneChunk(Connection connection,
                                                           BatchWriteRequest request,
                                                           BatchChunk chunk,
-                                                          String transportSql) {
+                                                          String transportSql, R2dbcBatchEvidenceCounts evidence) {
         return Flux.range(0, chunk.rows().size())
                 .concatMap(index -> executeSingleRow(
-                                connection, request, chunk.rows().get(index), transportSql)
-                        .map(affectedRows -> new IndexedRowCount(index, affectedRows)))
+                                connection, request, chunk.rows().get(index), transportSql, evidence)
+                        .map(affectedRows -> new IndexedRowCount(index, affectedRows))
+                        .doOnNext(count -> recordRow(evidence, count.affectedRows())))
                 .collectList()
                 .flatMap(counts -> resultForRowCounts(request, chunk, counts))
                 .onErrorMap(error -> {
@@ -258,9 +295,11 @@ final class R2dbcBatchWriterChunks {
             BatchWriteRequest request,
             BatchChunk chunk,
             R2dbcProtectedBatchSideIndex.Prepared prepared,
-            String transportSql) {
+            String transportSql,
+            R2dbcBatchEvidenceCounts evidence) {
         return protectedSideIndex.executeOwnerRestrictedUpdates(
-                        connection, request, chunk, prepared, transportSql)
+                        connection, request, chunk, prepared, transportSql,
+                        count -> recordRow(evidence, count), evidence)
                 .map(counts -> java.util.stream.IntStream.range(0, counts.size())
                         .mapToObj(index -> new IndexedRowCount(index, counts.get(index))).toList())
                 .flatMap(counts -> resultForRowCounts(request, chunk, counts))
@@ -300,10 +339,13 @@ final class R2dbcBatchWriterChunks {
     private Mono<Long> executeSingleRow(Connection connection,
                                         BatchWriteRequest request,
                                         ProtectedBatchRows.RowView row,
-                                        String transportSql) {
+                                        String transportSql, R2dbcBatchEvidenceCounts evidence) {
         return Mono.defer(() -> {
             Statement statement = connection.createStatement(transportSql);
             bind(statement, request, row);
+            if (evidence != null) {
+                evidence.markDatabaseWorkAttempted();
+            }
             return Flux.from(statement.execute())
                     .concatMap(Result::getRowsUpdated)
                     .reduce(0L, R2dbcExecutionCounts::add);
@@ -338,4 +380,17 @@ final class R2dbcBatchWriterChunks {
 
     private record IndexedRowCount(int index, long affectedRows) {
     }
+
+    private static void record(R2dbcBatchEvidenceCounts evidence, long count) {
+        if (evidence != null) {
+            evidence.record(count);
+        }
+    }
+
+    private static void recordRow(R2dbcBatchEvidenceCounts evidence, long count) {
+        if (evidence != null) {
+            evidence.recordRow(count);
+        }
+    }
+
 }

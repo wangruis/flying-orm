@@ -1,6 +1,8 @@
 package com.flying.orm.rdb.form;
 
+import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
@@ -13,7 +15,9 @@ record SyncFormConfiguration(FormDataSqlRenderer renderer,
                              DataScope dataScope,
                              SqlExecutionOptions executionOptions,
                              BatchWriteOptions batchOptions,
-                             EntityModelRegistry entityModels) {
+                             EntityModelRegistry entityModels,
+                             FieldUsePolicy fieldUsePolicy,
+                             QueryShapeLimits queryShapeLimits) {
 
     SyncFormConfiguration {
         renderer = Objects.requireNonNull(renderer, "form data sql renderer must not be null");
@@ -22,25 +26,42 @@ record SyncFormConfiguration(FormDataSqlRenderer renderer,
         executionOptions = Objects.requireNonNull(executionOptions, "default execution options must not be null");
         batchOptions = Objects.requireNonNull(batchOptions, "default batch options must not be null");
         entityModels = Objects.requireNonNull(entityModels, "entity model registry must not be null");
+        fieldUsePolicy = Objects.requireNonNull(fieldUsePolicy, "field use policy must not be null");
+        queryShapeLimits = Objects.requireNonNull(queryShapeLimits, "query shape limits must not be null");
     }
 
     SyncFormConfiguration withResolver(StructuredConditionResolver value) {
-        return new SyncFormConfiguration(renderer, value, dataScope, executionOptions, batchOptions, entityModels);
+        return new SyncFormConfiguration(renderer, value, dataScope, executionOptions, batchOptions, entityModels,
+                                         fieldUsePolicy, queryShapeLimits);
     }
 
     SyncFormConfiguration withExecutionOptions(SqlExecutionOptions value) {
-        return new SyncFormConfiguration(renderer, resolver, dataScope, value, batchOptions, entityModels);
+        return new SyncFormConfiguration(renderer, resolver, dataScope, value, batchOptions, entityModels,
+                                         fieldUsePolicy, queryShapeLimits);
     }
 
     SyncFormConfiguration withDataScope(DataScope value) {
-        return new SyncFormConfiguration(renderer, resolver, value, executionOptions, batchOptions, entityModels);
+        return new SyncFormConfiguration(renderer, resolver, value, executionOptions, batchOptions, entityModels,
+                                         fieldUsePolicy, queryShapeLimits);
     }
 
     SyncFormConfiguration withBatchOptions(BatchWriteOptions value) {
-        return new SyncFormConfiguration(renderer, resolver, dataScope, executionOptions, value, entityModels);
+        return new SyncFormConfiguration(renderer, resolver, dataScope, executionOptions, value, entityModels,
+                                         fieldUsePolicy, queryShapeLimits);
     }
 
     SyncFormConfiguration withEntityModels(EntityModelRegistry value) {
-        return new SyncFormConfiguration(renderer, resolver, dataScope, executionOptions, batchOptions, value);
+        return new SyncFormConfiguration(renderer, resolver, dataScope, executionOptions, batchOptions, value,
+                                         fieldUsePolicy, queryShapeLimits);
+    }
+
+    SyncFormConfiguration withFieldUsePolicy(FieldUsePolicy value) {
+        return new SyncFormConfiguration(renderer, resolver, dataScope, executionOptions, batchOptions, entityModels,
+                                         value, queryShapeLimits);
+    }
+
+    SyncFormConfiguration withQueryShapeLimits(QueryShapeLimits value) {
+        return new SyncFormConfiguration(renderer, resolver, dataScope, executionOptions, batchOptions, entityModels,
+                                         fieldUsePolicy, value);
     }
 }

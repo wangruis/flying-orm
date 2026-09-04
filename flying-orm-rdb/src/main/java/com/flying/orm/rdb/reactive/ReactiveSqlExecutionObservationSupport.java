@@ -2,6 +2,7 @@ package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
@@ -198,6 +199,10 @@ final class ReactiveSqlExecutionObservationSupport {
 
     Mono<BatchWriteResult> observeBatchResult(BatchWriteRequest request, Mono<BatchWriteResult> source) {
         return batches.observeResult(request, source);
+    }
+
+    Mono<BatchExecutionEvidence> observeBatchEvidence(Mono<BatchExecutionEvidence> source) {
+        return batches.observeEvidence(source);
     }
 
     Mono<BatchWriteResult> observeBatchResult(

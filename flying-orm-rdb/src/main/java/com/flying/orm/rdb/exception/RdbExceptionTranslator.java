@@ -10,6 +10,7 @@ import java.sql.SQLRecoverableException;
 import java.sql.SQLTimeoutException;
 import java.sql.SQLTransientConnectionException;
 import java.util.Objects;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeoutException;
@@ -67,6 +68,14 @@ public final class RdbExceptionTranslator {
         if (databaseError instanceof TimeoutException) {
             return new RdbException(RdbErrorKind.TIMEOUT,
                                     "database operation timed out",
+                                    null,
+                                    null,
+                                    databaseError);
+        }
+        if (databaseError instanceof InterruptedException
+                || databaseError instanceof CancellationException) {
+            return new RdbException(RdbErrorKind.CANCELLED,
+                                    "database operation was cancelled",
                                     null,
                                     null,
                                     databaseError);

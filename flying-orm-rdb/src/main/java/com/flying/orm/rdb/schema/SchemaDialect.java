@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.sql.render.SqlRequest;
 
@@ -26,6 +27,13 @@ public final class SchemaDialect {
     public enum ColumnCommentStyle {
         NONE,
         INLINE,
+        COMMENT_ON,
+        SQL_SERVER_EXTENDED_PROPERTY
+    }
+
+    public enum TableCommentStyle {
+        NONE,
+        MYSQL_OPTION,
         COMMENT_ON,
         SQL_SERVER_EXTENDED_PROPERTY
     }
@@ -64,6 +72,7 @@ public final class SchemaDialect {
                           String quoteClose,
                           Map<String, String> typeMappings,
                           ColumnCommentStyle columnCommentStyle,
+                          TableCommentStyle tableCommentStyle,
                           DropIndexStyle dropIndexStyle,
                           RenameColumnStyle renameColumnStyle,
                           GeneratedValueStyle generatedValueStyle,
@@ -73,6 +82,7 @@ public final class SchemaDialect {
         this.types = new SchemaDialectTypeSupport(quoteOpen, quoteClose, typeMappings, generatedValueStyle);
         this.ddl = new SchemaDialectDdlSupport(types,
                                                columnCommentStyle,
+                                               tableCommentStyle,
                                                dropIndexStyle,
                                                renameColumnStyle,
                                                generatedValueStyle,
@@ -105,6 +115,17 @@ public final class SchemaDialect {
         return types.identifier(value);
     }
 
+    /**
+     * 逐段渲染关系身份。每一段中的点号都属于名称本身，不会被再次拆分。
+     */
+    public String relationIdentifier(RelationIdentity value) {
+        return types.identifier(value);
+    }
+
+    String schemaObjectIdentifier(RelationIdentity relation, String objectName) {
+        return types.schemaObjectIdentifier(relation, objectName);
+    }
+
     public String dataType(String value) {
         return types.dataType(value);
     }
@@ -125,6 +146,22 @@ public final class SchemaDialect {
         return ddl.columnCommentSql(table, column, comment);
     }
 
+    Optional<String> columnCommentSql(RelationIdentity table, String column, String comment) {
+        return ddl.columnCommentSql(table, column, comment);
+    }
+
+    String inlineTableCommentClause(String comment) {
+        return ddl.inlineTableCommentClause(comment);
+    }
+
+    Optional<String> tableCommentSql(String table, String comment) {
+        return ddl.tableCommentSql(table, comment);
+    }
+
+    Optional<String> tableCommentSql(RelationIdentity table, String comment) {
+        return ddl.tableCommentSql(table, comment);
+    }
+
     Optional<String> columnCommentChangeSql(String table,
                                             String column,
                                             String previousComment,
@@ -133,6 +170,10 @@ public final class SchemaDialect {
     }
 
     public String dropIndexSql(String table, String index) {
+        return ddl.dropIndexSql(table, index);
+    }
+
+    String dropIndexSql(RelationIdentity table, String index) {
         return ddl.dropIndexSql(table, index);
     }
 
@@ -153,6 +194,10 @@ public final class SchemaDialect {
     }
 
     public String addColumnSql(String table, String columnDefinition) {
+        return ddl.addColumnSql(table, columnDefinition);
+    }
+
+    String addColumnSql(RelationIdentity table, String columnDefinition) {
         return ddl.addColumnSql(table, columnDefinition);
     }
 
@@ -209,6 +254,14 @@ public final class SchemaDialect {
         return types.quoteLiteral(value);
     }
 
+    String commentLiteral(String value) {
+        return ddl.commentLiteral(value);
+    }
+
+    String valueLiteral(String value) {
+        return types.valueLiteral(value);
+    }
+
     /**
      * 构建器只负责收集配置，build 时一次性创建不可变方言对象。
      * 公开方法名称保持原样，避免使用方因为内部拆分被迫改代码。
@@ -219,6 +272,7 @@ public final class SchemaDialect {
         private String quoteClose;
         private final Map<String, String> typeMappings = new LinkedHashMap<>();
         private ColumnCommentStyle columnCommentStyle = ColumnCommentStyle.NONE;
+        private TableCommentStyle tableCommentStyle = TableCommentStyle.NONE;
         private DropIndexStyle dropIndexStyle = DropIndexStyle.NAME_ONLY;
         private RenameColumnStyle renameColumnStyle = RenameColumnStyle.ALTER_TABLE;
         private GeneratedValueStyle generatedValueStyle = GeneratedValueStyle.NONE;
@@ -261,6 +315,24 @@ public final class SchemaDialect {
 
         public Builder sqlServerExtendedPropertyComment() {
             columnCommentStyle = ColumnCommentStyle.SQL_SERVER_EXTENDED_PROPERTY;
+            return this;
+        }
+
+        /** MySQL 把表注释放在 CREATE TABLE 的表选项中。 */
+        public Builder mysqlTableComment() {
+            tableCommentStyle = TableCommentStyle.MYSQL_OPTION;
+            return this;
+        }
+
+        /** H2、PostgreSQL 和 Oracle 使用独立的 COMMENT ON TABLE 语句。 */
+        public Builder commentOnTable() {
+            tableCommentStyle = TableCommentStyle.COMMENT_ON;
+            return this;
+        }
+
+        /** SQL Server 使用表级扩展属性保存注释。 */
+        public Builder sqlServerExtendedPropertyTableComment() {
+            tableCommentStyle = TableCommentStyle.SQL_SERVER_EXTENDED_PROPERTY;
             return this;
         }
 
@@ -350,6 +422,7 @@ public final class SchemaDialect {
                                      quoteClose,
                                      typeMappings,
                                      columnCommentStyle,
+                                     tableCommentStyle,
                                      dropIndexStyle,
                                      renameColumnStyle,
                                      generatedValueStyle,

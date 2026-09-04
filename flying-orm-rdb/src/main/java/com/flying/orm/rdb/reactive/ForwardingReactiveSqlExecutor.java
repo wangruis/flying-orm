@@ -2,6 +2,7 @@ package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchResolution;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
@@ -147,6 +148,16 @@ abstract class ForwardingReactiveSqlExecutor implements ReactiveSqlExecutor {
     @Override
     public Mono<BatchWriteResult> writeProtectedBatch(BatchWriteRequest request) {
         return delegate.writeProtectedBatch(request);
+    }
+
+    @Override
+    public Mono<BatchExecutionEvidence> writeBatchEvidence(BatchWriteRequest request) {
+        return delegate.writeBatchEvidence(request);
+    }
+
+    @Override
+    public Mono<BatchExecutionEvidence> writeProtectedBatchEvidence(BatchWriteRequest request) {
+        return delegate.writeProtectedBatchEvidence(request);
     }
 
     @Override

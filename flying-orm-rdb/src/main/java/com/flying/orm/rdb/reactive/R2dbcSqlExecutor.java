@@ -2,6 +2,7 @@ package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchMemoryLimits;
 import com.flying.orm.rdb.batch.BatchResolution;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
@@ -331,6 +332,23 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
     @Override
     public Mono<BatchWriteResult> writeProtectedBatch(BatchWriteRequest request) {
         return writeBatch(request);
+    }
+
+    @Override
+    public Mono<BatchExecutionEvidence> writeBatchEvidence(BatchWriteRequest request) {
+        return Mono.defer(() -> {
+            BatchWriteRequest safeRequest = Objects.requireNonNull(
+                    request, "batch evidence request must not be null");
+            batchMemoryLimits.check(safeRequest.options());
+            return batchWriter.resolveTransaction()
+                    .flatMap(resolution -> batchWriter.writeEvidence(safeRequest, resolution))
+                    .onErrorMap(ReactiveSqlExecutionProtection::translate);
+        });
+    }
+
+    @Override
+    public Mono<BatchExecutionEvidence> writeProtectedBatchEvidence(BatchWriteRequest request) {
+        return writeBatchEvidence(request);
     }
 
     @Override

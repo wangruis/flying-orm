@@ -1,6 +1,8 @@
 package com.flying.orm.core.metadata;
 
 import com.flying.orm.core.internal.Names;
+import com.flying.orm.core.internal.hash.StableDigest;
+import com.flying.orm.core.internal.hash.StableEncoder;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -18,6 +20,9 @@ import java.util.Optional;
  */
 public final class FeatureRegistry {
 
+    private static final StableDigest.Domain FINGERPRINT_DOMAIN =
+            StableDigest.domain("feature-registry/v1");
+
     private static final FeatureRegistry EMPTY = new FeatureRegistry(List.of());
 
     private final List<Feature> features;
@@ -25,6 +30,8 @@ public final class FeatureRegistry {
     private final Map<String, Feature> featuresById;
 
     private final Map<Class<? extends Feature>, Feature> featuresByType;
+
+    private final String fingerprint;
 
     private FeatureRegistry(List<Feature> features) {
         List<Feature> copiedFeatures = List.copyOf(features);
@@ -50,6 +57,7 @@ public final class FeatureRegistry {
         this.features = copiedFeatures;
         this.featuresById = Map.copyOf(indexedById);
         this.featuresByType = Map.copyOf(indexedByType);
+        this.fingerprint = fingerprint(copiedFeatures);
     }
 
     /**
@@ -77,6 +85,24 @@ public final class FeatureRegistry {
      */
     public List<Feature> features() {
         return features;
+    }
+
+    /** 返回只由 feature 稳定 id 和具体契约类型决定的冻结指纹。 */
+    public String fingerprint() {
+        return fingerprint;
+    }
+
+    private static String fingerprint(List<Feature> features) {
+        List<Feature> ordered = features.stream()
+                .sorted(java.util.Comparator.comparing(feature -> Names.key(feature.id(), "feature id")))
+                .toList();
+        StableEncoder encoder = StableDigest.sha256(FINGERPRINT_DOMAIN)
+                                            .integer("FEATURE_COUNT", ordered.size());
+        for (Feature feature : ordered) {
+            encoder.text("FEATURE_ID", Names.key(feature.id(), "feature id"))
+                   .text("FEATURE_TYPE", feature.getClass().getName());
+        }
+        return encoder.finishHex();
     }
 
     /**

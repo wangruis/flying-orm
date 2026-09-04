@@ -5,6 +5,7 @@ import com.flying.orm.core.metadata.ColumnMetadata;
 import com.flying.orm.core.metadata.IndexMetadata;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.rdb.dialect.DialectCapabilities;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -43,6 +44,15 @@ public final class SchemaMigrationReviewer {
      */
     public static SchemaMigrationReviewer create(FormSchemaSqlRenderer renderer) {
         return new SchemaMigrationReviewer(renderer);
+    }
+
+    /**
+     * 汇总一组结构化差异在当前数据库事实和已确认方言能力下的最高风险。
+     */
+    public SchemaMigrationRiskLevel riskLevel(List<SchemaOperation> operations,
+                                              SchemaSnapshot actual,
+                                              DialectCapabilities capabilities) {
+        return SchemaMigrationSupport.highestRisk(operations, actual, capabilities);
     }
 
     public ReviewedSchemaMigrationPlan review(TableMetadata current,

@@ -41,7 +41,7 @@ public record DynamicFormChangeSet(DynamicForm source,
         addedFields = unwrapOrCopy(addedFields, "added fields must not be null");
         removedFields = unwrapOrCopy(removedFields, "removed fields must not be null");
         changedFields = unwrapOrCopy(changedFields, "changed fields must not be null");
-        if (!source.table().equals(target.table())) {
+        if (!source.mapsToSameRelation(target)) {
             throw new IllegalArgumentException("form change set must target the same physical table");
         }
         if (!owned && (!addedFields.equals(expectedAdded(source, target))

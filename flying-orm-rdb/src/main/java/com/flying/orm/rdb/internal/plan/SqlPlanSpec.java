@@ -15,7 +15,7 @@ import java.util.Objects;
  * @param dialect 数据库方言名称
  * @param bindMarkerStyle 参数标记风格
  * @param formFingerprint DynamicForm 结构指纹
- * @param table schema.table 或 table 物理身份；保留大小写以匹配 quoted identifier 语义
+ * @param table 表名缓存标签；完整关系身份由 formFingerprint 隔离，不把标签重新解释成 SQL
  * @param operation select、insert、update 等操作
  * @param fields 写入字段或投影字段的稳定顺序
  * @param conditionShape 条件 AST 形状，不包含条件值
@@ -67,13 +67,9 @@ public record SqlPlanSpec(String dialect,
     }
 
     static String normalizeTable(String table) {
-        String normalized = requireText(table, "sql plan table");
-        int separator = normalized.indexOf('.');
-        if (separator == 0 || separator == normalized.length() - 1
-                || separator >= 0 && normalized.indexOf('.', separator + 1) >= 0) {
-            throw new IllegalArgumentException("sql plan table must be table or schema.table");
-        }
-        return normalized;
+        // 此处只保存缓存标签，不生成 SQL。点号也可能是分段关系身份中表名的字面内容；
+        // SQL 标识符校验和逐段引用由最终方言负责，不能在缓存边界再次套用旧字符串路径规则。
+        return requireText(table, "sql plan table");
     }
 
     private static String requireNonNullShape(String shape, String name) {

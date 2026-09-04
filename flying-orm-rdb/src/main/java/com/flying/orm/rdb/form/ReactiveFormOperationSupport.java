@@ -1,5 +1,7 @@
 package com.flying.orm.rdb.form;
 
+import com.flying.orm.core.condition.QueryShapeLimits;
+import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
@@ -28,6 +30,9 @@ class ReactiveFormOperationSupport {
     final FormOperationPlanner planner;
     final ReactiveFormResultSupport results;
     final ProtectedContainsResultSupport containsResults;
+    final FieldUsePolicy fieldUsePolicy;
+    final QueryShapeLimits queryShapeLimits;
+    final boolean governed;
 
     private final ReactiveFormOperationContext context;
 
@@ -38,6 +43,9 @@ class ReactiveFormOperationSupport {
         this.defaultExecutionOptions = context.defaultExecutionOptions();
         this.defaultBatchWriteOptions = context.defaultBatchWriteOptions();
         this.entityModels = context.entityModels();
+        this.fieldUsePolicy = context.fieldUsePolicy();
+        this.queryShapeLimits = context.queryShapeLimits();
+        this.governed = FieldUseGuard.governed(fieldUsePolicy, queryShapeLimits);
         this.scopes = new FormScopeSupport(renderer, context.structuredConditionResolver(),
                                            context.defaultDataScope());
         this.planner = new FormOperationPlanner(renderer, scopes, defaultExecutionOptions);
@@ -64,6 +72,9 @@ class ReactiveFormOperationSupport {
         this.planner = shared.planner;
         this.results = shared.results;
         this.containsResults = shared.containsResults;
+        this.fieldUsePolicy = shared.fieldUsePolicy;
+        this.queryShapeLimits = shared.queryShapeLimits;
+        this.governed = shared.governed;
     }
 
     final ReactiveFormOperationContext context() {

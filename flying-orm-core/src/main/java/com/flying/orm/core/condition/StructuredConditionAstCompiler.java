@@ -52,13 +52,14 @@ final class StructuredConditionAstCompiler {
                                                   "structured condition node must be either term or group at " + path);
         }
         return hasTermShape
-                ? compileTerm(form, input, policy, path)
+                ? compileTerm(form, input, policy, budget, path)
                 : compileGroup(form, input, policy, budget, depth, path);
     }
 
     private TermCondition compileTerm(DynamicForm form,
                                       StructuredConditionInput input,
                                       StructuredConditionPolicy policy,
+                                      ConditionCompilationBudget budget,
                                       String path) {
         String externalField = requireText(input.field(),
                                            StructuredConditionErrorCode.FIELD_NOT_ALLOWED,
@@ -98,6 +99,7 @@ final class StructuredConditionAstCompiler {
                                         externalField,
                                         externalOperator,
                                         "structured condition operator is not allowed at " + path));
+        budget.checkTerm(operator, policy, path);
         Object value = valueNormalizer.normalize(input.stableValue(),
                                                  field,
                                                  policy,

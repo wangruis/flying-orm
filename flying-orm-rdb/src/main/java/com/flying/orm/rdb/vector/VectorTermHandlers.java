@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.vector;
 
 import com.flying.orm.core.condition.TermCondition;
+import com.flying.orm.core.condition.TermExtensionDescriptor;
 import com.flying.orm.core.sql.render.SqlFragment;
 import com.flying.orm.core.sql.render.SqlRenderContext;
 import com.flying.orm.core.sql.render.SqlTermHandler;
@@ -24,7 +25,10 @@ public final class VectorTermHandlers {
     }
 
     private static SqlTermHandler handler(String id) {
-        return SqlTermHandler.of(id, VectorTermHandlers::render);
+        return SqlTermHandler.of(
+                TermExtensionDescriptor.filter(id, java.util.Set.of("postgresql-vector"), 2, 1),
+                com.flying.orm.core.condition.ConditionValueShape.SCALAR,
+                VectorTermHandlers::render);
     }
 
     private static SqlFragment render(TermCondition term, SqlRenderContext context) {

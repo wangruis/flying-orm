@@ -3,6 +3,7 @@ package com.flying.orm.rdb.vector;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.StructuredConditionInput;
 import com.flying.orm.core.condition.StructuredConditionPolicy;
+import com.flying.orm.core.condition.TermRegistry;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.core.form.DynamicForm;
@@ -31,6 +32,7 @@ public final class VectorStructuredConditions implements StructuredConditionReso
     private static final Set<String> OPERATORS = Set.of(L2_LESS_THAN,
                                                          COSINE_LESS_THAN,
                                                          INNER_PRODUCT_GREATER_THAN);
+    private static final TermRegistry GOVERNED_TERMS = VectorTermHandlers.postgresql().terms();
 
     private VectorStructuredConditions() {
     }
@@ -62,7 +64,7 @@ public final class VectorStructuredConditions implements StructuredConditionReso
         for (String operator : OPERATORS) {
             customized = customized.allowOperator(operator);
         }
-        return customized;
+        return customized.withAdditionalTerms(GOVERNED_TERMS);
     }
 
     private StructuredConditionInput adaptNode(DynamicForm form, StructuredConditionInput input) {

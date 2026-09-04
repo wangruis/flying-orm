@@ -7,6 +7,8 @@ import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
+import com.flying.orm.rdb.schema.SchemaSnapshot;
+import com.flying.orm.rdb.schema.SchemaSnapshotCoverage;
 import com.flying.orm.rdb.transaction.R2dbcTransactionContext;
 import reactor.core.publisher.Mono;
 
@@ -72,6 +74,11 @@ final class CachedReactiveFormMetadataReader implements ReactiveFormMetadataCach
     }
 
     @Override
+    public SchemaSnapshotCoverage snapshotCoverage() {
+        return delegate.snapshotCoverage();
+    }
+
+    @Override
     public Mono<DynamicForm> readForm(String formId, String table) {
         MetadataCacheKey key = MetadataCacheKey.form(formId, null, table);
         return contextual(key, formStats, () -> delegate.readForm(formId, table));
@@ -93,6 +100,17 @@ final class CachedReactiveFormMetadataReader implements ReactiveFormMetadataCach
     public Mono<TableMetadata> readTable(String schema, String table) {
         MetadataCacheKey key = MetadataCacheKey.table(schema, table);
         return contextual(key, tableStats, () -> delegate.readTable(schema, table));
+    }
+
+    /** Schema 审核必须读取当前数据库事实，不能命中或写入普通 CRUD 元数据缓存。 */
+    @Override
+    public Mono<SchemaSnapshot> readSnapshot(String table) {
+        return delegate.readSnapshot(table);
+    }
+
+    @Override
+    public Mono<SchemaSnapshot> readSnapshot(String schema, String table) {
+        return delegate.readSnapshot(schema, table);
     }
 
     private <T> Mono<T> contextual(MetadataCacheKey key,

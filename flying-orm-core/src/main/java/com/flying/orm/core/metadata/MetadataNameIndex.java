@@ -66,4 +66,12 @@ final class MetadataNameIndex<T> {
         }
         return Optional.ofNullable(unambiguousFoldedValues.get(identity.key()));
     }
+
+    /**
+     * 只接受精确物理名称。Schema 约束不能借用面向调用方查询的大小写兼容规则，否则 quoted identifier
+     * 会在构建成功后指向另一列。
+     */
+    Optional<T> findExact(String name, String fieldName) {
+        return Optional.ofNullable(exactValues.get(FieldIdentity.of(name).name()));
+    }
 }

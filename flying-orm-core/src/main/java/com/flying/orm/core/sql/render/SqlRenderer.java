@@ -27,14 +27,13 @@ import java.util.function.UnaryOperator;
 public final class SqlRenderer implements SqlRenderContext {
 
     private final SqlTermRegistry termRegistry;
-
     private final long standardConditionTermMask;
-
     private final ValueCodecRegistry valueCodecs;
-
     private final UnaryOperator<String> identifierRenderer;
-
     private final UnaryOperator<String> structureIdentifierRenderer;
+
+    /** 仍以实例身份隔离；只有启用 descriptor 时才把冻结声明混入现有缓存键哈希。 */
+    private final int cacheHashCode;
 
     private SqlRenderer(SqlTermRegistry termRegistry,
                         ValueCodecRegistry valueCodecs,
@@ -47,6 +46,26 @@ public final class SqlRenderer implements SqlRenderContext {
                                                          "sql identifier renderer must not be null");
         this.structureIdentifierRenderer = Objects.requireNonNull(
                 structureIdentifierRenderer, "sql structure identifier renderer must not be null");
+        int identityHash = System.identityHashCode(this);
+        if (this.termRegistry.hasDescriptors()) {
+            identityHash = 31 * identityHash + this.termRegistry.descriptorFingerprint().hashCode();
+        }
+        if (this.valueCodecs.hasDescriptors()) {
+            identityHash = 31 * identityHash + this.valueCodecs.descriptorFingerprint().hashCode();
+        }
+        this.cacheHashCode = identityHash;
+    }
+
+    /** SqlRenderer 继续按对象身份判等；哈希只在构造时计算一次，不触碰请求值。 */
+    @Override
+    public int hashCode() {
+        return cacheHashCode;
+    }
+
+    /** 与既有 Object 语义一致：不同装配实例即使 descriptor 相同也不能共享 renderer 缓存身份。 */
+    @Override
+    public boolean equals(Object other) {
+        return this == other;
     }
 
     /**
@@ -87,8 +106,24 @@ public final class SqlRenderer implements SqlRenderContext {
      */
     public SqlFragment renderWhere(ConditionGroup where) {
         RenderAccumulator accumulator = new RenderAccumulator();
-        renderGroup(where, false, accumulator);
+        renderGroup(where, false, accumulator, null, null);
         return accumulator.publish();
+    }
+
+    /** 内部组合边界：只为关系子查询提供已渲染的外层表达式及其所属关系，不改变普通条件字段。 */
+    public SqlFragment renderWhere(ConditionGroup where,
+                                   UnaryOperator<String> correlatedFieldRenderer,
+                                   UnaryOperator<String> outerQualifierRenderer) {
+        RenderAccumulator accumulator = new RenderAccumulator();
+        renderGroup(where, false, accumulator,
+                    Objects.requireNonNull(correlatedFieldRenderer, "correlated field renderer must not be null"),
+                    Objects.requireNonNull(outerQualifierRenderer, "outer qualifier renderer must not be null"));
+        return accumulator.publish();
+    }
+
+    /** 装配时确定的关系 term 标记；未启用的普通 CRUD 不创建关联上下文。 */
+    public boolean hasCorrelatedTerms() {
+        return termRegistry.hasCorrelatedTerms();
     }
 
     @Override
@@ -187,7 +222,9 @@ public final class SqlRenderer implements SqlRenderContext {
                                structureIdentifierRenderer);
     }
 
-    private boolean renderNode(ConditionNode node, RenderAccumulator accumulator) {
+    private boolean renderNode(ConditionNode node, RenderAccumulator accumulator,
+                               UnaryOperator<String> correlatedFields,
+                               UnaryOperator<String> outerQualifiers) {
         // AST 目前只有叶子 term 和逻辑分组。遇到未知实现立即失败，不能悄悄漏掉安全条件。
         if (node instanceof TermCondition term) {
             SqlTermHandler handler = termRegistry.handler(term.operator());
@@ -195,15 +232,21 @@ public final class SqlRenderer implements SqlRenderContext {
                     && simple.appendTo(term, this, accumulator)) {
                 return true;
             }
+            if (correlatedFields != null && handler instanceof RelationExistsTermHandler relation) {
+                return accumulator.append(relation.render(
+                        term, this, correlatedFields.apply(term.field()), outerQualifiers.apply(term.field())));
+            }
             return accumulator.append(handler.render(term, this));
         }
         if (node instanceof ConditionGroup group) {
-            return renderGroup(group, true, accumulator);
+            return renderGroup(group, true, accumulator, correlatedFields, outerQualifiers);
         }
         throw new IllegalArgumentException("unsupported condition node: " + node.getClass().getName());
     }
 
-    private boolean renderGroup(ConditionGroup group, boolean nested, RenderAccumulator accumulator) {
+    private boolean renderGroup(ConditionGroup group, boolean nested, RenderAccumulator accumulator,
+                                UnaryOperator<String> correlatedFields,
+                                UnaryOperator<String> outerQualifiers) {
         Objects.requireNonNull(group, "condition group must not be null");
         if (group.children().isEmpty()) {
             return false;
@@ -222,7 +265,7 @@ public final class SqlRenderer implements SqlRenderContext {
             if (rendered) {
                 accumulator.appendSql(delimiter);
             }
-            if (renderNode(child, accumulator)) {
+            if (renderNode(child, accumulator, correlatedFields, outerQualifiers)) {
                 rendered = true;
             } else {
                 accumulator.rollback(childSqlStart, childParameterStart);

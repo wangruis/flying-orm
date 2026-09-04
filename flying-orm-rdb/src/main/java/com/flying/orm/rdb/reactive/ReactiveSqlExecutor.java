@@ -2,6 +2,7 @@ package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchMemoryBudget;
 import com.flying.orm.rdb.batch.BatchMemoryLimits;
 import com.flying.orm.rdb.batch.BatchResolution;
@@ -190,6 +191,20 @@ public interface ReactiveSqlExecutor {
     default Mono<BatchWriteResult> writeBatch(BatchWriteRequest request) {
         Objects.requireNonNull(request, "batch write request must not be null");
         return Mono.error(new UnsupportedOperationException("reactive sql executor does not support chunked batch writes"));
+    }
+
+    /** 执行批量并返回独立 SQL 执行证据；旧实现必须显式拒绝，不能退化为 legacy 结果。 */
+    default Mono<BatchExecutionEvidence> writeBatchEvidence(BatchWriteRequest request) {
+        Objects.requireNonNull(request, "batch evidence request must not be null");
+        return Mono.error(new UnsupportedOperationException(
+                "reactive sql executor does not support batch execution evidence"));
+    }
+
+    /** 执行含侧索引维护的证据批量；默认实现禁止静默漏写侧索引。 */
+    default Mono<BatchExecutionEvidence> writeProtectedBatchEvidence(BatchWriteRequest request) {
+        Objects.requireNonNull(request, "protected batch evidence request must not be null");
+        return Mono.error(new UnsupportedOperationException(
+                "reactive sql executor does not support protected batch execution evidence"));
     }
 
     /** 执行含 CONTAINS 侧索引维护的批量；普通自定义执行器不能静默降级为只写业务表。 */

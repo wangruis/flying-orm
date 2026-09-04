@@ -73,7 +73,7 @@ public final class StructuredConditionPolicy {
      * @return 默认策略
      */
     public static StructuredConditionPolicy defaults() {
-        return new StructuredConditionPolicy(Map.copyOf(defaultOperators()),
+        return new StructuredConditionPolicy(TermRegistry.standardOperators(),
                                              Set.of(),
                                              false,
                                              Set.of(),
@@ -263,6 +263,20 @@ public final class StructuredConditionPolicy {
                                              Objects.requireNonNull(terms, "term registry must not be null"));
     }
 
+    /**
+     * 在保留当前扩展声明的前提下追加受治理的 term。
+     *
+     * <p>这个入口供可以组合的结构化条件定制器使用。同名声明必须具有完全相同的值形状和显式
+     * 描述器；没有新增声明时返回当前策略，不产生额外策略对象。</p>
+     *
+     * @param additions 要追加的受治理 term
+     * @return 合并后的策略；注册表没有变化时返回当前实例
+     */
+    public StructuredConditionPolicy withAdditionalTerms(TermRegistry additions) {
+        TermRegistry merged = terms.mergeDescribed(additions);
+        return merged == terms ? this : withTerms(merged);
+    }
+
     Optional<String> resolveOperator(String externalOperator) {
         return Optional.ofNullable(operators.get(Names.key(externalOperator, "condition operator")));
     }
@@ -324,6 +338,14 @@ public final class StructuredConditionPolicy {
         return TermRegistry.standard().find(operator).isPresent();
     }
 
+    /**
+     * 结构化外部条件把扩展声明的复杂度折算进既有 node budget，不再建立第二套请求预算。
+     * 标准 term 仍固定只计一个节点；自定义 term 必须来自带 descriptor 的受控注册表。
+     */
+    int termComplexityCost(String internalOperator) {
+        return terms.governedComplexityCost(internalOperator);
+    }
+
     private StructuredConditionPolicy copy(Map<String, String> operators,
                                            Set<FieldIdentity> allowedFields,
                                            Set<FieldIdentity> deniedFields,
@@ -342,34 +364,6 @@ public final class StructuredConditionPolicy {
                                              maxCollectionSize,
                                              maxStringLength,
                                              terms);
-    }
-
-    private static Map<String, String> defaultOperators() {
-        Map<String, String> operators = new LinkedHashMap<>();
-        operators.put("eq", "=");
-        operators.put("=", "=");
-        operators.put("gt", ">");
-        operators.put(">", ">");
-        operators.put("lt", "<");
-        operators.put("<", "<");
-        operators.put("ge", ">=");
-        operators.put(">=", ">=");
-        operators.put("le", "<=");
-        operators.put("<=", "<=");
-        operators.put("ne", "<>");
-        operators.put("!=", "!=");
-        operators.put("<>", "<>");
-        operators.put("like", "like");
-        operators.put("not-like", "not-like");
-        operators.put("like-ignore-case", "like-ignore-case");
-        operators.put("not-like-ignore-case", "not-like-ignore-case");
-        operators.put("in", "in");
-        operators.put("not-in", "not-in");
-        operators.put("between", "between");
-        operators.put("not-between", "not-between");
-        operators.put("is-null", "is-null");
-        operators.put("is-not-null", "is-not-null");
-        return operators;
     }
 
     private static int requirePositive(int value, String name) {

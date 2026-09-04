@@ -56,7 +56,10 @@ public record ProtectedContainsLayout(DynamicForm table,
             throw new IllegalArgumentException("protected contains search requires a primary key");
         }
         String tableName = containsTable(safeForm);
-        DynamicForm.Builder table = DynamicForm.builder(safeForm.id() + "Contains", tableName);
+        DynamicForm.Builder table = safeForm.relationIdentity()
+                .map(identity -> DynamicForm.relationalBuilder(
+                        safeForm.id() + "Contains", identity.withTable(tableName)))
+                .orElseGet(() -> DynamicForm.builder(safeForm.id() + "Contains", tableName));
         primaryKeys.forEach(field -> table.addField(ownerColumn(field)));
         table.addField(DynamicField.of("field_tag", "VARCHAR").withLength(30).withNullable(false));
         table.addField(DynamicField.of("token_hash", ProtectedFormLayout.HASH_TYPE).withNullable(false));
@@ -84,6 +87,9 @@ public record ProtectedContainsLayout(DynamicForm table,
     private static String containsTable(DynamicForm form) {
         String businessTable = form.table();
         String generatedName = ProtectedColumnNames.containsTable(form.id(), businessTable);
+        if (form.relationIdentity().isPresent()) {
+            return generatedName;
+        }
         int separator = businessTable.lastIndexOf('.');
         return separator < 0 ? generatedName : businessTable.substring(0, separator + 1) + generatedName;
     }

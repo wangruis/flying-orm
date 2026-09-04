@@ -9,6 +9,7 @@ import com.flying.orm.core.metadata.IndexMetadata;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.core.type.LogicalType;
+import com.flying.orm.rdb.dialect.DialectCapabilities;
 
 import java.util.HashSet;
 import java.util.List;
@@ -29,6 +30,51 @@ import java.util.Set;
 final class SchemaMigrationSupport {
 
     private SchemaMigrationSupport() {
+    }
+
+    static SchemaMigrationRiskLevel riskLevel(SchemaOperation operation,
+                                              SchemaSnapshot actual,
+                                              DialectCapabilities capabilities) {
+        return SchemaRiskClassifier.classify(operation, actual, capabilities);
+    }
+
+    static boolean safeIncremental(SchemaOperation operation,
+                                   SchemaSnapshot actual,
+                                   DialectCapabilities capabilities) {
+        return SchemaRiskClassifier.safeIncremental(operation, actual, capabilities);
+    }
+
+    static List<SchemaOperation> requireSafeIncremental(List<SchemaOperation> operations,
+                                                        SchemaSnapshot actual,
+                                                        DialectCapabilities capabilities) {
+        List<SchemaOperation> safeOperations = List.copyOf(Objects.requireNonNull(
+                operations, "schema operations must not be null"));
+        Objects.requireNonNull(actual, "schema snapshot must not be null");
+        Objects.requireNonNull(capabilities, "dialect capabilities must not be null");
+        for (SchemaOperation operation : safeOperations) {
+            if (!safeIncremental(operation, actual, capabilities)) {
+                throw new IllegalArgumentException(
+                        "schema operation requires review: " + operation.kind());
+            }
+        }
+        return safeOperations;
+    }
+
+    static SchemaMigrationRiskLevel highestRisk(List<SchemaOperation> operations,
+                                                SchemaSnapshot actual,
+                                                DialectCapabilities capabilities) {
+        List<SchemaOperation> safeOperations = List.copyOf(Objects.requireNonNull(
+                operations, "schema operations must not be null"));
+        Objects.requireNonNull(actual, "schema snapshot must not be null");
+        Objects.requireNonNull(capabilities, "dialect capabilities must not be null");
+        SchemaMigrationRiskLevel highest = SchemaMigrationRiskLevel.LOW;
+        for (SchemaOperation operation : safeOperations) {
+            SchemaMigrationRiskLevel risk = riskLevel(operation, actual, capabilities);
+            if (risk.ordinal() > highest.ordinal()) {
+                highest = risk;
+            }
+        }
+        return highest;
     }
 
     static boolean sameColumnShape(ColumnMetadata column,

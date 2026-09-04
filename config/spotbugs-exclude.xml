@@ -30,6 +30,7 @@
     <Match>
         <Or>
             <Class name="com.flying.orm.rdb.batch.BatchOptimisticLockException"/>
+            <Class name="com.flying.orm.rdb.batch.BatchExecutionEvidenceException"/>
             <Class name="com.flying.orm.rdb.batch.BatchWriteException"/>
             <Class name="com.flying.orm.rdb.execution.SqlExecutionSequenceException"/>
             <Class name="com.flying.orm.rdb.migration.DataMigrationException"/>
@@ -52,6 +53,44 @@
         <Class name="com.flying.orm.rdb.reactive.R2dbcLargeObjectRows"/>
         <Bug pattern="RCN_REDUNDANT_NULLCHECK_OF_NONNULL_VALUE"/>
     </Match>
+    <!--
+      The In compact constructor replaces values with Stream.toList() before the compiler stores
+      the component field. The generated accessor therefore returns an unmodifiable snapshot;
+      copying it on every read would add allocation without improving ownership.
+    -->
+    <Match>
+        <Class name="com.flying.orm.core.metadata.CheckPredicate$In"/>
+        <Method name="values"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!--
+      Both key descriptors replace columns with Stream.toList() in their compact constructors.
+      Their generated accessors expose those cached unmodifiable snapshots, not caller collections.
+    -->
+    <Match>
+        <Class name="com.flying.orm.core.metadata.PrimaryKeyDefinition"/>
+        <Method name="columns"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="com.flying.orm.core.metadata.UniqueConstraintDefinition"/>
+        <Method name="columns"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!--
+      CheckPredicate's nested record constructors invoke these private interface helpers with
+      invokestatic. SpotBugs does not connect those nested-class calls to the interface methods.
+    -->
+    <Match>
+        <Class name="com.flying.orm.core.metadata.CheckPredicate"/>
+        <Method name="normalizeValues"/>
+        <Bug pattern="UPM_UNCALLED_PRIVATE_METHOD"/>
+    </Match>
+    <Match>
+        <Class name="com.flying.orm.core.metadata.CheckPredicate"/>
+        <Method name="requireColumnName"/>
+        <Bug pattern="UPM_UNCALLED_PRIVATE_METHOD"/>
+    </Match>
     <!-- These accessors expose immutable values already frozen during construction. -->
     <Match>
         <Class name="com.flying.orm.core.codec.ValueCodecRegistry"/>
@@ -70,6 +109,79 @@
             <Class name="com.flying.orm.core.sql.render.SqlRenderer"/>
             <Class name="com.flying.orm.core.type.DatabaseType"/>
         </Or>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!--
+      These descriptor constructors normalize into fresh sets and finish with Set.copyOf (or Set.of).
+      The accessors intentionally return those cached immutable identity sets; copying again in each
+      registry lookup would allocate without improving encapsulation. Keep this suppression method-scoped
+      so a future mutable field exposed by either descriptor remains visible to SpotBugs.
+    -->
+    <Match>
+        <Class name="com.flying.orm.core.codec.ValueCodecDescriptor"/>
+        <Method name="~(javaTypes|logicalTypes|requiredCapabilities)"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="com.flying.orm.core.condition.TermExtensionDescriptor"/>
+        <Method name="requiredCapabilities"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!--
+      Strongly connected components are frozen twice during construction: each inner component is
+      produced by Stream.toList(), then the outer component list by List.copyOf(). The flattened
+      dependency order is another Stream.toList() snapshot. Getter copies would only add allocations.
+    -->
+    <Match>
+        <Class name="com.flying.orm.rdb.schema.SchemaStronglyConnectedComponents"/>
+        <Method name="components"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="com.flying.orm.rdb.schema.SchemaStronglyConnectedComponents"/>
+        <Method name="dependencyOrder"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!--
+      AggregateRow snapshots the input and publishes a Collections.unmodifiableList. Returning that cached
+      row view avoids copying every aggregate result on access; callers cannot add, remove or replace values.
+    -->
+    <Match>
+        <Class name="com.flying.orm.rdb.aggregate.AggregateRow"/>
+        <Method name="values"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!--
+      EntitySchemaDescriptor builds a fresh IdentityHashMap and wraps it with Collections.unmodifiableMap.
+      The field-to-codec identity table is intentionally cached because its keys use DynamicField identity.
+    -->
+    <Match>
+        <Class name="com.flying.orm.rdb.mapping.EntitySchemaDescriptor"/>
+        <Method name="customFieldCodecs"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!--
+      EntitySchemaDescriptor and EntityTypeMappingRegistry deliberately share one structurally immutable
+      ValueCodecRegistry assembled at startup. Copying the registry from either accessor would lose identity
+      reuse and add allocations without adding mutation protection.
+    -->
+    <Match>
+        <Class name="com.flying.orm.rdb.mapping.EntitySchemaDescriptor"/>
+        <Method name="valueCodecs"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="com.flying.orm.rdb.mapping.EntityTypeMappingRegistry"/>
+        <Method name="valueCodecs"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!--
+      Mapping.codec exposes the registered ValueCodec by design: codecs are shared strategy objects used by
+      mapping, binding and decoding. The Mapping itself is immutable and never claims ownership of a codec.
+    -->
+    <Match>
+        <Class name="com.flying.orm.rdb.mapping.EntityTypeMappingRegistry$Mapping"/>
+        <Method name="codec"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
     <!-- These RDB values are immutable snapshots or deliberate live execution handles. -->

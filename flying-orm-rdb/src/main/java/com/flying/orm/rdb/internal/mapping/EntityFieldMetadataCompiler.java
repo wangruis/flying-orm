@@ -30,7 +30,8 @@ final class EntityFieldMetadataCompiler {
     static EntityFieldMetadata compile(Class<?> entityType,
                                        Field field,
                                        EntityNamingStrategy namingStrategy,
-                                       Optional<FlyingLogicDelete> classLogicDelete) {
+                                       Optional<FlyingLogicDelete> classLogicDelete,
+                                       boolean deferLogicDeleteLiteralDecoding) {
         Optional<TableField> flyingField = FlyingAnnotationReader.tableField(field);
         Optional<TableId> flyingId = FlyingAnnotationReader.tableId(field);
         String columnName = columnName(field, namingStrategy, flyingId, flyingField);
@@ -57,10 +58,12 @@ final class EntityFieldMetadataCompiler {
                                        isVersion(field),
                                        logicDelete.isPresent(),
                                        logicDelete.map(LogicDeleteValues::notDeletedValue)
-                                                  .map(value -> EntityFieldTypeResolver.typedValue(value, field.getType()))
+                                                  .map(value -> logicDeleteValue(
+                                                          value, field.getType(), deferLogicDeleteLiteralDecoding))
                                                   .orElse(null),
                                        logicDelete.map(LogicDeleteValues::deletedValue)
-                                                  .map(value -> EntityFieldTypeResolver.typedValue(value, field.getType()))
+                                                  .map(value -> logicDeleteValue(
+                                                          value, field.getType(), deferLogicDeleteLiteralDecoding))
                                                   .orElse(null),
                                        null,
                                        null,
@@ -80,6 +83,14 @@ final class EntityFieldMetadataCompiler {
                                        updateStrategy != FieldStrategy.NEVER,
                                        true,
                                        false);
+    }
+
+    private static Object logicDeleteValue(String literal,
+                                           Class<?> fieldType,
+                                           boolean deferLiteralDecoding) {
+        // 严格 descriptor 还要先解析 EntityTypeMappingRegistry，原始文本必须留到映射确定后再交给它的 codec。
+        // 普通 CRUD 没有这份显式映射，继续沿用原来的内置类型转换，既有实体语义不会改变。
+        return deferLiteralDecoding ? literal : EntityFieldTypeResolver.typedValue(literal, fieldType);
     }
 
     private static String columnName(Field field,

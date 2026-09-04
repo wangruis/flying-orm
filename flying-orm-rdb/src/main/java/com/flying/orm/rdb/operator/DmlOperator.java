@@ -44,7 +44,7 @@ public final class DmlOperator {
      * @return 只供本次查询使用的构建器
      */
     public QueryOperator query() {
-        return new QueryOperator(executor, renderer, defaultDataScope);
+        return new QueryOperator(formClient, executor, renderer, defaultDataScope);
     }
 
     /** 创建以 DynamicForm 为根源的轻量多表查询。 */

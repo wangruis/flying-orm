@@ -2,6 +2,7 @@ package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.page.CursorSort;
+import com.flying.orm.core.page.KeysetSort;
 import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.rdb.form.spec.QuerySpec;
@@ -138,5 +139,28 @@ final class FormQueryShapeGuard {
         Set<String> index = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
         index.addAll(fields);
         return index;
+    }
+
+    static void requireReadableUnprotectedKeysetSorts(
+            DynamicForm form,
+            DynamicForm readableForm,
+            KeysetPageNormalizer.NormalizedKeysetPage page,
+            SensitiveDisplayMode displayMode) {
+        List<KeysetSort> sorts = page.sorts();
+        for (int index = 0; index < sorts.size(); index++) {
+            KeysetSort sort = sorts.get(index);
+            if (index < page.callerSortCount()) {
+                readableForm.field(sort.field());
+            }
+            requireUnencrypted(form, sort.field(),
+                               "encrypted field must not be used for keyset ordering");
+            var masking = form.protections().masked(sort.field()).orElse(null);
+            if (masking != null && (displayMode == SensitiveDisplayMode.MASKED
+                    || displayMode == SensitiveDisplayMode.DECLARED
+                    && masking.display() == SensitiveDisplayMode.MASKED)) {
+                throw new IllegalArgumentException(
+                        "masked field must not be used for keyset ordering");
+            }
+        }
     }
 }

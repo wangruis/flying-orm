@@ -5,6 +5,7 @@ import com.flying.orm.core.form.TenantStrategy;
 import com.flying.orm.core.internal.hash.StableDigest;
 import com.flying.orm.core.internal.hash.StableEncoder;
 import com.flying.orm.core.metadata.IndexMetadata;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.protection.FieldProtectionRegistry;
 import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.internal.mapping.EntityFieldNames;
@@ -35,6 +36,7 @@ public final class EntityMetadata<T> {
     private final String formId;
 
     private final String table;
+    private final RelationIdentity relationIdentity;
 
     private final List<EntityFieldMetadata> fields;
 
@@ -48,6 +50,7 @@ public final class EntityMetadata<T> {
     EntityMetadata(Class<T> type,
                    String formId,
                    String table,
+                   RelationIdentity relationIdentity,
                    List<EntityFieldMetadata> fields,
                    String tenantField,
                    TenantStrategy tenantStrategy,
@@ -55,6 +58,7 @@ public final class EntityMetadata<T> {
         this.type = Objects.requireNonNull(type, "entity type must not be null");
         this.formId = requireText(formId, "entity form id");
         this.table = requireText(table, "entity table");
+        this.relationIdentity = relationIdentity;
         this.fields = List.copyOf(fields);
         this.fieldsByName = index(this.fields);
         this.tenantField = tenantField == null ? null : field(tenantField);
@@ -76,7 +80,25 @@ public final class EntityMetadata<T> {
                                                 String tenantField,
                                                 TenantStrategy tenantStrategy,
                                                 FieldProtectionRegistry protections) {
-        return new EntityMetadata<>(type, formId, table, fields, tenantField, tenantStrategy, protections);
+        return new EntityMetadata<>(
+                type, formId, table, null, fields, tenantField, tenantStrategy, protections);
+    }
+
+    /** 严格关系模型跨包创建元数据时使用；旧 String 工厂和 table() 语义保持不变。 */
+    @InternalApi
+    public static <T> EntityMetadata<T> createRelational(
+            Class<T> type,
+            String formId,
+            String legacyTable,
+            RelationIdentity relationIdentity,
+            List<EntityFieldMetadata> fields,
+            String tenantField,
+            TenantStrategy tenantStrategy,
+            FieldProtectionRegistry protections) {
+        return new EntityMetadata<>(
+                type, formId, legacyTable,
+                Objects.requireNonNull(relationIdentity, "relation identity must not be null"),
+                fields, tenantField, tenantStrategy, protections);
     }
 
     /** @return 对应的 Java 实体类型 */
@@ -159,7 +181,7 @@ public final class EntityMetadata<T> {
     /**
      * 返回物理目标结构的稳定 SHA-256 指纹，用于安全复用同表的多个实体映射。
      *
-     * <p>指纹覆盖表名、按规范列名稳定排序的完整列形状和按结构稳定排序的目标索引，不包含
+     * <p>指纹覆盖完整关系身份、按规范列名稳定排序的完整列形状和按结构稳定排序的目标索引，不包含
      * Java 类名、表单 ID、字段声明顺序、上层框架策略、SQL 参数或凭据，使该指纹只回答
      * “物理结构是否相同”。</p>
      *
@@ -186,7 +208,9 @@ public final class EntityMetadata<T> {
     }
 
     private DynamicForm buildDynamicForm(FieldProtectionRegistry protections) {
-        DynamicForm.Builder builder = DynamicForm.builder(formId, table);
+        DynamicForm.Builder builder = relationIdentity == null
+                ? DynamicForm.builder(formId, table)
+                : DynamicForm.relationalBuilder(formId, relationIdentity);
         for (EntityFieldMetadata field : fields) {
             builder.addField(field.toDynamicField());
         }
@@ -200,8 +224,17 @@ public final class EntityMetadata<T> {
     }
 
     private static String fingerprint(DynamicForm form, List<IndexMetadata> indexes) {
-        StableEncoder descriptor = StableDigest.sha256(STRUCTURE_DOMAIN)
-                                               .text("TABLE", form.table().trim());
+        StableEncoder descriptor = StableDigest.sha256(STRUCTURE_DOMAIN);
+        RelationIdentity identity = form.relationIdentity().orElse(null);
+        if (identity == null) {
+            // 旧 String 表名继续使用原编码，保证已有实体的结构指纹和缓存语义不变。
+            descriptor.text("TABLE", form.table().trim());
+        } else {
+            descriptor.marker("SEGMENTED_RELATION")
+                      .nullableText("CATALOG", identity.catalog().orElse(null))
+                      .nullableText("SCHEMA", identity.schema().orElse(null))
+                      .text("TABLE", identity.table());
+        }
         form.fields().stream()
             .sorted(Comparator.comparing(field -> field.name().trim()))
             .forEach(field -> {

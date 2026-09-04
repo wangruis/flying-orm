@@ -2,6 +2,7 @@ package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchResolution;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
@@ -196,6 +197,24 @@ final class ObservedReactiveSqlExecutor extends ForwardingReactiveSqlExecutor {
         return observationSupport.observeBatchResult(
                 safeRequest,
                 Mono.defer(() -> delegate().writeProtectedBatch(safeRequest)
+                        .onErrorMap(ReactiveSqlExecutionProtection::translate)));
+    }
+
+    @Override
+    public Mono<BatchExecutionEvidence> writeBatchEvidence(BatchWriteRequest request) {
+        BatchWriteRequest safeRequest = Objects.requireNonNull(
+                request, "batch evidence request must not be null");
+        return observationSupport.observeBatchEvidence(Mono.defer(
+                () -> delegate().writeBatchEvidence(safeRequest)
+                        .onErrorMap(ReactiveSqlExecutionProtection::translate)));
+    }
+
+    @Override
+    public Mono<BatchExecutionEvidence> writeProtectedBatchEvidence(BatchWriteRequest request) {
+        BatchWriteRequest safeRequest = Objects.requireNonNull(
+                request, "protected batch evidence request must not be null");
+        return observationSupport.observeBatchEvidence(Mono.defer(
+                () -> delegate().writeProtectedBatchEvidence(safeRequest)
                         .onErrorMap(ReactiveSqlExecutionProtection::translate)));
     }
 

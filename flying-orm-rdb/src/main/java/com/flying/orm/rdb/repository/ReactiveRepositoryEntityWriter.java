@@ -48,7 +48,7 @@ final class ReactiveRepositoryEntityWriter<T> {
         this.metadata = Objects.requireNonNull(metadata, "repository entity metadata must not be null");
         this.entityValues = Objects.requireNonNull(entityValues, "repository entity values must not be null");
         this.lifecycle = Objects.requireNonNull(lifecycle, "repository lifecycle support must not be null");
-        this.ids = RepositoryEntityIdSupport.create(metadata, client.entityModels().idGenerator());
+        this.ids = RepositoryEntityIdSupport.create(metadata, client.entityModels());
     }
 
     Mono<Long> insert(T entity) {
@@ -133,7 +133,7 @@ final class ReactiveRepositoryEntityWriter<T> {
     private Mono<Long> executeUpdate(Map<String, Object> row,
                                      ConditionGroup where,
                                      Object... modifiers) {
-        return client.update(applyWriteModifiers(WriteSpec.update(form, row, where), modifiers));
+        return client.update(applyWriteModifiers(WriteSpec.updateOwned(form, row, where), modifiers));
     }
 
     private Mono<Long> executeDelete(ConditionGroup where, Object... modifiers) {
@@ -142,7 +142,7 @@ final class ReactiveRepositoryEntityWriter<T> {
 
     private Mono<Long> executeInsert(T entity, boolean externalTransaction) {
         ids.prepare(entity);
-        WriteSpec spec = WriteSpec.insert(form, entityValues.readForInsert(entity));
+        WriteSpec spec = WriteSpec.insertOwned(form, entityValues.readForInsert(entity));
         if (!ids.databaseGenerated()) {
             return client.insert(spec);
         }

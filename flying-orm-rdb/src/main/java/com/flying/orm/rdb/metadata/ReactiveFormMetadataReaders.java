@@ -5,6 +5,8 @@ import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
+import com.flying.orm.rdb.schema.SchemaSnapshot;
+import com.flying.orm.rdb.schema.SchemaSnapshotCoverage;
 import com.flying.orm.rdb.transaction.R2dbcTransactionContext;
 import com.flying.orm.rdb.transaction.R2dbcTransactionParticipant;
 import reactor.core.publisher.Mono;
@@ -16,6 +18,10 @@ import java.util.function.Supplier;
 /**
  * 按方言挑选动态表单元数据读取器。没有实现的库会明确告诉调用方还没支持。
  * 工厂没有共享状态，可以并发调用；返回的 reader 是否缓存由调用方选择。
+ *
+ * <p>每个内置 reader 都通过 {@link SchemaSnapshotCoverage} 声明真实覆盖范围。查询集按方言版本选择；
+ * 只有确实无法从该版本稳定观察的事实才降低 coverage，并让完整关系 DDL 进入人工验证计划，绝不把
+ * 未观察到的事实误判为不存在。</p>
  *
  * @author wangr
  * @date 2026-07-28
@@ -36,22 +42,10 @@ public final class ReactiveFormMetadataReaders {
     public static ReactiveFormMetadataReader create(ReactiveSqlExecutor executor, RdbDialect dialect) {
         ReactiveSqlExecutor safeExecutor = Objects.requireNonNull(executor, "reactive sql executor must not be null");
         RdbDialect safeDialect = Objects.requireNonNull(dialect, "rdb dialect must not be null");
-        if ("h2".equals(safeDialect.name())) {
-            return H2ReactiveFormMetadataReader.create(safeExecutor);
-        }
-        if ("mysql".equals(safeDialect.name())) {
-            return MySqlReactiveFormMetadataReader.create(safeExecutor);
-        }
-        if ("postgresql".equals(safeDialect.name())) {
-            return PostgreSqlReactiveFormMetadataReader.create(safeExecutor);
-        }
-        if ("oracle".equals(safeDialect.name())) {
-            return OracleReactiveFormMetadataReader.create(safeExecutor);
-        }
-        if ("sqlserver".equals(safeDialect.name())) {
-            return SqlServerReactiveFormMetadataReader.create(safeExecutor);
-        }
-        return unsupported(safeDialect.name());
+        MetadataQueryProfile profile = MetadataQueryProfile.resolve(safeDialect);
+        return profile == null
+                ? unsupported(safeDialect.name())
+                : new InformationSchemaFormMetadataReader(safeExecutor, profile);
     }
 
     /**
@@ -114,6 +108,11 @@ public final class ReactiveFormMetadataReaders {
             this.executor = Objects.requireNonNull(executor, "reactive sql executor must not be null");
         }
 
+        @Override
+        public SchemaSnapshotCoverage snapshotCoverage() {
+            return delegate.snapshotCoverage();
+        }
+
         private static ReactiveFormMetadataCache wrap(ReactiveFormMetadataCache delegate,
                                                        ReactiveSqlExecutor executor) {
             return new TransactionContextualReactiveFormMetadataCache(delegate, executor);
@@ -137,6 +136,16 @@ public final class ReactiveFormMetadataReaders {
         @Override
         public Mono<TableMetadata> readTable(String schema, String table) {
             return contextual(() -> delegate.readTable(schema, table));
+        }
+
+        @Override
+        public Mono<SchemaSnapshot> readSnapshot(String table) {
+            return contextual(() -> delegate.readSnapshot(table));
+        }
+
+        @Override
+        public Mono<SchemaSnapshot> readSnapshot(String schema, String table) {
+            return contextual(() -> delegate.readSnapshot(schema, table));
         }
 
         @Override

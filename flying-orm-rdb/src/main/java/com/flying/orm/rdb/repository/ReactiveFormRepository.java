@@ -8,10 +8,13 @@ import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.rdb.batch.BatchChunkResult;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteResult;
+import com.flying.orm.rdb.aggregate.AggregateRow;
+import com.flying.orm.rdb.aggregate.AggregateSpec;
 import com.flying.orm.rdb.form.ReactiveFormClient;
 import com.flying.orm.rdb.lifecycle.ReactiveEntityListener;
 import com.flying.orm.rdb.internal.mapping.EntityValues;
 import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.lock.ReadLock;
 import com.flying.orm.rdb.operator.EntityDmlDeleteOperator;
 import com.flying.orm.rdb.operator.EntityDmlOperator;
 import com.flying.orm.rdb.operator.EntityDmlQueryOperator;
@@ -46,6 +49,7 @@ public final class ReactiveFormRepository<T> {
 
     private final ReactiveFormClient client;
     private final DynamicForm form;
+    private final DynamicForm boundForm;
     private final Class<T> entityType;
     private final EntityValues<T> entityValues;
     private final ReactiveRepositoryEntityWriter<T> entityWriter;
@@ -58,20 +62,21 @@ public final class ReactiveFormRepository<T> {
                                    EntityValues<T> entityValues,
                                    ReactiveEntityListener<T> listener) {
         this.client = Objects.requireNonNull(client, "reactive form client must not be null");
-        this.form = Objects.requireNonNull(form, "repository form must not be null");
+        this.boundForm = Objects.requireNonNull(form, "repository form must not be null");
         this.entityType = Objects.requireNonNull(type, "repository type must not be null");
         this.entityValues = Objects.requireNonNull(entityValues, "repository entity values must not be null");
         EntityMetadata<T> metadata = client.entityModels().metadata(entityType);
+        this.form = RepositoryLogicDeletes.bind(metadata, boundForm);
         RepositoryEntityIdSupport<T> ids = RepositoryEntityIdSupport.create(
-                metadata, client.entityModels().idGenerator());
+                metadata, client.entityModels());
         ReactiveRepositoryLifecycleSupport<T> lifecycle =
                 new ReactiveRepositoryLifecycleSupport<>(metadata, listener);
         this.entityWriter = new ReactiveRepositoryEntityWriter<>(
-                client, form, metadata, this.entityValues, lifecycle);
+                client, this.form, metadata, this.entityValues, lifecycle);
         ReactiveRepositoryBatchCoordinator<T> batchCoordinator = new ReactiveRepositoryBatchCoordinator<>(metadata,
                 this.entityValues, lifecycle, ids);
-        this.batchOperations = new ReactiveRepositoryBatchOperations<>(client, form, batchCoordinator);
-        this.readMapper = new ReactiveRepositoryReadMapper<>(client, form, entityType, metadata, lifecycle);
+        this.batchOperations = new ReactiveRepositoryBatchOperations<>(client, this.form, batchCoordinator);
+        this.readMapper = new ReactiveRepositoryReadMapper<>(client, this.form, entityType, metadata, lifecycle);
     }
 
     /**
@@ -92,7 +97,7 @@ public final class ReactiveFormRepository<T> {
 
     /** 返回一个使用相同映射、客户端和安全配置，但追加了生命周期监听器的新 Repository。 */
     public ReactiveFormRepository<T> withListener(ReactiveEntityListener<T> listener) {
-        return new ReactiveFormRepository<>(client, form, entityType,
+        return new ReactiveFormRepository<>(client, boundForm, entityType,
                                             entityValues,
                                             Objects.requireNonNull(listener,
                                                                    "entity lifecycle listener must not be null"));
@@ -156,8 +161,24 @@ public final class ReactiveFormRepository<T> {
     public Mono<Long> physicalDelete(ConditionGroup where) { return entityWriter.physicalDelete(where); }
 
     public Flux<T> select(ConditionGroup where) { return readMapper.select(where, null, null); }
+    /** 在订阅时确认调用方 R2DBC 事务，再按受控锁读取当前实体。 */
+    public Flux<T> lockingRead(ConditionGroup where, ReadLock lock) {
+        return readMapper.lockingRead(where, lock);
+    }
+    /** 在当前 Repository 绑定的表单上执行类型化聚合。 */
+    public Flux<AggregateRow> aggregate(AggregateSpec spec) {
+        return client.aggregate(requireRepositoryAggregate(spec));
+    }
     public Mono<PageResult<T>> page(ConditionGroup where, PageQuery page) {
         return readMapper.page(where, page, null, null);
+    }
+
+    private AggregateSpec requireRepositoryAggregate(AggregateSpec spec) {
+        AggregateSpec safeSpec = Objects.requireNonNull(spec, "aggregate spec must not be null");
+        if (safeSpec.query().form() != boundForm) {
+            throw new IllegalArgumentException("aggregate spec must use the repository form");
+        }
+        return RepositoryLogicDeletes.aggregate(safeSpec, form);
     }
 
 }

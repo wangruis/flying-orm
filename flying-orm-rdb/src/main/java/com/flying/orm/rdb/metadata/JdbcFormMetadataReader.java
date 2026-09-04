@@ -1,11 +1,14 @@
 package com.flying.orm.rdb.metadata;
 
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.cache.BoundedCacheRegion;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.result.DynamicRow;
+import com.flying.orm.rdb.schema.SchemaSnapshot;
+import com.flying.orm.rdb.schema.SchemaSnapshotCoverage;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
 
 import java.util.List;
@@ -27,20 +30,42 @@ public final class JdbcFormMetadataReader implements MetadataCacheInvalidator {
 
     private final SyncSqlExecutor executor;
     private final InformationSchemaFormMetadataReader.Queries queries;
+    private final SchemaSnapshotCoverage coverage;
     private final BoundedCacheRegion<MetadataCacheKey, JdbcMetadataValue> metadata;
     private final MetadataCacheInvalidator dependentInvalidator;
+
+    /** 返回当前方言查询集真实具备的结构覆盖范围；覆盖不完整时后续规划会安全停止自动 DDL。 */
+    public SchemaSnapshotCoverage snapshotCoverage() {
+        return coverage;
+    }
 
     JdbcFormMetadataReader(SyncSqlExecutor executor,
                            InformationSchemaFormMetadataReader.Queries queries) {
         this(executor, queries, CacheRegionPolicy.disabled(), MetadataCacheInvalidator.none());
     }
 
+    JdbcFormMetadataReader(SyncSqlExecutor executor, MetadataQueryProfile profile) {
+        this(executor, profile, CacheRegionPolicy.disabled(), MetadataCacheInvalidator.none());
+    }
+
     JdbcFormMetadataReader(SyncSqlExecutor executor,
                            InformationSchemaFormMetadataReader.Queries queries,
                            CacheRegionPolicy policy,
                            MetadataCacheInvalidator dependentInvalidator) {
+        this(executor, new MetadataQueryProfile(
+                queries, InformationSchemaFormMetadataReader.coverage(queries)),
+                policy, dependentInvalidator);
+    }
+
+    JdbcFormMetadataReader(SyncSqlExecutor executor,
+                           MetadataQueryProfile profile,
+                           CacheRegionPolicy policy,
+                           MetadataCacheInvalidator dependentInvalidator) {
         this.executor = Objects.requireNonNull(executor, "sync sql executor must not be null");
-        this.queries = Objects.requireNonNull(queries, "metadata queries must not be null");
+        MetadataQueryProfile safeProfile = Objects.requireNonNull(
+                profile, "metadata query profile must not be null");
+        this.queries = safeProfile.queries();
+        this.coverage = safeProfile.coverage();
         CacheRegionPolicy safePolicy = Objects.requireNonNull(policy, "metadata cache policy must not be null");
         this.metadata = BoundedCacheRegion.create(safePolicy, (ignored, value) -> value.weight());
         this.dependentInvalidator = Objects.requireNonNull(
@@ -86,6 +111,16 @@ public final class JdbcFormMetadataReader implements MetadataCacheInvalidator {
         return readTable(MetadataCacheKey.table(schema, table));
     }
 
+    /** Schema 审核始终直读当前数据库，不命中也不写入普通元数据缓存。 */
+    public SchemaSnapshot readSnapshot(String table) {
+        return loadSnapshot(MetadataCacheKey.table(null, table));
+    }
+
+    /** 按明确 schema 直读当前数据库结构事实。 */
+    public SchemaSnapshot readSnapshot(String schema, String table) {
+        return loadSnapshot(MetadataCacheKey.table(schema, table));
+    }
+
     private TableMetadata readTable(MetadataCacheKey key) {
         boolean externalTransactionActive = externalTransactionActive();
         if (externalTransactionActive) {
@@ -109,6 +144,43 @@ public final class JdbcFormMetadataReader implements MetadataCacheInvalidator {
         List<DynamicRow> indexes = query(queries.indexQuery(), key.schema(), key.table());
         List<DynamicRow> foreignKeys = query(queries.foreignKeyQuery(), key.schema(), key.table());
         return FormMetadataRowConverter.toTableMetadata(displayTable, form, indexes, foreignKeys);
+    }
+
+    private SchemaSnapshot loadSnapshot(MetadataCacheKey key) {
+        String displayTable = displayTable(key.schema(), key.table());
+        List<DynamicRow> columns = query(queries.columnQuery(), key.schema(), key.table());
+        RelationIdentity identity = RelationIdentity.of(null, key.schema(), key.table());
+        if (queries.completeSnapshotQueries()) {
+            List<DynamicRow> tableRows = query(queries.tableQuery(), key.schema(), key.table());
+            List<DynamicRow> primaryKey = query(queries.primaryKeyQuery(), key.schema(), key.table());
+            List<DynamicRow> uniqueConstraints = query(
+                    queries.uniqueConstraintQuery(), key.schema(), key.table());
+            List<DynamicRow> indexes = query(queries.indexQuery(), key.schema(), key.table());
+            List<DynamicRow> foreignKeys = query(queries.foreignKeyQuery(), key.schema(), key.table());
+            List<DynamicRow> checks = query(queries.checkConstraintQuery(), key.schema(), key.table());
+            return FormMetadataRowConverter.toCompleteSchemaSnapshot(
+                    identity,
+                    columns,
+                    tableRows,
+                    primaryKey,
+                    uniqueConstraints,
+                    indexes,
+                    foreignKeys,
+                    checks,
+                    queries.typeMapper(),
+                    queries.snapshotDialect());
+        }
+        List<DynamicRow> indexes = query(queries.indexQuery(), key.schema(), key.table());
+        List<DynamicRow> foreignKeys = query(queries.foreignKeyQuery(), key.schema(), key.table());
+        return FormMetadataRowConverter.toSchemaSnapshot(
+                identity,
+                displayTable,
+                columns,
+                indexes,
+                queries.indexQuery() != null,
+                foreignKeys,
+                queries.foreignKeyQuery() != null,
+                queries.typeMapper());
     }
 
     @Override

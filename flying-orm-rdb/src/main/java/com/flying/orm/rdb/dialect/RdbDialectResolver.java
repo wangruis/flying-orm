@@ -83,6 +83,20 @@ public final class RdbDialectResolver {
     }
 
     /**
+     * 只读取 ConnectionFactory 自带的 metadata，既不创建连接，也不保存 URL。R2DBC SPI 不提供
+     * 产品版本，因此版本明确记为 unknown；能力仍来自已经解析的方言基线。
+     */
+    public static DatabaseDescriptor describe(ConnectionFactory connectionFactory) {
+        ConnectionFactory safeConnectionFactory = Objects.requireNonNull(connectionFactory,
+                                                                         "connection factory must not be null");
+        ConnectionFactoryMetadata metadata = Objects.requireNonNull(safeConnectionFactory.getMetadata(),
+                                                                    "connection factory metadata must not be null");
+        RdbDialect dialect = tryResolveName(metadata.getName())
+                .orElseThrow(() -> unsupported("connection factory metadata name"));
+        return DatabaseDescriptor.of(metadata.getName(), "unknown", dialect);
+    }
+
+    /**
      * 从 R2DBC URL 里识别方言。
      *
      * <p>普通 URL 看 driver，比如 {@code r2dbc:mysql://...}。连接池 URL 通常是

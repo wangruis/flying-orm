@@ -2,12 +2,13 @@ package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.ConditionGroups;
-import com.flying.orm.core.condition.StructuredConditionPolicy;
+import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.page.CursorPageQuery;
+import com.flying.orm.core.page.KeysetPageQuery;
 import com.flying.orm.core.page.PageQuery;
-import com.flying.orm.core.page.PageSort;
+import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
@@ -15,12 +16,13 @@ import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.form.spec.WriteOperation;
 import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.lock.OptimisticLockOptions;
+import com.flying.orm.rdb.lock.LockingReadPlan;
+import com.flying.orm.rdb.lock.LockingReadSpec;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 
 /**
  * 把表单查询和单条写入规格编译成与驱动无关的安全 SQL 计划。
@@ -31,9 +33,9 @@ import java.util.Optional;
  */
 final class FormOperationPlanner {
 
-    private final FormDataSqlRenderer renderer;
-    private final FormScopeSupport scopes;
-    private final SqlExecutionOptions defaultExecutionOptions;
+    final FormDataSqlRenderer renderer;
+    final FormScopeSupport scopes;
+    final SqlExecutionOptions defaultExecutionOptions;
     FormOperationPlanner(FormDataSqlRenderer renderer,
                          FormScopeSupport scopes,
                          SqlExecutionOptions defaultExecutionOptions) {
@@ -44,98 +46,69 @@ final class FormOperationPlanner {
     }
 
     PlannedQuery select(QuerySpec spec) {
-        QuerySpec safeSpec = Objects.requireNonNull(spec, "query spec must not be null");
-        ScopedRead read = scopedRead(safeSpec);
-        List<String> projections = FormQueryShapeGuard.readableProjections(safeSpec, read.form());
-        List<String> groups = FormQueryShapeGuard.readableGroups(safeSpec, read.form());
-        List<PageSort> sorts = FormQueryShapeGuard.readableSorts(
-                safeSpec.form(), read.form(), safeSpec.sorts());
-        FormQueryShapeGuard.requireValidGrouping(projections, groups, sorts);
-        Optional<ProtectedFieldRuntime.PreparedContainsQuery> contains = renderer.protection()
-                .prepareContainsQuery(safeSpec.form(), read.form(), read.where(), read.scope());
-        if (contains.isPresent()) {
-            FormQueryShapeGuard.requireContainsShape(safeSpec);
-            List<String> outputFields = FormQueryShapeGuard.outputFields(projections, read.form());
-            SqlRequest request = renderer.protection().containsRows(
-                    contains.orElseThrow(), sorts,
-                    ProtectedContainsResultSupport.DEFAULT_CANDIDATE_LIMIT);
-            return new PlannedQuery(safeSpec.form(), request, executionOptions(safeSpec),
-                                    read.scope(), safeSpec.sensitiveDisplayMode(),
-                                    contains.orElseThrow(), outputFields);
-        }
-        ProtectedFieldRuntime.PreparedQuery query = renderer.protection().prepareQuery(
-                safeSpec.form(), read.form(), read.where(), read.scope());
-        query = withProjection(query, projections);
-        SqlRequest request = renderer.protection().select(query, groups, sorts);
-        return new PlannedQuery(safeSpec.form(), request, executionOptions(safeSpec),
-                                read.scope(), safeSpec.sensitiveDisplayMode(), null,
-                                FormQueryShapeGuard.outputFields(projections, read.form()));
+        return FormReadPlanSupport.select(this, spec);
     }
 
     PlannedPage page(QuerySpec spec, PageQuery page) {
-        QuerySpec safeSpec = Objects.requireNonNull(spec, "query spec must not be null");
-        FormQueryShapeGuard.requireUngroupedPagination(safeSpec, "offset pagination");
-        PageQuery requested = Objects.requireNonNull(page, "page query must not be null");
-        ScopedRead read = scopedRead(safeSpec);
-        List<String> projections = FormQueryShapeGuard.readableProjections(safeSpec, read.form());
-        List<PageSort> requestedSorts = safeSpec.sorts().isEmpty() ? requested.sorts() : safeSpec.sorts();
-        List<PageSort> sorts = FormQueryShapeGuard.readableSorts(
-                safeSpec.form(), read.form(), requestedSorts);
-        PageQuery effectivePage = new PageQuery(requested.page(), requested.size(), sorts);
-        Optional<ProtectedFieldRuntime.PreparedContainsQuery> contains = renderer.protection()
-                .prepareContainsQuery(safeSpec.form(), read.form(), read.where(), read.scope());
-        if (contains.isPresent()) {
-            FormQueryShapeGuard.requireContainsShape(safeSpec);
-            SqlRequest request = renderer.protection().containsRows(
-                    contains.orElseThrow(), effectivePage.sorts(),
-                    ProtectedContainsResultSupport.DEFAULT_CANDIDATE_LIMIT);
-            return new PlannedPage(safeSpec.form(), null, request, effectivePage,
-                                   executionOptions(safeSpec), read.scope(),
-                                   safeSpec.sensitiveDisplayMode(), contains.orElseThrow(),
-                                   FormQueryShapeGuard.outputFields(projections, read.form()));
-        }
-        ProtectedFieldRuntime.PreparedQuery query = renderer.protection().prepareQuery(
-                safeSpec.form(), read.form(), read.where(), read.scope());
-        query = withProjection(query, projections);
-        return new PlannedPage(safeSpec.form(), renderer.protection().count(query),
-                               renderer.protection().select(query, effectivePage), effectivePage,
-                               executionOptions(safeSpec), read.scope(), safeSpec.sensitiveDisplayMode(),
-                               null, FormQueryShapeGuard.outputFields(projections, read.form()));
+        return FormReadPlanSupport.page(this, spec, page);
+    }
+
+    GovernedPlanEnvelope<PlannedPage> pageGoverned(QuerySpec spec,
+                                                    PageQuery page,
+                                                    FieldUsePolicy policy,
+                                                    QueryShapeLimits limits) {
+        return FormReadPlanSupport.pageGoverned(this, spec, page, policy, limits);
+    }
+
+    /** 纯规划锁定读取；这里只编译 SQL 和路由意图，不读取事务或连接。 */
+    PlannedLockingRead lockingRead(LockingReadSpec spec) {
+        return FormReadPlanSupport.lockingRead(this, spec);
+    }
+
+    GovernedPlanEnvelope<PlannedLockingRead> lockingReadGoverned(
+            LockingReadSpec spec,
+            FieldUsePolicy policy,
+            QueryShapeLimits limits) {
+        return FormReadPlanSupport.lockingReadGoverned(this, spec, policy, limits);
     }
 
     PlannedCursorPage cursorPage(QuerySpec spec, CursorPageQuery page) {
-        QuerySpec safeSpec = Objects.requireNonNull(spec, "query spec must not be null");
-        FormQueryShapeGuard.requireUngroupedPagination(safeSpec, "cursor pagination");
-        if (!safeSpec.sorts().isEmpty()) {
-            throw new IllegalArgumentException(
-                    "cursor pagination sorts must be declared with CursorPageQuery");
-        }
-        ScopedRead read = scopedRead(safeSpec);
-        CursorPageNormalizer.NormalizedCursorPage normalized = CursorPageNormalizer.normalize(
-                read.form(), Objects.requireNonNull(page, "cursor page query must not be null"));
-        FormQueryShapeGuard.requireReadableUnencryptedCursorSorts(
-                safeSpec.form(), read.form(), normalized.sorts(), safeSpec.sensitiveDisplayMode());
-        List<String> projections = FormQueryShapeGuard.readableProjections(safeSpec, read.form());
-        FormQueryShapeGuard.requireCursorProjection(projections, normalized.sorts());
-        Optional<ProtectedFieldRuntime.PreparedContainsQuery> contains = renderer.protection()
-                .prepareContainsQuery(safeSpec.form(), read.form(), read.where(), read.scope());
-        if (contains.isPresent()) {
-            FormQueryShapeGuard.requireContainsShape(safeSpec);
-            SqlRequest request = renderer.protection().containsRows(
-                    contains.orElseThrow(), normalized,
-                    ProtectedContainsResultSupport.DEFAULT_CANDIDATE_LIMIT);
-            return new PlannedCursorPage(safeSpec.form(), request, normalized,
-                                         executionOptions(safeSpec), read.scope(),
-                                         safeSpec.sensitiveDisplayMode(), contains.orElseThrow(),
-                                         FormQueryShapeGuard.outputFields(projections, read.form()));
-        }
-        ProtectedFieldRuntime.PreparedQuery query = renderer.protection().prepareQuery(
-                safeSpec.form(), read.form(), read.where(), read.scope());
-        query = withProjection(query, projections);
-        return new PlannedCursorPage(safeSpec.form(), renderer.protection().select(query, normalized),
-                                     normalized, executionOptions(safeSpec), read.scope(),
-                                     safeSpec.sensitiveDisplayMode(), null,
-                                     FormQueryShapeGuard.outputFields(projections, read.form()));
+        return FormReadPlanSupport.cursorPage(this, spec, page);
+    }
+
+    GovernedPlanEnvelope<PlannedCursorPage> cursorPageGoverned(QuerySpec spec,
+                                                                CursorPageQuery page,
+                                                                FieldUsePolicy policy,
+                                                                QueryShapeLimits limits) {
+        return FormReadPlanSupport.cursorPageGoverned(this, spec, page, policy, limits);
+    }
+
+    PlannedKeysetPage keysetPage(QuerySpec spec, KeysetPageQuery page) {
+        return FormKeysetPlanSupport.keysetPage(this, spec, page);
+    }
+
+    PlannedLockingKeysetRead lockingKeysetRead(
+            LockingReadSpec spec,
+            KeysetPageQuery page) {
+        return FormKeysetPlanSupport.lockingRead(this, spec, page);
+    }
+
+    GovernedPlanEnvelope<PlannedLockingKeysetRead> lockingKeysetReadGoverned(
+            LockingReadSpec spec,
+            KeysetPageQuery page,
+            FieldUsePolicy policy,
+            QueryShapeLimits limits) {
+        return FormKeysetPlanSupport.lockingReadGoverned(
+                this, spec, page, policy, limits);
+    }
+
+    GovernedPlanEnvelope<PlannedKeysetPage> keysetPageGoverned(
+            QuerySpec spec,
+            KeysetPageQuery page,
+            FieldUsePolicy policy,
+            QueryShapeLimits limits) {
+        return FormKeysetPlanSupport.keysetPageGoverned(
+                this, spec, page, policy, limits);
     }
 
     PlannedWrite insert(WriteSpec spec) {
@@ -152,6 +125,15 @@ final class FormOperationPlanner {
         ProtectedWriteWork protectedWrite = renderer.protection().protectedWrite(
                 form, values, effectiveScope, request, null, ProtectedWriteWork.Kind.INSERT).orElse(null);
         return new PlannedWrite(form, request, executionOptions(safeSpec), null, protectedWrite);
+    }
+
+    GovernedPlanEnvelope<PlannedWrite> insertGoverned(WriteSpec spec,
+                                                       FieldUsePolicy policy,
+                                                       QueryShapeLimits limits) {
+        WriteSpec safeSpec = Objects.requireNonNull(spec, "insert spec must not be null");
+        PlannedWrite plan = insert(safeSpec);
+        return FieldUseGuard.write(plan, renderer, safeSpec, scopes.effectiveScope(safeSpec.scope()), plan.request(),
+                                   policy, limits);
     }
 
     PlannedWrite update(WriteSpec spec) {
@@ -183,6 +165,15 @@ final class FormOperationPlanner {
                                 safeSpec.lock().orElse(null), protectedWrite);
     }
 
+    GovernedPlanEnvelope<PlannedWrite> updateGoverned(WriteSpec spec,
+                                                       FieldUsePolicy policy,
+                                                       QueryShapeLimits limits) {
+        WriteSpec safeSpec = Objects.requireNonNull(spec, "update spec must not be null");
+        PlannedWrite plan = update(safeSpec);
+        return FieldUseGuard.write(plan, renderer, safeSpec, scopes.effectiveScope(safeSpec.scope()), plan.request(),
+                                   policy, limits);
+    }
+
     PlannedWrite delete(WriteSpec spec) {
         WriteSpec safeSpec = requireOperation(spec, WriteOperation.DELETE, "delete");
         DynamicForm form = safeSpec.form();
@@ -208,6 +199,15 @@ final class FormOperationPlanner {
         return new PlannedWrite(form, request, executionOptions(safeSpec), lock, null);
     }
 
+    GovernedPlanEnvelope<PlannedWrite> deleteGoverned(WriteSpec spec,
+                                                       FieldUsePolicy policy,
+                                                       QueryShapeLimits limits) {
+        WriteSpec safeSpec = Objects.requireNonNull(spec, "delete spec must not be null");
+        PlannedWrite plan = delete(safeSpec);
+        return FieldUseGuard.write(plan, renderer, safeSpec, scopes.effectiveScope(safeSpec.scope()), plan.request(),
+                                   policy, limits);
+    }
+
     PlannedWrite physicalDelete(WriteSpec spec) {
         WriteSpec safeSpec = requireOperation(spec, WriteOperation.DELETE, "delete");
         DynamicForm form = safeSpec.form();
@@ -220,19 +220,20 @@ final class FormOperationPlanner {
         return new PlannedWrite(form, request, executionOptions(safeSpec), lock, null);
     }
 
-    private ScopedRead scopedRead(QuerySpec spec) {
-        return spec.structuredInput()
-                   .map(input -> scopes.scopedStructuredRead(
-                           spec.form(), input,
-                           spec.structuredPolicy().orElse(StructuredConditionPolicy.defaults()), spec.scope()))
-                   .orElseGet(() -> scopes.scopedRead(spec.form(), spec.where(), spec.scope()));
+    GovernedPlanEnvelope<PlannedWrite> physicalDeleteGoverned(WriteSpec spec,
+                                                               FieldUsePolicy policy,
+                                                               QueryShapeLimits limits) {
+        WriteSpec safeSpec = Objects.requireNonNull(spec, "delete spec must not be null");
+        PlannedWrite plan = physicalDelete(safeSpec);
+        return FieldUseGuard.write(plan, renderer, safeSpec, scopes.effectiveScope(safeSpec.scope()), plan.request(),
+                                   policy, limits);
     }
 
-    private static ProtectedFieldRuntime.PreparedQuery withProjection(ProtectedFieldRuntime.PreparedQuery query,
-                                                                      List<String> projections) {
-        return projections.isEmpty()
-                ? query
-                : new ProtectedFieldRuntime.PreparedQuery(query.physicalForm(), query.where(), projections);
+    /** 受治理查询仍复用 legacy 计划，只在当前调用外层保存动态审批结果。 */
+    GovernedPlanEnvelope<PlannedQuery> selectGoverned(QuerySpec spec,
+                                                       FieldUsePolicy policy,
+                                                       QueryShapeLimits limits) {
+        return FormReadPlanSupport.selectGoverned(this, spec, policy, limits);
     }
 
     private static ConditionGroup withExpectedVersion(ConditionGroup where, OptimisticLockOptions lock) {
@@ -240,10 +241,6 @@ final class FormOperationPlanner {
                                                         .where(lock.field(), "=", lock.expectedValue())
                                                         .build();
         return ConditionGroups.and(where, expectedVersion);
-    }
-
-    private SqlExecutionOptions executionOptions(QuerySpec spec) {
-        return spec.executionOptions().orElse(defaultExecutionOptions);
     }
 
     private SqlExecutionOptions executionOptions(WriteSpec spec) {
@@ -310,6 +307,30 @@ final class FormOperationPlanner {
 
         List<String> decodingFields() {
             return contains() ? containsQuery.visibleFields() : outputFields;
+        }
+    }
+
+    record PlannedKeysetPage(DynamicForm form,
+                             SqlRequest request,
+                             KeysetPageNormalizer.NormalizedKeysetPage page,
+                             HiddenProjectionLayout layout,
+                             SqlExecutionOptions options,
+                             com.flying.orm.core.scope.DataScope scope,
+                             com.flying.orm.core.protection.SensitiveDisplayMode displayMode,
+                             List<String> outputFields) {
+    }
+
+    record PlannedLockingRead(PlannedQuery query, LockingReadPlan plan) {
+        PlannedLockingRead {
+            query = Objects.requireNonNull(query, "locking read query plan must not be null");
+            plan = Objects.requireNonNull(plan, "locking read public plan must not be null");
+        }
+    }
+
+    record PlannedLockingKeysetRead(PlannedKeysetPage query, LockingReadPlan plan) {
+        PlannedLockingKeysetRead {
+            query = Objects.requireNonNull(query, "locking keyset query plan must not be null");
+            plan = Objects.requireNonNull(plan, "locking keyset public plan must not be null");
         }
     }
 

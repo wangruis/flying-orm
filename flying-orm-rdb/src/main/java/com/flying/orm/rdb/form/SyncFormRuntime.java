@@ -1,14 +1,22 @@
 package com.flying.orm.rdb.form;
 
+import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.page.CursorPageQuery;
 import com.flying.orm.core.page.CursorPageResult;
+import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetPageResult;
 import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageResult;
 import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.scope.FieldUsePolicy;
+import com.flying.orm.core.scope.FieldUseSnapshot;
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteResult;
+import com.flying.orm.rdb.aggregate.AggregateRow;
+import com.flying.orm.rdb.aggregate.AggregateSpec;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.form.spec.BatchSpec;
@@ -16,6 +24,7 @@ import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
 import com.flying.orm.rdb.mapping.RowMapper;
+import com.flying.orm.rdb.lock.LockingReadSpec;
 import com.flying.orm.rdb.result.DynamicRow;
 
 import java.util.List;
@@ -32,6 +41,13 @@ interface SyncFormRuntime {
     EntityModelRegistry entityModels();
     java.util.Optional<com.flying.orm.rdb.transaction.JdbcTransactionContext> currentTransaction();
     List<DynamicRow> select(QuerySpec spec);
+    List<DynamicRow> selectGoverned(QuerySpec spec, FieldUsePolicy policy, QueryShapeLimits limits);
+    List<DynamicRow> lockingRead(LockingReadSpec spec);
+    <T> List<T> lockingRead(LockingReadSpec spec, Class<T> type);
+    FieldUseSnapshot previewFieldUse(QuerySpec spec);
+    FieldUseSnapshot previewFieldUse(JoinQuerySpec spec);
+    FieldUseSnapshot previewFieldUse(AggregateSpec spec);
+    List<AggregateRow> aggregate(AggregateSpec spec);
     List<DynamicRow> selectJoin(JoinQuerySpec spec, SqlExecutionOptions options);
     <T> List<T> selectJoin(JoinQuerySpec spec, SqlExecutionOptions options, RowMapper<T> mapper);
     PageResult<DynamicRow> pageJoin(JoinQuerySpec spec, PageQuery page, SqlExecutionOptions options);
@@ -41,16 +57,24 @@ interface SyncFormRuntime {
     <T> PageResult<T> page(QuerySpec spec, PageQuery page, Class<T> type);
     CursorPageResult<DynamicRow> cursorPage(QuerySpec spec, CursorPageQuery page);
     <T> CursorPageResult<T> cursorPage(QuerySpec spec, CursorPageQuery page, Class<T> type);
+    KeysetPageResult<DynamicRow> keysetPage(QuerySpec spec, KeysetPageQuery page);
+    <T> KeysetPageResult<T> keysetPage(QuerySpec spec, KeysetPageQuery page, Class<T> type);
+    KeysetPageResult<DynamicRow> lockingRead(LockingReadSpec spec, KeysetPageQuery page);
+    <T> KeysetPageResult<T> lockingRead(
+            LockingReadSpec spec, KeysetPageQuery page, Class<T> type);
     long insert(WriteSpec spec);
     SqlWriteResult insertReturningKeys(WriteSpec spec);
     long update(WriteSpec spec);
     long delete(WriteSpec spec);
     long physicalDelete(WriteSpec spec);
     BatchWriteResult writeBatch(BatchSpec spec);
+    BatchExecutionEvidence writeBatchEvidence(BatchSpec spec);
     List<BatchChunkResult> writeBatchChunks(BatchSpec spec);
     SyncFormRuntime withResolver(StructuredConditionResolver resolver);
     SyncFormRuntime withExecutionOptions(SqlExecutionOptions options);
     SyncFormRuntime withDataScope(DataScope scope);
     SyncFormRuntime withBatchOptions(BatchWriteOptions options);
     SyncFormRuntime withEntityModels(EntityModelRegistry entityModels);
+    SyncFormRuntime withFieldUsePolicy(FieldUsePolicy policy);
+    SyncFormRuntime withQueryShapeLimits(QueryShapeLimits limits);
 }

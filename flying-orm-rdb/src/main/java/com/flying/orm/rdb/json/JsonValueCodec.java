@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.json;
 
+import com.flying.orm.core.codec.ValueCodecDescriptor;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.core.type.LogicalType;
 import tools.jackson.core.JacksonException;
@@ -31,6 +32,12 @@ import java.util.Optional;
  * @version v1.0
  */
 public final class JsonValueCodec {
+
+    private static final ValueCodecDescriptor DESCRIPTOR = ValueCodecDescriptor.of(
+            "json-value",
+            java.util.Set.of(Map.class, Collection.class, JsonNode.class),
+            java.util.Set.of(LogicalType.JSON),
+            java.util.Set.of());
 
     private static final String ORACLE_JSON_VALUE = "oracle.sql.json.OracleJsonValue";
 
@@ -78,6 +85,11 @@ public final class JsonValueCodec {
     };
 
     private JsonValueCodec() {
+    }
+
+    /** 返回 JSON 现有转换接缝的稳定类型描述；不创建 codec 注册表或运行时上下文。 */
+    public static ValueCodecDescriptor descriptor() {
+        return DESCRIPTOR;
     }
 
     private static ObjectMapper createMapper() {

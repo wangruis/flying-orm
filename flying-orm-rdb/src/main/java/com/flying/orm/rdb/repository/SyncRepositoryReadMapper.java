@@ -9,6 +9,8 @@ import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.form.SyncFormClient;
 import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.lock.LockingReadSpec;
+import com.flying.orm.rdb.lock.ReadLock;
 
 import java.util.List;
 import java.util.Objects;
@@ -41,6 +43,13 @@ final class SyncRepositoryReadMapper<T> {
 
     List<T> select(ConditionGroup where, DataScope scope, SqlExecutionOptions options) {
         return lifecycle.postLoad(client.select(querySpec(where, scope, options), entityType));
+    }
+
+    List<T> lockingRead(ConditionGroup where, ReadLock lock) {
+        QuerySpec query = querySpec(where, null, null);
+        return lifecycle.postLoad(client.lockingRead(
+                LockingReadSpec.of(query, Objects.requireNonNull(
+                        lock, "repository read lock must not be null")), entityType));
     }
 
     PageResult<T> page(ConditionGroup where, PageQuery page, DataScope scope, SqlExecutionOptions options) {

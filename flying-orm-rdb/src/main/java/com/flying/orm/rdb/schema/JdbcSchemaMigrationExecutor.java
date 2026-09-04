@@ -5,9 +5,6 @@ import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlExecutionPhase;
 import com.flying.orm.rdb.execution.SqlExecutionSequenceException;
 import com.flying.orm.rdb.execution.SqlExecutionStepResult;
-import com.flying.orm.rdb.exception.RdbErrorKind;
-import com.flying.orm.rdb.exception.RdbException;
-import com.flying.orm.rdb.internal.cache.SchemaCacheInvalidationCoordinator;
 import com.flying.orm.rdb.observation.SqlExecutionStatus;
 import com.flying.orm.rdb.observation.SqlFailureCategory;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
@@ -15,20 +12,25 @@ import com.flying.orm.rdb.transaction.JdbcTransactionParticipant;
 import com.flying.orm.rdb.transaction.JdbcTransactionContext;
 import reactor.core.publisher.Mono;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
+
+import static com.flying.orm.rdb.schema.JdbcSchemaExecutionSupport.addExact;
+import static com.flying.orm.rdb.schema.JdbcSchemaExecutionSupport.directVirtualMachineError;
+import static com.flying.orm.rdb.schema.JdbcSchemaExecutionSupport.rejection;
+import static com.flying.orm.rdb.schema.JdbcSchemaExecutionSupport.rethrow;
+import static com.flying.orm.rdb.schema.JdbcSchemaExecutionSupport.suppress;
 
 /**
  * Schema 的同步 JDBC 执行编排。
  *
- * <p>这里故意不把 JDBC 调用包装成 Reactor。每条 DDL 都直接交给同步执行器，
- * 只在需要锁超时的场景把 setup、work、cleanup 连续交给同一个外部事务连接。
- * 没有这样的连接能力时，方法会在第一条 SQL 前拒绝，而不是假装多个连接属于同一个会话。</p>
+ * <p>这里不把 JDBC 调用包装成 Reactor。锁超时时，setup、work、cleanup 连续交给同一个外部事务连接；
+ * 没有这种能力就在第一条 SQL 前拒绝，不把多个连接冒充为同一会话。</p>
  *
- * <p>元数据失效会尝试全部目标。DDL 成功而失效失败时明确报告缓存一致性失败；DDL 同时失败时，数据库失败
- * 保持 primary，失效失败作为 suppressed 保留。</p>
+ * <p>元数据失效会尝试全部目标。DDL 成功而失效失败时报告缓存一致性失败；两者都失败时，数据库失败保持
+ * primary，失效失败作为 suppressed 保留。</p>
  */
 final class JdbcSchemaMigrationExecutor {
     private final SyncSqlExecutor executor;
@@ -59,7 +61,8 @@ final class JdbcSchemaMigrationExecutor {
             return 0L;
         }
         guardExternalTransaction(requests, false);
-        ExecutionState state = new ExecutionState();
+        MySqlSchemaCommentSupport.validate(executor, requests, options, null);
+        JdbcSchemaExecutionState state = new JdbcSchemaExecutionState();
         state.started = true;
         return executeWork(requests, options, state);
     }
@@ -72,8 +75,9 @@ final class JdbcSchemaMigrationExecutor {
         }
         Consumer<String> safeInvalidator = Objects.requireNonNull(
                 invalidator, "schema metadata invalidator must not be null");
-        ExecutionState state = new ExecutionState();
+        JdbcSchemaExecutionState state = new JdbcSchemaExecutionState();
         guardExternalTransaction(requests, false, tables, safeInvalidator, null, state);
+        MySqlSchemaCommentSupport.validate(executor, requests, options, null);
         state.started = true;
         Throwable primaryFailure = null;
         try {
@@ -82,7 +86,7 @@ final class JdbcSchemaMigrationExecutor {
             primaryFailure = failure;
             throw failure;
         } finally {
-            invalidateAfterExecution(state, tables, safeInvalidator, primaryFailure);
+            state.invalidateAfterExecution(tables, safeInvalidator, primaryFailure);
         }
     }
     SchemaMigrationResult executeReviewed(ReviewedSchemaMigrationPlan plan,
@@ -92,7 +96,7 @@ final class JdbcSchemaMigrationExecutor {
                 plan, "reviewed schema migration plan must not be null");
         SchemaMigrationExecutionOptions safeOptions = Objects.requireNonNull(
                 options, "schema migration execution options must not be null");
-        ExecutionState state = new ExecutionState();
+        JdbcSchemaExecutionState state = new JdbcSchemaExecutionState();
         long startedAt = System.nanoTime();
         String planFingerprint = safePlan.fingerprint();
         Throwable primaryFailure = null;
@@ -102,6 +106,7 @@ final class JdbcSchemaMigrationExecutor {
             guardExternalTransaction(requests,
                                      safePlan.onlineDdl().requiresNonTransactionalExecution(),
                                      tables, metadataInvalidator, planFingerprint, state);
+            MySqlSchemaCommentSupport.validate(executor, requests, safeOptions.sqlExecutionOptions(), planFingerprint);
             long rows = requests.isEmpty()
                     ? 0L
                     : executeReviewedRequests(requests, safeOptions, state, planFingerprint);
@@ -116,12 +121,77 @@ final class JdbcSchemaMigrationExecutor {
             primaryFailure = error;
             throw error;
         } finally {
-            invalidateAfterExecution(state, tables, metadataInvalidator, primaryFailure);
+            state.invalidateAfterExecution(tables, metadataInvalidator, primaryFailure);
         }
+    }
+    SchemaExecutionReport executeReviewed(ReviewedSchemaPlan plan, Supplier<SchemaSnapshot> snapshotReader,
+                                          Supplier<SchemaSnapshotCoverage> coverageReader, Runnable metadataInvalidator,
+                                          SchemaMigrationExecutionOptions options) {
+        SchemaMigrationExecutionOptions safeOptions = Objects.requireNonNull(
+                options, "schema migration execution options must not be null");
+        ReviewedSchemaPlan safePlan = Objects.requireNonNull(plan, "reviewed schema plan must not be null");
+        Runnable safeInvalidator = Objects.requireNonNull(
+                metadataInvalidator, "schema metadata invalidator must not be null");
+        return VerifiedSchemaPlanExecutor.executeJdbcGuarded(
+                safePlan, snapshotReader, coverageReader, safeInvalidator, safeOptions,
+                steps -> executeVerifiedSteps(safePlan, steps, safeInvalidator, safeOptions));
+    }
+    private VerifiedSchemaPlanExecutor.ExecutionAttempt executeVerifiedSteps(
+            ReviewedSchemaPlan plan, List<SchemaPlanStep> steps, Runnable invalidator,
+            SchemaMigrationExecutionOptions options) {
+        if (steps.isEmpty()) {
+            return VerifiedSchemaPlanExecutor.successfulAttempt(steps, List.of());
+        }
+        List<SqlRequest> requests = steps.stream()
+                .map(step -> step.request().orElseThrow(() -> new IllegalStateException(
+                        "reviewed schema execution contains a non-executable step")))
+                .toList();
+        List<String> tables = List.of(plan.desiredTable().orElseThrow().identity().table());
+        Consumer<String> tableInvalidator = ignored -> invalidator.run();
+        JdbcSchemaExecutionState state = new JdbcSchemaExecutionState();
+        Throwable primaryFailure = null;
+        RuntimeException invalidationFailure = null;
+        VerifiedSchemaPlanExecutor.ExecutionAttempt attempt;
+        guardExternalTransaction(requests, false, tables, tableInvalidator, plan.fingerprint(), state);
+        MySqlSchemaCommentSupport.validate(executor, requests, options.sqlExecutionOptions(), plan.fingerprint());
+        try {
+            executeReviewedRequests(requests, options, state, plan.fingerprint());
+            attempt = state.transactionCompletionRegistered
+                    ? VerifiedSchemaPlanExecutor.externalTransactionAttempt(steps, state.steps)
+                    : VerifiedSchemaPlanExecutor.successfulAttempt(steps, state.steps);
+        } catch (SchemaMigrationRejectedException rejection) {
+            primaryFailure = rejection;
+            throw rejection;
+        } catch (RuntimeException failure) {
+            primaryFailure = failure;
+            SqlExecutionSequenceException sequenceFailure = failure instanceof SqlExecutionSequenceException sequence
+                    ? sequence : null;
+            List<SqlExecutionStepResult> completed = sequenceFailure == null
+                    ? state.steps : sequenceFailure.completedWorkSteps();
+            if (sequenceFailure != null && sequenceFailure.phase() == SqlExecutionPhase.CLEANUP) {
+                attempt = VerifiedSchemaPlanExecutor.cleanupFailedAttempt(steps, completed);
+            } else {
+                int failedIndex = sequenceFailure == null
+                        ? Math.max(0, state.failedStepIndex) : sequenceFailure.stepIndex();
+                boolean sqlSent = sequenceFailure == null || sequenceFailure.phase() == SqlExecutionPhase.WORK;
+                attempt = VerifiedSchemaPlanExecutor.failedAttempt(steps, completed, failedIndex, sqlSent, failure);
+            }
+        } catch (Error failure) {
+            primaryFailure = failure;
+            throw failure;
+        } finally {
+            try {
+                state.invalidateAfterExecution(tables, tableInvalidator, primaryFailure);
+            } catch (RuntimeException failure) {
+                invalidationFailure = failure;
+            }
+        }
+        return invalidationFailure == null ? attempt
+                : VerifiedSchemaPlanExecutor.cleanupFailedAttempt(steps, state.steps);
     }
     private long executeReviewedRequests(List<SqlRequest> requests,
                                          SchemaMigrationExecutionOptions options,
-                                         ExecutionState state,
+                                         JdbcSchemaExecutionState state,
                                          String planFingerprint) {
         if (!options.hasLockTimeout()) {
             state.started = true;
@@ -140,7 +210,7 @@ final class JdbcSchemaMigrationExecutor {
     private long executeSession(SchemaDdlSessionGuard guard,
                                 List<SqlRequest> requests,
                                 SqlExecutionOptions options,
-                                ExecutionState state) {
+                                JdbcSchemaExecutionState state) {
         Throwable primaryFailure = null;
         long rows = 0L;
         state.phase = SqlExecutionPhase.SETUP;
@@ -196,17 +266,7 @@ final class JdbcSchemaMigrationExecutor {
         return rows;
     }
 
-    private static void rethrow(Throwable failure) {
-        if (failure instanceof Error fatal) {
-            throw fatal;
-        }
-        if (failure instanceof RuntimeException runtimeFailure) {
-            throw runtimeFailure;
-        }
-        throw new IllegalStateException("schema migration failed with an unsupported checked exception", failure);
-    }
-
-    private static SqlExecutionSequenceException sequenceFailure(ExecutionState state,
+    private static SqlExecutionSequenceException sequenceFailure(JdbcSchemaExecutionState state,
                                                                   RuntimeException failure) {
         if (failure instanceof SqlExecutionSequenceException sequenceFailure) {
             return sequenceFailure;
@@ -219,7 +279,7 @@ final class JdbcSchemaMigrationExecutor {
 
     private void executePhase(List<SqlRequest> requests,
                               SqlExecutionOptions options,
-                              ExecutionState state) {
+                              JdbcSchemaExecutionState state) {
         for (int index = 0; index < requests.size(); index++) {
             try {
                 executor.rowsUpdated(requests.get(index), options);
@@ -231,14 +291,14 @@ final class JdbcSchemaMigrationExecutor {
 
     private long executeWork(List<SqlRequest> requests,
                              SqlExecutionOptions options,
-                             ExecutionState state) {
+                             JdbcSchemaExecutionState state) {
         long rows = 0L;
         state.phase = SqlExecutionPhase.WORK;
         for (int index = 0; index < requests.size(); index++) {
             SqlRequest request = requests.get(index);
             long startedAt = System.nanoTime();
             try {
-                long affectedRows = executor.rowsUpdated(request, options);
+                long affectedRows = ddlRowsUpdated(executor.rowsUpdated(request, options));
                 state.steps.add(new SqlExecutionStepResult(
                         index, request, affectedRows, System.nanoTime() - startedAt));
                 rows = addExact(rows, affectedRows);
@@ -248,6 +308,10 @@ final class JdbcSchemaMigrationExecutor {
             }
         }
         return rows;
+    }
+
+    private static long ddlRowsUpdated(long rowsUpdated) {
+        return Math.max(0L, rowsUpdated);
     }
 
     private void guardExternalTransaction(List<SqlRequest> requests,
@@ -261,7 +325,7 @@ final class JdbcSchemaMigrationExecutor {
                                           List<String> tables,
                                           Consumer<String> invalidator,
                                           String planFingerprint,
-                                          ExecutionState state) {
+                                          JdbcSchemaExecutionState state) {
         if (requests.isEmpty()) {
             return;
         }
@@ -277,11 +341,11 @@ final class JdbcSchemaMigrationExecutor {
                             + ddlTransactionSupport);
         }
         if (tables != null) {
-            ExecutionState invalidationState = Objects.requireNonNull(
+            JdbcSchemaExecutionState invalidationState = Objects.requireNonNull(
                     state, "schema invalidation state must not be null");
             if (!current.get().completion().register(
-                    ignored -> Mono.fromRunnable(() -> invalidateAtTransactionCompletion(
-                            invalidationState, tables, invalidator)))) {
+                    ignored -> Mono.fromRunnable(() -> invalidationState
+                            .invalidateAtTransactionCompletion(tables, invalidator)))) {
                 throw rejection(
                         SchemaMigrationFailureCode.DDL_TRANSACTION_NOT_SUPPORTED,
                         planFingerprint,
@@ -291,15 +355,7 @@ final class JdbcSchemaMigrationExecutor {
         }
     }
 
-    private static SchemaMigrationRejectedException rejection(SchemaMigrationFailureCode failureCode,
-                                                               String planFingerprint,
-                                                               String message) {
-        return planFingerprint == null
-                ? new SchemaMigrationRejectedException(failureCode, message)
-                : new SchemaMigrationRejectedException(failureCode, planFingerprint, message);
-    }
-
-    private void observe(ExecutionState state,
+    private void observe(JdbcSchemaExecutionState state,
                          ReviewedSchemaMigrationPlan plan,
                          String planFingerprint,
                          SchemaMigrationResult result,
@@ -313,9 +369,9 @@ final class JdbcSchemaMigrationExecutor {
         try {
             observedRows = result == null ? state.steps.stream()
                                                  .mapToLong(SqlExecutionStepResult::rowsUpdated)
-                                                 .reduce(0L, JdbcSchemaMigrationExecutor::addExact)
+                                                 .reduce(0L, JdbcSchemaExecutionSupport::addExact)
                                            : result.rowsUpdated();
-        } catch (RdbException overflow) {
+        } catch (com.flying.orm.rdb.exception.RdbException overflow) {
             // 失败路径没有可精确表示的汇总时宁可不发观测，也不能覆盖原始数据库异常。
             return;
         }
@@ -340,60 +396,4 @@ final class JdbcSchemaMigrationExecutor {
                 error));
     }
 
-    private static void invalidateAfterExecution(ExecutionState state,
-                                                 List<String> tables,
-                                                 Consumer<String> invalidator,
-                                                 Throwable primaryFailure) {
-        if (!state.started || state.transactionCompletionRegistered) {
-            return;
-        }
-        try {
-            invalidateTables(invalidator, tables);
-        } catch (RuntimeException | Error invalidationFailure) {
-            if (primaryFailure == null) {
-                throw invalidationFailure;
-            }
-            suppress(primaryFailure, invalidationFailure);
-        }
-    }
-
-    private static void invalidateAtTransactionCompletion(ExecutionState state,
-                                                          List<String> tables,
-                                                          Consumer<String> invalidator) {
-        if (state.started) {
-            invalidateTables(invalidator, tables);
-        }
-    }
-
-    private static void invalidateTables(Consumer<String> invalidator, List<String> tables) {
-        SchemaCacheInvalidationCoordinator.invalidateTables(invalidator, tables);
-    }
-
-    private static VirtualMachineError directVirtualMachineError(Throwable failure) {
-        return failure instanceof VirtualMachineError fatal ? fatal : null;
-    }
-
-    private static void suppress(Throwable primary, Throwable secondary) {
-        if (primary != null && secondary != null && primary != secondary) {
-            primary.addSuppressed(secondary);
-        }
-    }
-
-    private static long addExact(long left, long right) {
-        try {
-            return Math.addExact(left, right);
-        } catch (ArithmeticException overflow) {
-            throw new RdbException(RdbErrorKind.UNKNOWN,
-                                   "database execution count exceeds supported range",
-                                   null, null, overflow);
-        }
-    }
-
-    private static final class ExecutionState {
-        private final List<SqlExecutionStepResult> steps = new ArrayList<>();
-        private SqlExecutionPhase phase;
-        private int failedStepIndex = -1;
-        private volatile boolean started;
-        private volatile boolean transactionCompletionRegistered;
-    }
 }

@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.mapping;
 
+import com.flying.orm.core.codec.ValueCodec;
 import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.core.type.LogicalType;
@@ -25,6 +26,7 @@ final class EntityRowValueConverter {
                           DatabaseType databaseType,
                           EntityEnumStorage enumStorage,
                           EntityEnumValueCodec enumValue,
+                          ValueCodec customCodec,
                           ValueCodecRegistry valueCodecs) {
         try {
             if (enumValue != null) {
@@ -37,6 +39,12 @@ final class EntityRowValueConverter {
                     throw new IllegalArgumentException("enum ordinal is out of range: " + ordinal);
                 }
                 return constants[ordinal];
+            }
+            if (value != null && targetType.isInstance(value)) {
+                return value;
+            }
+            if (customCodec != null) {
+                return customCodec.read(value, targetType);
             }
             // byte[] 是二进制值，不是 SQL Array；只有真正的对象/基本类型数组走数组 codec。
             if ((targetType.isArray() && targetType != byte[].class)

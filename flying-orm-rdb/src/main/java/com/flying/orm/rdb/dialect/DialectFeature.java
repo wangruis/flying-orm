@@ -16,6 +16,8 @@ public enum DialectFeature {
     NATIVE_JSON,
     NATIVE_BOOLEAN,
     LARGE_OBJECTS,
+    /** MySQL 关系字典中的固定主键名与自动外键支撑索引语义。 */
+    MYSQL_RELATIONAL_METADATA,
     /** PostgreSQL pgvector 的 VECTOR 类型、距离条件和最近邻查询。 */
     POSTGRESQL_VECTOR
 }

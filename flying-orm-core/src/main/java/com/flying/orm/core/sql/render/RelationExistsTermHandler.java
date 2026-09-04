@@ -110,9 +110,17 @@ record RelationExistsTermHandler(String id,
      */
     @Override
     public SqlFragment render(TermCondition term, SqlRenderContext context) {
+        return render(term, context, context.identifier(term.field()), null);
+    }
+
+    SqlFragment render(TermCondition term, SqlRenderContext context,
+                       String outerField, String outerQualifier) {
         TermCondition safeTerm = Objects.requireNonNull(term, "term condition must not be null");
         SqlRenderContext safeContext = Objects.requireNonNull(context, "sql render context must not be null");
         String alias = structureIdentifier(safeContext, relationAlias);
+        if (alias.equalsIgnoreCase(outerQualifier)) {
+            alias = structureIdentifier(safeContext, relationAlias + "_relation");
+        }
         String relationKey = alias + "." + structureIdentifier(safeContext, relationKeyColumn);
         String relationValue = alias + "." + structureIdentifier(safeContext, relationValueColumn);
         List<?> sourceValues = values(safeTerm.value());
@@ -130,7 +138,7 @@ record RelationExistsTermHandler(String id,
                 + " where "
                 + relationKey
                 + " = "
-                + safeContext.identifier(safeTerm.field())
+                + Objects.requireNonNull(outerField, "correlated outer field must not be null")
                 + " and "
                 + valueExpression
                 + ")";

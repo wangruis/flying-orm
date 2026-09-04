@@ -1,14 +1,22 @@
 package com.flying.orm.rdb.form;
 
+import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.page.CursorPageQuery;
 import com.flying.orm.core.page.CursorPageResult;
+import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetPageResult;
 import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageResult;
 import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.scope.FieldUsePolicy;
+import com.flying.orm.core.scope.FieldUseSnapshot;
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteResult;
+import com.flying.orm.rdb.aggregate.AggregateRow;
+import com.flying.orm.rdb.aggregate.AggregateSpec;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.form.spec.BatchSpec;
@@ -16,6 +24,7 @@ import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
 import com.flying.orm.rdb.mapping.RowMapper;
+import com.flying.orm.rdb.lock.LockingReadSpec;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.sync.SyncBatchExecutor;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
@@ -40,10 +49,11 @@ final class JdbcSyncFormRuntime implements SyncFormRuntime {
         this.configuration = Objects.requireNonNull(configuration, "sync form configuration must not be null");
         this.operations = new SyncFormOperations(
                 sqlExecutor, configuration.renderer(), configuration.resolver(), configuration.dataScope(),
-                configuration.executionOptions(), configuration.entityModels());
+                configuration.executionOptions(), configuration.entityModels(), configuration.fieldUsePolicy(),
+                configuration.queryShapeLimits());
         this.batches = new NativeSyncFormBatchOperations(
                 batchExecutor, configuration.renderer(), configuration.resolver(), configuration.dataScope(),
-                configuration.batchOptions());
+                configuration.batchOptions(), configuration.fieldUsePolicy());
     }
 
     @Override public BatchWriteOptions defaultBatchWriteOptions() { return configuration.batchOptions(); }
@@ -52,6 +62,25 @@ final class JdbcSyncFormRuntime implements SyncFormRuntime {
         return sqlExecutor.currentTransaction();
     }
     @Override public List<DynamicRow> select(QuerySpec spec) { return operations.select(spec); }
+    @Override public List<DynamicRow> selectGoverned(QuerySpec spec,
+                                                     FieldUsePolicy policy,
+                                                     QueryShapeLimits limits) {
+        return operations.selectGoverned(spec, policy, limits);
+    }
+    @Override public List<DynamicRow> lockingRead(LockingReadSpec spec) {
+        return operations.lockingRead(spec);
+    }
+    @Override public <T> List<T> lockingRead(LockingReadSpec spec, Class<T> type) {
+        return operations.lockingRead(spec, type);
+    }
+    @Override public FieldUseSnapshot previewFieldUse(QuerySpec spec) { return operations.previewFieldUse(spec); }
+    @Override public FieldUseSnapshot previewFieldUse(JoinQuerySpec spec) { return operations.previewFieldUse(spec); }
+    @Override public FieldUseSnapshot previewFieldUse(AggregateSpec spec) {
+        return SyncFormAggregateOperations.preview(configuration, spec);
+    }
+    @Override public List<AggregateRow> aggregate(AggregateSpec spec) {
+        return SyncFormAggregateOperations.aggregate(sqlExecutor, configuration, spec);
+    }
     @Override public List<DynamicRow> selectJoin(JoinQuerySpec spec, SqlExecutionOptions options) {
         return operations.selectJoin(spec, options);
     }
@@ -77,6 +106,21 @@ final class JdbcSyncFormRuntime implements SyncFormRuntime {
     @Override public <T> CursorPageResult<T> cursorPage(QuerySpec spec, CursorPageQuery page, Class<T> type) {
         return operations.cursorPage(spec, page, type);
     }
+    @Override public KeysetPageResult<DynamicRow> keysetPage(QuerySpec spec, KeysetPageQuery page) {
+        return operations.keysetPage(spec, page);
+    }
+    @Override public <T> KeysetPageResult<T> keysetPage(
+            QuerySpec spec, KeysetPageQuery page, Class<T> type) {
+        return operations.keysetPage(spec, page, type);
+    }
+    @Override public KeysetPageResult<DynamicRow> lockingRead(
+            LockingReadSpec spec, KeysetPageQuery page) {
+        return operations.lockingRead(spec, page);
+    }
+    @Override public <T> KeysetPageResult<T> lockingRead(
+            LockingReadSpec spec, KeysetPageQuery page, Class<T> type) {
+        return operations.lockingRead(spec, page, type);
+    }
     @Override public long insert(WriteSpec spec) { return operations.insert(spec); }
     @Override public SqlWriteResult insertReturningKeys(WriteSpec spec) {
         return operations.insertReturningKeys(spec);
@@ -85,6 +129,9 @@ final class JdbcSyncFormRuntime implements SyncFormRuntime {
     @Override public long delete(WriteSpec spec) { return operations.delete(spec); }
     @Override public long physicalDelete(WriteSpec spec) { return operations.physicalDelete(spec); }
     @Override public BatchWriteResult writeBatch(BatchSpec spec) { return batches.writeBatch(spec); }
+    @Override public BatchExecutionEvidence writeBatchEvidence(BatchSpec spec) {
+        return batches.writeBatchEvidence(spec);
+    }
     @Override public List<BatchChunkResult> writeBatchChunks(BatchSpec spec) { return batches.writeBatchChunks(spec); }
     @Override public SyncFormRuntime withResolver(StructuredConditionResolver resolver) {
         return configured(configuration.withResolver(resolver));
@@ -100,6 +147,12 @@ final class JdbcSyncFormRuntime implements SyncFormRuntime {
     }
     @Override public SyncFormRuntime withEntityModels(EntityModelRegistry entityModels) {
         return configured(configuration.withEntityModels(entityModels));
+    }
+    @Override public SyncFormRuntime withFieldUsePolicy(FieldUsePolicy policy) {
+        return configured(configuration.withFieldUsePolicy(policy));
+    }
+    @Override public SyncFormRuntime withQueryShapeLimits(QueryShapeLimits limits) {
+        return configured(configuration.withQueryShapeLimits(limits));
     }
     private JdbcSyncFormRuntime configured(SyncFormConfiguration value) {
         return new JdbcSyncFormRuntime(sqlExecutor, batchExecutor, value);

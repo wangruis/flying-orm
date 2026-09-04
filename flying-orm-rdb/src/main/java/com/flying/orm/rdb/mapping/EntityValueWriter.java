@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.mapping;
 
+import com.flying.orm.core.codec.ValueCodec;
 import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.internal.error.ThrowableGraph;
 import com.flying.orm.rdb.internal.mapping.EntityEnumValueCodec;
@@ -17,12 +18,16 @@ interface EntityValueWriter {
 
     void write(Object target, Object value, ValueCodecRegistry valueCodecs);
 
-    static EntityValueWriter forMethod(Method method, Class<?> valueType, EntityFieldMetadata metadata) {
+    static EntityValueWriter forMethod(Method method,
+                                       Class<?> valueType,
+                                       EntityFieldMetadata metadata,
+                                       ValueCodec customCodec) {
         EntityEnumValueCodec enumValue = EntityRowValueConverter.enumValueCodec(valueType, metadata);
         return (target, value, valueCodecs) -> {
             try {
                 method.invoke(target, EntityRowValueConverter.convert(
-                        value, valueType, metadata.databaseType(), metadata.enumStorage(), enumValue, valueCodecs));
+                        value, valueType, metadata.databaseType(), metadata.enumStorage(), enumValue,
+                        customCodec, valueCodecs));
             } catch (ReflectiveOperationException error) {
                 ThrowableGraph.rethrowVirtualMachineError(error);
                 throw new MappingException("bean setter cannot be written: " + method.getName(), error);
@@ -30,12 +35,16 @@ interface EntityValueWriter {
         };
     }
 
-    static EntityValueWriter forField(Field field, Class<?> valueType, EntityFieldMetadata metadata) {
+    static EntityValueWriter forField(Field field,
+                                      Class<?> valueType,
+                                      EntityFieldMetadata metadata,
+                                      ValueCodec customCodec) {
         EntityEnumValueCodec enumValue = EntityRowValueConverter.enumValueCodec(valueType, metadata);
         return (target, value, valueCodecs) -> {
             try {
                 field.set(target, EntityRowValueConverter.convert(
-                        value, valueType, metadata.databaseType(), metadata.enumStorage(), enumValue, valueCodecs));
+                        value, valueType, metadata.databaseType(), metadata.enumStorage(), enumValue,
+                        customCodec, valueCodecs));
             } catch (IllegalAccessException error) {
                 throw new MappingException("bean field cannot be written: " + field.getName(), error);
             }

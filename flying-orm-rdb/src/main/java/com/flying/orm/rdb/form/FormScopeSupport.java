@@ -52,8 +52,7 @@ final class FormScopeSupport {
     }
 
     ScopedRead scopedRead(DynamicForm form, ConditionGroup where, DataScope scope) {
-        FormScopeGuard.ScopedRead read = guard.scopedRead(form, where, scope);
-        return new ScopedRead(read.form(), read.where(), read.scope());
+        return guard.scopedRead(form, where, scope);
     }
 
     ScopedRead scopedStructuredRead(DynamicForm form,
@@ -66,8 +65,22 @@ final class FormScopeSupport {
                                     StructuredConditionInput input,
                                     StructuredConditionPolicy policy,
                                     DataScope scope) {
-        FormScopeGuard.ScopedRead read = guard.scopedStructuredRead(form, input, policy, scope);
-        return new ScopedRead(read.form(), read.where(), read.scope());
+        return guard.scopedStructuredRead(form, input, policy, scope);
+    }
+
+    GovernedRead governedRead(DynamicForm form, ConditionGroup where, DataScope scope) {
+        ConditionGroup businessWhere = Objects.requireNonNull(
+                where, "business where condition must not be null");
+        return new GovernedRead(scopedRead(form, businessWhere, scope), businessWhere);
+    }
+
+    GovernedRead governedStructuredRead(DynamicForm form,
+                                        StructuredConditionInput input,
+                                        StructuredConditionPolicy policy,
+                                        DataScope scope) {
+        FormScopeGuard.GovernedScopedRead governed = guard.governedStructuredRead(
+                form, input, policy, scope);
+        return new GovernedRead(governed.read(), governed.businessWhere());
     }
 
     ConditionGroup writableActiveWhere(DynamicForm form,
@@ -201,5 +214,15 @@ final class FormScopeSupport {
                                OptimisticLockOptions lock,
                                SqlRequest request,
                                ProtectedFieldRuntime.PreparedQuery ownerQuery) {
+    }
+
+    /** 只在 governed 入口创建，普通 CRUD 的 ScopedRead 布局保持不变。 */
+    record GovernedRead(ScopedRead read, ConditionGroup businessWhere) {
+
+        GovernedRead {
+            read = Objects.requireNonNull(read, "governed scoped read must not be null");
+            businessWhere = Objects.requireNonNull(
+                    businessWhere, "governed business where condition must not be null");
+        }
     }
 }

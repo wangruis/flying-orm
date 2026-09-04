@@ -25,7 +25,7 @@ public final class JdbcFormMetadataReaders {
     public static JdbcFormMetadataReader create(SyncSqlExecutor executor, RdbDialect dialect) {
         SyncSqlExecutor safeExecutor = Objects.requireNonNull(executor, "sync sql executor must not be null");
         RdbDialect safeDialect = Objects.requireNonNull(dialect, "rdb dialect must not be null");
-        return new JdbcFormMetadataReader(safeExecutor, queries(safeDialect));
+        return new JdbcFormMetadataReader(safeExecutor, profile(safeDialect));
     }
 
     /** 直接从 DataSource 创建原生 JDBC reader；连接的关闭和归还由 JdbcSqlExecutor 负责。 */
@@ -42,20 +42,17 @@ public final class JdbcFormMetadataReaders {
         SyncSqlExecutor safeExecutor = Objects.requireNonNull(executor, "sync sql executor must not be null");
         RdbDialect safeDialect = Objects.requireNonNull(dialect, "rdb dialect must not be null");
         return new JdbcFormMetadataReader(safeExecutor,
-                                          queries(safeDialect),
+                                          profile(safeDialect),
                                           policy,
                                           dependentInvalidator);
     }
 
-    private static InformationSchemaFormMetadataReader.Queries queries(RdbDialect dialect) {
-        return switch (dialect.name()) {
-            case "h2" -> H2ReactiveFormMetadataReader.queries();
-            case "mysql" -> MySqlReactiveFormMetadataReader.queries();
-            case "postgresql" -> PostgreSqlReactiveFormMetadataReader.queries();
-            case "oracle" -> OracleReactiveFormMetadataReader.queries();
-            case "sqlserver" -> SqlServerReactiveFormMetadataReader.queries();
-            default -> throw new UnsupportedOperationException(
+    private static MetadataQueryProfile profile(RdbDialect dialect) {
+        MetadataQueryProfile profile = MetadataQueryProfile.resolve(dialect);
+        if (profile == null) {
+            throw new UnsupportedOperationException(
                     "metadata reader is not implemented for the requested dialect");
-        };
+        }
+        return profile;
     }
 }

@@ -1,7 +1,8 @@
 package com.flying.orm.rdb.schema;
 
-import com.flying.orm.rdb.mapping.EntityMetadata;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
+import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.mapping.EntitySchemaDescriptor;
 
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -24,15 +25,16 @@ final class EntitySchemaSyncSupport {
             if (byType.containsKey(safeType)) {
                 continue;
             }
-            EntityMetadata<?> metadata = models.metadata(safeType);
-            String tableKey = normalizeTable(metadata.table());
+            // 先完成全部实体的严格关系编译，再让任意元数据 reader 或 DDL 执行器接触数据库。
+            EntitySchemaDescriptor<?> descriptor = models.schemaDescriptor(safeType);
+            String tableKey = normalizeTable(descriptor.metadata().table());
             Class<?> previous = byTable.putIfAbsent(tableKey, safeType);
             if (previous != null) {
                 throw new IllegalArgumentException("multiple entity types map to the same table '"
-                                                           + metadata.table() + "': " + previous.getName()
+                                                           + descriptor.metadata().table() + "': " + previous.getName()
                                                            + " and " + safeType.getName());
             }
-            byType.put(safeType, new EntitySchemaTarget(metadata));
+            byType.put(safeType, new EntitySchemaTarget(descriptor));
         }
         return List.copyOf(byType.values());
     }
@@ -95,9 +97,14 @@ final class EntitySchemaSyncSupport {
     }
 }
 
-record EntitySchemaTarget(EntityMetadata<?> metadata) {
+record EntitySchemaTarget(EntitySchemaDescriptor<?> descriptor) {
 
     EntitySchemaTarget {
-        metadata = Objects.requireNonNull(metadata, "entity metadata must not be null");
+        descriptor = Objects.requireNonNull(descriptor, "entity schema descriptor must not be null");
+    }
+
+    /** 保留启动同步内部既有的轻量访问写法，真实所有权仍由完整 descriptor 承担。 */
+    EntityMetadata<?> metadata() {
+        return descriptor.metadata();
     }
 }

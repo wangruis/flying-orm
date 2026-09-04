@@ -3,6 +3,8 @@ package com.flying.orm.rdb.metadata;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.rdb.dialect.RdbDialect;
+import com.flying.orm.rdb.schema.SchemaSnapshot;
+import com.flying.orm.rdb.schema.SchemaSnapshotCoverage;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
 
 import java.util.Objects;
@@ -66,6 +68,20 @@ public final class SyncFormMetadataReader {
         return runtime.readTable(schema, table);
     }
 
+    /** 直读当前数据库的三态 Schema 快照，不复用普通元数据缓存。 */
+    public SchemaSnapshot readSnapshot(String table) {
+        return runtime.readSnapshot(table);
+    }
+
+    public SchemaSnapshot readSnapshot(String schema, String table) {
+        return runtime.readSnapshot(schema, table);
+    }
+
+    /** 返回底层 JDBC reader 的不可变结构事实覆盖声明。 */
+    public SchemaSnapshotCoverage snapshotCoverage() {
+        return runtime.snapshotCoverage();
+    }
+
     /** 内部运行时只描述四个读取动作，SQL 和结构转换仍由既有 reader 负责。 */
     private interface Runtime {
         DynamicForm readForm(String formId, String table);
@@ -75,6 +91,12 @@ public final class SyncFormMetadataReader {
         TableMetadata readTable(String table);
 
         TableMetadata readTable(String schema, String table);
+
+        SchemaSnapshot readSnapshot(String table);
+
+        SchemaSnapshot readSnapshot(String schema, String table);
+
+        SchemaSnapshotCoverage snapshotCoverage();
     }
 
     /** 原生 JDBC 路径只是直接转发，不加入等待、线程切换或第二套转换逻辑。 */
@@ -102,6 +124,21 @@ public final class SyncFormMetadataReader {
         @Override
         public TableMetadata readTable(String schema, String table) {
             return reader.readTable(schema, table);
+        }
+
+        @Override
+        public SchemaSnapshot readSnapshot(String table) {
+            return reader.readSnapshot(table);
+        }
+
+        @Override
+        public SchemaSnapshot readSnapshot(String schema, String table) {
+            return reader.readSnapshot(schema, table);
+        }
+
+        @Override
+        public SchemaSnapshotCoverage snapshotCoverage() {
+            return reader.snapshotCoverage();
         }
     }
 

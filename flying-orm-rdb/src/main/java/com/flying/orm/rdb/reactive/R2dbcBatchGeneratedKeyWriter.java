@@ -30,13 +30,26 @@ final class R2dbcBatchGeneratedKeyWriter {
                                ProtectedBatchRows.RowView row,
                                long inputOffset,
                                Supplier<R2dbcLargeObjectScope> largeObjects) {
+        return write(connection, request, transportSql, row, inputOffset, largeObjects, null);
+    }
+
+    Mono<GeneratedWrite> write(Connection connection,
+                               BatchWriteRequest request,
+                               String transportSql,
+                               ProtectedBatchRows.RowView row,
+                               long inputOffset,
+                               Supplier<R2dbcLargeObjectScope> largeObjects,
+                               R2dbcBatchEvidenceCounts evidence) {
         return Mono.defer(() -> {
             Statement statement = Objects.requireNonNull(connection, "r2dbc connection must not be null")
                     .createStatement(transportSql);
             bind(statement, request, row);
             statement.returnGeneratedValues(request.generatedKeys().columnName());
             SqlExecutionOptions options = largeObjectOptions(request);
-            Accumulator accumulator = new Accumulator(request, inputOffset, options, largeObjects);
+            Accumulator accumulator = new Accumulator(inputOffset, options, largeObjects);
+            if (evidence != null) {
+                evidence.markDatabaseWorkAttempted();
+            }
             return Flux.from(statement.execute())
                     .concatMap(result -> Flux.from(result.flatMap(segment -> consume(segment, accumulator))), 1)
                     .then(Mono.fromSupplier(accumulator::finish));
@@ -82,7 +95,6 @@ final class R2dbcBatchGeneratedKeyWriter {
     /** 每一行都使用独立累加器，不把可变状态带入并发分片或下一次订阅。 */
     private static final class Accumulator {
 
-        private final BatchWriteRequest request;
         private final long inputOffset;
         private final SqlExecutionOptions options;
         private final Supplier<R2dbcLargeObjectScope> largeObjects;
@@ -90,11 +102,9 @@ final class R2dbcBatchGeneratedKeyWriter {
         private boolean updateCountSeen;
         private DynamicRow generatedKey;
 
-        private Accumulator(BatchWriteRequest request,
-                            long inputOffset,
+        private Accumulator(long inputOffset,
                             SqlExecutionOptions options,
                             Supplier<R2dbcLargeObjectScope> largeObjects) {
-            this.request = request;
             this.inputOffset = inputOffset;
             this.options = options;
             this.largeObjects = largeObjects;
@@ -123,7 +133,6 @@ final class R2dbcBatchGeneratedKeyWriter {
             if (generatedKey == null) {
                 throw new IllegalStateException("database did not return a generated key for batch row " + inputOffset);
             }
-            request.generatedKeys().accept(inputOffset, generatedKey);
             // 少数驱动只发布生成键行而没有 UpdateCount，此时键行本身证明该行已执行。
             return new GeneratedWrite(updateCountSeen ? affectedRows : 1L, generatedKey);
         }

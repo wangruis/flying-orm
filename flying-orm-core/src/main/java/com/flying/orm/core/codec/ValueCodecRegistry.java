@@ -1,8 +1,13 @@
 package com.flying.orm.core.codec;
 
+import com.flying.orm.core.internal.hash.StableDigest;
+import com.flying.orm.core.internal.hash.StableEncoder;
+
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.function.BiFunction;
 
 /**
@@ -17,11 +22,24 @@ import java.util.function.BiFunction;
  */
 public final class ValueCodecRegistry {
 
+    private static final StableDigest.Domain DESCRIPTOR_FINGERPRINT_DOMAIN =
+            StableDigest.domain("value-codec-registry-descriptors/v1");
+
+    private static final DescriptorState NO_DESCRIPTORS = new DescriptorState(
+            false,
+            StableDigest.sha256(DESCRIPTOR_FINGERPRINT_DOMAIN)
+                        .integer("DESCRIPTOR_COUNT", 0)
+                        .finishHex());
+
     private static final ValueCodecRegistry STANDARD = new ValueCodecRegistry(StandardValueCodecs.create());
 
     private final List<ValueCodec> codecs;
 
     private final List<DriverValueAdapter> driverAdapters;
+
+    private final boolean hasDescriptors;
+
+    private final String descriptorFingerprint;
 
     /** 创建按声明顺序匹配的只读 codec 注册表。 */
     public ValueCodecRegistry(List<ValueCodec> codecs) {
@@ -32,11 +50,26 @@ public final class ValueCodecRegistry {
         this.codecs = List.copyOf(Objects.requireNonNull(codecs, "value codecs must not be null"));
         this.driverAdapters = List.copyOf(Objects.requireNonNull(driverAdapters,
                                                                   "driver value adapters must not be null"));
+        DescriptorState descriptorState = descriptorState(this.codecs);
+        this.hasDescriptors = descriptorState.present();
+        this.descriptorFingerprint = descriptorState.fingerprint();
     }
 
     /** 返回框架内置的共享注册表，常规场景无需为每次查询重复创建。 */
     public static ValueCodecRegistry standard() {
         return STANDARD;
+    }
+
+    /** @return 当前注册表是否包含可配置装配所需的显式 codec 描述器 */
+    public boolean hasDescriptors() {
+        return hasDescriptors;
+    }
+
+    /**
+     * 返回按 codec 优先级冻结的描述器指纹。旧 codec 仍由注册表对象身份隔离，不伪造稳定契约。
+     */
+    public String descriptorFingerprint() {
+        return descriptorFingerprint;
     }
 
     /**
@@ -123,6 +156,37 @@ public final class ValueCodecRegistry {
             }
         }
         throw new IllegalArgumentException("no value codec for " + targetType.getName());
+    }
+
+    private static DescriptorState descriptorState(List<ValueCodec> codecs) {
+        List<ValueCodecDescriptor> descriptors = new ArrayList<>();
+        LinkedHashSet<String> ids = new LinkedHashSet<>();
+        for (ValueCodec codec : codecs) {
+            Optional<ValueCodecDescriptor> descriptor = Objects.requireNonNull(
+                    Objects.requireNonNull(codec, "value codec must not be null").descriptor(),
+                    "value codec descriptor lookup must not return null");
+            if (descriptor.isEmpty()) {
+                continue;
+            }
+            ValueCodecDescriptor value = descriptor.orElseThrow();
+            if (!ids.add(value.id())) {
+                throw new IllegalArgumentException("duplicate value codec descriptor id: " + value.id());
+            }
+            descriptors.add(value);
+        }
+        if (descriptors.isEmpty()) {
+            return NO_DESCRIPTORS;
+        }
+        StableEncoder encoder = StableDigest.sha256(DESCRIPTOR_FINGERPRINT_DOMAIN);
+        encoder.integer("DESCRIPTOR_COUNT", descriptors.size());
+        for (int index = 0; index < descriptors.size(); index++) {
+            encoder.integer("PRIORITY", index)
+                   .text("DESCRIPTOR", descriptors.get(index).fingerprint());
+        }
+        return new DescriptorState(!descriptors.isEmpty(), encoder.finishHex());
+    }
+
+    private record DescriptorState(boolean present, String fingerprint) {
     }
 
 }

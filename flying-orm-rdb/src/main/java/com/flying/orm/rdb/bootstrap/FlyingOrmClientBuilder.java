@@ -9,6 +9,7 @@ import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.form.StructuredConditionResolver;
 import com.flying.orm.rdb.id.IdGenerator;
 import com.flying.orm.rdb.mapping.EntityFieldFiller;
+import com.flying.orm.rdb.mapping.EntitySchemaDescriptor;
 import com.flying.orm.rdb.observation.BatchExecutionObserver;
 import com.flying.orm.rdb.observation.SqlExecutionLogOptions;
 import com.flying.orm.rdb.observation.SqlExecutionLogSelection;
@@ -133,6 +134,20 @@ public final class FlyingOrmClientBuilder {
     /** 为 TableField.fill 设置当前客户端共享的线程安全填充器。 */
     public FlyingOrmClientBuilder fieldFiller(EntityFieldFiller v) {
         s.fieldFiller = Objects.requireNonNull(v);
+        return this;
+    }
+
+    /**
+     * 注册一个已经编译完成的实体关系描述，让 Repository、Schema 和值转换共用同一份启动期事实。
+     *
+     * <p>同一个描述对象可以重复注册；同一实体不能换成另一份描述。一个客户端里的所有描述还必须共用
+     * 同一个类型映射注册表，避免写入和读取各自拿到不同的 codec。</p>
+     *
+     * @param descriptor 实体关系描述
+     * @return 当前构建器
+     */
+    public FlyingOrmClientBuilder entitySchema(EntitySchemaDescriptor<?> descriptor) {
+        s.addEntitySchema(descriptor);
         return this;
     }
 

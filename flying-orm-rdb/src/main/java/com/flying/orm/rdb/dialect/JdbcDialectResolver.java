@@ -33,16 +33,32 @@ public final class JdbcDialectResolver {
 
     /** 从数据库产品名和 JDBC URL 识别方言，无法确定时直接失败，不猜默认数据库。 */
     public static RdbDialect resolve(DataSource dataSource) {
+        return inspect(dataSource).dialect();
+    }
+
+    /**
+     * 在自动识别方言使用的同一个 JDBC 连接上读取产品和版本，不额外借连接，也不保存 URL、账号或数据源。
+     */
+    public static DatabaseDescriptor describe(DataSource dataSource) {
+        ResolvedDatabase resolved = inspect(dataSource);
+        return DatabaseDescriptor.of(resolved.product(), resolved.version(), resolved.dialect());
+    }
+
+    private static ResolvedDatabase inspect(DataSource dataSource) {
         DataSource safeDataSource = Objects.requireNonNull(dataSource, "jdbc data source must not be null");
         try (Connection connection = safeDataSource.getConnection()) {
             DatabaseMetaData metadata = Objects.requireNonNull(
                     connection.getMetaData(), "jdbc database metadata must not be null");
             String productName = metadata.getDatabaseProductName();
             String jdbcUrl = metadata.getURL();
-            return RdbDialectResolver.tryResolveName(productName)
+            RdbDialect dialect = RdbDialectResolver.tryResolveName(productName)
                     .or(() -> tryResolveJdbcUrl(jdbcUrl))
                     .orElseThrow(() -> new IllegalArgumentException(
                             "unsupported rdb dialect from jdbc metadata"));
+            String version = metadata.getDatabaseProductVersion();
+            return new ResolvedDatabase(productName == null || productName.isBlank() ? "unknown" : productName,
+                                        version == null || version.isBlank() ? "unknown" : version,
+                                        dialect);
         } catch (SQLException error) {
             throw new IllegalStateException("failed to read jdbc metadata for dialect detection", error);
         }
@@ -69,6 +85,9 @@ public final class JdbcDialectResolver {
             return java.util.Optional.empty();
         }
         return RdbDialectResolver.tryResolveName(url.substring(prefix + 1, driverEnd));
+    }
+
+    private record ResolvedDatabase(String product, String version, RdbDialect dialect) {
     }
 
 }

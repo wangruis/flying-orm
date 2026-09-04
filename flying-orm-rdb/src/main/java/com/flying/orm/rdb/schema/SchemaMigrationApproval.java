@@ -33,6 +33,13 @@ public record SchemaMigrationApproval(String planFingerprint, String reason) {
         return new SchemaMigrationApproval(safePlan.fingerprint(), reason);
     }
 
+    /** 为 3.2 完整关系审核计划生成精确批准。 */
+    public static SchemaMigrationApproval approve(ReviewedSchemaPlan plan, String reason) {
+        ReviewedSchemaPlan safePlan = Objects.requireNonNull(
+                plan, "reviewed relational schema plan must not be null");
+        return new SchemaMigrationApproval(safePlan.fingerprint(), reason);
+    }
+
     private static String requireText(String value, String name) {
         String text = Objects.requireNonNull(value, name + " must not be null").trim();
         if (text.isEmpty()) {

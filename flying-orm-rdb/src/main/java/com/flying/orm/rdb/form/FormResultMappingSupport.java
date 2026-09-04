@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.page.CursorPageResult;
+import com.flying.orm.core.page.KeysetPageResult;
 import com.flying.orm.core.page.PageResult;
 import com.flying.orm.rdb.mapping.RowMapper;
 import com.flying.orm.rdb.result.DynamicRow;
@@ -51,5 +52,23 @@ final class FormResultMappingSupport {
                                      .map(safeMapper::map)
                                      .toList();
         return new CursorPageResult<>(typedRows, safeSource.nextCursor(), safeSource.hasMore());
+    }
+
+    static <T> Mono<KeysetPageResult<T>> mapKeysetPage(
+            Mono<KeysetPageResult<DynamicRow>> source,
+            RowMapper<T> rowMapper) {
+        return Objects.requireNonNull(source, "keyset page source must not be null")
+                .map(page -> mapKeysetPage(page, rowMapper));
+    }
+
+    static <T> KeysetPageResult<T> mapKeysetPage(
+            KeysetPageResult<DynamicRow> source,
+            RowMapper<T> rowMapper) {
+        KeysetPageResult<DynamicRow> safeSource = Objects.requireNonNull(
+                source, "keyset page result must not be null");
+        RowMapper<T> safeMapper = Objects.requireNonNull(
+                rowMapper, "row mapper must not be null");
+        List<T> typedRows = safeSource.rows().stream().map(safeMapper::map).toList();
+        return new KeysetPageResult<>(typedRows, safeSource.nextPosition(), safeSource.hasMore());
     }
 }

@@ -26,6 +26,17 @@ final class ConditionCompilationBudget {
         }
     }
 
+    /** 当前 term 已在 checkNode 中计过一次，这里只补 descriptor 声明的额外成本。 */
+    void checkTerm(String operator, StructuredConditionPolicy policy, String path) {
+        int additional = policy.termComplexityCost(operator) - 1;
+        if (additional > policy.maxNodes() - nodes) {
+            throw StructuredConditionException.of(StructuredConditionErrorCode.NODE_COUNT_EXCEEDED,
+                                                  path,
+                                                  "structured condition node count exceeds limit at " + path);
+        }
+        nodes += additional;
+    }
+
     static String childConditionPath(String path, int index) {
         if (ROOT_PATH.equals(path)) {
             return ROOT_PATH + "[" + index + "]";

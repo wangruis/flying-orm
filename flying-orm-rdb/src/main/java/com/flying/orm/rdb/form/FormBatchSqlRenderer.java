@@ -56,7 +56,7 @@ final class FormBatchSqlRenderer {
         List<DynamicField> layout = firstValues.stream().map(FormSqlRenderSupport.FieldValue::field).toList();
         StringJoiner placeholders = new StringJoiner(", ");
         layout.forEach(field -> placeholders.add(support.valueExpression(field)));
-        String sql = "insert into " + support.identifier(safeForm.table()) + " (" + support.columns(layout)
+        String sql = "insert into " + support.identifier(safeForm) + " (" + support.columns(layout)
                 + ") values (" + placeholders + ")";
         return plan(safeForm, layout, firstValues, sql);
     }
@@ -92,7 +92,7 @@ final class FormBatchSqlRenderer {
                                   updateColumns,
                                   parameterColumns,
                                   valueExpressions,
-                                  support.identifier(safeForm.table()));
+                                  support.identifier(safeForm));
         return plan(safeForm, fields.parameterFields(), firstValues, sql);
     }
 

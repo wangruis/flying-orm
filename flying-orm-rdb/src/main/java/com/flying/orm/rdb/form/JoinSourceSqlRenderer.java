@@ -51,7 +51,7 @@ final class JoinSourceSqlRenderer {
         JoinSource safeSource = Objects.requireNonNull(source, "join source must not be null");
         SqlFragment filter = condition(safeSource, physicalForm, protection, false);
         parameters.addAll(filter.parameters());
-        String table = support.identifier(safeSource.form().table());
+        String table = support.identifier(safeSource.form());
         if (filter.sql().isBlank()) {
             return table + " " + alias(safeSource);
         }
@@ -79,6 +79,13 @@ final class JoinSourceSqlRenderer {
                     ? alias(safeSource) + "." + support.identifier(field)
                     : support.identifier(field);
         });
-        return renderer.renderWhere(safeCondition);
+        if (!renderer.hasCorrelatedTerms()) {
+            return renderer.renderWhere(safeCondition);
+        }
+        String qualifier = qualified ? alias(safeSource) : support.identifier(safeForm);
+        return renderer.renderWhere(
+                safeCondition,
+                name -> qualifier + "." + support.identifier(safeForm.field(name).name()),
+                name -> qualifier);
     }
 }

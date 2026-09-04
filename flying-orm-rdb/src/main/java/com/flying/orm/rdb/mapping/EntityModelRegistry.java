@@ -9,6 +9,8 @@ import com.flying.orm.rdb.internal.mapping.EntityMetadataResolver;
 import com.flying.orm.rdb.internal.mapping.EntityValues;
 import com.flying.orm.rdb.id.IdGenerator;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
@@ -33,15 +35,20 @@ public final class EntityModelRegistry implements AutoCloseable {
     private final long maximumWeight;
     private final IdGenerator idGenerator;
     private final EntityFieldFiller fieldFiller;
+    private final Map<Class<?>, EntitySchemaDescriptor<?>> entitySchemas;
 
     private final AtomicBoolean closed = new AtomicBoolean();
 
-    private EntityModelRegistry(CacheRegionPolicy policy, IdGenerator idGenerator, EntityFieldFiller fieldFiller) {
+    private EntityModelRegistry(CacheRegionPolicy policy,
+                                IdGenerator idGenerator,
+                                EntityFieldFiller fieldFiller,
+                                Map<Class<?>, EntitySchemaDescriptor<?>> entitySchemas) {
         CacheRegionPolicy safePolicy = Objects.requireNonNull(policy,
                                                                "entity mapping cache policy must not be null");
         this.maximumWeight = safePolicy.maximumWeight();
         this.idGenerator = Objects.requireNonNull(idGenerator, "id generator must not be null");
         this.fieldFiller = Objects.requireNonNull(fieldFiller, "entity field filler must not be null");
+        this.entitySchemas = copySchemas(entitySchemas);
         models = BoundedCacheRegion.create(safePolicy, (ignored, model) -> logicalWeight(model));
     }
 
@@ -52,19 +59,34 @@ public final class EntityModelRegistry implements AutoCloseable {
      * @return 可并发共享的注册表
      */
     public static EntityModelRegistry create(CacheRegionPolicy policy) {
-        return new EntityModelRegistry(policy, IdGenerator.none(), EntityFieldFiller.none());
+        return new EntityModelRegistry(policy, IdGenerator.none(), EntityFieldFiller.none(), Map.of());
     }
 
     /** 创建使用显式主键生成器的实例级实体模型注册表。 */
     public static EntityModelRegistry create(CacheRegionPolicy policy, IdGenerator idGenerator) {
-        return new EntityModelRegistry(policy, idGenerator, EntityFieldFiller.none());
+        return new EntityModelRegistry(policy, idGenerator, EntityFieldFiller.none(), Map.of());
     }
 
     /** 创建同时绑定主键生成器和字段填充器的实例级实体模型注册表。 */
     public static EntityModelRegistry create(CacheRegionPolicy policy,
                                              IdGenerator idGenerator,
                                              EntityFieldFiller fieldFiller) {
-        return new EntityModelRegistry(policy, idGenerator, fieldFiller);
+        return new EntityModelRegistry(policy, idGenerator, fieldFiller, Map.of());
+    }
+
+    /**
+     * 创建已经绑定完整实体关系描述的注册表。
+     *
+     * <p>描述在客户端启动期一次注册。之后 metadata、写值计划、行映射和 Schema 都从同一个描述出发；
+     * 没有注册的实体仍走原来的 CRUD-only 编译路径。</p>
+     */
+    @InternalApi
+    public static EntityModelRegistry create(
+            CacheRegionPolicy policy,
+            IdGenerator idGenerator,
+            EntityFieldFiller fieldFiller,
+            Map<Class<?>, EntitySchemaDescriptor<?>> entitySchemas) {
+        return new EntityModelRegistry(policy, idGenerator, fieldFiller, entitySchemas);
     }
 
     /** Repository 读取当前客户端绑定的生成器；普通映射调用不会触发它。 */
@@ -87,9 +109,13 @@ public final class EntityModelRegistry implements AutoCloseable {
         ValueCodecRegistry safeCodecs = Objects.requireNonNull(valueCodecs,
                                                                "value codec registry must not be null");
         EntityMetadata<T> metadata = metadata(safeType);
+        EntitySchemaDescriptor<T> schema = registeredSchema(safeType);
+        Map<String, EntityTypeMappingRegistry.Mapping> customMappings = schema == null
+                ? Map.of() : schema.customFieldMappings();
         ModelKey key = ModelKey.mapping(safeType, safeCodecs);
         return (MappingPlan<T>) model(key,
-                                      ignored -> MappingPlan.createUncached(safeType, metadata, safeCodecs));
+                                      ignored -> MappingPlan.createUncached(
+                                              safeType, metadata, safeCodecs, customMappings));
     }
 
     /**
@@ -102,8 +128,50 @@ public final class EntityModelRegistry implements AutoCloseable {
     @SuppressWarnings("unchecked")
     public <T> EntityMetadata<T> metadata(Class<T> type) {
         Class<T> safeType = Objects.requireNonNull(type, "entity type must not be null");
+        EntitySchemaDescriptor<T> schema = registeredSchema(safeType);
+        if (schema != null) {
+            return schema.metadata();
+        }
         return (EntityMetadata<T>) model(ModelKey.metadata(safeType),
                                          ignored -> EntityMetadataResolver.createUncached(safeType));
+    }
+
+    /**
+     * 使用框架标准类型映射获取实体的严格 Schema 描述。
+     *
+     * <p>启动期注册过完整描述时直接返回同一对象；未注册实体才在显式 Schema 冷路径按标准映射编译。</p>
+     */
+    public <T> EntitySchemaDescriptor<T> schemaDescriptor(Class<T> type) {
+        Class<T> safeType = Objects.requireNonNull(type, "entity type must not be null");
+        EntitySchemaDescriptor<T> schema = registeredSchema(safeType);
+        if (schema != null) {
+            return schema;
+        }
+        return schemaDescriptor(safeType, EntityTypeMappingRegistry.standard());
+    }
+
+    /**
+     * 使用指定类型映射获取或编译严格 Schema 描述。
+     *
+     * <p>缓存按注册表对象身份隔离；即使两个注册表具有相同稳定指纹，也不会跨应用生命周期共享
+     * codec 或反射模型。</p>
+     */
+    @SuppressWarnings("unchecked")
+    public <T> EntitySchemaDescriptor<T> schemaDescriptor(Class<T> type,
+                                                           EntityTypeMappingRegistry typeMappings) {
+        Class<T> safeType = Objects.requireNonNull(type, "entity type must not be null");
+        EntityTypeMappingRegistry safeMappings = Objects.requireNonNull(
+                typeMappings, "entity type mappings must not be null");
+        EntitySchemaDescriptor<T> schema = registeredSchema(safeType);
+        if (schema != null && schema.typeMappings() == safeMappings) {
+            return schema;
+        }
+        ModelKey key = ModelKey.schemaDescriptor(safeType, safeMappings);
+        return (EntitySchemaDescriptor<T>) model(
+                key,
+                ignored -> EntitySchemaDescriptor.builder(safeType)
+                        .typeMappings(safeMappings)
+                        .build());
     }
 
     /**
@@ -120,6 +188,24 @@ public final class EntityModelRegistry implements AutoCloseable {
         EntityMetadata<T> metadata = metadata(safeType);
         return (EntityValues<T>) model(ModelKey.values(safeType),
                                        ignored -> EntityValues.createUncached(safeType, metadata, fieldFiller));
+    }
+
+    /**
+     * 返回启动期注册 descriptor 中数据库生成主键的精确自定义映射。未注册实体和标准类型返回 null，
+     * Repository 创建后会缓存结果，逐次回填不扫描元数据。
+     */
+    @InternalApi
+    public EntityTypeMappingRegistry.Mapping databaseGeneratedKeyMapping(Class<?> type) {
+        Class<?> safeType = Objects.requireNonNull(type, "entity type must not be null");
+        EntitySchemaDescriptor<?> schema = registeredSchema(safeType);
+        if (schema == null) {
+            return null;
+        }
+        return schema.metadata().fields().stream()
+                .filter(field -> field.primaryKey() && field.generation().generated())
+                .findFirst()
+                .map(field -> schema.customFieldMappings().get(field.name()))
+                .orElse(null);
     }
 
     /** @return 当前近似缓存条目数；区域关闭时始终为零。 */
@@ -175,6 +261,34 @@ public final class EntityModelRegistry implements AutoCloseable {
                                     0L, 0L, 0L);
     }
 
+    @SuppressWarnings("unchecked")
+    private <T> EntitySchemaDescriptor<T> registeredSchema(Class<T> type) {
+        if (entitySchemas.isEmpty()) {
+            return null;
+        }
+        return (EntitySchemaDescriptor<T>) entitySchemas.get(type);
+    }
+
+    private static Map<Class<?>, EntitySchemaDescriptor<?>> copySchemas(
+            Map<Class<?>, EntitySchemaDescriptor<?>> schemas) {
+        Map<Class<?>, EntitySchemaDescriptor<?>> safeSchemas = Objects.requireNonNull(
+                schemas, "entity schemas must not be null");
+        if (safeSchemas.isEmpty()) {
+            return Map.of();
+        }
+        Map<Class<?>, EntitySchemaDescriptor<?>> copy = new LinkedHashMap<>(safeSchemas.size());
+        safeSchemas.forEach((type, schema) -> {
+            Class<?> safeType = Objects.requireNonNull(type, "entity schema type must not be null");
+            EntitySchemaDescriptor<?> safeSchema = Objects.requireNonNull(
+                    schema, "entity schema descriptor must not be null");
+            if (safeSchema.metadata().type() != safeType) {
+                throw new IllegalArgumentException("entity schema key must match its entity type");
+            }
+            copy.put(safeType, safeSchema);
+        });
+        return Map.copyOf(copy);
+    }
+
     private static int logicalWeight(Object model) {
         if (model instanceof MappingPlan<?> plan) {
             return plan.logicalWeight();
@@ -182,26 +296,41 @@ public final class EntityModelRegistry implements AutoCloseable {
         if (model instanceof EntityMetadata<?> metadata) {
             return metadata.logicalWeight();
         }
+        if (model instanceof EntitySchemaDescriptor<?> descriptor) {
+            return descriptor.metadata().logicalWeight();
+        }
         if (model instanceof EntityValues<?> values) {
             return values.logicalWeight();
         }
         return 1;
     }
 
-    /** 使用对象身份实现键相等，不能让不同类别或不同 codec 生命周期的模型错误共享计划。 */
+    /** 使用对象身份实现键相等，不能让不同类别、codec 或类型映射生命周期的模型错误共享计划。 */
     private static final class ModelKey {
 
         private final Kind kind;
         private final Class<?> type;
-        private final ValueCodecRegistry valueCodecs;
+        private final Object modelIdentity;
         private final int hash;
 
-        private ModelKey(Kind kind, Class<?> type, ValueCodecRegistry valueCodecs) {
+        private ModelKey(Kind kind, Class<?> type, Object modelIdentity) {
             this.kind = kind;
             this.type = type;
-            this.valueCodecs = valueCodecs;
-            this.hash = 31 * (31 * kind.hashCode() + System.identityHashCode(type))
-                    + System.identityHashCode(valueCodecs);
+            this.modelIdentity = modelIdentity;
+            int modelHash = System.identityHashCode(modelIdentity);
+            if (modelIdentity instanceof ValueCodecRegistry codecs && codecs.hasDescriptors()) {
+                modelHash = 31 * modelHash + codecs.descriptorFingerprint().hashCode();
+            }
+            this.hash = 31 * (31 * kind.hashCode() + System.identityHashCode(type)) + modelHash;
+        }
+
+        private ModelKey(Class<?> type, EntityTypeMappingRegistry typeMappings) {
+            this.kind = Kind.SCHEMA_DESCRIPTOR;
+            this.type = type;
+            this.modelIdentity = typeMappings;
+            int identityHash = 31 * (31 * kind.hashCode() + System.identityHashCode(type))
+                    + System.identityHashCode(typeMappings);
+            this.hash = 31 * identityHash + typeMappings.fingerprint().hashCode();
         }
 
         private static ModelKey mapping(Class<?> type, ValueCodecRegistry codecs) {
@@ -216,12 +345,16 @@ public final class EntityModelRegistry implements AutoCloseable {
             return new ModelKey(Kind.VALUES, type, null);
         }
 
+        private static ModelKey schemaDescriptor(Class<?> type, EntityTypeMappingRegistry typeMappings) {
+            return new ModelKey(type, typeMappings);
+        }
+
         @Override
         public boolean equals(Object other) {
             return this == other || other instanceof ModelKey key
                     && kind == key.kind
                     && type == key.type
-                    && valueCodecs == key.valueCodecs;
+                    && modelIdentity == key.modelIdentity;
         }
 
         @Override
@@ -233,6 +366,7 @@ public final class EntityModelRegistry implements AutoCloseable {
     private enum Kind {
         METADATA,
         VALUES,
-        ROW_MAPPING
+        ROW_MAPPING,
+        SCHEMA_DESCRIPTOR
     }
 }

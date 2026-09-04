@@ -3,6 +3,7 @@ package com.flying.orm.core.form;
 import com.flying.orm.core.field.FieldIdentity;
 import com.flying.orm.core.internal.Names;
 import com.flying.orm.core.metadata.IndexMetadata;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.FieldProtectionRegistry;
@@ -28,7 +29,7 @@ public final class DynamicForm {
 
     private final String table;
 
-    private final String normalizedTable;
+    private final Optional<RelationIdentity> relationIdentity;
 
     private final List<DynamicField> fields;
 
@@ -45,14 +46,14 @@ public final class DynamicForm {
 
     private DynamicForm(String id,
                         String table,
+                        RelationIdentity relationIdentity,
                         List<DynamicField> fields,
                         LogicDeleteDefinition logicDelete,
                         TenantDefinition tenant,
                         FieldProtectionRegistry protections) {
         this.id = Names.requireText(id, "dynamic form id");
         this.table = Names.requireText(table, "dynamic form table");
-        // 物理表名最终会进入方言标识符渲染。大小写可能代表两个不同的 quoted identifier，不能像字段查找键一样折叠。
-        this.normalizedTable = this.table;
+        this.relationIdentity = Optional.ofNullable(relationIdentity);
 
         List<DynamicField> copiedFields = List.copyOf(fields);
         Map<String, DynamicField> indexedFields = new LinkedHashMap<>(Names.mapCapacity(copiedFields.size()));
@@ -65,9 +66,12 @@ public final class DynamicForm {
         }
         this.fields = copiedFields;
         this.fieldsByName = Map.copyOf(indexedFields);
-        this.logicDelete = logicDelete == null ? null : validateLogicDelete(logicDelete);
-        this.tenant = tenant == null ? null : validateTenant(tenant);
-        this.protections = validateProtections(protections);
+        this.logicDelete = logicDelete == null
+                ? null : DynamicFormValidation.logicDelete(logicDelete, fieldsByName);
+        this.tenant = tenant == null
+                ? null : DynamicFormValidation.tenant(tenant, fieldsByName);
+        this.protections = DynamicFormValidation.protections(
+                protections, fieldsByName, this.tenant, this.logicDelete);
     }
 
     /**
@@ -78,7 +82,20 @@ public final class DynamicForm {
      * @return 动态表单构建器
      */
     public static Builder builder(String id, String table) {
-        return new Builder(id, table);
+        return new Builder(id, table, null);
+    }
+
+    /**
+     * 创建保留 catalog、schema 和 table 分段身份的动态表单构建器。
+     *
+     * @param id       表单 ID
+     * @param identity 物理关系身份
+     * @return 动态表单构建器
+     */
+    public static Builder relationalBuilder(String id, RelationIdentity identity) {
+        RelationIdentity safeIdentity = Objects.requireNonNull(
+                identity, "dynamic form relation identity must not be null");
+        return new Builder(id, safeIdentity.table(), safeIdentity);
     }
 
     /**
@@ -97,6 +114,15 @@ public final class DynamicForm {
      */
     public String table() {
         return table;
+    }
+
+    /**
+     * 返回不会猜测点号层级的物理关系身份。
+     *
+     * @return catalog、schema、table 的只读分段身份；旧 String 构建入口为空
+     */
+    public Optional<RelationIdentity> relationIdentity() {
+        return relationIdentity;
     }
 
     /**
@@ -124,8 +150,12 @@ public final class DynamicForm {
         synchronized (this) {
             fingerprint = structureFingerprint;
             if (fingerprint == null) {
-                fingerprint = DynamicFormStructure.fingerprint(
-                        normalizedTable, fields, logicDelete, tenant, protections);
+                fingerprint = relationIdentity.isEmpty()
+                        ? DynamicFormStructure.fingerprint(
+                                table, fields, logicDelete, tenant, protections)
+                        : DynamicFormStructure.fingerprint(
+                                relationIdentity.orElseThrow(),
+                                fields, logicDelete, tenant, protections);
                 structureFingerprint = fingerprint;
             }
             return fingerprint;
@@ -212,7 +242,7 @@ public final class DynamicForm {
      */
     public DynamicFormChangeSet diffTo(DynamicForm target) {
         DynamicForm safeTarget = Objects.requireNonNull(target, "target form must not be null");
-        if (!normalizedTable.equals(safeTarget.normalizedTable)) {
+        if (!mapsToSameRelation(safeTarget)) {
             throw new IllegalArgumentException("cannot diff forms mapped to different tables");
         }
 
@@ -241,49 +271,16 @@ public final class DynamicForm {
         return DynamicFormChangeSet.ownedDiff(this, safeTarget, added, removed, changed);
     }
 
-    private LogicDeleteDefinition validateLogicDelete(LogicDeleteDefinition definition) {
-        if (!fieldsByName.containsKey(definition.identity().key())) {
-            throw new IllegalArgumentException("logic delete field does not exist in form");
+    /**
+     * 判断两个表单是否映射到同一个物理关系，并保留 legacy 字符串和分段身份的各自语义。
+     */
+    public boolean mapsToSameRelation(DynamicForm target) {
+        DynamicForm safeTarget = Objects.requireNonNull(target, "target form must not be null");
+        if (relationIdentity.isEmpty() || safeTarget.relationIdentity.isEmpty()) {
+            return relationIdentity.isEmpty() && safeTarget.relationIdentity.isEmpty()
+                    && table.equals(safeTarget.table);
         }
-        return definition;
-    }
-
-    private TenantDefinition validateTenant(TenantDefinition definition) {
-        if (!fieldsByName.containsKey(definition.identity().key())) {
-            throw new IllegalArgumentException("tenant field does not exist in form");
-        }
-        return definition;
-    }
-
-    private FieldProtectionRegistry validateProtections(FieldProtectionRegistry registry) {
-        FieldProtectionRegistry safeRegistry = Objects.requireNonNull(
-                registry, "field protection registry must not be null");
-        if (safeRegistry.encryptedFields().keySet().stream().anyMatch(name -> !fieldsByName.containsKey(name))
-                || safeRegistry.maskedFields().keySet().stream().anyMatch(name -> !fieldsByName.containsKey(name))) {
-            throw new IllegalArgumentException("protected field does not exist in form");
-        }
-        if (safeRegistry.encryptedFields().keySet().stream().anyMatch(this::ormControlField)) {
-            // 主键、租户和逻辑删除条件由 ORM 自动生成普通等值谓词，不能到首次执行时才发现无法比较随机密文。
-            throw new IllegalArgumentException("encrypted field must not be an ORM control field");
-        }
-        safeRegistry.encryptedFields().keySet().forEach(this::validateProtectedDataType);
-        safeRegistry.maskedFields().keySet().forEach(this::validateProtectedDataType);
-        return safeRegistry;
-    }
-
-    private boolean ormControlField(String fieldName) {
-        DynamicField field = fieldsByName.get(fieldName);
-        return field.primaryKey()
-                || tenant != null && fieldName.equals(tenant.identity().key())
-                || logicDelete != null
-                && fieldName.equals(logicDelete.identity().key());
-    }
-
-    private void validateProtectedDataType(String fieldName) {
-        if (!fieldsByName.get(fieldName).databaseType().isTextual()) {
-            // 加密与 masking 都按稳定文本编码工作，不能把不支持的类型留到首次查询时才失败。
-            throw new IllegalArgumentException("protected field must use a textual data type");
-        }
+        return relationIdentity.equals(safeTarget.relationIdentity);
     }
 
     /**
@@ -299,6 +296,8 @@ public final class DynamicForm {
 
         private final String table;
 
+        private final RelationIdentity relationIdentity;
+
         private final List<DynamicField> fields = new ArrayList<>();
 
         private LogicDeleteDefinition logicDelete;
@@ -307,9 +306,10 @@ public final class DynamicForm {
 
         private final FieldProtectionRegistry.Builder protections = FieldProtectionRegistry.builder();
 
-        private Builder(String id, String table) {
+        private Builder(String id, String table, RelationIdentity relationIdentity) {
             this.id = Names.requireText(id, "dynamic form id");
             this.table = Names.requireText(table, "dynamic form table");
+            this.relationIdentity = relationIdentity;
         }
 
         /**
@@ -378,7 +378,8 @@ public final class DynamicForm {
          * @return 动态表单定义
          */
         public DynamicForm build() {
-            return new DynamicForm(id, table, fields, logicDelete, tenant, protections.build());
+            return new DynamicForm(
+                    id, table, relationIdentity, fields, logicDelete, tenant, protections.build());
         }
     }
 }

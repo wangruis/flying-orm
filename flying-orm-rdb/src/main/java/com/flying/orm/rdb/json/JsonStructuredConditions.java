@@ -3,6 +3,7 @@ package com.flying.orm.rdb.json;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.StructuredConditionInput;
 import com.flying.orm.core.condition.StructuredConditionPolicy;
+import com.flying.orm.core.condition.TermRegistry;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.core.form.DynamicForm;
@@ -40,6 +41,9 @@ public final class JsonStructuredConditions implements StructuredConditionResolv
                                                                  JSON_CONTAINS,
                                                                  JSON_EXISTS,
                                                                  JSON_ARRAY_CONTAINS);
+
+    /** MySQL 与 PostgreSQL 的 JSON term 共享同一组治理描述器，冻结一次即可供输入编译复用。 */
+    private static final TermRegistry GOVERNED_TERMS = JsonTermHandlers.mysql().terms();
 
     private static final JsonStructuredConditions STANDARD = new JsonStructuredConditions();
 
@@ -79,7 +83,7 @@ public final class JsonStructuredConditions implements StructuredConditionResolv
         for (String operator : BUILT_IN_OPERATORS) {
             safePolicy = safePolicy.allowOperator(operator);
         }
-        return safePolicy;
+        return safePolicy.withAdditionalTerms(GOVERNED_TERMS);
     }
 
     private StructuredConditionInput adaptNode(DynamicForm form, StructuredConditionInput input) {

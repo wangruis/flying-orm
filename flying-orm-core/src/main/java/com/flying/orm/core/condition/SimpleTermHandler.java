@@ -27,3 +27,24 @@ record SimpleTermHandler(String id, ConditionValueShape shape) implements TermHa
         shape = java.util.Objects.requireNonNull(shape, "term value shape must not be null");
     }
 }
+
+/** 描述器只在显式扩展对象上保存，标准 term 的简单对象布局保持不变。 */
+record DescribedTermHandler(TermExtensionDescriptor extension,
+                            ConditionValueShape shape) implements TermHandler {
+
+    DescribedTermHandler {
+        extension = java.util.Objects.requireNonNull(
+                extension, "term extension descriptor must not be null");
+        shape = java.util.Objects.requireNonNull(shape, "term value shape must not be null");
+    }
+
+    @Override
+    public String id() {
+        return extension.id();
+    }
+
+    @Override
+    public java.util.Optional<TermExtensionDescriptor> descriptor() {
+        return java.util.Optional.of(extension);
+    }
+}

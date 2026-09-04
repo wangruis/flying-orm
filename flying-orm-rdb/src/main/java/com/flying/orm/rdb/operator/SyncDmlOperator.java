@@ -38,7 +38,7 @@ public final class SyncDmlOperator {
 
     /** 创建单次同步查询构建器。 */
     public SyncQueryOperator query() {
-        return new SyncQueryOperator(executor, renderer, defaultDataScope);
+        return new SyncQueryOperator(formClient, executor, renderer, defaultDataScope);
     }
 
     /** 创建以 DynamicForm 为根源的原生 JDBC 轻量多表查询。 */

@@ -9,6 +9,8 @@ import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
 import com.flying.orm.rdb.observation.BatchExecutionObservation;
 import com.flying.orm.rdb.observation.BatchExecutionObserver;
+import com.flying.orm.rdb.observation.SqlExecutionBackend;
+import com.flying.orm.rdb.observation.SqlTransactionSource;
 import com.flying.orm.rdb.transaction.R2dbcTransactionParticipationException;
 import com.flying.orm.rdb.transaction.TransactionOutcome;
 import reactor.core.publisher.Mono;
@@ -50,7 +52,8 @@ final class R2dbcExternalBatchCompletion {
                                                           results.enlistedChunks(snapshot));
         BatchExecutionObservation.BatchWriteRequestView view = observerEnabled
                 ? new BatchExecutionObservation.BatchWriteRequestView(
-                        safeRequest.sql(), safeRequest.options().mode(), safeRequest.parameterCount())
+                        safeRequest.sql(), safeRequest.options().mode(), safeRequest.parameterCount(),
+                        SqlExecutionBackend.R2DBC)
                 : null;
         if (register(safeResource, view, safeRequest.completion(), snapshot)) {
             return Mono.just(enlisted);
@@ -118,6 +121,7 @@ final class R2dbcExternalBatchCompletion {
     private void notifyObserver(BatchExecutionObservation.BatchWriteRequestView view,
                                 BatchWriteResult result,
                                 long durationNanos) {
-        observer.onExecution(BatchExecutionObservation.summary(view, result, durationNanos));
+        observer.onExecution(BatchExecutionObservation.summary(view, result, durationNanos),
+                             SqlTransactionSource.EXTERNAL);
     }
 }

@@ -3,6 +3,9 @@ package com.flying.orm.rdb.form;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchCommitFact;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
+import com.flying.orm.rdb.batch.BatchExecutionState;
 import com.flying.orm.rdb.batch.BatchGeneratedKeys;
 import com.flying.orm.rdb.batch.BatchWriteCompletion;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
@@ -16,6 +19,7 @@ import reactor.core.publisher.Mono;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Function;
 
 /**
  * 负责动态表单的批量插入与 upsert。
@@ -151,6 +155,35 @@ final class ReactiveFormBatchInsertOperations extends ReactiveFormOperationSuppo
                                       DataScope requestedScope,
                                       BatchGeneratedKeys generatedKeys,
                                       BatchWriteCompletion completion) {
+        return executeBatch(form, rows, options, upsert, requestedScope, generatedKeys, completion,
+                            executor::writeBatch, executor::writeProtectedBatch,
+                            BatchWriteResult::empty);
+    }
+
+    Mono<BatchExecutionEvidence> writeBatchEvidence(DynamicForm form,
+                                                     Publisher<Map<String, Object>> rows,
+                                                     BatchWriteOptions options,
+                                                     boolean upsert,
+                                                     DataScope requestedScope,
+                                                     BatchGeneratedKeys generatedKeys,
+                                                     BatchWriteCompletion completion) {
+        return executeBatch(form, rows, options, upsert, requestedScope, generatedKeys, completion,
+                            executor::writeBatchEvidence, executor::writeProtectedBatchEvidence,
+                            mode -> BatchExecutionEvidence.of(
+                                    mode, BatchExecutionState.SUCCESS,
+                                    BatchCommitFact.NOT_APPLICABLE, List.of()));
+    }
+
+    private <R> Mono<R> executeBatch(DynamicForm form,
+                                     Publisher<Map<String, Object>> rows,
+                                     BatchWriteOptions options,
+                                     boolean upsert,
+                                     DataScope requestedScope,
+                                     BatchGeneratedKeys generatedKeys,
+                                     BatchWriteCompletion completion,
+                                     Function<BatchWriteRequest, Mono<R>> writer,
+                                     Function<BatchWriteRequest, Mono<R>> protectedWriter,
+                                     Function<BatchWriteOptions.Mode, R> emptyResult) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
         BatchWriteOptions safeOptions = Objects.requireNonNull(options, "batch write options must not be null");
         BatchGeneratedKeys safeGeneratedKeys = Objects.requireNonNull(
@@ -161,10 +194,12 @@ final class ReactiveFormBatchInsertOperations extends ReactiveFormOperationSuppo
                     return Mono.error(Objects.requireNonNull(signal.getThrowable()));
                 }
                 if (!signal.hasValue()) {
-                    return Mono.just(BatchWriteResult.empty(safeOptions.mode()));
+                    return Mono.just(emptyResult.apply(safeOptions.mode()));
                 }
                 Map<String, Object> sourceFirstRow = signal.get();
                 DataScope scope = scopes.effectiveScope(requestedScope);
+                FieldUseGuard.approveBatchInsert(
+                        safeForm, sourceFirstRow, scope, upsert, fieldUsePolicy);
                 Map<String, Object> firstValues = scopes.prepareWriteValues(safeForm, sourceFirstRow, scope);
                 Flux<Map<String, Object>> cpuRows = ReactiveProtectionCpuBoundary.batch(
                         replay,
@@ -196,7 +231,7 @@ final class ReactiveFormBatchInsertOperations extends ReactiveFormOperationSuppo
                     BatchWriteRequest request = plan.request(
                             parameters, safeOptions, safeGeneratedKeys, completion);
                     return FormProtectedBatchRows.requiresProtectedExecution(protectionLayout)
-                            ? executor.writeProtectedBatch(request) : executor.writeBatch(request);
+                            ? protectedWriter.apply(request) : writer.apply(request);
                 });
             }).single();
     }
@@ -257,6 +292,8 @@ final class ReactiveFormBatchInsertOperations extends ReactiveFormOperationSuppo
                 }
                 Map<String, Object> sourceFirstRow = signal.get();
                 DataScope scope = scopes.effectiveScope(requestedScope);
+                FieldUseGuard.approveBatchInsert(
+                        safeForm, sourceFirstRow, scope, upsert, fieldUsePolicy);
                 Map<String, Object> firstValues = scopes.prepareWriteValues(safeForm, sourceFirstRow, scope);
                 Flux<Map<String, Object>> cpuRows = ReactiveProtectionCpuBoundary.batch(
                         replay,

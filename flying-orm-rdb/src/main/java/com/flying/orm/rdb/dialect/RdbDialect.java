@@ -1,8 +1,10 @@
 package com.flying.orm.rdb.dialect;
 
 import com.flying.orm.rdb.json.JsonDialect;
+import com.flying.orm.rdb.lock.LockingReadDialect;
 import com.flying.orm.rdb.schema.SchemaDialect;
 
+import java.util.EnumSet;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
@@ -24,22 +26,34 @@ public final class RdbDialect {
     private final PaginationDialect pagination;
     private final UpsertDialect upsert;
     private final JsonDialect json;
+    private final LockingReadDialect lockingRead;
     private final String version;
+    private final DialectCapabilities capabilities;
+    private final int maxIdentifierLength;
     private final Set<DialectFeature> features;
+
     private RdbDialect(String name,
                        SchemaDialect schema,
                        PaginationDialect pagination,
                        UpsertDialect upsert,
                        JsonDialect json,
+                       LockingReadDialect lockingRead,
                        String version,
-                       Set<DialectFeature> features) {
+                       DialectCapabilities capabilities,
+                       int maxIdentifierLength) {
         this.name = requireText(name, "dialect name").toLowerCase(Locale.ROOT);
         this.schema = Objects.requireNonNull(schema, "schema dialect must not be null");
         this.pagination = Objects.requireNonNull(pagination, "pagination dialect must not be null");
         this.upsert = Objects.requireNonNull(upsert, "upsert dialect must not be null");
         this.json = Objects.requireNonNull(json, "json dialect must not be null");
+        this.lockingRead = Objects.requireNonNull(lockingRead, "locking read dialect must not be null");
         this.version = requireText(version, "dialect version");
-        this.features = Set.copyOf(Objects.requireNonNull(features, "dialect features must not be null"));
+        this.capabilities = Objects.requireNonNull(capabilities, "dialect capabilities must not be null");
+        if (maxIdentifierLength < 0) {
+            throw new IllegalArgumentException("maximum identifier length must not be negative");
+        }
+        this.maxIdentifierLength = maxIdentifierLength;
+        this.features = legacyFeatures(capabilities);
     }
 
     /**
@@ -48,23 +62,7 @@ public final class RdbDialect {
      * @return H2 方言
      */
     public static RdbDialect h2() {
-        return of("h2",
-                  SchemaDialect.builder()
-                               .mapType("TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE")
-                               .mapType("OFFSET_TIME", "TIME WITH TIME ZONE")
-                               .mapType("NCLOB", "CLOB")
-                               .mapType("PROTECTED_BINARY", "BLOB")
-                               .mapType("PROTECTED_HASH", "BINARY(32)")
-                               .inlineColumnComment()
-                               .generatedValues(SchemaDialect.GeneratedValueStyle.H2)
-                               .build(),
-                  PaginationDialect.limitOffset(),
-                  UpsertDialect.h2(),
-                  JsonDialect.h2(),
-                  "default",
-                  Set.of(DialectFeature.IDENTITY_COLUMNS,
-                         DialectFeature.SEQUENCES,
-                         DialectFeature.MERGE_UPSERT));
+        return BuiltInRdbDialects.h2();
     }
 
     /**
@@ -77,43 +75,7 @@ public final class RdbDialect {
      * @return MySQL 方言
      */
     public static RdbDialect mysql() {
-        return of("mysql", SchemaDialect.builder()
-                                        .quoteIdentifiers('`')
-                                        .mapType("BIGINT", "BIGINT")
-                                        .mapType("INTEGER", "INT")
-                                        .mapType("INT", "INT")
-                                        .mapType("VARCHAR", "VARCHAR(255)")
-                                        .mapType("TEXT", "TEXT")
-                                        .mapType("CLOB", "LONGTEXT")
-                                        .mapType("NCLOB", "LONGTEXT")
-                                        .mapType("BOOLEAN", "BOOLEAN")
-                                        .mapType("BOOL", "BOOLEAN")
-                                        .mapType("DECIMAL", "DECIMAL(38,10)")
-                                        .mapType("NUMERIC", "DECIMAL(38,10)")
-                                        .mapType("BLOB", "LONGBLOB")
-                                        .mapType("BINARY", "LONGBLOB")
-                                        .mapType("MYSQL_BLOB", "BLOB")
-                                        .mapType("MYSQL_BINARY", "BINARY")
-                                        .mapType("PROTECTED_BINARY", "LONGBLOB")
-                                        .mapType("PROTECTED_HASH", "BINARY(32)")
-                                        .mapType("JSON", "JSON")
-                                        .mapType("TIMESTAMP", "DATETIME")
-                                        .mapType("TIMESTAMPTZ", "TIMESTAMP(6)")
-                                        .mapType("DATETIME", "DATETIME")
-                                        .mapType("DATE", "DATE")
-                                        .mapType("TIME", "TIME")
-                                        .mapType("OFFSET_TIME", "VARCHAR(32)")
-                                        .inlineColumnComment()
-                                        .dropIndexOnTable()
-                                        .generatedValues(SchemaDialect.GeneratedValueStyle.MYSQL)
-                                        .operationDependentOnlineDdl()
-                                        .mysqlLockTimeout()
-                                        .build(),
-                  PaginationDialect.limitOffset(),
-                  UpsertDialect.mysql(),
-                  JsonDialect.plain(),
-                  "default",
-                  Set.of(DialectFeature.IDENTITY_COLUMNS));
+        return BuiltInRdbDialects.mysql();
     }
 
     /**
@@ -122,47 +84,7 @@ public final class RdbDialect {
      * @return PostgreSQL 方言
      */
     public static RdbDialect postgresql() {
-        return of("postgresql",
-                  SchemaDialect.builder()
-                               .quoteIdentifiers('"')
-                               .mapType("BIGINT", "BIGINT")
-                               .mapType("INTEGER", "INTEGER")
-                               .mapType("INT", "INTEGER")
-                               .mapType("VARCHAR", "VARCHAR(255)")
-                               .mapType("TEXT", "TEXT")
-                               .mapType("CLOB", "TEXT")
-                               .mapType("NCLOB", "TEXT")
-                               .mapType("BOOLEAN", "BOOLEAN")
-                               .mapType("DECIMAL", "NUMERIC(38,10)")
-                               .mapType("NUMERIC", "NUMERIC(38,10)")
-                               .mapType("BLOB", "BYTEA")
-                               .mapType("BINARY", "BYTEA")
-                               .mapType("PROTECTED_BINARY", "BYTEA")
-                               .mapType("PROTECTED_HASH", "BYTEA")
-                               .mapType("JSON", "JSONB")
-                               .mapType("TIMESTAMP", "TIMESTAMP")
-                               .mapType("TIMESTAMPTZ", "TIMESTAMPTZ")
-                               .mapType("DATETIME", "TIMESTAMP")
-                               .mapType("DATE", "DATE")
-                               .mapType("TIME", "TIME")
-                               .mapType("OFFSET_TIME", "TIME WITH TIME ZONE")
-                               .mapType("VECTOR", "VECTOR")
-                               .commentOnColumn()
-                               .generatedValues(SchemaDialect.GeneratedValueStyle.POSTGRESQL)
-                               .concurrentIndexOnlineDdl()
-                               .postgresqlLockTimeout()
-                               .build(),
-                  PaginationDialect.limitOffset(),
-                  UpsertDialect.postgresql(),
-                  JsonDialect.postgresql(),
-                  "default",
-                  Set.of(DialectFeature.JSON_FUNCTIONS,
-                         DialectFeature.NATIVE_JSON,
-                         DialectFeature.NATIVE_BOOLEAN,
-                         DialectFeature.LARGE_OBJECTS,
-                          DialectFeature.IDENTITY_COLUMNS,
-                          DialectFeature.SEQUENCES,
-                         DialectFeature.POSTGRESQL_VECTOR));
+        return BuiltInRdbDialects.postgresql();
     }
 
     /**
@@ -179,68 +101,7 @@ public final class RdbDialect {
      * 才会启用原生 JSON 或 SQL BOOLEAN，避免在旧库上生成无法执行的 DDL。
      */
     public static RdbDialect oracle(OracleVersion version) {
-        OracleVersion safeVersion = Objects.requireNonNull(version, "oracle version must not be null");
-        String booleanType = safeVersion.nativeBoolean() ? "BOOLEAN" : "NUMBER(1)";
-        String jsonType = safeVersion.nativeJson() ? "JSON" : "CLOB";
-        Set<DialectFeature> features = safeVersion.nativeBoolean()
-                ? Set.of(DialectFeature.OFFSET_FETCH_PAGINATION,
-                         DialectFeature.MERGE_UPSERT,
-                         DialectFeature.IDENTITY_COLUMNS,
-                         DialectFeature.SEQUENCES,
-                         DialectFeature.JSON_FUNCTIONS,
-                         DialectFeature.NATIVE_JSON,
-                         DialectFeature.NATIVE_BOOLEAN,
-                         DialectFeature.LARGE_OBJECTS)
-                : safeVersion.nativeJson()
-                        ? Set.of(DialectFeature.OFFSET_FETCH_PAGINATION,
-                                 DialectFeature.MERGE_UPSERT,
-                                 DialectFeature.IDENTITY_COLUMNS,
-                                 DialectFeature.SEQUENCES,
-                                 DialectFeature.JSON_FUNCTIONS,
-                                 DialectFeature.NATIVE_JSON,
-                                 DialectFeature.LARGE_OBJECTS)
-                        : Set.of(DialectFeature.OFFSET_FETCH_PAGINATION,
-                                 DialectFeature.MERGE_UPSERT,
-                                 DialectFeature.IDENTITY_COLUMNS,
-                                 DialectFeature.SEQUENCES,
-                                 DialectFeature.JSON_FUNCTIONS,
-                                 DialectFeature.LARGE_OBJECTS);
-        return of("oracle",
-                  SchemaDialect.builder()
-                               .quoteIdentifiers('"')
-                               .mapType("BIGINT", "NUMBER(19)")
-                               .mapType("INTEGER", "NUMBER(10)")
-                               .mapType("INT", "NUMBER(10)")
-                               .mapType("VARCHAR", "VARCHAR2(255)")
-                               .mapType("TEXT", "CLOB")
-                               .mapType("CLOB", "CLOB")
-                               .mapType("NCLOB", "NCLOB")
-                               .mapType("BOOLEAN", booleanType)
-                               .mapType("DECIMAL", "NUMBER(38,10)")
-                               .mapType("NUMERIC", "NUMBER(38,10)")
-                               .mapType("BLOB", "BLOB")
-                               .mapType("BINARY", "BLOB")
-                               .mapType("PROTECTED_BINARY", "BLOB")
-                               .mapType("PROTECTED_HASH", "RAW(32)")
-                               .mapType("JSON", jsonType)
-                               .mapType("TIMESTAMP", "TIMESTAMP")
-                               .mapType("TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE")
-                               .mapType("DATETIME", "TIMESTAMP")
-                               .mapType("ORACLE_DATE", "DATE")
-                               .mapType("DATE", "DATE")
-                               .mapType("TIME", "VARCHAR2(16)")
-                               .mapType("OFFSET_TIME", "VARCHAR2(32)")
-                               .commentOnColumn()
-                               .generatedValues(SchemaDialect.GeneratedValueStyle.ORACLE)
-                               .oracleColumnChanges()
-                               .licenseOrEditionDependentOnlineDdl()
-                               .oracleLockTimeout()
-                               .build(),
-                  PaginationDialect.offsetFetch(),
-                  UpsertDialect.oracle(),
-                  JsonDialect.plain(),
-                  safeVersion.label(),
-                  features);
+        return BuiltInRdbDialects.oracle(version);
     }
 
     /**
@@ -256,58 +117,7 @@ public final class RdbDialect {
      * 按明确版本创建 SQL Server 方言。2012 是当前最低代码契约，2016 起额外声明 JSON 函数能力。
      */
     public static RdbDialect sqlServer(SqlServerVersion version) {
-        SqlServerVersion safeVersion = Objects.requireNonNull(version, "sql server version must not be null");
-        Set<DialectFeature> features = safeVersion.jsonFunctions()
-                ? Set.of(DialectFeature.OFFSET_FETCH_PAGINATION,
-                         DialectFeature.MERGE_UPSERT,
-                         DialectFeature.IDENTITY_COLUMNS,
-                         DialectFeature.SEQUENCES,
-                         DialectFeature.JSON_FUNCTIONS,
-                         DialectFeature.LARGE_OBJECTS)
-                : Set.of(DialectFeature.OFFSET_FETCH_PAGINATION,
-                         DialectFeature.MERGE_UPSERT,
-                         DialectFeature.IDENTITY_COLUMNS,
-                         DialectFeature.SEQUENCES,
-                         DialectFeature.LARGE_OBJECTS);
-        return of("sqlserver",
-                  SchemaDialect.builder()
-                               .quoteIdentifiers('[', ']')
-                               .mapType("BIGINT", "BIGINT")
-                               .mapType("INTEGER", "INT")
-                               .mapType("INT", "INT")
-                               .mapType("VARCHAR", "NVARCHAR(255)")
-                               .mapType("TEXT", "NVARCHAR(max)")
-                               .mapType("CLOB", "NVARCHAR(max)")
-                               .mapType("NCLOB", "NVARCHAR(max)")
-                               .mapType("BOOLEAN", "BIT")
-                               .mapType("DECIMAL", "DECIMAL(38,10)")
-                               .mapType("NUMERIC", "DECIMAL(38,10)")
-                               .mapType("BLOB", "VARBINARY(max)")
-                               .mapType("BINARY", "VARBINARY(max)")
-                               .mapType("PROTECTED_BINARY", "VARBINARY(max)")
-                               .mapType("PROTECTED_HASH", "BINARY(32)")
-                               .mapType("JSON", "NVARCHAR(max)")
-                               .mapType("SQLSERVER_DATETIME", "DATETIME")
-                               .mapType("SQLSERVER_SMALLDATETIME", "SMALLDATETIME")
-                               .mapType("TIMESTAMP", "DATETIME2")
-                               .mapType("TIMESTAMPTZ", "DATETIMEOFFSET")
-                               .mapType("DATETIME", "DATETIME2")
-                               .mapType("DATE", "DATE")
-                               .mapType("TIME", "TIME")
-                               .mapType("OFFSET_TIME", "VARCHAR(32)")
-                               .sqlServerExtendedPropertyComment()
-                               .dropIndexOnTable()
-                               .sqlServerRenameColumn()
-                               .generatedValues(SchemaDialect.GeneratedValueStyle.SQL_SERVER)
-                               .sqlServerColumnChanges()
-                               .licenseOrEditionDependentOnlineDdl()
-                               .sqlServerLockTimeout()
-                               .build(),
-                  PaginationDialect.sqlServerOffsetFetch(),
-                  UpsertDialect.sqlServer(),
-                  JsonDialect.plain(),
-                  safeVersion.label(),
-                  features);
+        return BuiltInRdbDialects.sqlServer(version);
     }
 
     /**
@@ -331,17 +141,60 @@ public final class RdbDialect {
                                 PaginationDialect pagination,
                                 UpsertDialect upsert,
                                 JsonDialect json) {
-        return new RdbDialect(name, schema, pagination, upsert, json, "unspecified", Set.of());
+        return new RdbDialect(name,
+                              schema,
+                              pagination,
+                              upsert,
+                              json,
+                              LockingReadDialect.unsupported(),
+                              "unspecified",
+                              DialectCapabilities.empty(),
+                              0);
     }
 
-    private static RdbDialect of(String name,
-                                 SchemaDialect schema,
-                                 PaginationDialect pagination,
-                                 UpsertDialect upsert,
-                                 JsonDialect json,
-                                 String version,
-                                 Set<DialectFeature> features) {
-        return new RdbDialect(name, schema, pagination, upsert, json, version, features);
+    /**
+     * 显式组装带能力事实的方言。
+     *
+     * <p>这个方法使用独立名称，不与历史 {@code of(..., JsonDialect)} 形成同参数位重载；
+     * 因此旧代码把 {@code null} 传给 JSON 参数时仍能按原签名编译。标识符上限为 0 表示未知，
+     * 调用方必须在需要生成受限对象名的路径上 fail closed。</p>
+     */
+    public static RdbDialect ofWithCapabilities(String name,
+                                                SchemaDialect schema,
+                                                PaginationDialect pagination,
+                                                UpsertDialect upsert,
+                                                JsonDialect json,
+                                                String version,
+                                                DialectCapabilities capabilities,
+                                                int maxIdentifierLength) {
+        return new RdbDialect(name,
+                              schema,
+                              pagination,
+                              upsert,
+                              json,
+                              LockingReadDialect.unsupported(),
+                              version,
+                              capabilities,
+                              maxIdentifierLength);
+    }
+
+    static RdbDialect builtIn(String name,
+                              SchemaDialect schema,
+                              PaginationDialect pagination,
+                              UpsertDialect upsert,
+                              JsonDialect json,
+                              String version,
+                              Set<DialectFeature> features,
+                              int maxIdentifierLength) {
+        return new RdbDialect(name,
+                              schema,
+                              pagination,
+                              upsert,
+                              json,
+                              builtInLockingRead(name),
+                              version,
+                              DialectCapabilities.from(features),
+                              maxIdentifierLength);
     }
 
     /** @return 当前数据库方言名称 */
@@ -371,9 +224,28 @@ public final class RdbDialect {
         return json;
     }
 
+    /**
+     * @return 已确认版本的受控锁定读取渲染器；旧自定义方言默认 fail closed
+     */
+    public LockingReadDialect lockingReadDialect() {
+        return lockingRead;
+    }
+
     /** @return 当前方言按哪个数据库版本边界生成 SQL */
     public String version() {
         return version;
+    }
+
+    /** @return 构造时冻结的只读方言能力；不会在 SQL 热路径重新推断 */
+    public DialectCapabilities capabilities() {
+        return capabilities;
+    }
+
+    /**
+     * @return 当前数据库普通对象名上限；0 表示版本或自定义方言没有提供可信上限
+     */
+    public int maxIdentifierLength() {
+        return maxIdentifierLength;
     }
 
     /**
@@ -382,6 +254,25 @@ public final class RdbDialect {
      */
     public boolean supports(DialectFeature feature) {
         return features.contains(Objects.requireNonNull(feature, "dialect feature must not be null"));
+    }
+
+    private static Set<DialectFeature> legacyFeatures(DialectCapabilities capabilities) {
+        EnumSet<DialectFeature> features = EnumSet.noneOf(DialectFeature.class);
+        for (DialectFeature feature : DialectFeature.values()) {
+            if (capabilities.supports(DialectCapabilityId.from(feature))) {
+                features.add(feature);
+            }
+        }
+        return Set.copyOf(features);
+    }
+
+    private static LockingReadDialect builtInLockingRead(String name) {
+        return switch (requireText(name, "dialect name").toLowerCase(Locale.ROOT)) {
+            case "h2", "mysql", "postgresql" -> LockingReadDialect.forUpdateSuffix();
+            case "oracle" -> LockingReadDialect.forUpdateSuffixWithoutPagination();
+            case "sqlserver" -> LockingReadDialect.sqlServerTableHint();
+            default -> LockingReadDialect.unsupported();
+        };
     }
 
     private static String requireText(String value, String fieldName) {

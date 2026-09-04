@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.page.CursorDirection;
 import com.flying.orm.core.page.CursorPageQuery;
 import com.flying.orm.core.page.PageSort;
@@ -46,7 +47,8 @@ final class ProtectedContainsSqlPlanner {
         }
         String owners = safe.primaryKeys().stream().map(support::identifier).collect(Collectors.joining(", "));
         String tokenColumn = support.identifier("token_hash");
-        String base = "select " + owners + " from " + support.identifier(safe.tokenTable())
+        String base = "select " + owners + " from " + support.derivedRelationIdentifier(
+                safe.physicalForm(), safe.tokenTable())
                 + " where " + support.identifier("field_tag") + " = ? and " + tokenColumn + " in (%s)"
                 + " group by " + owners
                 + " having count(distinct " + tokenColumn + ") = ?"
@@ -128,7 +130,7 @@ final class ProtectedContainsSqlPlanner {
                                             + " " + sort.sqlKeyword())
                                     .collect(Collectors.joining(", ", " order by ", ""));
         StringBuilder sql = new StringBuilder("select ").append(projections)
-                .append(" from ").append(support.identifier(safe.physicalForm().table()))
+                .append(" from ").append(support.identifier(safe.physicalForm()))
                 .append(' ').append(businessAlias)
                 .append(" join (").append(String.join(" union ", candidates)).append(") ")
                 .append(candidateAlias).append(" on ").append(joins);
@@ -151,9 +153,11 @@ final class ProtectedContainsSqlPlanner {
     private SqlFragment businessCondition(ProtectedFieldRuntime.PreparedContainsQuery query,
                                            String businessAlias) {
         ConditionGroup normalized = support.normalizeCondition(query.physicalForm(), query.remainingWhere());
-        return support.normalizedConditionRenderer().withFieldIdentifierRenderer(name -> qualified(
-                        businessAlias, query.physicalForm().field(name).name()))
-                .renderWhere(normalized);
+        var renderer = support.normalizedConditionRenderer().withFieldIdentifierRenderer(name -> qualified(
+                        businessAlias, query.physicalForm().field(name).name()));
+        return renderer.hasCorrelatedTerms()
+                ? renderer.renderWhere(normalized, renderer::identifier, name -> support.identifier(businessAlias))
+                : renderer.renderWhere(normalized);
     }
 
     private String cursorWhere(ProtectedFieldRuntime.PreparedContainsQuery query,
@@ -201,7 +205,8 @@ final class ProtectedContainsSqlPlanner {
         parameters.add(query.fieldTag());
         parameters.addAll(tokens);
         parameters.add(query.distinctTokenCount());
-        return "select " + owners + " from " + support.identifier(query.tokenTable()) + " " + tokenAlias
+        return "select " + owners + " from " + support.derivedRelationIdentifier(
+                query.physicalForm(), query.tokenTable()) + " " + tokenAlias
                 + " where " + qualified(tokenAlias, "field_tag") + " = ? and " + tokenColumn
                 + " in (" + markers + ") group by " + groupedOwners
                 + " having count(distinct " + tokenColumn + ") = ?";
@@ -210,17 +215,18 @@ final class ProtectedContainsSqlPlanner {
     private List<PageSort> stableSorts(ProtectedFieldRuntime.PreparedContainsQuery query,
                                        List<PageSort> sorts) {
         List<PageSort> result = new ArrayList<>(Objects.requireNonNull(sorts, "page sorts must not be null"));
-        for (PageSort sort : result) {
-            String field = query.physicalForm().field(sort.field()).name();
-            if (query.encryptedFields().stream().anyMatch(name -> name.equalsIgnoreCase(field))) {
-                throw new IllegalArgumentException("encrypted field cannot be used for protected contains ordering");
-            }
-        }
         for (String primaryKey : query.primaryKeys()) {
             if (result.stream().noneMatch(sort -> query.physicalForm().field(sort.field()).name()
                                                        .equals(primaryKey))) {
                 result.add(PageSort.asc(primaryKey));
             }
+        }
+        for (PageSort sort : result) {
+            DynamicField field = query.physicalForm().field(sort.field());
+            if (query.encryptedFields().stream().anyMatch(name -> name.equalsIgnoreCase(field.name()))) {
+                throw new IllegalArgumentException("encrypted field cannot be used for protected contains ordering");
+            }
+            support.requireStableOffsetTimeOrdering(field);
         }
         return List.copyOf(result);
     }

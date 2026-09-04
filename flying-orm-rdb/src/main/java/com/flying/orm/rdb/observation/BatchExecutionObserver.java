@@ -1,5 +1,7 @@
 package com.flying.orm.rdb.observation;
 
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
+
 /**
  * 批量执行观察者。它看的是分片、汇总和 UNKNOWN 恢复，不看每一行参数。
  *
@@ -22,6 +24,13 @@ public interface BatchExecutionObserver {
      */
     default void onExecution(BatchExecutionObservation observation, SqlTransactionSource transactionSource) {
         onExecution(observation);
+    }
+
+    /**
+     * 新 evidence 入口形成完整或 partial 证据后调用。默认不做任何事，旧 observer 保持二进制兼容。
+     */
+    default void onExecutionEvidence(BatchExecutionEvidence evidence) {
+        // 只由显式 evidence 路径发布；legacy writeBatch 不创建证据对象。
     }
 
     static BatchExecutionObserver noop() {

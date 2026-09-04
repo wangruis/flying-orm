@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.json;
 
 import com.flying.orm.core.condition.TermCondition;
+import com.flying.orm.core.condition.TermExtensionDescriptor;
 import com.flying.orm.core.sql.render.SqlFragment;
 import com.flying.orm.core.sql.render.SqlRenderContext;
 import com.flying.orm.core.sql.render.SqlTermHandler;
@@ -17,31 +18,42 @@ import java.util.List;
  */
 public final class JsonTermHandlers {
 
+    private static final java.util.Set<String> CAPABILITIES = java.util.Set.of("json-functions");
+
     private JsonTermHandlers() {
     }
 
     public static SqlTermPackage mysql() {
         return SqlTermPackage.of("json-mysql",
-                                 SqlTermHandler.of(JsonStructuredConditions.JSON_PATH_EQUALS,
-                                                   JsonTermHandlers::renderMysqlPathEquals),
-                                 SqlTermHandler.of(JsonStructuredConditions.JSON_CONTAINS,
-                                                   JsonTermHandlers::renderMysqlContains),
-                                 SqlTermHandler.of(JsonStructuredConditions.JSON_EXISTS,
-                                                   JsonTermHandlers::renderMysqlExists),
-                                 SqlTermHandler.of(JsonStructuredConditions.JSON_ARRAY_CONTAINS,
-                                                   JsonTermHandlers::renderMysqlArrayContains));
+                                 handler(JsonStructuredConditions.JSON_PATH_EQUALS, 2,
+                                         JsonTermHandlers::renderMysqlPathEquals),
+                                 handler(JsonStructuredConditions.JSON_CONTAINS, 1,
+                                         JsonTermHandlers::renderMysqlContains),
+                                 handler(JsonStructuredConditions.JSON_EXISTS, 1,
+                                         JsonTermHandlers::renderMysqlExists),
+                                 handler(JsonStructuredConditions.JSON_ARRAY_CONTAINS, 2,
+                                         JsonTermHandlers::renderMysqlArrayContains));
     }
 
     public static SqlTermPackage postgresql() {
         return SqlTermPackage.of("json-postgresql",
-                                 SqlTermHandler.of(JsonStructuredConditions.JSON_PATH_EQUALS,
-                                                   JsonTermHandlers::renderPostgresqlPathEquals),
-                                 SqlTermHandler.of(JsonStructuredConditions.JSON_CONTAINS,
-                                                   JsonTermHandlers::renderPostgresqlContains),
-                                 SqlTermHandler.of(JsonStructuredConditions.JSON_EXISTS,
-                                                   JsonTermHandlers::renderPostgresqlExists),
-                                 SqlTermHandler.of(JsonStructuredConditions.JSON_ARRAY_CONTAINS,
-                                                   JsonTermHandlers::renderPostgresqlArrayContains));
+                                 handler(JsonStructuredConditions.JSON_PATH_EQUALS, 2,
+                                         JsonTermHandlers::renderPostgresqlPathEquals),
+                                 handler(JsonStructuredConditions.JSON_CONTAINS, 1,
+                                         JsonTermHandlers::renderPostgresqlContains),
+                                 handler(JsonStructuredConditions.JSON_EXISTS, 1,
+                                         JsonTermHandlers::renderPostgresqlExists),
+                                 handler(JsonStructuredConditions.JSON_ARRAY_CONTAINS, 2,
+                                         JsonTermHandlers::renderPostgresqlArrayContains));
+    }
+
+    private static SqlTermHandler handler(String id,
+                                          int maxParameters,
+                                          com.flying.orm.core.sql.render.SqlTermRenderer renderer) {
+        return SqlTermHandler.of(
+                TermExtensionDescriptor.filter(id, CAPABILITIES, maxParameters, 1),
+                com.flying.orm.core.condition.ConditionValueShape.SCALAR,
+                renderer);
     }
 
     private static SqlFragment renderMysqlPathEquals(TermCondition term, SqlRenderContext context) {
@@ -52,9 +64,9 @@ public final class JsonTermHandlers {
 
     private static SqlFragment renderPostgresqlPathEquals(TermCondition term, SqlRenderContext context) {
         JsonConditionValue value = conditionValue(term.value(), JsonConditionValue.Kind.PATH_EQUALS);
-        return SqlFragment.of(context.identifier(term.field())
-                                      + " #>> cast(? as text[]) = cast(? as text)",
-                              postgresqlPath(value), value.value());
+        return SqlFragment.of("cast(" + context.identifier(term.field())
+                                      + " #> cast(? as text[]) as jsonb) = cast(? as jsonb)",
+                              postgresqlPath(value), JsonValueCodec.writeLiteral(value.value()));
     }
 
     private static SqlFragment renderMysqlContains(TermCondition term, SqlRenderContext context) {
@@ -65,7 +77,7 @@ public final class JsonTermHandlers {
 
     private static SqlFragment renderPostgresqlContains(TermCondition term, SqlRenderContext context) {
         JsonConditionValue value = conditionValue(term.value(), JsonConditionValue.Kind.CONTAINS);
-        return SqlFragment.of(context.identifier(term.field()) + " @> cast(? as jsonb)",
+        return SqlFragment.of("cast(" + context.identifier(term.field()) + " as jsonb) @> cast(? as jsonb)",
                               value.value());
     }
 
@@ -91,8 +103,8 @@ public final class JsonTermHandlers {
 
     private static SqlFragment renderPostgresqlArrayContains(TermCondition term, SqlRenderContext context) {
         JsonConditionValue value = conditionValue(term.value(), JsonConditionValue.Kind.ARRAY_CONTAINS);
-        return SqlFragment.of("(" + context.identifier(term.field())
-                                      + " #> cast(? as text[])) @> cast(? as jsonb)",
+        return SqlFragment.of("cast(" + context.identifier(term.field())
+                                      + " #> cast(? as text[]) as jsonb) @> cast(? as jsonb)",
                               postgresqlPath(value),
                               JsonValueCodec.write(List.of(value.value())));
     }

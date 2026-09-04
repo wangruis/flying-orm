@@ -310,7 +310,14 @@ final class FormResultDecoder {
             case OFFSET_TIME -> OffsetTimeValueCodec.read(rawValue);
             case SCALAR -> decoding.scalar().read(rawValue);
             case LARGE_OBJECT -> LargeObjectValueCodec.read(rawValue, field.databaseType());
+            case CUSTOM -> decodeCustom(decoding, rawValue);
+            case CUSTOM_LARGE_OBJECT -> decodeCustom(
+                    decoding, LargeObjectValueCodec.read(rawValue, field.databaseType()));
         };
+    }
+
+    private static Object decodeCustom(FormFieldDecodingPlan.Decoding decoding, Object value) {
+        return decoding.customMapping().codec().read(value, decoding.customMapping().javaType());
     }
 
     /**
@@ -329,9 +336,13 @@ final class FormResultDecoder {
             case LARGE_OBJECT -> LargeObjectValueCodec.readReactive(
                     rawValue, bound.field().databaseType(), options)
                     .map(value -> new DecodedFieldValue(bound.index(), value));
+            case CUSTOM_LARGE_OBJECT -> LargeObjectValueCodec.readReactive(
+                    rawValue, bound.field().databaseType(), options)
+                    .map(value -> new DecodedFieldValue(
+                            bound.index(), decodeCustom(bound.decoding(), value)));
             // 解码结果允许是 Java null，例如数据库返回 JSON 文本 "null"。把 null 放进包装对象，
             // 不能让 Mono.fromSupplier(null) 把它误解成“这一列无需替换”。
-            case JSON, ARRAY, VECTOR, OFFSET_TIME, SCALAR -> Mono.fromSupplier(
+            case JSON, ARRAY, VECTOR, OFFSET_TIME, SCALAR, CUSTOM -> Mono.fromSupplier(
                     () -> new DecodedFieldValue(bound.index(), decodeMaterializedValue(
                             bound.field(), bound.decoding(), rawValue)));
         };

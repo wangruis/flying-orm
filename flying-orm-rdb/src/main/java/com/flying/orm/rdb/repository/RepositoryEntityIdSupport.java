@@ -1,12 +1,14 @@
 package com.flying.orm.rdb.repository;
 
 import com.flying.orm.core.annotation.IdType;
+import com.flying.orm.core.internal.error.ThrowableGraph;
 import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.id.IdGenerator;
-import com.flying.orm.core.internal.error.ThrowableGraph;
 import com.flying.orm.rdb.internal.mapping.EntityFieldNames;
 import com.flying.orm.rdb.mapping.EntityFieldMetadata;
+import com.flying.orm.rdb.mapping.EntityModelRegistry;
 import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
 import com.flying.orm.rdb.mapping.MappingException;
 import com.flying.orm.rdb.result.DynamicRow;
 
@@ -35,16 +37,44 @@ final class RepositoryEntityIdSupport<T> {
     private final List<PrimaryKey> primaryKeys;
     private final PrimaryKey generatedKey;
     private final IdGenerator generator;
+    private final EntityTypeMappingRegistry.Mapping generatedKeyMapping;
 
     private RepositoryEntityIdSupport(List<PrimaryKey> primaryKeys,
                                       PrimaryKey generatedKey,
-                                      IdGenerator generator) {
+                                      IdGenerator generator,
+                                      EntityTypeMappingRegistry.Mapping generatedKeyMapping) {
         this.primaryKeys = primaryKeys;
         this.generatedKey = generatedKey;
         this.generator = generator;
+        this.generatedKeyMapping = generatedKeyMapping;
     }
 
     static <T> RepositoryEntityIdSupport<T> create(EntityMetadata<T> metadata, IdGenerator generator) {
+        return create(metadata, generator, null);
+    }
+
+    /** Repository 单条与批量入口共用同一份启动期生成键映射。 */
+    static <T> RepositoryEntityIdSupport<T> create(
+            EntityMetadata<T> metadata,
+            EntityModelRegistry models) {
+        EntityModelRegistry safeModels = Objects.requireNonNull(
+                models, "entity model registry must not be null");
+        EntityMetadata<T> safeMetadata = Objects.requireNonNull(
+                metadata, "entity metadata must not be null");
+        return create(
+                safeMetadata,
+                safeModels.idGenerator(),
+                safeModels.databaseGeneratedKeyMapping(safeMetadata.type()));
+    }
+
+    /**
+     * 为已经注册完整关系描述的实体缓存数据库生成键 codec；普通 CRUD 继续使用旧入口和原转换规则。
+     * 映射只在 Repository 创建时解析并传入，逐次回填不再查注册表。
+     */
+    static <T> RepositoryEntityIdSupport<T> create(
+            EntityMetadata<T> metadata,
+            IdGenerator generator,
+            EntityTypeMappingRegistry.Mapping generatedKeyMapping) {
         EntityMetadata<T> safeMetadata = Objects.requireNonNull(metadata, "entity metadata must not be null");
         IdGenerator safeGenerator = Objects.requireNonNull(generator, "id generator must not be null");
         List<PrimaryKey> primaryKeys = safeMetadata.fields().stream()
@@ -58,7 +88,10 @@ final class RepositoryEntityIdSupport<T> {
             throw new MappingException("entity cannot declare more than one database-generated primary key");
         }
         return new RepositoryEntityIdSupport<>(
-                primaryKeys, generatedKeys.isEmpty() ? null : generatedKeys.getFirst(), safeGenerator);
+                primaryKeys,
+                generatedKeys.isEmpty() ? null : generatedKeys.getFirst(),
+                safeGenerator,
+                generatedKeyMapping);
     }
 
     /** SQL 生成前完成全部本地主键规则，失败时数据库还没有发生任何写入。 */
@@ -163,7 +196,25 @@ final class RepositoryEntityIdSupport<T> {
         DynamicRow safeKey = Objects.requireNonNull(generatedKey, "generated key row must not be null");
         Object value = keyValue(safeKey);
         ValueAccess access = this.generatedKey.access();
-        access.write(safeEntity, convert(value, access.valueType()));
+        access.write(safeEntity, generatedKeyValue(value, access.valueType()));
+    }
+
+    private Object generatedKeyValue(Object value, Class<?> type) {
+        if (generatedKeyMapping == null) {
+            return convert(value, type);
+        }
+        if (value == null) {
+            throw new MappingException("database returned a null generated primary key");
+        }
+        try {
+            Object decoded = generatedKeyMapping.codec().read(value, type);
+            if (decoded == null) {
+                throw new MappingException("database returned a null generated primary key");
+            }
+            return decoded;
+        } catch (IllegalArgumentException error) {
+            throw new MappingException("generated primary key cannot be converted to " + type.getName(), error);
+        }
     }
 
     private Object keyValue(DynamicRow row) {

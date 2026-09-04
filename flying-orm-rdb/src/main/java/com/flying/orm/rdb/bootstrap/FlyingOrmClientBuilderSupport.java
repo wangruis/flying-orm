@@ -14,6 +14,8 @@ import com.flying.orm.rdb.id.IdGenerator;
 import com.flying.orm.rdb.jdbc.JdbcBatchWriter;
 import com.flying.orm.rdb.jdbc.JdbcSqlExecutor;
 import com.flying.orm.rdb.mapping.EntityFieldFiller;
+import com.flying.orm.rdb.mapping.EntitySchemaDescriptor;
+import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
 import com.flying.orm.rdb.observation.BatchExecutionObservation;
 import com.flying.orm.rdb.observation.BatchExecutionObserver;
 import com.flying.orm.rdb.observation.ResourceCleanupObservation;
@@ -46,6 +48,9 @@ import io.r2dbc.spi.ConnectionFactoryMetadata;
 import org.reactivestreams.Publisher;
 
 import javax.sql.DataSource;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Objects;
 
 /** 保存启动期可变配置并在 build 时一次校验；该对象不会进入 SQL 热路径。 */
@@ -64,6 +69,8 @@ final class FlyingOrmClientBuilderSupport {
     OrmCachePolicy cachePolicy = OrmCachePolicy.safeDefaults();
     IdGenerator idGenerator = IdGenerator.none();
     EntityFieldFiller fieldFiller = EntityFieldFiller.none();
+    Map<Class<?>, EntitySchemaDescriptor<?>> entitySchemas = Map.of();
+    EntityTypeMappingRegistry sharedEntityTypeMappings;
     ProtectedFieldKeyRing protectedFieldKeys;
     ProtectedValueNormalizerRegistry protectedValueNormalizers = ProtectedValueNormalizerRegistry.standard();
     MaskingPolicyRegistry maskingPolicies = MaskingPolicyRegistry.standard();
@@ -121,15 +128,24 @@ final class FlyingOrmClientBuilderSupport {
             }
             batch = BatchMemoryLimitedSyncBatchExecutor.create(jdbcBatch, batchMemoryLimits);
         }
+        Map<Class<?>, EntitySchemaDescriptor<?>> entitySchemaSnapshot = entitySchemas.isEmpty()
+                ? Map.of()
+                : Collections.unmodifiableMap(new LinkedHashMap<>(entitySchemas));
+        SqlRenderer selectedRenderer = renderer;
+        if (!entitySchemaSnapshot.isEmpty()) {
+            // 启动期合并一次 codec；没有注册描述时仍沿用原 renderer 对象和原装配路径。
+            selectedRenderer = renderer.withValueCodecs(
+                    sharedEntityTypeMappings.valueCodecs(renderer.valueCodecs()));
+        }
         StructuredConditionResolver selectedResolver = resolver == null
-                ? StructuredConditionResolvers.defaults(renderer.valueCodecs()) : resolver;
+                ? StructuredConditionResolvers.defaults(selectedRenderer.valueCodecs()) : resolver;
         ProtectedFieldRuntime protectedFields = protectedFieldKeys == null
                 ? ProtectedFieldRuntime.withoutKeys(protectedValueNormalizers, maskingPolicies)
                 : ProtectedFieldRuntime.create(protectedFieldKeys, protectedValueNormalizers, maskingPolicies);
         FlyingOrmClients clients = FlyingOrmClientAssembler.assemble(new FlyingOrmAssemblyRequest(
-                reactive, sync, batch, jdbcTransaction, renderer, dialect, selectedResolver,
+                reactive, sync, batch, jdbcTransaction, selectedRenderer, dialect, selectedResolver,
                 cachePolicy, executionOptions, idGenerator, fieldFiller,
-                templates, reactiveParameters, syncParameters, protectedFields));
+                templates, reactiveParameters, syncParameters, protectedFields, entitySchemaSnapshot));
         if (protectedFieldKeys != null) {
             // 构建到客户端对象图后，密钥清零责任已经转移；同一 Builder 不能再把它交给第二个独立对象图。
             protectedFieldKeysTransferred = true;
@@ -155,6 +171,32 @@ final class FlyingOrmClientBuilderSupport {
     private static FlyingOrmClients replace(FlyingOrmClients current, FlyingOrmClients replacement) {
         current.close();
         return replacement;
+    }
+
+    /** 只在配置线程注册；对象身份约束在这里一次完成，不进入任何 SQL 执行路径。 */
+    void addEntitySchema(EntitySchemaDescriptor<?> descriptor) {
+        EntitySchemaDescriptor<?> safeDescriptor = Objects.requireNonNull(
+                descriptor, "entity schema descriptor must not be null");
+        Class<?> entityType = safeDescriptor.metadata().type();
+        EntitySchemaDescriptor<?> existing = entitySchemas.get(entityType);
+        if (existing != null) {
+            if (existing != safeDescriptor) {
+                throw new IllegalArgumentException("entity schema is already registered for "
+                                                           + entityType.getTypeName());
+            }
+            return;
+        }
+        EntityTypeMappingRegistry mappings = safeDescriptor.typeMappings();
+        if (sharedEntityTypeMappings != null && sharedEntityTypeMappings != mappings) {
+            throw new IllegalArgumentException(
+                    "all entity schemas in one client must share the same type mapping registry");
+        }
+        if (entitySchemas.isEmpty()) {
+            // 可选能力第一次启用时才分配 Map；普通客户端构建继续保持原来的零配置对象形状。
+            entitySchemas = new LinkedHashMap<>();
+        }
+        sharedEntityTypeMappings = mappings;
+        entitySchemas.put(entityType, safeDescriptor);
     }
 
     private ReactiveSqlExecutor reactiveExecutor(RdbDialect dialect,

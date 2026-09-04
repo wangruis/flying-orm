@@ -1,13 +1,18 @@
 package com.flying.orm.rdb.metadata;
 
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
+import com.flying.orm.rdb.schema.SchemaSnapshot;
+import com.flying.orm.rdb.schema.SchemaSnapshotCoverage;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
+import java.util.EnumSet;
 import java.util.Objects;
 import java.util.function.Function;
 
@@ -22,6 +27,7 @@ final class InformationSchemaFormMetadataReader
 
     private final ReactiveSqlExecutor executor;
     private final Queries queries;
+    private final SchemaSnapshotCoverage coverage;
 
     InformationSchemaFormMetadataReader(ReactiveSqlExecutor executor,
                                         ColumnQuery columnQuery,
@@ -45,8 +51,39 @@ final class InformationSchemaFormMetadataReader
     }
 
     InformationSchemaFormMetadataReader(ReactiveSqlExecutor executor, Queries queries) {
+        this(executor, new MetadataQueryProfile(
+                queries, InformationSchemaFormMetadataReader.coverage(queries)));
+    }
+
+    InformationSchemaFormMetadataReader(ReactiveSqlExecutor executor, MetadataQueryProfile profile) {
         this.executor = Objects.requireNonNull(executor, "reactive sql executor must not be null");
-        this.queries = Objects.requireNonNull(queries, "metadata queries must not be null");
+        MetadataQueryProfile safeProfile = Objects.requireNonNull(
+                profile, "metadata query profile must not be null");
+        this.queries = safeProfile.queries();
+        this.coverage = safeProfile.coverage();
+    }
+
+    @Override
+    public SchemaSnapshotCoverage snapshotCoverage() {
+        return coverage;
+    }
+
+    static SchemaSnapshotCoverage coverage(Queries queries) {
+        Queries safeQueries = Objects.requireNonNull(queries, "metadata queries must not be null");
+        if (safeQueries.completeSnapshotQueries()) {
+            return SchemaSnapshotCoverage.complete();
+        }
+        EnumSet<SchemaSnapshotCoverage.Fact> observed = EnumSet.of(
+                SchemaSnapshotCoverage.Fact.TABLE_EXISTENCE,
+                SchemaSnapshotCoverage.Fact.COLUMNS,
+                SchemaSnapshotCoverage.Fact.PRIMARY_KEY);
+        if (safeQueries.indexQuery() != null) {
+            observed.add(SchemaSnapshotCoverage.Fact.INDEXES);
+        }
+        if (safeQueries.foreignKeyQuery() != null) {
+            observed.add(SchemaSnapshotCoverage.Fact.FOREIGN_KEYS);
+        }
+        return SchemaSnapshotCoverage.of(observed);
     }
 
     @Override
@@ -76,6 +113,17 @@ final class InformationSchemaFormMetadataReader
         return readTable(schema, table, schema + "." + table);
     }
 
+    @Override
+    public Mono<SchemaSnapshot> readSnapshot(String table) {
+        TableName tableName = parseTable(table);
+        return readSnapshot(tableName.schema(), tableName.name(), tableName.displayName());
+    }
+
+    @Override
+    public Mono<SchemaSnapshot> readSnapshot(String schema, String table) {
+        return readSnapshot(schema, table, schema + "." + table);
+    }
+
     private Mono<DynamicForm> readForm(String formId, String schema, String table, String displayTable) {
         return executor.query(queries.columnQuery().create(schema, table))
                        .collectList()
@@ -84,12 +132,40 @@ final class InformationSchemaFormMetadataReader
     }
 
     private Mono<TableMetadata> readTable(String schema, String table, String displayTable) {
-        Mono<DynamicForm> form = readForm(displayTable, schema, table, displayTable);
-        Mono<List<DynamicRow>> indexes = readRows(queries.indexQuery(), schema, table);
-        Mono<List<DynamicRow>> foreignKeys = readRows(queries.foreignKeyQuery(), schema, table);
-        return Mono.zip(form, indexes, foreignKeys)
-                   .map(result -> FormMetadataRowConverter.toTableMetadata(displayTable, result.getT1(),
-                                                                           result.getT2(), result.getT3()));
+        return readForm(displayTable, schema, table, displayTable)
+                .flatMap(form -> readRows(queries.indexQuery(), schema, table)
+                        .flatMap(indexes -> readRows(queries.foreignKeyQuery(), schema, table)
+                                .map(foreignKeys -> FormMetadataRowConverter.toTableMetadata(
+                                        displayTable, form, indexes, foreignKeys))));
+    }
+
+    private Mono<SchemaSnapshot> readSnapshot(String schema, String table, String displayTable) {
+        Mono<List<DynamicRow>> columns = executor.query(queries.columnQuery().create(schema, table)).collectList();
+        RelationIdentity identity = RelationIdentity.of(null, schema, table);
+        if (queries.completeSnapshotQueries()) {
+            return Flux.concat(
+                            columns,
+                            readRows(queries.tableQuery(), schema, table),
+                            readRows(queries.primaryKeyQuery(), schema, table),
+                            readRows(queries.uniqueConstraintQuery(), schema, table),
+                            readRows(queries.indexQuery(), schema, table),
+                            readRows(queries.foreignKeyQuery(), schema, table),
+                            readRows(queries.checkConstraintQuery(), schema, table))
+                    .collectList()
+                    .map(result -> FormMetadataRowConverter.toCompleteSchemaSnapshot(
+                            identity,
+                            result.get(0), result.get(1), result.get(2), result.get(3),
+                            result.get(4), result.get(5), result.get(6),
+                            queries.typeMapper(), queries.snapshotDialect()));
+        }
+        return Flux.concat(
+                        columns,
+                        readRows(queries.indexQuery(), schema, table),
+                        readRows(queries.foreignKeyQuery(), schema, table))
+                .collectList()
+                .map(result -> FormMetadataRowConverter.toSchemaSnapshot(
+                        identity, displayTable, result.get(0), result.get(1), queries.indexQuery() != null,
+                        result.get(2), queries.foreignKeyQuery() != null, queries.typeMapper()));
     }
 
     private Mono<List<DynamicRow>> readRows(Query query, String schema, String table) {
@@ -122,14 +198,90 @@ final class InformationSchemaFormMetadataReader
     interface ForeignKeyQuery extends Query {
     }
 
+    interface TableQuery extends Query {
+    }
+
+    interface PrimaryKeyQuery extends Query {
+    }
+
+    interface UniqueConstraintQuery extends Query {
+    }
+
+    interface CheckConstraintQuery extends Query {
+    }
+
+    enum SnapshotDialect {
+        LEGACY,
+        POSTGRESQL,
+        MYSQL,
+        H2,
+        ORACLE,
+        SQL_SERVER
+    }
+
     record Queries(ColumnQuery columnQuery,
                    IndexQuery indexQuery,
                    ForeignKeyQuery foreignKeyQuery,
-                   Function<String, String> typeMapper) {
+                   Function<String, String> typeMapper,
+                   TableQuery tableQuery,
+                   PrimaryKeyQuery primaryKeyQuery,
+                   UniqueConstraintQuery uniqueConstraintQuery,
+                   CheckConstraintQuery checkConstraintQuery,
+                   SnapshotDialect snapshotDialect) {
+
+        Queries(ColumnQuery columnQuery,
+                IndexQuery indexQuery,
+                ForeignKeyQuery foreignKeyQuery,
+                Function<String, String> typeMapper) {
+            this(columnQuery, indexQuery, foreignKeyQuery, typeMapper,
+                 null, null, null, null, SnapshotDialect.LEGACY);
+        }
 
         Queries {
             Objects.requireNonNull(columnQuery, "column query must not be null");
             Objects.requireNonNull(typeMapper, "type mapper must not be null");
+            Objects.requireNonNull(snapshotDialect, "snapshot dialect must not be null");
+            if (snapshotDialect != SnapshotDialect.LEGACY && !hasAllSnapshotQueries(
+                    tableQuery, primaryKeyQuery, uniqueConstraintQuery, indexQuery,
+                    foreignKeyQuery, checkConstraintQuery)) {
+                throw new IllegalArgumentException(
+                        "complete schema metadata requires every structural query");
+            }
+        }
+
+        static Queries complete(ColumnQuery columnQuery,
+                                IndexQuery indexQuery,
+                                ForeignKeyQuery foreignKeyQuery,
+                                Function<String, String> typeMapper,
+                                TableQuery tableQuery,
+                                PrimaryKeyQuery primaryKeyQuery,
+                                UniqueConstraintQuery uniqueConstraintQuery,
+                                CheckConstraintQuery checkConstraintQuery,
+                                SnapshotDialect snapshotDialect) {
+            if (snapshotDialect == SnapshotDialect.LEGACY) {
+                throw new IllegalArgumentException("complete schema metadata requires a concrete dialect");
+            }
+            return new Queries(columnQuery, indexQuery, foreignKeyQuery, typeMapper,
+                               tableQuery, primaryKeyQuery, uniqueConstraintQuery,
+                               checkConstraintQuery, snapshotDialect);
+        }
+
+        boolean completeSnapshotQueries() {
+            return snapshotDialect != SnapshotDialect.LEGACY;
+        }
+
+        private static boolean hasAllSnapshotQueries(TableQuery tableQuery,
+                                                     PrimaryKeyQuery primaryKeyQuery,
+                                                     UniqueConstraintQuery uniqueConstraintQuery,
+                                                     IndexQuery indexQuery,
+                                                     ForeignKeyQuery foreignKeyQuery,
+                                                     CheckConstraintQuery checkConstraintQuery) {
+            return tableQuery != null
+                    && primaryKeyQuery != null
+                    && uniqueConstraintQuery != null
+                    && indexQuery != null
+                    && foreignKeyQuery != null
+                    && checkConstraintQuery != null;
         }
     }
 

@@ -74,6 +74,19 @@ final class FormScopeGuard {
         return buildScopedRead(safeForm, where, effectiveScope);
     }
 
+    /** governed 路径额外保留同一次编译的业务条件；普通读取不创建这个上下文。 */
+    GovernedScopedRead governedStructuredRead(DynamicForm form,
+                                              StructuredConditionInput input,
+                                              StructuredConditionPolicy policy,
+                                              DataScope scope) {
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        DataScope effectiveScope = effectiveScope(scope);
+        ConditionGroup businessWhere = compileStructuredCondition(
+                safeForm, input, policy, effectiveScope.fields());
+        return new GovernedScopedRead(
+                buildScopedRead(safeForm, businessWhere, effectiveScope), businessWhere);
+    }
+
     ConditionGroup writableActiveWhere(DynamicForm form,
                                        Map<String, Object> values,
                                        ConditionGroup where,
@@ -123,7 +136,7 @@ final class FormScopeGuard {
         String suppliedField = findTenantField(safeForm, safeValues, tenant.fieldName());
         if (tenant.strategy() == TenantStrategy.AUTO) {
             if (suppliedField != null) {
-                requireMatchingTenantValue(
+                TenantValueGuard.requireMatching(
                         safeForm, tenant.fieldName(), safeValues.get(suppliedField), tenantScope.value());
                 if (suppliedField.equals(tenant.fieldName())) {
                     validateWritableValues(safeForm, safeValues, safeScope, suppliedField);
@@ -147,7 +160,7 @@ final class FormScopeGuard {
                              "tenant field [" + tenant.fieldName() + "] is required for form ["
                                      + safeForm.id() + "]");
         }
-        requireMatchingTenantValue(
+        TenantValueGuard.requireMatching(
                 safeForm, tenant.fieldName(), safeValues.get(suppliedField), tenantScope.value());
         return safeValues;
     }
@@ -242,7 +255,9 @@ final class FormScopeGuard {
                              null,
                              "field scope leaves no readable fields for form [" + safeForm.id() + "]");
         }
-        DynamicForm.Builder builder = DynamicForm.builder(safeForm.id(), safeForm.table());
+        DynamicForm.Builder builder = safeForm.relationIdentity()
+                .map(identity -> DynamicForm.relationalBuilder(safeForm.id(), identity))
+                .orElseGet(() -> DynamicForm.builder(safeForm.id(), safeForm.table()));
         readableFields.forEach(builder::addField);
         return builder.build();
     }
@@ -309,15 +324,15 @@ final class FormScopeGuard {
                                      "duplicate tenant field values for [" + tenant.fieldName() + "]");
                 }
                 suppliedTenantField = fieldName;
-                requireMatchingTenantValue(
+                TenantValueGuard.requireMatching(
                         safeForm, tenant.fieldName(), entry.getValue(), formTenantScope.value());
                 continue;
             }
             safeScope.tenantScope(fieldName).ifPresent(tenantScope ->
-                    requireMatchingTenantValue(safeForm,
-                                               tenantScope.field(),
-                                               entry.getValue(),
-                                               tenantScope.value()));
+                    TenantValueGuard.requireMatching(safeForm,
+                                                     tenantScope.field(),
+                                                     entry.getValue(),
+                                                     tenantScope.value()));
         }
     }
 
@@ -348,38 +363,6 @@ final class FormScopeGuard {
         return matchedField;
     }
 
-    private static void requireMatchingTenantValue(DynamicForm form,
-                                                    String tenantField,
-                                                    Object suppliedValue,
-                                                    Object scopedValue) {
-        if (!tenantValuesEqual(suppliedValue, scopedValue)) {
-            throw scopeError(ScopeErrorCode.TENANT_VALUE_MISMATCH,
-                             form,
-                             tenantField,
-                             "tenant field [" + tenantField + "] does not match scope for form ["
-                                     + form.id() + "]");
-        }
-    }
-
-    private static boolean tenantValuesEqual(Object suppliedValue, Object scopedValue) {
-        String suppliedText = canonicalText(suppliedValue);
-        String scopedText = canonicalText(scopedValue);
-        if (suppliedText != null && scopedText != null) {
-            return suppliedText.equals(scopedText);
-        }
-        return Objects.deepEquals(suppliedValue, scopedValue);
-    }
-
-    /** 只规范化 TextValueCodec 明确定义的文本形状，不调用任意业务对象的 toString。 */
-    private static String canonicalText(Object value) {
-        return switch (value) {
-            case CharSequence text -> text.toString();
-            case Character character -> character.toString();
-            case char[] characters -> new String(characters);
-            case null, default -> null;
-        };
-    }
-
     private static ScopeAccessException scopeError(ScopeErrorCode code,
                                                    DynamicForm form,
                                                    String field,
@@ -387,6 +370,6 @@ final class FormScopeGuard {
         return new ScopeAccessException(code, form.id(), field, message);
     }
 
-    record ScopedRead(DynamicForm form, ConditionGroup where, DataScope scope) {
+    record GovernedScopedRead(ScopedRead read, ConditionGroup businessWhere) {
     }
 }

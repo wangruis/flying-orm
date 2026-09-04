@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.vector;
 
+import com.flying.orm.core.codec.ValueCodecDescriptor;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.core.internal.error.ThrowableGraph;
@@ -21,12 +22,24 @@ import java.util.Objects;
  */
 public final class VectorValueCodec {
 
+    private static final ValueCodecDescriptor DESCRIPTOR = ValueCodecDescriptor.of(
+            "postgresql-vector-value",
+            java.util.Set.of(Collection.class, float[].class, double[].class, int[].class, long[].class,
+                             Float[].class, Double[].class, Integer[].class, Long[].class),
+            java.util.Set.of(LogicalType.VECTOR),
+            java.util.Set.of("postgresql-vector"));
+
     /** pgvector 的 vector 类型最多允许 16000 维。 */
     public static final int MAX_DIMENSIONS = 16_000;
 
     private static final String DRIVER_VECTOR = "io.r2dbc.postgresql.codec.Vector";
 
     private VectorValueCodec() {
+    }
+
+    /** 返回现有 vector 转换接缝的稳定类型和方言能力边界。 */
+    public static ValueCodecDescriptor descriptor() {
+        return DESCRIPTOR;
     }
 
     public static boolean isVectorDataType(String dataType) {

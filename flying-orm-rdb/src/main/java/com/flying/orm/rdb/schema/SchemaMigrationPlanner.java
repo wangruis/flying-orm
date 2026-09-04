@@ -9,6 +9,7 @@ import com.flying.orm.core.metadata.ForeignKeyMetadata;
 import com.flying.orm.core.metadata.IndexMetadata;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.rdb.dialect.DialectCapabilities;
 import com.flying.orm.rdb.metadata.ReactiveFormMetadataReader;
 import reactor.core.publisher.Mono;
 
@@ -38,6 +39,13 @@ final class SchemaMigrationPlanner {
         this.tables = safeRenderer.tableRenderer();
         this.indexChanges = new SchemaIndexPlanner(this.tables);
         this.protectedSchemas = new ProtectedSchemaMigrationPlanner(this, safeRenderer);
+    }
+
+    /** 只保留由当前结构事实和方言能力共同证明安全的增量操作。 */
+    List<SchemaOperation> safeIncrementalPlan(List<SchemaOperation> operations,
+                                              SchemaSnapshot actual,
+                                              DialectCapabilities capabilities) {
+        return SchemaMigrationSupport.requireSafeIncremental(operations, actual, capabilities);
     }
 
     Mono<SchemaMigrationPlan> plan(DynamicForm form,

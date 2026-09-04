@@ -145,7 +145,8 @@ public final class JoinQuerySpec {
                                String rightField) {
             JoinSource safeLeft = requireSource(leftSource);
             DynamicForm safeForm = Objects.requireNonNull(form, "joined form must not be null");
-            if (sources.stream().anyMatch(source -> source.form().table().equals(safeForm.table()))) {
+            if (sources.stream().anyMatch(
+                    source -> source.form().mapsToSameRelation(safeForm))) {
                 throw new IllegalArgumentException("join source must not be duplicated");
             }
             JoinSource joined = new JoinSource(sources.size(), safeForm);

@@ -10,6 +10,8 @@ import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.PaginationDialect;
+import com.flying.orm.rdb.lock.LockingReadDialect;
+import com.flying.orm.rdb.lock.ReadLock;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -111,12 +113,53 @@ final class FormQuerySqlRenderer {
                                whereFragment.parameters(), () -> {
                            StringBuilder sql = new StringBuilder("select ")
                                    .append(support.identifierColumns(selectedFields))
-                                   .append(" from ").append(support.identifier(safeForm.table()));
+                                   .append(" from ").append(support.identifier(safeForm));
                            appendWhere(sql, whereFragment);
                            if (!groupedFields.isEmpty()) {
                                sql.append(" group by ").append(support.identifierColumns(groupedFields));
                            }
                            return sql.append(orderBy(safeForm, safeSorts)).toString();
+                       });
+    }
+
+    /** 只接收方言发布的受控锁模型，调用方不能把任意 hint 或后缀带进 SQL。 */
+    SqlRequest selectProjectedLocking(DynamicForm form,
+                                      ConditionGroup where,
+                                      List<String> projections,
+                                      List<String> groups,
+                                      List<PageSort> sorts,
+                                      LockingReadDialect dialect,
+                                      ReadLock lock) {
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        List<String> safeProjections = List.copyOf(Objects.requireNonNull(projections,
+                                                                          "query projections must not be null"));
+        List<String> safeGroups = List.copyOf(Objects.requireNonNull(groups, "query groups must not be null"));
+        List<PageSort> safeSorts = List.copyOf(Objects.requireNonNull(sorts, "query sorts must not be null"));
+        if (safeProjections.isEmpty()) {
+            throw new IllegalArgumentException("projected query must select at least one entity field");
+        }
+        List<String> selectedFields = safeProjections.stream().map(safeForm::field).map(DynamicField::name).toList();
+        List<String> groupedFields = safeGroups.stream().map(safeForm::field).map(DynamicField::name).toList();
+        FormSqlRenderSupport.ConditionSql whereFragment = support.condition(safeForm, where);
+        String groupShape = String.join(",", groupedFields);
+        String sortShape = pageSortShape(safeForm, safeSorts);
+        LockingReadDialect safeDialect = Objects.requireNonNull(
+                dialect, "locking read dialect must not be null");
+        ReadLock safeLock = Objects.requireNonNull(lock, "read lock must not be null");
+        String tableHint = safeDialect.tableHint(safeLock);
+        String suffix = safeDialect.suffix(safeLock);
+        return support.request("select-locking-" + lockShape(safeLock), safeForm, selectedFields,
+                               whereFragment, groupShape, sortShape, "",
+                               whereFragment.parameters(), () -> {
+                           StringBuilder sql = new StringBuilder("select ")
+                                   .append(support.identifierColumns(selectedFields))
+                                   .append(" from ").append(support.identifier(safeForm))
+                                   .append(tableHint);
+                           appendWhere(sql, whereFragment);
+                           if (!groupedFields.isEmpty()) {
+                               sql.append(" group by ").append(support.identifierColumns(groupedFields));
+                           }
+                           return sql.append(orderBy(safeForm, safeSorts)).append(suffix).toString();
                        });
     }
 
@@ -145,6 +188,25 @@ final class FormQuerySqlRenderer {
         return support.request("select-cursor", safeForm, fields, whereFragment, "", sortShape, pageShape,
                                parameters, () -> paginationDialect.paginate(
                                selectSql(safeForm, fields, whereFragment, safePage), baseParameters, limit).sql());
+    }
+
+    SqlRequest selectKeyset(DynamicForm form,
+                            ConditionGroup where,
+                            HiddenProjectionLayout layout,
+                            KeysetPageNormalizer.NormalizedKeysetPage page) {
+        return FormKeysetSqlRenderer.select(
+                support, paginationDialect, form, where, layout, page);
+    }
+
+    /** 为已规范化的 keyset 查询附加同一个受控锁，不改变其游标布局和结果预算。 */
+    SqlRequest selectKeysetLocking(DynamicForm form,
+                                   ConditionGroup where,
+                                   HiddenProjectionLayout layout,
+                                   KeysetPageNormalizer.NormalizedKeysetPage page,
+                                   LockingReadDialect dialect,
+                                   ReadLock lock) {
+        return FormKeysetSqlRenderer.selectLocking(
+                support, paginationDialect, form, where, layout, page, dialect, lock);
     }
 
     /** 内部受保护游标查询只投影业务列，排序仍由物理表单执行本地校验。 */
@@ -186,7 +248,7 @@ final class FormQuerySqlRenderer {
         return support.request("count", safeForm, List.of(), whereFragment, "", "", "",
                                whereFragment.parameters(), () -> {
                            StringBuilder sql = new StringBuilder("select count(*) as total from ")
-                                   .append(support.identifier(safeForm.table()));
+                                   .append(support.identifier(safeForm));
                            appendWhere(sql, whereFragment);
                            return sql.toString();
                        });
@@ -198,7 +260,7 @@ final class FormQuerySqlRenderer {
                              CursorPageNormalizer.NormalizedCursorPage cursorPage) {
         String selected = fields.isEmpty() ? "*" : support.identifierColumns(fields);
         StringBuilder sql = new StringBuilder("select ").append(selected)
-                .append(" from ").append(support.identifier(form.table()));
+                .append(" from ").append(support.identifier(form));
         if (cursorPage == null) {
             appendWhere(sql, where);
             return sql.toString();
@@ -236,6 +298,11 @@ final class FormQuerySqlRenderer {
             alternatives.add(pivot == 0 ? terms.toString() : "(" + terms + ")");
         }
         return alternatives.toString();
+    }
+
+    /** 缓存形状包含完整锁语义，后续增加锁强度时也不会复用另一种锁的 SQL。 */
+    static String lockShape(ReadLock lock) {
+        return lock.strength() + ":" + lock.waitMode();
     }
 
     private void addCursorParameters(DynamicForm form,

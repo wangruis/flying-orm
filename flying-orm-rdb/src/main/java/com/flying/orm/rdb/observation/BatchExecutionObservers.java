@@ -1,5 +1,7 @@
 package com.flying.orm.rdb.observation;
 
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
+
 import java.util.Objects;
 
 /** 批量 observer 的包内安全分发实现，外部实现不能声明自己已经隔离。 */
@@ -60,6 +62,15 @@ final class BatchExecutionObservers {
                 // 同一安全分发边界覆盖带事务来源的回调。
             }
         }
+
+        @Override
+        public void onExecutionEvidence(BatchExecutionEvidence evidence) {
+            try {
+                delegate.onExecutionEvidence(evidence);
+            } catch (RuntimeException ignored) {
+                // evidence 审计旁路与既有观察事件使用同一隔离规则。
+            }
+        }
     }
 
     private record Composite(BatchExecutionObserver first,
@@ -77,6 +88,12 @@ final class BatchExecutionObservers {
                                 SqlTransactionSource transactionSource) {
             first.onExecution(observation, transactionSource);
             second.onExecution(observation, transactionSource);
+        }
+
+        @Override
+        public void onExecutionEvidence(BatchExecutionEvidence evidence) {
+            first.onExecutionEvidence(evidence);
+            second.onExecutionEvidence(evidence);
         }
     }
 }

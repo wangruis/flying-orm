@@ -75,6 +75,17 @@ public final class WriteSpec {
     }
 
     /**
+     * Repository 已在当前执行链里从实体新建了一份列值 Map，字段 codec 必须先看到原始领域类型，
+     * 不能让 JSON/ARRAY 的通用快照提前把自定义容器改成另一种 Java 类型。
+     */
+    @InternalApi
+    public static WriteSpec insertOwned(DynamicForm form, Map<String, Object> values) {
+        return new WriteSpec(form, WriteOperation.INSERT,
+                             Objects.requireNonNull(values, "write values must not be null"),
+                             ConditionGroup.and().build(), DataScope.none(), null, null, true);
+    }
+
+    /**
      * 创建更新规格；执行时仍会强制非空 where。
      *
      * @param form 动态表单
@@ -84,6 +95,16 @@ public final class WriteSpec {
      */
     public static WriteSpec update(DynamicForm form, Map<String, Object> values, ConditionGroup where) {
         return new WriteSpec(form, WriteOperation.UPDATE, values, where, DataScope.none(), null, null);
+    }
+
+    /** 与 {@link #insertOwned(DynamicForm, Map)} 相同，但用于 Repository 更新。 */
+    @InternalApi
+    public static WriteSpec updateOwned(DynamicForm form,
+                                        Map<String, Object> values,
+                                        ConditionGroup where) {
+        return new WriteSpec(form, WriteOperation.UPDATE,
+                             Objects.requireNonNull(values, "write values must not be null"),
+                             where, DataScope.none(), null, null, true);
     }
 
     /**

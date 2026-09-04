@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.LongConsumer;
 import java.util.function.Supplier;
 
 /**
@@ -43,7 +44,7 @@ final class R2dbcProtectedBatchSideIndex {
     Mono<Prepared> prepare(Connection connection,
                            BatchWriteRequest request,
                            R2dbcBatchWriterChunks.BatchChunk chunk,
-                           Supplier<R2dbcLargeObjectScope> largeObjects) {
+                           Supplier<R2dbcLargeObjectScope> largeObjects, R2dbcBatchEvidenceCounts evidence) {
         return Mono.defer(() -> {
             if (chunk.rows().stream().noneMatch(row -> row.work() != null)) {
                 return Mono.just(new Prepared(List.of(), request.options().maxBufferedBytes()));
@@ -58,7 +59,7 @@ final class R2dbcProtectedBatchSideIndex {
                     chunk.rows(), request.options().maxBufferedBytes());
             return Flux.fromIterable(plans)
                        .concatMap(plan -> readOwners(
-                               connection, plan, states, options, largeObjects), 1)
+                               connection, plan, states, options, largeObjects, evidence), 1)
                        .then(Mono.fromSupplier(() -> new Prepared(
                                states, request.options().maxBufferedBytes())));
         });
@@ -78,11 +79,13 @@ final class R2dbcProtectedBatchSideIndex {
                                                    BatchWriteRequest request,
                                                    R2dbcBatchWriterChunks.BatchChunk chunk,
                                                    Prepared prepared,
-                                                   String transportSql) {
+                                                   String transportSql,
+                                                   LongConsumer completedRow, R2dbcBatchEvidenceCounts evidence) {
         return Flux.range(0, chunk.rows().size())
                    .concatMap(index -> executeOwnerRestrictedUpdate(
                            connection, request, chunk.rows().get(index), prepared.rows().get(index),
-                           transportSql), 1)
+                           transportSql, evidence), 1)
+                   .doOnNext(completedRow::accept)
                    .collectList();
     }
 
@@ -90,11 +93,12 @@ final class R2dbcProtectedBatchSideIndex {
                                                      BatchWriteRequest request,
                                                      ProtectedBatchRows.RowView row,
                                                      RowState state,
-                                                     String transportSql) {
+                                                     String transportSql, R2dbcBatchEvidenceCounts evidence) {
         ProtectedWriteWork work = state.work();
         if (work == null) {
             return executeBusiness(connection, request, transportSql,
-                                   java.util.Arrays.asList(row.row()).subList(0, row.parameterCount()));
+                                   java.util.Arrays.asList(row.row()).subList(0, row.parameterCount()),
+                                   evidence);
         }
         if (work.kind() != ProtectedWriteWork.Kind.UPDATE) {
             return Mono.error(new IllegalArgumentException(
@@ -107,13 +111,13 @@ final class R2dbcProtectedBatchSideIndex {
         return executeBusiness(connection, request,
                                bindMarkers.adapt(restricted.sql(), restricted.parameters().size(),
                                                  restricted.bindMarkerStyle()),
-                               restricted.parameters());
+                               restricted.parameters(), evidence);
     }
 
     private Mono<Long> executeBusiness(Connection connection,
                                        BatchWriteRequest request,
-                                       String sql,
-                                       List<Object> parameters) {
+                                       String sql, List<Object> parameters,
+                                       R2dbcBatchEvidenceCounts evidence) {
         return Mono.defer(() -> {
             Statement statement = connection.createStatement(sql);
             for (int index = 0; index < parameters.size(); index++) {
@@ -126,6 +130,9 @@ final class R2dbcProtectedBatchSideIndex {
                 } else {
                     statement.bind(index, R2dbcParameterValues.forOwnedBinding(value));
                 }
+            }
+            if (evidence != null) {
+                evidence.markDatabaseWorkAttempted();
             }
             return Flux.from(statement.execute())
                        .concatMap(Result::getRowsUpdated)
@@ -144,15 +151,13 @@ final class R2dbcProtectedBatchSideIndex {
         return completeReplacements(connection, prepared.rows(), prepared.maxBufferedBytes());
     }
 
-    Mono<Void> replaceOwners(Connection connection,
-                              ProtectedWriteWork work,
+    Mono<Void> replaceOwners(Connection connection, ProtectedWriteWork work,
                               List<Map<String, Object>> owners) {
         // 普通写入没有批量字节预算，仍按既有操作数和参数数量上限逐段执行。
         return completeReplacements(connection, List.of(new RowState(work, owners)), Long.MAX_VALUE);
     }
 
-    Mono<Void> insertOwners(Connection connection,
-                            ProtectedWriteWork work,
+    Mono<Void> insertOwners(Connection connection, ProtectedWriteWork work,
                             List<Map<String, Object>> owners) {
         List<ProtectedReplacementBatchPlan.Insertion> insertions = new ArrayList<>();
         for (Map<String, Object> owner : owners) {
@@ -175,8 +180,7 @@ final class R2dbcProtectedBatchSideIndex {
                    .then();
     }
 
-    Mono<Void> completeGeneratedRow(Connection connection,
-                                    RowState state,
+    Mono<Void> completeGeneratedRow(Connection connection, RowState state,
                                     R2dbcBatchGeneratedKeyWriter.GeneratedWrite write) {
         if (state.work() == null || write.affectedRows() == 0L) {
             return Mono.empty();
@@ -189,10 +193,13 @@ final class R2dbcProtectedBatchSideIndex {
                                   ProtectedOwnerBatchPlan plan,
                                   List<RowState> states,
                                   SqlExecutionOptions options,
-                                  Supplier<R2dbcLargeObjectScope> largeObjects) {
+                                  Supplier<R2dbcLargeObjectScope> largeObjects, R2dbcBatchEvidenceCounts evidence) {
         Statement statement = statement(
                 connection, plan.sql(), SqlBindMarkerStyle.CANONICAL, plan.parameters());
         boolean[] matched = new boolean[plan.size()];
+        if (evidence != null) {
+            evidence.markDatabaseWorkAttempted();
+        }
         return Flux.from(statement.execute())
                    .concatMap(result -> R2dbcExecutionSession.mapRows(result, options, largeObjects), 1)
                    .doOnNext(row -> {
@@ -211,8 +218,7 @@ final class R2dbcProtectedBatchSideIndex {
     private static SqlExecutionOptions largeObjectOptions(BatchWriteRequest request) {
         long limit = request.options().maxBufferedBytes();
         return SqlExecutionOptions.safeDefaults()
-                                  .withTimeout(request.options().timeout())
-                                  .withMaxResultBytes(limit)
+                                  .withTimeout(request.options().timeout()).withMaxResultBytes(limit)
                                   .withMaxLargeObjectBytes(limit)
                                   .withMaxLargeObjectChars(limit);
     }
@@ -236,8 +242,7 @@ final class R2dbcProtectedBatchSideIndex {
                    .then();
     }
 
-    private Mono<Void> completeSegment(Connection connection,
-                                       ProtectedReplacementBatchPlan.Segment segment) {
+    private Mono<Void> completeSegment(Connection connection, ProtectedReplacementBatchPlan.Segment segment) {
         Mono<Void> deletes;
         if (segment.deleteParameterSets().isEmpty()) {
             deletes = Mono.empty();
@@ -251,8 +256,7 @@ final class R2dbcProtectedBatchSideIndex {
         return deletes.then(insertions(connection, segment.insertions()));
     }
 
-    private Mono<Void> insertions(Connection connection,
-                                  List<ProtectedReplacementBatchPlan.Insertion> insertions) {
+    private Mono<Void> insertions(Connection connection, List<ProtectedReplacementBatchPlan.Insertion> insertions) {
         if (insertions.isEmpty()) {
             return Mono.empty();
         }
@@ -391,6 +395,5 @@ final class R2dbcProtectedBatchSideIndex {
         }
     }
 
-    private record InsertBatchShape(String sql, int parameterCount) {
-    }
+    private record InsertBatchShape(String sql, int parameterCount) { }
 }

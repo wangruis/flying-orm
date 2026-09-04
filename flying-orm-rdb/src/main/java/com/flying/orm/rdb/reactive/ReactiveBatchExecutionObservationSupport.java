@@ -1,6 +1,8 @@
 package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
+import com.flying.orm.rdb.batch.BatchExecutionEvidenceException;
 import com.flying.orm.rdb.batch.BatchWriteException;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
@@ -65,6 +67,23 @@ final class ReactiveBatchExecutionObservationSupport {
                 transactionSources.resolve(SqlTransactionSource.INTERNAL),
                 ignored -> safeSource,
                 true);
+    }
+
+    /** evidence 只走显式旁路，不把它伪装成 legacy BatchWriteResult 事件。 */
+    Mono<BatchExecutionEvidence> observeEvidence(Mono<BatchExecutionEvidence> source) {
+        Mono<BatchExecutionEvidence> safeSource = Objects.requireNonNull(
+                source, "batch evidence observation source must not be null");
+        if (!batchEnabled) {
+            return safeSource;
+        }
+        return safeSource
+                .doOnSuccess(evidence -> {
+                    if (evidence != null) {
+                        observer.onExecutionEvidence(evidence);
+                    }
+                })
+                .doOnError(BatchExecutionEvidenceException.class,
+                        failure -> observer.onExecutionEvidence(failure.evidence()));
     }
 
     Mono<BatchWriteResult> observeResult(

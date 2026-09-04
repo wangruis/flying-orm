@@ -39,7 +39,9 @@ public final class ProtectedFormLayout {
         if (safeForm.protections().encryptedFields().isEmpty()) {
             return safeForm;
         }
-        DynamicForm.Builder builder = DynamicForm.builder(safeForm.id(), safeForm.table());
+        DynamicForm.Builder builder = safeForm.relationIdentity()
+                .map(identity -> DynamicForm.relationalBuilder(safeForm.id(), identity))
+                .orElseGet(() -> DynamicForm.builder(safeForm.id(), safeForm.table()));
         Set<String> names = new HashSet<>();
         for (DynamicField field : safeForm.fields()) {
             EncryptedFieldDefinition definition = safeForm.protections().encrypted(field.name()).orElse(null);

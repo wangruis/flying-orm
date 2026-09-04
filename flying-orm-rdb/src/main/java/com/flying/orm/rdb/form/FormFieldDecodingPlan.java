@@ -6,6 +6,7 @@ import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.rdb.codec.ArrayValueCodec;
 import com.flying.orm.rdb.codec.LargeObjectValueCodec;
 import com.flying.orm.rdb.codec.OffsetTimeValueCodec;
+import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
 
 import java.util.HashMap;
 import java.util.List;
@@ -97,6 +98,12 @@ final class FormFieldDecodingPlan {
         if (form.protections().encrypted(field.name()).isPresent()) {
             return Decoding.of(Kind.ENCRYPTED);
         }
+        EntityTypeMappingRegistry.Mapping customMapping = renderer.customFieldMapping(field);
+        if (customMapping != null) {
+            return LargeObjectValueCodec.isLargeObjectDataType(field.databaseType())
+                    ? Decoding.custom(Kind.CUSTOM_LARGE_OBJECT, customMapping)
+                    : Decoding.custom(Kind.CUSTOM, customMapping);
+        }
         if (!field.databaseType().isArray() && field.databaseType().logicalType() == LogicalType.JSON) {
             return Decoding.of(Kind.JSON);
         }
@@ -124,14 +131,19 @@ final class FormFieldDecodingPlan {
         VECTOR,
         OFFSET_TIME,
         SCALAR,
-        LARGE_OBJECT;
+        LARGE_OBJECT,
+        CUSTOM,
+        CUSTOM_LARGE_OBJECT;
 
         boolean requiresAsync() {
-            return this == ENCRYPTED || this == LARGE_OBJECT;
+            return this == ENCRYPTED || this == LARGE_OBJECT || this == CUSTOM_LARGE_OBJECT;
         }
     }
 
-    record Decoding(Kind kind, FormScalarReadPlan scalar, Class<?> arrayType) {
+    record Decoding(Kind kind,
+                    FormScalarReadPlan scalar,
+                    Class<?> arrayType,
+                    EntityTypeMappingRegistry.Mapping customMapping) {
 
         Decoding {
             Objects.requireNonNull(kind, "field decoding kind must not be null");
@@ -141,20 +153,29 @@ final class FormFieldDecodingPlan {
             if ((kind == Kind.ARRAY) != (arrayType != null)) {
                 throw new IllegalArgumentException("array decoding plan must match its kind");
             }
+            boolean custom = kind == Kind.CUSTOM || kind == Kind.CUSTOM_LARGE_OBJECT;
+            if (custom != (customMapping != null)) {
+                throw new IllegalArgumentException("custom decoding plan must match its kind");
+            }
         }
 
         static Decoding of(Kind kind) {
-            return new Decoding(kind, null, null);
+            return new Decoding(kind, null, null, null);
         }
 
         static Decoding scalar(FormScalarReadPlan scalar) {
             return new Decoding(Kind.SCALAR,
-                                Objects.requireNonNull(scalar, "scalar read plan must not be null"), null);
+                                Objects.requireNonNull(scalar, "scalar read plan must not be null"), null, null);
         }
 
         static Decoding array(Class<?> arrayType) {
             return new Decoding(Kind.ARRAY, null,
-                                Objects.requireNonNull(arrayType, "array target type must not be null"));
+                                Objects.requireNonNull(arrayType, "array target type must not be null"), null);
+        }
+
+        static Decoding custom(Kind kind, EntityTypeMappingRegistry.Mapping mapping) {
+            return new Decoding(kind, null, null,
+                                Objects.requireNonNull(mapping, "custom entity mapping must not be null"));
         }
     }
 }

@@ -55,7 +55,7 @@ final class FormWriteSqlRenderer {
                                        columns.add(support.identifier(fieldValue.field().name()));
                                        placeholders.add(support.valueExpression(fieldValue.field()));
                                    }
-                                   return "insert into " + support.identifier(safeForm.table()) + " (" + columns
+                                   return "insert into " + support.identifier(safeForm) + " (" + columns
                                            + ") values (" + placeholders + ")";
                                });
     }
@@ -78,7 +78,7 @@ final class FormWriteSqlRenderer {
                                parameters, () -> {
                                    StringJoiner sets = new StringJoiner(", ");
                                    fieldValues.forEach(fieldValue -> sets.add(updateExpression(fieldValue)));
-                                   return "update " + support.identifier(safeForm.table()) + " set " + sets + " where "
+                                   return "update " + support.identifier(safeForm) + " set " + sets + " where "
                                            + groupedForAdditionalPredicate(where, whereFragment.sql());
                                });
     }
@@ -121,7 +121,7 @@ final class FormWriteSqlRenderer {
                                    } else {
                                        sets.add(support.identifier(lockField.name()) + " = ?");
                                    }
-                                   return "update " + support.identifier(safeForm.table()) + " set " + sets + " where "
+                                   return "update " + support.identifier(safeForm) + " set " + sets + " where "
                                            + groupedForAdditionalPredicate(where, whereFragment.sql()) + " and "
                                            + support.identifier(lockField.name()) + " = ?";
                                });
@@ -165,7 +165,7 @@ final class FormWriteSqlRenderer {
         FormSqlRenderSupport.ConditionSql whereFragment = support.requiredWhere(safeForm, where, "delete");
         return support.request("delete", safeForm, List.of(), whereFragment, "", "", "",
                                whereFragment.parameters(), () -> "delete from "
-                                       + support.identifier(safeForm.table()) + " where " + whereFragment.sql());
+                                       + support.identifier(safeForm) + " where " + whereFragment.sql());
     }
 
     /**
@@ -181,7 +181,7 @@ final class FormWriteSqlRenderer {
         parameters.addAll(whereFragment.parameters());
         parameters.add(typedValue(lockField, support.writeValue(lockField, safeLock.expectedValue())));
         return support.request("delete-optimistic", safeForm, List.of(lockField.name()), whereFragment, "", "", "",
-                               parameters, () -> "delete from " + support.identifier(safeForm.table())
+                               parameters, () -> "delete from " + support.identifier(safeForm)
                                        + " where " + groupedForAdditionalPredicate(where, whereFragment.sql()) + " and "
                                        + support.identifier(lockField.name()) + " = ?");
     }

@@ -2,7 +2,11 @@ package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchCommitFact;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
+import com.flying.orm.rdb.batch.BatchExecutionState;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
@@ -30,16 +34,19 @@ final class NativeSyncFormBatchOperations {
     private final FormDataSqlRenderer renderer;
     private final FormScopeSupport scopes;
     private final BatchWriteOptions defaultOptions;
+    private final FieldUsePolicy fieldUsePolicy;
 
     NativeSyncFormBatchOperations(SyncBatchExecutor executor,
                                   FormDataSqlRenderer renderer,
                                   StructuredConditionResolver resolver,
                                   DataScope defaultDataScope,
-                                  BatchWriteOptions defaultOptions) {
+                                  BatchWriteOptions defaultOptions,
+                                  FieldUsePolicy fieldUsePolicy) {
         this.executor = Objects.requireNonNull(executor, "sync batch executor must not be null");
         this.renderer = Objects.requireNonNull(renderer, "form data sql renderer must not be null");
         this.scopes = new FormScopeSupport(renderer, resolver, defaultDataScope);
         this.defaultOptions = Objects.requireNonNull(defaultOptions, "default batch options must not be null");
+        this.fieldUsePolicy = Objects.requireNonNull(fieldUsePolicy, "field use policy must not be null");
     }
 
     BatchWriteResult writeBatch(BatchSpec spec) {
@@ -54,6 +61,22 @@ final class NativeSyncFormBatchOperations {
             BatchWriteRequest request = request(safeSpec, rows, options, protectionLayout);
             return protectionLayout.contains() != null
                     ? executor.writeProtectedBatch(request) : executor.writeBatch(request);
+        }
+    }
+
+    BatchExecutionEvidence writeBatchEvidence(BatchSpec spec) {
+        BatchSpec safeSpec = Objects.requireNonNull(spec, "batch spec must not be null");
+        BatchWriteOptions options = safeSpec.options().orElse(defaultOptions);
+        try (SyncBatchHead<Object> rows = open(safeSpec)) {
+            if (rows.isEmpty()) {
+                return BatchExecutionEvidence.of(
+                        options.mode(), BatchExecutionState.SUCCESS, BatchCommitFact.NOT_APPLICABLE, List.of());
+            }
+            FormProtectedBatchRows.BatchLayout protectionLayout =
+                    FormProtectedBatchRows.layout(safeSpec.form(), options);
+            BatchWriteRequest request = request(safeSpec, rows, options, protectionLayout);
+            return protectionLayout.contains() != null
+                    ? executor.writeProtectedBatchEvidence(request) : executor.writeBatchEvidence(request);
         }
     }
 
@@ -94,6 +117,7 @@ final class NativeSyncFormBatchOperations {
         DynamicForm form = spec.form();
         DataScope scope = scopes.effectiveScope(spec.scope());
         Map<String, Object> sourceFirstRow = requireMap(rows.first());
+        FieldUseGuard.approveBatchInsert(form, sourceFirstRow, scope, upsert, fieldUsePolicy);
         Map<String, Object> firstValues = scopes.prepareWriteValues(form, sourceFirstRow, scope);
         DynamicForm physicalForm = renderer.protection().physicalForm(form);
         FormProtectionSqlSupport.WriteOperation protection = renderer.protection().writeOperation(
@@ -129,13 +153,15 @@ final class NativeSyncFormBatchOperations {
                                             FormProtectedBatchRows.BatchLayout protectionLayout) {
         DynamicForm form = spec.form();
         DataScope scope = scopes.effectiveScope(spec.scope());
+        BatchOptimisticUpdate sourceFirst = requireUpdate(rows.first());
+        FieldUseGuard.approveBatchUpdate(renderer, form, sourceFirst, scope, fieldUsePolicy);
         DynamicForm physicalForm = renderer.protection().physicalForm(form);
         FormProtectionSqlSupport.WriteOperation protection = renderer.protection().writeOperation(
                 form, physicalForm, scope, protectionLayout.contains());
         FormScopeSupport.PreparedBatchScope batchScope = scopes.prepareBatchScope(
                 form, physicalForm, scope);
         FormScopeSupport.PreparedBatchUpdate first = scopes.prepareBatchUpdate(
-                form, physicalForm, requireUpdate(rows.first()), batchScope, protection);
+                form, physicalForm, sourceFirst, batchScope, protection);
         BatchUpdatePlan plan = renderer.optimisticUpdatePlan(
                 first.form(), first.values(), first.where(), first.lock(), first.request());
         Publisher<Object[]> parameters = BatchPublishers.mapIndexed(rows, (row, index) -> {

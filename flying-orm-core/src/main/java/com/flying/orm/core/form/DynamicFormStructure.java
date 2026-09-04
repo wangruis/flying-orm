@@ -2,6 +2,7 @@ package com.flying.orm.core.form;
 
 import com.flying.orm.core.internal.hash.StableDigest;
 import com.flying.orm.core.internal.hash.StableEncoder;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.FieldProtectionRegistry;
 import com.flying.orm.core.protection.MaskedFieldDefinition;
@@ -52,6 +53,19 @@ final class DynamicFormStructure {
         return base.substring(0, MAX_AUTO_UNIQUE_INDEX_NAME_LENGTH - suffix.length() - 1) + "_" + suffix;
     }
 
+    static String fingerprint(RelationIdentity identity,
+                              List<DynamicField> fields,
+                              LogicDeleteDefinition logicDelete,
+                              TenantDefinition tenant,
+                              FieldProtectionRegistry protections) {
+        StableEncoder shape = StableDigest.sha256(STRUCTURE_DOMAIN)
+                                          .marker("SEGMENTED_RELATION");
+        identity.catalog().ifPresent(value -> shape.text("CATALOG", value));
+        identity.schema().ifPresent(value -> shape.text("SCHEMA", value));
+        shape.text("TABLE", identity.table());
+        return fingerprint(shape, fields, logicDelete, tenant, protections);
+    }
+
     static String fingerprint(String table,
                               List<DynamicField> fields,
                               LogicDeleteDefinition logicDelete,
@@ -59,6 +73,14 @@ final class DynamicFormStructure {
                               FieldProtectionRegistry protections) {
         StableEncoder shape = StableDigest.sha256(STRUCTURE_DOMAIN)
                                           .text("TABLE", table);
+        return fingerprint(shape, fields, logicDelete, tenant, protections);
+    }
+
+    private static String fingerprint(StableEncoder shape,
+                                      List<DynamicField> fields,
+                                      LogicDeleteDefinition logicDelete,
+                                      TenantDefinition tenant,
+                                      FieldProtectionRegistry protections) {
         for (DynamicField field : fields) {
             shape.marker("FIELD")
                  .text("FIELD_NAME", field.name().trim())

@@ -31,10 +31,29 @@ final class ReactiveJoinQueryOperations extends ReactiveFormOperationSupport {
 
     Flux<DynamicRow> select(JoinQuerySpec spec, SqlExecutionOptions options) {
         JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
+        if (governed) {
+            return requiresProtectedPlanning(safeSpec)
+                    ? ReactiveProtectionCpuBoundary.plan(() -> joinPlanner.planGoverned(
+                            safeSpec, options, fieldUsePolicy, queryShapeLimits)).flatMapMany(this::select)
+                    : select(joinPlanner.planGoverned(
+                            safeSpec, options, fieldUsePolicy, queryShapeLimits));
+        }
         return requiresProtectedPlanning(safeSpec)
                 ? ReactiveProtectionCpuBoundary.plan(() -> joinPlanner.plan(safeSpec, options))
                                                .flatMapMany(this::select)
                 : select(joinPlanner.plan(safeSpec, options));
+    }
+
+    private Flux<DynamicRow> select(GovernedPlanEnvelope<JoinQueryPlanner.PlannedJoin> envelope) {
+        JoinQueryPlanner.PlannedJoin plan = envelope.plan();
+        return select(plan).map(row -> FieldUseGuard.applyJoinVisibility(
+                renderer, plan.spec(), row, envelope.fieldUse()));
+    }
+
+    com.flying.orm.core.scope.FieldUseSnapshot previewFieldUse(JoinQuerySpec spec) {
+        return governed
+                ? joinPlanner.planGoverned(spec, null, fieldUsePolicy, queryShapeLimits).fieldUse()
+                : com.flying.orm.core.scope.FieldUseSnapshot.unrestricted();
     }
 
     private Flux<DynamicRow> select(JoinQueryPlanner.PlannedJoin plan) {
@@ -52,10 +71,28 @@ final class ReactiveJoinQueryOperations extends ReactiveFormOperationSupport {
                                       SqlExecutionOptions options) {
         JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
         PageQuery safePage = Objects.requireNonNull(page, "join page query must not be null");
+        if (governed) {
+            return requiresProtectedPlanning(safeSpec)
+                    ? ReactiveProtectionCpuBoundary.plan(() -> joinPlanner.pageGoverned(
+                            safeSpec, safePage, options, fieldUsePolicy, queryShapeLimits)).flatMap(this::page)
+                    : page(joinPlanner.pageGoverned(
+                            safeSpec, safePage, options, fieldUsePolicy, queryShapeLimits));
+        }
         return requiresProtectedPlanning(safeSpec)
                 ? ReactiveProtectionCpuBoundary.plan(() -> joinPlanner.page(safeSpec, safePage, options))
                                                .flatMap(this::page)
                 : page(joinPlanner.page(safeSpec, safePage, options));
+    }
+
+    private Mono<PageResult<DynamicRow>> page(
+            GovernedPlanEnvelope<JoinQueryPlanner.PlannedJoinPage> envelope) {
+        JoinQueryPlanner.PlannedJoinPage plan = envelope.plan();
+        return page(plan).map(result -> PageResult.of(
+                result.rows().stream()
+                        .map(row -> FieldUseGuard.applyJoinVisibility(
+                                renderer, plan.spec(), row, envelope.fieldUse()))
+                        .toList(),
+                result.total(), plan.page()));
     }
 
     private Mono<PageResult<DynamicRow>> page(JoinQueryPlanner.PlannedJoinPage plan) {

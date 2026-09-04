@@ -1,6 +1,6 @@
 # flying-orm
 
-flying-orm 是一个为运行时动态表单而生、同时提供实体 Repository 的轻量级 Java ORM。它把表单、条件、Scope、分页、JOIN 和写入规格编译为安全的参数化 SQL，并通过原生 JDBC 或 R2DBC 执行。
+flying-orm 是一个为运行时动态表单而生、同时提供实体 Repository 的轻量级 Java ORM。它把表单、条件、Scope、分页、JOIN、聚合和写入规格编译为安全的参数化 SQL，并通过原生 JDBC 或 R2DBC 执行。
 
 项目坚持简单、易用、稳定、安全、开箱即用；在正确性和可维护性成立后，追求高性能、高并发、高吞吐和低延迟。
 
@@ -8,8 +8,8 @@ flying-orm 是一个为运行时动态表单而生、同时提供实体 Reposito
 
 - Java 21、Maven 3.9 或更高版本。
 - 上层应用提供 JDBC `DataSource`、R2DBC `ConnectionFactory` 或两者。
-- 上层应用选择并配置数据库驱动、连接池、凭据、路由和事务管理器；flying-orm 不实现连接池。
-- 支持 PostgreSQL、MySQL、Oracle、SQL Server 和 H2 的既有方言能力。发版认证结果以当前 3.1.0 的实际门禁报告为准。
+- 上层应用选择并配置数据库驱动、连接池、凭据、路由和事务管理器；flying-orm 不实现连接池、数据源路由或事务管理器。
+- 支持 PostgreSQL、MySQL、Oracle、SQL Server 和 H2 的已声明方言能力。静态 SQL/能力合同与真实数据库往返认证是两类证据，未运行实库门禁时不声称已认证。
 
 ## 添加依赖
 
@@ -19,7 +19,7 @@ flying-orm 是一个为运行时动态表单而生、同时提供实体 Reposito
 <dependency>
     <groupId>io.github.wangruis</groupId>
     <artifactId>flying-orm-rdb</artifactId>
-    <version>3.1.0</version>
+    <version>3.2.0</version>
 </dependency>
 ```
 
@@ -54,6 +54,15 @@ DynamicForm userForm = DynamicForm.builder("user", "app_user")
 ```
 
 `DynamicForm` 是不可变的运行时表模型。字段名、数据库类型、主键、租户、逻辑删除以及显式字段保护都从这里进入统一 SQL 管线。
+
+实体中不对应数据库列的计算属性继续使用 `@TableField(exist = false)` 或 Java `transient`；flying-orm 不再发明一套重复注解。这些属性不进入读取、插入、更新、批量或 Schema 列计划；同时声明列或约束注解会被当作配置错误。
+
+实体也可以作为完整期望关系模型的唯一来源：`@TableName` / `@TableCatalog` 声明表身份，`@TableComment` 声明表注释，
+`@TableColumn` 声明列结构与列注释，`@TablePrimaryKey`、`@TableUnique`、`@TableIndex`、
+`@TableForeignKey` 和 `@TableCheck` 声明受控约束。显式调用
+`EntitySchemaSynchronizer.synchronizeRelational(...)` 或响应式入口后，flying-orm 才会执行
+“注解编译 → Schema diff → 精确 SQL 审阅 → 前置条件复核 → DDL → 执行后回读验证”；普通 Repository/CRUD 不会自动进入这条冷路径。
+自动执行要求元数据读取器明确声明能够完整回读所有被比较的结构事实。内置 PostgreSQL、MySQL、Oracle、SQL Server 和 H2 读取器均提供完整关系快照，覆盖表与列、PK、UK、索引、FK、CHECK、默认值、生成方式及注释；第三方读取器若只声明部分 coverage，审阅阶段会返回人工步骤和零 SQL，不会先执行 DDL 再把未知事实误报为成功。
 
 ### 3. 查询与写入
 
@@ -108,27 +117,20 @@ INDEPENDENT 的事务和回执边界也随之改变，应同时考虑结果分�
 本次新增 record 分量 `maxRowBytes`，直接调用规范构造器的代码需要补齐参数并重新编译。
 回执计划升级后，旧计划回执不能作为新计划自动重放；升级前应完成旧任务的恢复确认。
 
+需要区分“SQL 已执行”和“外部事务已提交”时，使用独立证据入口：
+
+```java
+Mono<BatchExecutionEvidence> evidence = forms.writeBatchEvidence(batch);
+```
+
+`BatchExecutionEvidence` 保留分片位置、执行状态和驱动能够证明的影响行数。外部事务中返回 `PENDING_EXTERNAL`，不等待同一事务完成，也不由 flying-orm 提交、回滚或关闭外部连接。
+
 ## 正式能力导航
 
-下列能力全部属于 flying-orm 3.1.0 的正式能力；分组只用于阅读导航。
+下列能力属于 `3.2.0` 的公开能力；分组只用于阅读导航。
 
-- [常用正式能力](CAPABILITIES.md)：分页、游标分页、轻量 JOIN、结构化条件、Scope、批量、Repository、Schema、字段加密、保护搜索和脱敏。
-- [专业正式能力](ADVANCED-CAPABILITIES.md)：DatabaseOperator、SQL 模板、受控原生 SQL、外部事务、超时、观测、缓存、方言和类型扩展。
-- [PERF31 后本机 PostgreSQL 性能、历史最优与 10 万逻辑并发报告](docs/superpowers/plans/2026-09-01-flying-orm-local-postgresql-performance-after-perf31.md)：标准五轮通过；8 个 ORM 场景相对历史同协议最优为 5 升 3 降，查询路径退化；单机池 16 的 10 万逻辑并发未通过。
-- [最新全仓性能复审](docs/superpowers/plans/2026-09-01-flying-orm-performance-audit-after-perf31.md)：覆盖当前 683 个生产文件；当前账本 35 FIXED、0 OPEN、0 DEFERRED，独立复核 ACCEPT；不代表实库吞吐或并发容量认证。
-- [PERF30 / PERF31 修复与验证报告](docs/superpowers/plans/2026-09-01-flying-orm-perf30-31-repairs.md)：关闭最新审查确认的查询形状成员扫描和保护迁移 Map 重扫；记录 TDD、独立复核、1,075 项完整门禁及 API/ABI、制品证据。
-- [PERF30 / PERF31 修复前的全仓性能审查](docs/superpowers/plans/2026-09-01-flying-orm-performance-audit-after-perf29.md)：保留两项问题发现时的生产入口、扫描计数和验证限制；当前状态以上方最新复审及修复报告为准。
-- [PERF25/28/29 修复与验证报告](docs/superpowers/plans/2026-09-01-flying-orm-perf25-28-29-repairs.md)：响应式独立分片生命周期与两处宽表编译扫描的修复、独立复核、质量门禁和 API/制品证据；这是上一轮修复记录，后续新增问题见上方审查。
-- [上轮修复前的全仓性能审查](docs/superpowers/plans/2026-09-01-flying-orm-whole-performance-review.md)：覆盖 683 个生产文件，记录当时确认的 3 个开放根因（1 项 P1、2 项 P2）；这三项的后续处理以上方修复报告为准。
-- [前轮修复与验证报告](docs/superpowers/plans/2026-09-01-flying-orm-perf24-27-repairs.md)：保留 PERF24–27 当轮修复、主键清理边界修复及 1031 项测试/一次完整质量门禁的历史证据；已修 JDBC 路径保持 FIXED，后续响应式遗漏以最新审查为准。
-- [前轮修复前的并发、吞吐与低延迟性能审查](docs/superpowers/plans/2026-09-01-flying-orm-throughput-latency-review.md)：保留 682 个生产文件的覆盖登记及当时发现的 4 项问题（2 项 P2、2 项 P3）；当前状态以上方最新报告为准。
-- [前轮全仓性能与过度防御复审](docs/superpowers/plans/2026-09-01-flying-orm-comprehensive-review.md)：保留当轮无新增问题的历史结论与覆盖证据；后续新增量化证据见上述性能审查，既有 27 项 FIXED 未重开。
-- [前轮修复与验证报告](docs/superpowers/plans/2026-09-01-flying-orm-perf21-23-repairs.md)：关闭当轮 PERF21–23 三项问题；990 项测试及完整质量门禁通过。保留容量修复的分配权衡、内部 API 增量及当时的验证范围。
-- [修复前的完整性能与过度防御审查](docs/superpowers/plans/2026-09-01-flying-orm-overdefense-sweep.md)：保留 682 个生产文件的覆盖证据，以及当时发现的三项 P3 问题；当前修复状态以上述最新报告为准。
-- [此前修复与验证报告](docs/superpowers/plans/2026-08-31-flying-orm-overdefense-audit-fixes.md)：关闭当轮四项问题，956 项测试及完整质量门禁通过；保留本轮修复前的验证基线。
-- [修复前的性能与过度防御审查](docs/superpowers/plans/2026-08-31-flying-orm-overdefense-audit.md)：保留问题发现时的调用链、公开 SPI 复现、覆盖和当时结论。
-- [上轮修复与验证报告](docs/superpowers/plans/2026-08-31-flying-orm-overdefense-repair.md)：保留当轮四项修复与 934 项测试及完整质量门禁通过的证据；不代表后续审查没有新问题。
-- [此前审查与证据边界](docs/superpowers/plans/2026-08-31-flying-orm-overdefense-review.md)：保留此前问题发现时的快照、证据及历史裁决。
+- [常用正式能力](CAPABILITIES.md)：可空复合 keyset、轻量 JOIN、结构化条件、字段用途、查询预算、类型化聚合、批量执行证据、Repository 和实体注解 Schema 闭环。
+- [专业正式能力](ADVANCED-CAPABILITIES.md)：DatabaseOperator、SQL 模板、受控原生 SQL、外部事务、锁定读取、超时、观测、缓存、方言和受治理扩展。
 
 ## 默认安全行为
 

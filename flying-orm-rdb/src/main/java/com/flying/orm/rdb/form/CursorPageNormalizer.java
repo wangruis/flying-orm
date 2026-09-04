@@ -55,6 +55,7 @@ final class CursorPageNormalizer {
                 throw new IllegalArgumentException("cursor sort field has conflicting directions: " + field.name());
             }
         }
+        int callerSortCount = uniqueSorts.size();
 
         CursorDirection appendedDirection = uniqueSorts.values().stream()
                 .reduce((first, second) -> second)
@@ -71,7 +72,7 @@ final class CursorPageNormalizer {
             throw new IllegalArgumentException("cursor value count must match normalized sort field count: expected "
                                                        + normalizedSorts.size() + " but was " + cursor.size());
         }
-        return new NormalizedCursorPage(safePage.size(), normalizedSorts, cursor);
+        return new NormalizedCursorPage(safePage.size(), normalizedSorts, cursor, callerSortCount);
     }
 
     private static DynamicField requireSortable(DynamicForm form, String fieldName) {
@@ -96,11 +97,16 @@ final class CursorPageNormalizer {
         private final int size;
         private final List<CursorSort> sorts;
         private final List<Object> cursor;
+        private final int callerSortCount;
 
-        private NormalizedCursorPage(int size, List<CursorSort> sorts, List<Object> cursor) {
+        private NormalizedCursorPage(int size,
+                                     List<CursorSort> sorts,
+                                     List<Object> cursor,
+                                     int callerSortCount) {
             this.size = size;
             this.sorts = sorts;
             this.cursor = cursor;
+            this.callerSortCount = callerSortCount;
         }
 
         int size() {
@@ -117,6 +123,10 @@ final class CursorPageNormalizer {
 
         boolean firstPage() {
             return cursor.isEmpty();
+        }
+
+        int callerSortCount() {
+            return callerSortCount;
         }
     }
 }

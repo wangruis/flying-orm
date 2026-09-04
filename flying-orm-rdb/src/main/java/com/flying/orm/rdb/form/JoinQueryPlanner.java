@@ -1,10 +1,15 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.join.JoinSource;
 import com.flying.orm.core.page.PageQuery;
+import com.flying.orm.core.scope.FieldScope;
+import com.flying.orm.core.scope.FieldUsePolicy;
+import com.flying.orm.core.scope.FieldUseRequirements;
+import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
@@ -41,7 +46,7 @@ final class JoinQueryPlanner {
     PlannedJoin plan(JoinQuerySpec spec, SqlExecutionOptions options) {
         JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
         PreparedJoin prepared = prepare(safeSpec);
-        return new PlannedJoin(prepared.resultForm(),
+        return new PlannedJoin(safeSpec, prepared.resultForm(),
                                renderer.joinQueries().select(
                                        safeSpec, prepared.physicalForms(), prepared.protections(),
                                        prepared.businessConditions()),
@@ -50,12 +55,32 @@ final class JoinQueryPlanner {
                                prepared.resultPlan());
     }
 
+    GovernedPlanEnvelope<PlannedJoin> planGoverned(JoinQuerySpec spec,
+                                                    SqlExecutionOptions options,
+                                                    FieldUsePolicy policy,
+                                                    QueryShapeLimits limits) {
+        JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
+        FieldUseRequirements.Builder requirements = FieldUseRequirements.builder();
+        QueryShapeBudget budget = new QueryShapeBudget(limits);
+        PreparedJoin prepared = prepare(safeSpec, requirements, budget,
+                FieldUseGuard.effectiveDisplayMode(policy, safeSpec.sensitiveDisplayMode()));
+        SqlRequest request = renderer.joinQueries().select(
+                safeSpec, prepared.physicalForms(), prepared.protections(), prepared.businessConditions());
+        PlannedJoin plan = new PlannedJoin(safeSpec, prepared.resultForm(), request,
+                                           options == null ? defaultOptions : options,
+                                           prepared.scopes(), prepared.resultPlan());
+        return new GovernedPlanEnvelope<>(
+                plan,
+                FieldUseGuard.approveCollected(safeSpec.root().form().id(), requirements.build(),
+                                               FieldScope.unrestricted(), request, policy, budget));
+    }
+
     PlannedJoinPage page(JoinQuerySpec spec, PageQuery page, SqlExecutionOptions options) {
         JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
         PageQuery safePage = Objects.requireNonNull(page, "join page query must not be null");
         PreparedJoin prepared = prepare(safeSpec);
         JoinQuerySqlRenderer joins = renderer.joinQueries();
-        return new PlannedJoinPage(prepared.resultForm(),
+        return new PlannedJoinPage(safeSpec, prepared.resultForm(),
                                    joins.count(safeSpec, prepared.physicalForms(), prepared.protections(),
                                                prepared.businessConditions()),
                                    joins.select(safeSpec, prepared.physicalForms(), prepared.protections(),
@@ -66,7 +91,39 @@ final class JoinQueryPlanner {
                                    prepared.resultPlan());
     }
 
+    GovernedPlanEnvelope<PlannedJoinPage> pageGoverned(JoinQuerySpec spec,
+                                                        PageQuery page,
+                                                        SqlExecutionOptions options,
+                                                        FieldUsePolicy policy,
+                                                        QueryShapeLimits limits) {
+        JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
+        PageQuery safePage = Objects.requireNonNull(page, "join page query must not be null");
+        FieldUseRequirements.Builder requirements = FieldUseRequirements.builder();
+        QueryShapeBudget budget = new QueryShapeBudget(limits);
+        PreparedJoin prepared = prepare(safeSpec, requirements, budget,
+                FieldUseGuard.effectiveDisplayMode(policy, safeSpec.sensitiveDisplayMode()));
+        JoinQuerySqlRenderer joins = renderer.joinQueries();
+        SqlRequest count = joins.count(safeSpec, prepared.physicalForms(), prepared.protections(),
+                                       prepared.businessConditions());
+        SqlRequest data = joins.select(safeSpec, prepared.physicalForms(), prepared.protections(),
+                                       prepared.businessConditions(), safePage);
+        PlannedJoinPage plan = new PlannedJoinPage(safeSpec, prepared.resultForm(), count, data, safePage,
+                                                   options == null ? defaultOptions : options,
+                                                   prepared.scopes(), prepared.resultPlan());
+        return new GovernedPlanEnvelope<>(
+                plan,
+                FieldUseGuard.approveCollected(safeSpec.root().form().id(), requirements.build(),
+                                               FieldScope.unrestricted(), data, policy, budget));
+    }
+
     private PreparedJoin prepare(JoinQuerySpec safeSpec) {
+        return prepare(safeSpec, null, null, safeSpec.sensitiveDisplayMode());
+    }
+
+    private PreparedJoin prepare(JoinQuerySpec safeSpec,
+                                 FieldUseRequirements.Builder requirements,
+                                 QueryShapeBudget budget,
+                                 SensitiveDisplayMode displayMode) {
         Map<JoinSource, ConditionGroup> protections = new LinkedHashMap<>();
         Map<JoinSource, ConditionGroup> businessConditions = new LinkedHashMap<>();
         Map<JoinSource, DynamicForm> readableForms = new LinkedHashMap<>();
@@ -84,19 +141,25 @@ final class JoinQueryPlanner {
             physicalForms.put(source, business.physicalForm());
             effectiveScopes.put(source, read.scope());
         }
-        JoinReadGuard.validate(safeSpec, readableForms);
+        if (requirements == null) {
+            JoinReadGuard.validate(safeSpec, readableForms);
+        } else {
+            JoinReadGuard.validate(safeSpec, readableForms, requirements, budget, renderer);
+        }
         JoinResultProtector.ResultPlan resultPlan = results.plan(
-                safeSpec, effectiveScopes, safeSpec.sensitiveDisplayMode());
+                safeSpec, effectiveScopes, displayMode);
         return new PreparedJoin(JoinResultForms.create(safeSpec, physicalForms), physicalForms, protections,
                                 businessConditions, effectiveScopes, resultPlan);
     }
 
-    record PlannedJoin(DynamicForm resultForm,
+    record PlannedJoin(JoinQuerySpec spec,
+                       DynamicForm resultForm,
                        SqlRequest request,
                        SqlExecutionOptions options,
                        Map<JoinSource, com.flying.orm.core.scope.DataScope> scopes,
                        JoinResultProtector.ResultPlan resultPlan) {
         PlannedJoin {
+            spec = Objects.requireNonNull(spec, "join query spec must not be null");
             resultForm = Objects.requireNonNull(resultForm, "join result form must not be null");
             request = Objects.requireNonNull(request, "join SQL request must not be null");
             options = Objects.requireNonNull(options, "join execution options must not be null");
@@ -105,7 +168,8 @@ final class JoinQueryPlanner {
         }
     }
 
-    record PlannedJoinPage(DynamicForm resultForm,
+    record PlannedJoinPage(JoinQuerySpec spec,
+                           DynamicForm resultForm,
                            SqlRequest countRequest,
                            SqlRequest dataRequest,
                            PageQuery page,
@@ -113,6 +177,7 @@ final class JoinQueryPlanner {
                            Map<JoinSource, com.flying.orm.core.scope.DataScope> scopes,
                            JoinResultProtector.ResultPlan resultPlan) {
         PlannedJoinPage {
+            spec = Objects.requireNonNull(spec, "join query spec must not be null");
             resultForm = Objects.requireNonNull(resultForm, "join result form must not be null");
             countRequest = Objects.requireNonNull(countRequest, "join count request must not be null");
             dataRequest = Objects.requireNonNull(dataRequest, "join data request must not be null");

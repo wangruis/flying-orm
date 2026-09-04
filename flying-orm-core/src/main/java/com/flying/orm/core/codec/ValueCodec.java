@@ -1,5 +1,7 @@
 package com.flying.orm.core.codec;
 
+import java.util.Optional;
+
 /**
  * 单个类型转换器。写库前把 Java 值变成数据库友好的值，读库后再转回调用方要的类型。
  *
@@ -8,6 +10,13 @@ package com.flying.orm.core.codec;
  * @version v1.0
  */
 public interface ValueCodec {
+
+    /**
+     * 可配置装配所需的稳定适用范围。空值表示既有 trusted startup codec，不改变历史行为。
+     */
+    default Optional<ValueCodecDescriptor> descriptor() {
+        return Optional.empty();
+    }
 
     /**
      * 判断这个转换器能不能处理目标类型。

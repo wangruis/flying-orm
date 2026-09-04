@@ -3,6 +3,7 @@ package com.flying.orm.rdb.repository;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchGeneratedKeys;
 import com.flying.orm.rdb.batch.BatchWriteCompletion;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
@@ -61,6 +62,21 @@ final class ReactiveRepositoryBatchOperations<T> {
         });
     }
 
+    Mono<BatchExecutionEvidence> insertEvidence(Publisher<T> entities) {
+        return insertEvidence(entities, client.defaultBatchWriteOptions());
+    }
+
+    Mono<BatchExecutionEvidence> insertEvidence(Publisher<T> entities, BatchWriteOptions options) {
+        return Mono.defer(() -> {
+            coordinator.requireStableInsertLayout();
+            return evidence(entities, coordinator::insertValues, EntityLifecyclePhase.POST_PERSIST,
+                            options, true,
+                            (rows, completion, generatedKeys) -> BatchSpec.insert(form, rows)
+                                    .withOptions(options).withGeneratedKeys(generatedKeys)
+                                    .withCompletion(completion));
+        });
+    }
+
     Flux<BatchChunkResult> insertChunks(Publisher<T> entities, BatchWriteOptions options) {
         return Flux.defer(() -> {
             coordinator.requireStableInsertLayout();
@@ -88,6 +104,21 @@ final class ReactiveRepositoryBatchOperations<T> {
                          EntityLifecyclePhase.POST_PERSIST, options, false,
                          (rows, completion, generatedKeys) -> BatchSpec.upsert(form, rows)
                                  .withOptions(options).withCompletion(completion));
+        });
+    }
+
+    Mono<BatchExecutionEvidence> upsertEvidence(Publisher<T> entities) {
+        return upsertEvidence(entities, client.defaultBatchWriteOptions());
+    }
+
+    Mono<BatchExecutionEvidence> upsertEvidence(Publisher<T> entities, BatchWriteOptions options) {
+        return Mono.defer(() -> {
+            coordinator.requireSupportedUpsertId();
+            coordinator.requireStableUpsertLayout();
+            return evidence(entities, coordinator::upsertValues, EntityLifecyclePhase.POST_PERSIST,
+                            options, false,
+                            (rows, completion, generatedKeys) -> BatchSpec.upsert(form, rows)
+                                    .withOptions(options).withCompletion(completion));
         });
     }
 
@@ -127,6 +158,26 @@ final class ReactiveRepositoryBatchOperations<T> {
                                                         .withOptions(options).withCompletion(completion));
     }
 
+    Mono<BatchExecutionEvidence> updateEvidence(Publisher<T> entities) {
+        return updateEvidence(entities, client.defaultBatchWriteOptions());
+    }
+
+    Mono<BatchExecutionEvidence> updateEvidence(Publisher<T> entities, BatchWriteOptions options) {
+        return evidence(entities, coordinator::optimisticUpdate, EntityLifecyclePhase.POST_UPDATE,
+                        options, false,
+                        (rows, completion, generatedKeys) -> BatchSpec.update(form, rows)
+                                .withOptions(options).withCompletion(completion));
+    }
+
+    Mono<BatchExecutionEvidence> updateEvidence(Publisher<T> entities,
+                                                 DataScope scope,
+                                                 BatchWriteOptions options) {
+        return evidence(entities, coordinator::optimisticUpdate, EntityLifecyclePhase.POST_UPDATE,
+                        options, false,
+                        (rows, completion, generatedKeys) -> BatchSpec.update(form, rows).withScope(scope)
+                                .withOptions(options).withCompletion(completion));
+    }
+
     Flux<BatchChunkResult> updateChunks(Publisher<T> entities, BatchWriteOptions options) {
         return chunks(entities, coordinator::optimisticUpdate, EntityLifecyclePhase.PRE_UPDATE,
                       EntityLifecyclePhase.POST_UPDATE, options, false,
@@ -162,6 +213,17 @@ final class ReactiveRepositoryBatchOperations<T> {
                                                BatchSpecFactory<R> spec) {
         return coordinator.chunks(entities, mapper, before, after, options, generatedKeyInsert,
                 (rows, completion, generatedKeys) -> client.writeBatchChunks(
+                        spec.apply(rows, completion, generatedKeys)));
+    }
+
+    private <R> Mono<BatchExecutionEvidence> evidence(Publisher<T> entities,
+                                                       Function<T, R> mapper,
+                                                       EntityLifecyclePhase after,
+                                                       BatchWriteOptions options,
+                                                       boolean generatedKeyInsert,
+                                                       BatchSpecFactory<R> spec) {
+        return coordinator.evidence(entities, mapper, after, options, generatedKeyInsert,
+                (rows, completion, generatedKeys) -> client.writeBatchEvidence(
                         spec.apply(rows, completion, generatedKeys)));
     }
 

@@ -4,6 +4,9 @@ import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.form.DynamicFormChangeSet;
 import com.flying.orm.core.metadata.ForeignKeyMetadata;
 import com.flying.orm.core.metadata.IndexMetadata;
+import com.flying.orm.core.metadata.RelationIdentity;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
+import com.flying.orm.rdb.dialect.DatabaseDescriptor;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.internal.cache.SchemaCacheInvalidationCoordinator;
 import com.flying.orm.rdb.metadata.JdbcFormMetadataReader;
@@ -42,6 +45,7 @@ public final class JdbcSchemaClient {
 
     private final SyncSqlExecutor executor;
     private final FormSchemaSqlRenderer renderer;
+    private final RdbDialect relationalDialect;
     private final SchemaMigrationObserver observer;
     private final SchemaMigrationExecutionOptions defaultExecutionOptions;
     private final SchemaDdlTransactionSupport ddlTransactionSupport;
@@ -56,9 +60,11 @@ public final class JdbcSchemaClient {
                              SchemaMigrationExecutionOptions executionOptions,
                              SchemaDdlTransactionSupport ddlTransactionSupport,
                              JdbcTransactionParticipant transactionParticipant,
-                             Consumer<String> metadataInvalidator) {
+                             Consumer<String> metadataInvalidator,
+                             RdbDialect relationalDialect) {
         this.executor = Objects.requireNonNull(executor, "sync sql executor must not be null");
         this.renderer = Objects.requireNonNull(renderer, "form schema SQL renderer must not be null");
+        this.relationalDialect = relationalDialect;
         this.observer = SchemaMigrationObservers.safe(observer);
         this.defaultExecutionOptions = Objects.requireNonNull(
                 executionOptions, "default schema migration execution options must not be null");
@@ -86,7 +92,8 @@ public final class JdbcSchemaClient {
                                     SchemaDdlTransactionSupport.UNKNOWN,
                                     JdbcTransactionParticipant.none(),
                                     ignored -> {
-                                    });
+                                    },
+                                    null);
     }
 
     /** 根据显式 RDB 方言创建客户端；方言决定 DDL 外部事务能力和 SQL 形状。 */
@@ -106,7 +113,8 @@ public final class JdbcSchemaClient {
                                     SchemaDdlTransactionSupport.from(safeDialect),
                                     transactionParticipant,
                                     ignored -> {
-                                    });
+                                    },
+                                    safeDialect);
     }
 
     /** 返回使用新迁移 observer 的不可变客户端。 */
@@ -127,7 +135,8 @@ public final class JdbcSchemaClient {
                                     defaultExecutionOptions,
                                     support,
                                     transactionParticipant,
-                                    metadataInvalidator);
+                                    metadataInvalidator,
+                                    relationalDialect);
     }
 
     /**
@@ -224,6 +233,59 @@ public final class JdbcSchemaClient {
         return executeReviewed(reviewedPlan, defaultExecutionOptions.withApproval(approval));
     }
 
+    /** 执行冻结 SQL，并用同一个 JDBC reader 做前置指纹和执行后结构验证。 */
+    public SchemaExecutionReport executeReviewed(ReviewedSchemaPlan reviewedPlan,
+                                                 JdbcFormMetadataReader metadataReader,
+                                                 SchemaMigrationExecutionOptions options) {
+        ReviewedSchemaPlan safePlan = Objects.requireNonNull(
+                reviewedPlan, "reviewed schema plan must not be null");
+        JdbcFormMetadataReader safeReader = Objects.requireNonNull(
+                metadataReader, "jdbc form metadata reader must not be null");
+        RelationIdentity relation = safePlan.desiredTable()
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "reviewed schema plan must contain a desired verification table"))
+                .identity();
+        SchemaCacheInvalidationCoordinator invalidator = metadataInvalidator.with(
+                safeReader, safeReader::invalidate);
+        return migrationExecutor.executeReviewed(
+                safePlan,
+                () -> readSnapshot(safeReader, relation),
+                safeReader::snapshotCoverage,
+                () -> invalidate(invalidator, relation),
+                options);
+    }
+
+    /**
+     * 直读一次当前结构，并从完整关系模型生成冻结 SQL 的审核计划。
+     * 自定义旧 renderer 没有对应的关系方言事实，因此该入口只对按 {@link RdbDialect} 创建的客户端开放。
+     */
+    public ReviewedSchemaPlan reviewRelational(DatabaseDescriptor database,
+                                               RelationalTableDefinition desired,
+                                               JdbcFormMetadataReader metadataReader,
+                                               SchemaCompatibilityMode mode) {
+        RelationalSchemaPlanReviewer reviewer = relationalReviewer();
+        RelationalTableDefinition safeDesired = Objects.requireNonNull(
+                desired, "desired relational table must not be null");
+        JdbcFormMetadataReader safeReader = Objects.requireNonNull(
+                metadataReader, "jdbc form metadata reader must not be null");
+        SchemaSnapshot actual = readSnapshot(safeReader, safeDesired.identity());
+        return reviewer.review(database, safeDesired, actual, safeReader.snapshotCoverage(), mode);
+    }
+
+    /** 使用客户端默认的逐条 SQL 执行保护。 */
+    public SchemaExecutionReport executeReviewed(ReviewedSchemaPlan reviewedPlan,
+                                                  JdbcFormMetadataReader metadataReader) {
+        return executeReviewed(reviewedPlan, metadataReader, defaultExecutionOptions);
+    }
+
+    /** 使用客户端默认保护，并带上完整关系计划的精确批准。 */
+    public SchemaExecutionReport executeReviewed(ReviewedSchemaPlan reviewedPlan,
+                                                  JdbcFormMetadataReader metadataReader,
+                                                  SchemaMigrationApproval approval) {
+        return executeReviewed(
+                reviewedPlan, metadataReader, defaultExecutionOptions.withApproval(approval));
+    }
+
     /** 只生成安全迁移计划，不执行 SQL。 */
     public SchemaMigrationPlan planCreateOrAlter(DynamicForm form,
                                                  List<IndexMetadata> indexes,
@@ -257,13 +319,46 @@ public final class JdbcSchemaClient {
                                     options,
                                     ddlTransactionSupport,
                                     transactionParticipant,
-                                    invalidator);
+                                    invalidator,
+                                    relationalDialect);
+    }
+
+    RelationalSchemaPlanReviewer relationalReviewer() {
+        return RelationalSchemaPlanReviewer.create(requireRelationalDialect());
+    }
+
+    private RdbDialect requireRelationalDialect() {
+        if (relationalDialect == null) {
+            throw new UnsupportedOperationException(
+                    "relational schema review requires a client created with an RDB dialect");
+        }
+        return relationalDialect;
     }
 
     private Consumer<String> invalidatorFor(JdbcFormMetadataReader reader) {
         JdbcFormMetadataReader safeReader = Objects.requireNonNull(
                 reader, "jdbc form metadata reader must not be null");
         return metadataInvalidator.with(safeReader, safeReader::invalidate);
+    }
+
+    static SchemaSnapshot readSnapshot(JdbcFormMetadataReader reader,
+                                               RelationIdentity relation) {
+        if (relation.catalog().isPresent()) {
+            throw new UnsupportedOperationException(
+                    "catalog-qualified schema snapshots are not supported by the JDBC reader");
+        }
+        return relation.schema().isPresent()
+                ? reader.readSnapshot(relation.schema().orElseThrow(), relation.table())
+                : reader.readSnapshot(relation.table());
+    }
+
+    private static void invalidate(SchemaCacheInvalidationCoordinator invalidator,
+                                   RelationIdentity relation) {
+        if (relation.schema().isPresent()) {
+            invalidator.invalidate(relation.schema().orElseThrow(), relation.table());
+        } else {
+            invalidator.invalidate(relation.table());
+        }
     }
 
     private static List<String> metadataTables(SchemaMigrationPlan plan) {

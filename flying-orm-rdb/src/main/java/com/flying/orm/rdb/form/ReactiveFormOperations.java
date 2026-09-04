@@ -1,18 +1,26 @@
 package com.flying.orm.rdb.form;
 
+import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.page.CursorPageQuery;
 import com.flying.orm.core.page.CursorPageResult;
+import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetPageResult;
 import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageResult;
 import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.scope.FieldUsePolicy;
+import com.flying.orm.core.scope.FieldUseSnapshot;
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteResult;
 import com.flying.orm.rdb.form.spec.BatchSpec;
 import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.execution.SqlWriteResult;
+import com.flying.orm.rdb.lock.LockingReadRequiredTransactionException;
+import com.flying.orm.rdb.lock.LockingReadSpec;
 import com.flying.orm.rdb.result.DynamicRow;
 import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
@@ -50,6 +58,10 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
         return joins.select(spec, options);
     }
 
+    FieldUseSnapshot previewFieldUse(JoinQuerySpec spec) {
+        return joins.previewFieldUse(spec);
+    }
+
     Mono<PageResult<DynamicRow>> pageJoin(JoinQuerySpec spec,
                                           PageQuery page,
                                           com.flying.orm.rdb.execution.SqlExecutionOptions options) {
@@ -58,9 +70,76 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
 
     Flux<DynamicRow> selectSpec(QuerySpec spec) {
         QuerySpec safeSpec = Objects.requireNonNull(spec, "query spec must not be null");
+        if (governed) {
+            return selectSpecGoverned(safeSpec, fieldUsePolicy, queryShapeLimits);
+        }
         return requiresProtectedPlanning(safeSpec)
                 ? ReactiveProtectionCpuBoundary.plan(() -> planner.select(safeSpec)).flatMapMany(this::select)
                 : select(planner.select(safeSpec));
+    }
+
+    Flux<DynamicRow> selectSpecGoverned(QuerySpec spec,
+                                        FieldUsePolicy policy,
+                                        QueryShapeLimits limits) {
+        QuerySpec safeSpec = Objects.requireNonNull(spec, "query spec must not be null");
+        FieldUsePolicy safePolicy = Objects.requireNonNull(policy, "field use policy must not be null");
+        QueryShapeLimits safeLimits = Objects.requireNonNull(limits, "query shape limits must not be null");
+        return requiresProtectedPlanning(safeSpec)
+                ? ReactiveProtectionCpuBoundary.plan(
+                        () -> planner.selectGoverned(safeSpec, safePolicy, safeLimits))
+                                               .flatMapMany(this::select)
+                : select(planner.selectGoverned(safeSpec, safePolicy, safeLimits));
+    }
+
+    Flux<DynamicRow> lockingReadSpec(LockingReadSpec spec) {
+        LockingReadSpec safeSpec = Objects.requireNonNull(
+                spec, "locking read spec must not be null");
+        return Flux.defer(() -> {
+            if (governed) {
+                GovernedPlanEnvelope<FormOperationPlanner.PlannedLockingRead> envelope =
+                        planner.lockingReadGoverned(
+                                safeSpec, fieldUsePolicy, queryShapeLimits);
+                return requireCallerManagedTransaction().thenMany(select(
+                        new GovernedPlanEnvelope<>(
+                                envelope.plan().query(), envelope.fieldUse())));
+            }
+            FormOperationPlanner.PlannedLockingRead plan = planner.lockingRead(safeSpec);
+            return requireCallerManagedTransaction().thenMany(select(plan.query()));
+        });
+    }
+
+    FieldUseSnapshot previewFieldUse(QuerySpec spec) {
+        return governed
+                ? planner.selectGoverned(spec, fieldUsePolicy, queryShapeLimits).fieldUse()
+                : FieldUseSnapshot.unrestricted();
+    }
+
+    private Flux<DynamicRow> select(GovernedPlanEnvelope<FormOperationPlanner.PlannedQuery> envelope) {
+        FormOperationPlanner.PlannedQuery plan = envelope.plan();
+        com.flying.orm.core.protection.SensitiveDisplayMode displayMode =
+                plan.displayMode();
+        Flux<DynamicRow> decoded;
+        if (plan.contains()) {
+            decoded = executor.query(plan.request(), plan.options())
+                              .collectList()
+                              .flatMapMany(rows -> {
+                                  ProtectedContainsResultSupport.requireCandidateLimit(rows.size());
+                                  return results.decodeRows(
+                                                  plan.form(), Flux.fromIterable(rows), plan.options(), plan.scope(),
+                                                  com.flying.orm.core.protection.SensitiveDisplayMode.FULL,
+                                                  plan.decodingFields())
+                                                .collectList()
+                                                .flatMapMany(full -> Flux.fromIterable(containsResults.finish(
+                                                        plan.form(), plan.containsQuery(), full,
+                                                        plan.outputFields(), displayMode)));
+                              });
+        } else {
+            decoded = results.decodeRows(
+                    plan.form(), executor.query(plan.request(), plan.options()), plan.options(), plan.scope(),
+                    displayMode, plan.decodingFields());
+        }
+        return decoded.map(row -> FieldUseGuard.applyVisibility(
+                renderer, plan.form(), row, envelope.fieldUse()));
     }
 
     private Flux<DynamicRow> select(FormOperationPlanner.PlannedQuery plan) {
@@ -74,30 +153,7 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
     }
 
     Mono<PageResult<DynamicRow>> pageSpec(QuerySpec spec, PageQuery page) {
-        QuerySpec safeSpec = Objects.requireNonNull(spec, "query spec must not be null");
-        PageQuery safePage = Objects.requireNonNull(page, "page query must not be null");
-        return requiresProtectedPlanning(safeSpec)
-                ? ReactiveProtectionCpuBoundary.plan(() -> planner.page(safeSpec, safePage)).flatMap(this::page)
-                : page(planner.page(safeSpec, safePage));
-    }
-
-    private Mono<PageResult<DynamicRow>> page(FormOperationPlanner.PlannedPage plan) {
-        if (plan.contains()) {
-            return executor.query(plan.dataRequest(), plan.options())
-                           .collectList()
-                           .flatMap(rows -> verifyContains(plan, rows))
-                           .map(rows -> containsPage(rows, plan.page()));
-        }
-        Mono<Long> total = executor.query(plan.countRequest(), plan.options())
-                                   .next()
-                                   .map(CountResultReader::read)
-                                   .defaultIfEmpty(0L);
-        return total.flatMap(count -> count == 0L
-                ? Mono.just(PageResult.of(List.of(), 0L, plan.page()))
-                : results.decodeRows(plan.form(), executor.query(plan.dataRequest(), plan.options()), plan.options(),
-                                     plan.scope(), plan.displayMode(), plan.decodingFields())
-                         .collectList()
-                         .map(rows -> PageResult.of(rows, count, plan.page())));
+        return ReactiveFormPageResultSupport.pageSpec(this, spec, page);
     }
 
     private Flux<DynamicRow> verifyContains(FormOperationPlanner.PlannedQuery plan,
@@ -111,58 +167,49 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
                               plan.form(), plan.containsQuery(), rows, plan.outputFields(), plan.displayMode())));
     }
 
-    private Mono<List<DynamicRow>> verifyContains(FormOperationPlanner.PlannedPage plan,
-                                                   List<DynamicRow> rawRows) {
-        ProtectedContainsResultSupport.requireCandidateLimit(rawRows.size());
-        return results.decodeRows(plan.form(), Flux.fromIterable(rawRows), plan.options(),
-                                  plan.scope(), com.flying.orm.core.protection.SensitiveDisplayMode.FULL,
-                                  plan.decodingFields())
-                      .collectList()
-                      .map(rows -> containsResults.finish(
-                              plan.form(), plan.containsQuery(), rows, plan.outputFields(), plan.displayMode()));
-    }
-
-    private static PageResult<DynamicRow> containsPage(List<DynamicRow> rows, PageQuery page) {
-        int from = (int) Math.min(page.offset(), rows.size());
-        int to = Math.min(from + page.size(), rows.size());
-        return PageResult.of(rows.subList(from, to), rows.size(), page);
-    }
-
     Mono<CursorPageResult<DynamicRow>> cursorPageSpec(QuerySpec spec, CursorPageQuery page) {
-        QuerySpec safeSpec = Objects.requireNonNull(spec, "query spec must not be null");
-        CursorPageQuery safePage = Objects.requireNonNull(page, "cursor page query must not be null");
-        return requiresProtectedPlanning(safeSpec)
-                ? ReactiveProtectionCpuBoundary.plan(() -> planner.cursorPage(safeSpec, safePage))
-                                               .flatMap(this::cursorPage)
-                : cursorPage(planner.cursorPage(safeSpec, safePage));
+        return ReactiveFormPageResultSupport.cursorPageSpec(this, spec, page);
     }
 
-    private Mono<CursorPageResult<DynamicRow>> cursorPage(FormOperationPlanner.PlannedCursorPage plan) {
-        if (plan.contains()) {
-            return executor.query(plan.request(), plan.options())
-                           .collectList()
-                           .flatMap(rows -> verifyContains(plan, rows))
-                           .map(rows -> FormCursorResults.from(rows, plan.page()));
-        }
-        return results.decodeRows(plan.form(), executor.query(plan.request(), plan.options()), plan.options(),
-                                  plan.scope(), plan.displayMode(), plan.decodingFields())
-                      .collectList()
-                      .map(rows -> FormCursorResults.from(rows, plan.page()));
+    Mono<KeysetPageResult<DynamicRow>> keysetPageSpec(QuerySpec spec, KeysetPageQuery page) {
+        return ReactiveFormPageResultSupport.keysetPageSpec(this, spec, page);
     }
 
-    private Mono<List<DynamicRow>> verifyContains(FormOperationPlanner.PlannedCursorPage plan,
-                                                   List<DynamicRow> rawRows) {
-        ProtectedContainsResultSupport.requireCandidateLimit(rawRows.size());
-        return results.decodeRows(plan.form(), Flux.fromIterable(rawRows), plan.options(),
-                                  plan.scope(), com.flying.orm.core.protection.SensitiveDisplayMode.FULL,
-                                  plan.decodingFields())
-                      .collectList()
-                      .map(rows -> containsResults.finish(
-                              plan.form(), plan.containsQuery(), rows, plan.outputFields(), plan.displayMode()));
+    Mono<KeysetPageResult<DynamicRow>> lockingReadSpec(
+            LockingReadSpec spec,
+            KeysetPageQuery page) {
+        LockingReadSpec safeSpec = Objects.requireNonNull(
+                spec, "locking read spec must not be null");
+        KeysetPageQuery safePage = Objects.requireNonNull(
+                page, "keyset page query must not be null");
+        return Mono.defer(() -> {
+            if (governed) {
+                GovernedPlanEnvelope<FormOperationPlanner.PlannedLockingKeysetRead> envelope =
+                        planner.lockingKeysetReadGoverned(
+                                safeSpec, safePage, fieldUsePolicy, queryShapeLimits);
+                return requireCallerManagedTransaction()
+                        .then(keysetPage(envelope.plan().query(), envelope.fieldUse()));
+            }
+            FormOperationPlanner.PlannedLockingKeysetRead plan =
+                    planner.lockingKeysetRead(safeSpec, safePage);
+            return requireCallerManagedTransaction().then(keysetPage(plan.query(), null));
+        });
+    }
+
+    private Mono<KeysetPageResult<DynamicRow>> keysetPage(
+            FormOperationPlanner.PlannedKeysetPage plan,
+            FieldUseSnapshot fieldUse) {
+        return ReactiveFormPageResultSupport.keysetPage(this, plan, fieldUse);
     }
 
     Mono<Long> insertSpec(WriteSpec spec) {
         WriteSpec safeSpec = Objects.requireNonNull(spec, "insert spec must not be null");
+        if (governed) {
+            return requiresProtectedPlanning(safeSpec)
+                    ? ReactiveProtectionCpuBoundary.plan(() -> planner.insertGoverned(
+                            safeSpec, fieldUsePolicy, queryShapeLimits)).flatMap(envelope -> write(envelope.plan()))
+                    : write(planner.insertGoverned(safeSpec, fieldUsePolicy, queryShapeLimits).plan());
+        }
         return requiresProtectedPlanning(safeSpec)
                 ? ReactiveProtectionCpuBoundary.plan(() -> planner.insert(safeSpec)).flatMap(this::write)
                 : write(planner.insert(safeSpec));
@@ -178,6 +225,14 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
 
     Mono<SqlWriteResult> insertReturningKeysSpec(WriteSpec spec) {
         WriteSpec safeSpec = Objects.requireNonNull(spec, "insert spec must not be null");
+        if (governed) {
+            return requiresProtectedPlanning(safeSpec)
+                    ? ReactiveProtectionCpuBoundary.plan(() -> planner.insertGoverned(
+                            safeSpec, fieldUsePolicy, queryShapeLimits))
+                                                   .flatMap(envelope -> writeReturningKeys(envelope.plan()))
+                    : writeReturningKeys(
+                            planner.insertGoverned(safeSpec, fieldUsePolicy, queryShapeLimits).plan());
+        }
         return requiresProtectedPlanning(safeSpec)
                 ? ReactiveProtectionCpuBoundary.plan(() -> planner.insert(safeSpec))
                                                .flatMap(this::writeReturningKeys)
@@ -199,6 +254,12 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
 
     Mono<Long> updateSpec(WriteSpec spec) {
         WriteSpec safeSpec = Objects.requireNonNull(spec, "update spec must not be null");
+        if (governed) {
+            return requiresProtectedPlanning(safeSpec)
+                    ? ReactiveProtectionCpuBoundary.plan(() -> planner.updateGoverned(
+                            safeSpec, fieldUsePolicy, queryShapeLimits)).flatMap(envelope -> write(envelope.plan()))
+                    : write(planner.updateGoverned(safeSpec, fieldUsePolicy, queryShapeLimits).plan());
+        }
         return requiresProtectedPlanning(safeSpec)
                 ? ReactiveProtectionCpuBoundary.plan(() -> planner.update(safeSpec)).flatMap(this::write)
                 : write(planner.update(safeSpec));
@@ -206,6 +267,12 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
 
     Mono<Long> deleteSpec(WriteSpec spec) {
         WriteSpec safeSpec = Objects.requireNonNull(spec, "delete spec must not be null");
+        if (governed) {
+            return requiresProtectedPlanning(safeSpec)
+                    ? ReactiveProtectionCpuBoundary.plan(() -> planner.deleteGoverned(
+                            safeSpec, fieldUsePolicy, queryShapeLimits)).flatMap(envelope -> write(envelope.plan()))
+                    : write(planner.deleteGoverned(safeSpec, fieldUsePolicy, queryShapeLimits).plan());
+        }
         return requiresProtectedPlanning(safeSpec)
                 ? ReactiveProtectionCpuBoundary.plan(() -> planner.delete(safeSpec)).flatMap(this::write)
                 : write(planner.delete(safeSpec));
@@ -213,6 +280,13 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
 
     Mono<Long> physicalDeleteSpec(WriteSpec spec) {
         WriteSpec safeSpec = Objects.requireNonNull(spec, "physical delete spec must not be null");
+        if (governed) {
+            return requiresProtectedPlanning(safeSpec)
+                    ? ReactiveProtectionCpuBoundary.plan(() -> planner.physicalDeleteGoverned(
+                            safeSpec, fieldUsePolicy, queryShapeLimits)).flatMap(envelope -> write(envelope.plan()))
+                    : write(planner.physicalDeleteGoverned(
+                            safeSpec, fieldUsePolicy, queryShapeLimits).plan());
+        }
         return requiresProtectedPlanning(safeSpec)
                 ? ReactiveProtectionCpuBoundary.plan(() -> planner.physicalDelete(safeSpec)).flatMap(this::write)
                 : write(planner.physicalDelete(safeSpec));
@@ -231,6 +305,21 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
         };
     }
 
+    Mono<BatchExecutionEvidence> writeBatchEvidenceSpec(BatchSpec spec) {
+        BatchSpec safeSpec = Objects.requireNonNull(spec, "batch spec must not be null");
+        BatchWriteOptions options = safeSpec.options().orElse(defaultBatchWriteOptions);
+        return switch (safeSpec.operation()) {
+            case INSERT -> batchInserts.writeBatchEvidence(
+                    safeSpec.form(), mapRows(safeSpec), options, false,
+                    safeSpec.scope(), safeSpec.generatedKeys(), safeSpec.completion());
+            case UPSERT -> batchInserts.writeBatchEvidence(
+                    safeSpec.form(), mapRows(safeSpec), options, true,
+                    safeSpec.scope(), safeSpec.generatedKeys(), safeSpec.completion());
+            case UPDATE -> batchUpdates.updateBatchEvidence(
+                    safeSpec.form(), updateRows(safeSpec), safeSpec.scope(), options, safeSpec.completion());
+        };
+    }
+
     Flux<BatchChunkResult> writeBatchChunksSpec(BatchSpec spec) {
         BatchSpec safeSpec = Objects.requireNonNull(spec, "batch spec must not be null");
         BatchWriteOptions options = safeSpec.options().orElse(defaultBatchWriteOptions);
@@ -244,7 +333,7 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
         };
     }
 
-    private boolean requiresProtectedPlanning(QuerySpec spec) {
+    boolean requiresProtectedPlanning(QuerySpec spec) {
         if (spec.form().protections().encryptedFields().isEmpty()) {
             return false;
         }
@@ -252,6 +341,14 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
         return ReactiveProtectionCpuBoundary.usesEncryptedCondition(spec.form(), spec.where())
                 || ReactiveProtectionCpuBoundary.usesEncryptedScope(spec.form(), effectiveScope)
                 || spec.structuredInput().isPresent();
+    }
+
+    private Mono<Void> requireCallerManagedTransaction() {
+        return Mono.defer(() -> Objects.requireNonNull(
+                        executor.currentTransaction(),
+                        "current R2DBC transaction lookup must not return null"))
+                .switchIfEmpty(Mono.error(new LockingReadRequiredTransactionException()))
+                .then();
     }
 
     private boolean requiresProtectedPlanning(WriteSpec spec) {

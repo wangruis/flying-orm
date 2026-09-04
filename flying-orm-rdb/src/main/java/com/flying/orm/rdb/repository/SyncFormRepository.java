@@ -8,10 +8,13 @@ import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.rdb.batch.BatchChunkResult;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteResult;
+import com.flying.orm.rdb.aggregate.AggregateRow;
+import com.flying.orm.rdb.aggregate.AggregateSpec;
 import com.flying.orm.rdb.form.SyncFormClient;
 import com.flying.orm.rdb.internal.mapping.EntityValues;
 import com.flying.orm.rdb.lifecycle.ReactiveEntityListener;
 import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.lock.ReadLock;
 import com.flying.orm.rdb.operator.SyncEntityDmlDeleteOperator;
 import com.flying.orm.rdb.operator.SyncEntityDmlOperator;
 import com.flying.orm.rdb.operator.SyncEntityDmlQueryOperator;
@@ -42,6 +45,7 @@ public final class SyncFormRepository<T> {
 
     private final SyncFormClient client;
     private final DynamicForm form;
+    private final DynamicForm boundForm;
     private final Class<T> entityType;
     private final EntityValues<T> entityValues;
     private final SyncRepositoryEntityWriter<T> entityWriter;
@@ -54,20 +58,21 @@ public final class SyncFormRepository<T> {
                                EntityValues<T> entityValues,
                                ReactiveEntityListener<T> listener) {
         this.client = Objects.requireNonNull(client, "sync form client must not be null");
-        this.form = Objects.requireNonNull(form, "repository form must not be null");
+        this.boundForm = Objects.requireNonNull(form, "repository form must not be null");
         this.entityType = Objects.requireNonNull(type, "repository type must not be null");
         this.entityValues = Objects.requireNonNull(entityValues, "repository entity values must not be null");
 
         EntityMetadata<T> metadata = client.entityModels().metadata(type);
+        this.form = RepositoryLogicDeletes.bind(metadata, boundForm);
         RepositoryEntityIdSupport<T> ids = RepositoryEntityIdSupport.create(
-                metadata, client.entityModels().idGenerator());
+                metadata, client.entityModels());
         SyncRepositoryLifecycleSupport<T> lifecycle = new SyncRepositoryLifecycleSupport<>(
                 metadata, listener, new SyncRepositoryAwaiter(client.timeout()));
         this.entityWriter = new SyncRepositoryEntityWriter<>(
-                client, form, metadata, this.entityValues, lifecycle);
+                client, this.form, metadata, this.entityValues, lifecycle);
         this.batchCoordinator = new SyncRepositoryBatchCoordinator<>(
-                client, form, metadata, this.entityValues, lifecycle, ids);
-        this.readMapper = new SyncRepositoryReadMapper<>(client, form, type, metadata, lifecycle);
+                client, this.form, metadata, this.entityValues, lifecycle, ids);
+        this.readMapper = new SyncRepositoryReadMapper<>(client, this.form, type, metadata, lifecycle);
     }
 
     /** 使用共享的实体元数据和字段策略创建同步 Repository。 */
@@ -81,7 +86,7 @@ public final class SyncFormRepository<T> {
      * 返回带有额外监听器的新 Repository。实例本身不可变，因此可以安全地在并发请求之间复用。
      */
     public SyncFormRepository<T> withListener(ReactiveEntityListener<T> listener) {
-        return new SyncFormRepository<>(client, form, entityType, entityValues,
+        return new SyncFormRepository<>(client, boundForm, entityType, entityValues,
                                         Objects.requireNonNull(listener, "entity lifecycle listener must not be null"));
     }
 
@@ -143,5 +148,21 @@ public final class SyncFormRepository<T> {
     public long physicalDelete(ConditionGroup where) { return entityWriter.physicalDelete(where); }
 
     public List<T> select(ConditionGroup where) { return readMapper.select(where, null, null); }
+    /** 在调用方 JDBC 事务内按受控锁读取当前实体；事务生命周期仍归调用方。 */
+    public List<T> lockingRead(ConditionGroup where, ReadLock lock) {
+        return readMapper.lockingRead(where, lock);
+    }
+    /** 在当前 Repository 绑定的表单上执行类型化聚合。 */
+    public List<AggregateRow> aggregate(AggregateSpec spec) {
+        return client.aggregate(requireRepositoryAggregate(spec));
+    }
     public PageResult<T> page(ConditionGroup where, PageQuery page) { return readMapper.page(where, page, null, null); }
+
+    private AggregateSpec requireRepositoryAggregate(AggregateSpec spec) {
+        AggregateSpec safeSpec = Objects.requireNonNull(spec, "aggregate spec must not be null");
+        if (safeSpec.query().form() != boundForm) {
+            throw new IllegalArgumentException("aggregate spec must use the repository form");
+        }
+        return RepositoryLogicDeletes.aggregate(safeSpec, form);
+    }
 }

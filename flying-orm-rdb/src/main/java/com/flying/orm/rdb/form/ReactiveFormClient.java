@@ -1,15 +1,23 @@
 package com.flying.orm.rdb.form;
 
+import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.page.CursorPageQuery;
 import com.flying.orm.core.page.CursorPageResult;
+import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetPageResult;
 import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageResult;
 import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.scope.FieldUsePolicy;
+import com.flying.orm.core.scope.FieldUseSnapshot;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteResult;
+import com.flying.orm.rdb.aggregate.AggregateRow;
+import com.flying.orm.rdb.aggregate.AggregateSpec;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlWriteResult;
@@ -19,6 +27,7 @@ import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
 import com.flying.orm.rdb.mapping.RowMapper;
+import com.flying.orm.rdb.lock.LockingReadSpec;
 import com.flying.orm.rdb.operator.EntityDmlOperator;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
@@ -60,7 +69,9 @@ public final class ReactiveFormClient {
                                               DataScope.none(),
                                               SqlExecutionOptions.safeDefaults(),
                                               BatchWriteOptions.defaults(),
-                                              EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())));
+                                              EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults()),
+                                              FieldUsePolicy.unrestricted(),
+                                              QueryShapeLimits.defaults()));
     }
 
     private ReactiveFormClient(ReactiveFormOperationContext context) {
@@ -98,6 +109,33 @@ public final class ReactiveFormClient {
         DataScope combined = context.defaultDataScope().and(Objects.requireNonNull(scope,
                                                                                    "data scope must not be null"));
         return new ReactiveFormClient(context.withDataScope(combined));
+    }
+
+    /** 返回绑定字段用途策略的不可变调用视图。 */
+    public ReactiveFormClient withFieldUsePolicy(FieldUsePolicy policy) {
+        return new ReactiveFormClient(context.withFieldUsePolicy(
+                Objects.requireNonNull(policy, "field use policy must not be null")));
+    }
+
+    /** 返回绑定更窄查询形状预算的不可变调用视图。 */
+    public ReactiveFormClient withQueryShapeLimits(QueryShapeLimits limits) {
+        return new ReactiveFormClient(context.withQueryShapeLimits(
+                Objects.requireNonNull(limits, "query shape limits must not be null")));
+    }
+
+    /** 不执行 SQL、不获取连接，返回与执行路径相同的字段用途审批快照。 */
+    public FieldUseSnapshot previewFieldUse(QuerySpec spec) {
+        return operations.previewFieldUse(spec);
+    }
+
+    /** JOIN 预览与执行复用同一中央审批函数，且不订阅执行器。 */
+    public FieldUseSnapshot previewFieldUse(JoinQuerySpec spec) {
+        return operations.previewFieldUse(spec);
+    }
+
+    /** 不执行 SQL、不获取连接，返回聚合执行将使用的字段用途审批快照。 */
+    public FieldUseSnapshot previewFieldUse(AggregateSpec spec) {
+        return ReactiveFormAggregateOperations.preview(context, spec);
     }
 
     /** Repository 和容器集成读取批量默认策略时使用。 */
@@ -140,6 +178,25 @@ public final class ReactiveFormClient {
     /** 执行不可变查询规格并返回紧凑动态行流。 */
     public Flux<DynamicRow> select(QuerySpec spec) {
         return operations().selectSpec(spec);
+    }
+
+    /** DML operator 复用完整 Form 计划、保护改写和结果解码，但不复制整套客户端配置。 */
+    @InternalApi
+    public Flux<DynamicRow> selectGoverned(QuerySpec spec,
+                                           FieldUsePolicy policy,
+                                           QueryShapeLimits limits) {
+        return operations().selectSpecGoverned(spec, policy, limits);
+    }
+
+    /** 在订阅时确认外部 R2DBC 事务，再执行受控锁定读取；ORM 不结束该事务。 */
+    public Flux<DynamicRow> lockingRead(LockingReadSpec spec) {
+        return operations().lockingReadSpec(Objects.requireNonNull(
+                spec, "locking read spec must not be null"));
+    }
+
+    /** 使用 JDBC/R2DBC 共用的计划和布局执行类型化聚合。 */
+    public Flux<AggregateRow> aggregate(AggregateSpec spec) {
+        return ReactiveFormAggregateOperations.aggregate(context, spec);
     }
 
     /** 执行查询规格并映射实体。 */
@@ -225,6 +282,50 @@ public final class ReactiveFormClient {
         return operations().writeBatchSpec(spec);
     }
 
+    /** 执行锁定读取并复用当前实体映射。 */
+    public <T> Flux<T> lockingRead(LockingReadSpec spec, Class<T> type) {
+        RowMapper<T> mapper = results.rowMapper(
+                type, "locking read result type must not be null");
+        return FormResultMappingSupport.mapRows(lockingRead(spec), mapper);
+    }
+
+    /** 执行 nullable、复合排序的稳定 keyset 分页，不执行 count SQL。 */
+    public Mono<KeysetPageResult<DynamicRow>> keysetPage(QuerySpec spec, KeysetPageQuery page) {
+        return operations().keysetPageSpec(spec, page);
+    }
+
+    /** 执行 keyset 分页并在隐藏游标列剥离后映射实体。 */
+    public <T> Mono<KeysetPageResult<T>> keysetPage(
+            QuerySpec spec, KeysetPageQuery page, Class<T> type) {
+        return FormResultMappingSupport.mapKeysetPage(
+                keysetPage(spec, page),
+                results.rowMapper(type, "keyset page result type must not be null"));
+    }
+
+    /** 在同一个外部事务中组合稳定 keyset 与受控锁，不执行 count。 */
+    public Mono<KeysetPageResult<DynamicRow>> lockingRead(
+            LockingReadSpec spec,
+            KeysetPageQuery page) {
+        return operations().lockingReadSpec(
+                Objects.requireNonNull(spec, "locking read spec must not be null"),
+                Objects.requireNonNull(page, "keyset page query must not be null"));
+    }
+
+    /** 锁定 keyset 的类型化结果入口。 */
+    public <T> Mono<KeysetPageResult<T>> lockingRead(
+            LockingReadSpec spec,
+            KeysetPageQuery page,
+            Class<T> type) {
+        return FormResultMappingSupport.mapKeysetPage(
+                lockingRead(spec, page),
+                results.rowMapper(type, "locking keyset result type must not be null"));
+    }
+
+    /** 返回已经形成的执行事实；外部事务的提交事实保持为 PENDING_EXTERNAL。 */
+    public Mono<BatchExecutionEvidence> writeBatchEvidence(BatchSpec spec) {
+        return operations().writeBatchEvidenceSpec(spec);
+    }
+
     /** 流式发布 INDEPENDENT 模式下已完成的分片结果。 */
     public Flux<BatchChunkResult> writeBatchChunks(BatchSpec spec) {
         return operations().writeBatchChunksSpec(spec);
@@ -234,4 +335,5 @@ public final class ReactiveFormClient {
     ReactiveFormOperations operations() {
         return operations;
     }
+
 }

@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.bootstrap;
 
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchMemoryLimits;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
@@ -42,6 +43,16 @@ final class BatchMemoryLimitedSyncBatchExecutor implements SyncBatchExecutor {
     public BatchWriteResult writeProtectedBatch(BatchWriteRequest request) {
         BatchWriteRequest safeRequest = requireWithinLimits(request);
         return delegate.writeProtectedBatch(safeRequest);
+    }
+
+    @Override
+    public BatchExecutionEvidence writeBatchEvidence(BatchWriteRequest request) {
+        return delegate.writeBatchEvidence(requireWithinLimits(request));
+    }
+
+    @Override
+    public BatchExecutionEvidence writeProtectedBatchEvidence(BatchWriteRequest request) {
+        return delegate.writeProtectedBatchEvidence(requireWithinLimits(request));
     }
 
     @Override

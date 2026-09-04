@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchMemoryLimits;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
@@ -57,6 +58,26 @@ final class BatchMemoryLimitedReactiveSqlExecutor extends ForwardingReactiveSqlE
                     request, "protected batch request must not be null");
             limits.check(safeRequest.options());
             return delegate().writeProtectedBatch(safeRequest);
+        });
+    }
+
+    @Override
+    public Mono<BatchExecutionEvidence> writeBatchEvidence(BatchWriteRequest request) {
+        return Mono.defer(() -> {
+            BatchWriteRequest safeRequest = Objects.requireNonNull(
+                    request, "batch evidence request must not be null");
+            limits.check(safeRequest.options());
+            return delegate().writeBatchEvidence(safeRequest);
+        });
+    }
+
+    @Override
+    public Mono<BatchExecutionEvidence> writeProtectedBatchEvidence(BatchWriteRequest request) {
+        return Mono.defer(() -> {
+            BatchWriteRequest safeRequest = Objects.requireNonNull(
+                    request, "protected batch evidence request must not be null");
+            limits.check(safeRequest.options());
+            return delegate().writeProtectedBatchEvidence(safeRequest);
         });
     }
 

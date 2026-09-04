@@ -11,7 +11,9 @@ import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.PaginationDialect;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
+import com.flying.orm.rdb.lock.LockingReadDialect;
 import com.flying.orm.rdb.lock.OptimisticLockOptions;
+import com.flying.orm.rdb.lock.ReadLock;
 import com.flying.orm.rdb.protection.ProtectedContainsLayout;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 import com.flying.orm.rdb.result.DynamicRow;
@@ -38,7 +40,7 @@ final class FormProtectionSqlSupport {
     private final FormQuerySqlRenderer queries;
     private final FormWriteSqlRenderer writes;
     private final ProtectedFieldRuntime protectedFields;
-    private final ProtectedContainsSqlPlanner contains;
+    final ProtectedContainsSqlPlanner contains;
 
     FormProtectionSqlSupport(FormSqlRenderSupport support,
                              FormQuerySqlRenderer queries,
@@ -228,7 +230,7 @@ final class FormProtectionSqlSupport {
                                    .collect(java.util.stream.Collectors.joining(", "));
             String markers = java.util.Collections.nCopies(owners.size() + 2, "?").stream()
                                            .collect(java.util.stream.Collectors.joining(", "));
-            String tokenTable = support.identifier(layout.table().table());
+            String tokenTable = support.identifier(layout.table());
             this.deleteSql = "delete from " + tokenTable + " where " + ownerPredicate
                     + " and " + support.identifier("field_tag") + " = ?";
             this.insertSql = "insert into " + tokenTable + " (" + columns + ", "
@@ -281,24 +283,6 @@ final class FormProtectionSqlSupport {
         return contains.candidates(query, candidateLimit);
     }
 
-    SqlRequest containsRows(ProtectedFieldRuntime.PreparedContainsQuery query,
-                            List<PageSort> sorts,
-                            int candidateLimit) {
-        return contains.rows(query, sorts, candidateLimit);
-    }
-
-    SqlRequest containsRows(ProtectedFieldRuntime.PreparedContainsQuery query,
-                            CursorPageQuery page,
-                            int candidateLimit) {
-        return contains.rows(query, page, candidateLimit);
-    }
-
-    SqlRequest containsRows(ProtectedFieldRuntime.PreparedContainsQuery query,
-                            CursorPageNormalizer.NormalizedCursorPage page,
-                            int candidateLimit) {
-        return contains.rows(query, page, candidateLimit);
-    }
-
     SqlRequest insert(FormPreparedWrite write) {
         return writes.insert(write.physicalForm(), write.values());
     }
@@ -325,6 +309,15 @@ final class FormProtectionSqlSupport {
         return queries.selectProjected(query.physicalForm(), query.where(), query.visibleFields(), groups, sorts);
     }
 
+    SqlRequest selectLocking(ProtectedFieldRuntime.PreparedQuery query,
+                             List<String> groups,
+                             List<PageSort> sorts,
+                             LockingReadDialect dialect,
+                             ReadLock lock) {
+        return queries.selectProjectedLocking(
+                query.physicalForm(), query.where(), query.visibleFields(), groups, sorts, dialect, lock);
+    }
+
     SqlRequest select(ProtectedFieldRuntime.PreparedQuery query, PageQuery page) {
         return queries.selectPhysical(query.physicalForm(), query.visibleFields(), query.where(), page);
     }
@@ -336,6 +329,21 @@ final class FormProtectionSqlSupport {
     SqlRequest select(ProtectedFieldRuntime.PreparedQuery query,
                       CursorPageNormalizer.NormalizedCursorPage page) {
         return queries.selectPhysical(query.physicalForm(), query.visibleFields(), query.where(), page);
+    }
+
+    SqlRequest selectKeyset(ProtectedFieldRuntime.PreparedQuery query,
+                            HiddenProjectionLayout layout,
+                            KeysetPageNormalizer.NormalizedKeysetPage page) {
+        return queries.selectKeyset(query.physicalForm(), query.where(), layout, page);
+    }
+
+    SqlRequest selectKeysetLocking(ProtectedFieldRuntime.PreparedQuery query,
+                                   HiddenProjectionLayout layout,
+                                   KeysetPageNormalizer.NormalizedKeysetPage page,
+                                   LockingReadDialect dialect,
+                                   ReadLock lock) {
+        return queries.selectKeysetLocking(
+                query.physicalForm(), query.where(), layout, page, dialect, lock);
     }
 
     SqlRequest count(ProtectedFieldRuntime.PreparedQuery query) {
