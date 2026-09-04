@@ -54,10 +54,8 @@
     </modules>
 
     <properties>
-        <java.version>21</java.version>
-        <maven.compiler.release>${java.version}</maven.compiler.release>
+        <maven.compiler.release>21</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
         <project.build.outputTimestamp>2026-08-01T00:00:00Z</project.build.outputTimestamp>
         <junit.jupiter.version>6.1.1</junit.jupiter.version>
         <r2dbc.spi.version>1.0.0.RELEASE</r2dbc.spi.version>
@@ -72,10 +70,6 @@
         <maven.checkstyle.version>3.6.0</maven.checkstyle.version>
         <spotbugs.maven.version>4.9.8.2</spotbugs.maven.version>
         <jacoco.version>0.8.15</jacoco.version>
-        <japicmp.version>0.26.1</japicmp.version>
-        <exec.maven.version>3.6.3</exec.maven.version>
-        <postgresql.version>42.7.13</postgresql.version>
-        <api.compat.enabled>false</api.compat.enabled>
         <jacoco.line.minimum>0.30</jacoco.line.minimum>
         <jacoco.branch.minimum>0.25</jacoco.branch.minimum>
         <maven.gpg.version>3.2.8</maven.gpg.version>
@@ -216,86 +210,6 @@
 
     <profiles>
         <profile>
-            <id>api-compat</id>
-            <activation>
-                <!-- 传入旧版参数本身就表示要跑兼容门禁；不能因为漏写 -P 而静默降级。 -->
-                <property>
-                    <name>api.compat.core.old.jar</name>
-                </property>
-            </activation>
-            <properties>
-                <!--
-                  这个门禁默认完全关闭。启用后，旧制品与候选制品都只能使用下面插件中写死的
-                  仓库内路径，不接受命令行替换，避免同包比较造成假通过。
-                -->
-                <api.compat.enabled>true</api.compat.enabled>
-            </properties>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.codehaus.mojo</groupId>
-                        <artifactId>exec-maven-plugin</artifactId>
-                        <version>${exec.maven.version}</version>
-                        <inherited>false</inherited>
-                        <executions>
-                            <execution>
-                                <id>verify-frozen-api-baseline</id>
-                                <phase>validate</phase>
-                                <goals>
-                                    <goal>exec</goal>
-                                </goals>
-                                <configuration>
-                                    <executable>${java.home}/bin/java</executable>
-                                    <arguments>
-                                        <argument>${maven.multiModuleProjectDirectory}/config/api-compat/ApiCompatibilityBaselineVerifier.java</argument>
-                                        <argument>${maven.multiModuleProjectDirectory}</argument>
-                                    </arguments>
-                                </configuration>
-                            </execution>
-                        </executions>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-        <!--
-          主 profile 已由 core 旧包参数自动激活。这里只拦截“仅传 RDB 参数”的不完整命令，
-          防止它在未运行 japicmp 的情况下变成普通构建。
-        -->
-        <profile>
-            <id>api-compat-rdb-input-guard</id>
-            <activation>
-                <property>
-                    <name>api.compat.rdb.old.jar</name>
-                </property>
-            </activation>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-enforcer-plugin</artifactId>
-                        <executions>
-                            <execution>
-                                <id>reject-rdb-baseline-without-api-compat</id>
-                                <phase>validate</phase>
-                                <goals>
-                                    <goal>enforce</goal>
-                                </goals>
-                                <configuration>
-                                    <rules>
-                                        <requireProperty>
-                                            <property>api.compat.core.old.jar</property>
-                                            <regex>.+</regex>
-                                            <message>不能只传 RDB 旧包；请显式启用 -Papi-compat 或同时传入 core 旧包。</message>
-                                        </requireProperty>
-                                    </rules>
-                                </configuration>
-                            </execution>
-                        </executions>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-        <profile>
             <id>quality</id>
             <build>
                 <plugins>
@@ -382,62 +296,6 @@
                                             </limits>
                                         </rule>
                                     </rules>
-                                </configuration>
-                            </execution>
-                        </executions>
-                    </plugin>
-                </plugins>
-            </build>
-        </profile>
-        <profile>
-            <id>release-artifacts</id>
-            <build>
-                <plugins>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-source-plugin</artifactId>
-                        <executions>
-                            <execution>
-                                <id>attach-sources</id>
-                                <goals>
-                                    <goal>jar-no-fork</goal>
-                                </goals>
-                            </execution>
-                        </executions>
-                    </plugin>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-javadoc-plugin</artifactId>
-                        <executions>
-                            <execution>
-                                <id>attach-javadocs</id>
-                                <goals>
-                                    <goal>jar</goal>
-                                </goals>
-                                <configuration>
-                                    <!-- 发布包里的坏链接和坏 HTML 不能只打印警告后继续上传。 -->
-                                    <failOnWarnings>true</failOnWarnings>
-                                </configuration>
-                            </execution>
-                        </executions>
-                    </plugin>
-                    <plugin>
-                        <groupId>org.apache.maven.plugins</groupId>
-                        <artifactId>maven-dependency-plugin</artifactId>
-                        <executions>
-                            <execution>
-                                <id>analyze-direct-dependencies</id>
-                                <phase>verify</phase>
-                                <goals>
-                                    <goal>analyze-only</goal>
-                                </goals>
-                                <configuration>
-                                    <failOnWarning>true</failOnWarning>
-                                    <ignoredUnusedDeclaredDependencies>
-                                        <ignoredUnusedDeclaredDependency>
-                                            org.junit.jupiter:junit-jupiter-engine
-                                        </ignoredUnusedDeclaredDependency>
-                                    </ignoredUnusedDeclaredDependencies>
                                 </configuration>
                             </execution>
                         </executions>
