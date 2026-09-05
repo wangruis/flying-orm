@@ -202,6 +202,10 @@ final class EntityRelationalConstraintCompiler {
                 throw new MappingException(
                         "foreign key references an unknown target entity property");
             }
+            if (target.protections().encrypted(metadata.columnName()).isPresent()) {
+                throw new MappingException(
+                        "foreign key must not reference an encrypted target entity property");
+            }
             if (!seen.add(metadata.columnName())) {
                 throw new MappingException(
                         "foreign key must not repeat a target entity property");

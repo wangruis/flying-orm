@@ -5,6 +5,7 @@ import com.flying.orm.core.internal.error.ThrowableGraph;
 import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.id.IdGenerator;
 import com.flying.orm.rdb.internal.mapping.EntityFieldNames;
+import com.flying.orm.rdb.internal.mapping.EntityMetadataHierarchy;
 import com.flying.orm.rdb.mapping.EntityFieldMetadata;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
 import com.flying.orm.rdb.mapping.EntityMetadata;
@@ -244,8 +245,8 @@ final class RepositoryEntityIdSupport<T> {
         try {
             for (PropertyDescriptor property : Introspector.getBeanInfo(type).getPropertyDescriptors()) {
                 if (property.getName().equals(id.name())) {
-                    reader = accessible(property.getReadMethod());
-                    writer = accessible(property.getWriteMethod());
+                    reader = accessible(property.getReadMethod(), property.getName());
+                    writer = accessible(property.getWriteMethod(), property.getName());
                     break;
                 }
             }
@@ -269,6 +270,10 @@ final class RepositoryEntityIdSupport<T> {
         for (Class<?> current = type; current != null && current != Object.class; current = current.getSuperclass()) {
             try {
                 Field field = current.getDeclaredField(name);
+                if (!EntityMetadataHierarchy.isPersistentField(field)) {
+                    // 非持久子字段不能遮住真正的继承主键；回填和回滚恢复都必须使用持久成员。
+                    continue;
+                }
                 if (!field.trySetAccessible()) {
                     throw new MappingException("primary key field is not accessible: " + field);
                 }
@@ -280,8 +285,8 @@ final class RepositoryEntityIdSupport<T> {
         return null;
     }
 
-    private static Method accessible(Method method) {
-        if (method == null) {
+    private static Method accessible(Method method, String propertyName) {
+        if (method == null || !EntityMetadataHierarchy.isPersistentAccessor(method, propertyName)) {
             return null;
         }
         if (!method.trySetAccessible()) {

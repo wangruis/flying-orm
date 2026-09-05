@@ -520,6 +520,7 @@ class SyncIndependentBatchLifecycleTest {
                     (self, method, arguments) -> switch (method.getName()) {
                         case "getColumnCount" -> 1;
                         case "getColumnLabel", "getColumnName" -> "id";
+                        case "getColumnType" -> java.sql.Types.BIGINT;
                         default -> throw new AssertionError("unexpected key metadata call: " + method.getName());
                     });
             return proxy(ResultSet.class, (self, method, arguments) -> switch (method.getName()) {

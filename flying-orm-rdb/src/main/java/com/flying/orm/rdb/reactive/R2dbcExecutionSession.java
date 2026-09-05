@@ -108,14 +108,16 @@ final class R2dbcExecutionSession {
                                   java.util.function.BiFunction<Statement,
                                           Supplier<R2dbcLargeObjectScope>, Mono<T>> operation) {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
-        return withPreparedStatementMono(safeRequest,
+        return withPreparedStatementResource(safeRequest,
                                          snapshotExecutionParameters(safeRequest),
                                          options,
                                          operationType,
-                                         operation);
+                                         (statement, largeObjects) -> protectMono(
+                                                 operation.apply(statement, largeObjects), options));
     }
 
-    <T> Mono<T> withPreparedStatementMono(SqlRequest request,
+    /** 只拥有 Statement/连接的资源边界；操作把唯一执行时限放在其证据转换之前。 */
+    <T> Mono<T> withPreparedStatementResource(SqlRequest request,
                                           List<Object> executionParameters,
                                           SqlExecutionOptions options,
                                           SqlExecutionOperation operationType,
@@ -132,8 +134,7 @@ final class R2dbcExecutionSession {
                                                                       safeRequest,
                                                                       safeParameters,
                                                                       0);
-                                 return protectMono(
-                                         operation.apply(statement, lease::largeObjects), safeOptions);
+                                 return operation.apply(statement, lease::largeObjects);
                              },
                              lease -> leaseCleanup.closeAfterResult(lease, operationType, safeOptions, true),
                              (lease, error) -> leaseCleanup.closeAfterError(lease, operationType, safeOptions, error),

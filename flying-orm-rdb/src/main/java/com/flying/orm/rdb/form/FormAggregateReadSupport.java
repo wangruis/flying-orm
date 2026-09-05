@@ -19,6 +19,7 @@ import com.flying.orm.rdb.result.DynamicRow;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Function;
 
 /**
  * 聚合 planner 对既有表单 Scope、逻辑删除、字段保护和 codec 的窄桥接。
@@ -131,6 +132,18 @@ public final class FormAggregateReadSupport {
                                     Map<String, String> expressionsByAlias,
                                     Map<String, String> correlatedExpressionsByAlias,
                                     String outerQualifier) {
+        return renderHaving(resultForm, having, expressionsByAlias, correlatedExpressionsByAlias,
+                            outerQualifier, null);
+    }
+
+    /** Alias SQL and value semantics come from the same already validated aggregate declaration. */
+    @InternalApi
+    public SqlFragment renderHaving(DynamicForm resultForm,
+                                    ConditionGroup having,
+                                    Map<String, String> expressionsByAlias,
+                                    Map<String, String> correlatedExpressionsByAlias,
+                                    String outerQualifier,
+                                    Function<String, DynamicField> valueFieldResolver) {
         Map<String, String> safeExpressions = Map.copyOf(Objects.requireNonNull(
                 expressionsByAlias, "aggregate alias expressions must not be null"));
         return renderer.renderCondition(
@@ -145,7 +158,8 @@ public final class FormAggregateReadSupport {
                 },
                 correlatedExpressionsByAlias == null ? null
                         : alias -> correlatedExpressionsByAlias.get(FieldIdentity.of(alias).key()),
-                correlatedExpressionsByAlias == null ? null : alias -> outerQualifier);
+                correlatedExpressionsByAlias == null ? null : alias -> outerQualifier,
+                valueFieldResolver);
     }
 
     /** 普通字段及实体自定义字段沿用表单查询的同一解码规则。 */

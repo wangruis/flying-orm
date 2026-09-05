@@ -20,7 +20,7 @@ public final class AggregateRow {
 
     private AggregateRow(AggregateRowLayout layout, List<?> values) {
         this.layout = Objects.requireNonNull(layout, "aggregate row layout must not be null");
-        this.values = BindableValueSnapshots.immutableValues(
+        this.values = BindableValueSnapshots.logicalValues(
                 Objects.requireNonNull(values, "aggregate row values must not be null"));
         if (layout.size() != this.values.size()) {
             throw new IllegalArgumentException("aggregate row value count does not match its layout");
@@ -38,17 +38,18 @@ public final class AggregateRow {
     public <T> T get(AggregateExpression<T> expression) {
         AggregateExpression<T> safeExpression = Objects.requireNonNull(
                 expression, "aggregate expression must not be null");
-        Object value = values.get(layout.indexOf(safeExpression));
+        Object value = BindableValueSnapshots.logicalValue(values.get(layout.indexOf(safeExpression)));
         return value == null ? null : safeExpression.javaType().cast(value);
     }
 
     public <T> T get(GroupSelection group, Class<T> javaType) {
-        Object value = values.get(layout.indexOf(group));
+        Object value = BindableValueSnapshots.logicalValue(values.get(layout.indexOf(group)));
         return value == null ? null : Objects.requireNonNull(
                 javaType, "aggregate group Java type must not be null").cast(value);
     }
 
     public List<Object> values() {
-        return values;
+        // 已解码的领域值不是 SQL 绑定值；导出时只隔离标准可变载荷，不再次转换领域类型。
+        return BindableValueSnapshots.logicalValues(values);
     }
 }

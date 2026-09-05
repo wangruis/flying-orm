@@ -78,7 +78,7 @@ final class JdbcBatchEvidenceTestSupport {
         private PreparedStatement statement() {
             AtomicInteger rows = new AtomicInteger();
             return proxy(PreparedStatement.class, (self, method, arguments) -> switch (method.getName()) {
-                case "setObject", "setNull", "setQueryTimeout", "cancel", "close" -> null;
+                case "setObject", "setNull", "setBinaryStream", "setQueryTimeout", "cancel", "close" -> null;
                 case "addBatch" -> { rows.incrementAndGet(); yield null; }
                 case "executeBatch" -> {
                     executions.incrementAndGet();

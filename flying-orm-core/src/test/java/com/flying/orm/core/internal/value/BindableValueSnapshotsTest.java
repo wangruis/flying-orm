@@ -1,9 +1,20 @@
 package com.flying.orm.core.internal.value;
 
+import com.flying.orm.core.codec.ValueCodec;
+import com.flying.orm.core.codec.ValueCodecRegistry;
+import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.form.LogicDeleteDefinition;
+import com.flying.orm.core.internal.condition.ConditionExecutionViews;
+import com.flying.orm.core.page.CursorPageQuery;
+import com.flying.orm.core.page.CursorPosition;
+import com.flying.orm.core.page.CursorSort;
+import com.flying.orm.core.param.ParameterConditionSpec;
+import com.flying.orm.core.scope.TenantScope;
 import org.junit.jupiter.api.Test;
 
 import java.lang.management.ManagementFactory;
 import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -14,6 +25,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -23,6 +35,65 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class BindableValueSnapshotsTest {
 
     private static final int SCALAR_FAST_PATH_ITERATIONS = 10_000;
+
+    @Test
+    void mixedStandardTextRangeKeepsItsExistingOrderingAndBinding() {
+        ConditionGroup range = ConditionGroup.and().where("label", "between",
+                List.of(new StringBuilder(" a "), "z")).build();
+        assertEquals(List.of("a", "z"),
+                     ConditionExecutionViews.bindParameters(range, ValueCodecRegistry.standard()));
+        var reversed = assertThrows(com.flying.orm.core.condition.ConditionValueException.class,
+                     () -> ConditionGroup.and().where("label", "between",
+                             List.of(new StringBuilder("z"), new StringBuffer("a"))).build());
+        assertEquals(com.flying.orm.core.condition.ConditionValueException.Error.RANGE_ORDER_INVALID,
+                     reversed.error());
+    }
+
+    @Test
+    void logicalTextKeepsItsTypeAcrossConditionAndScopeBoundaries() {
+        StringBuilder source = new StringBuilder(" value ");
+        ConditionGroup condition = ConditionGroup.and().where("label", "=", source).build();
+        ValueCodecRegistry codecs = ValueCodecRegistry.standard().withFirst(new ValueCodec() {
+            @Override
+            public boolean supports(Class<?> type) {
+                return type == StringBuilder.class;
+            }
+
+            @Override
+            public Object write(Object value) {
+                return "codec:" + ((StringBuilder) value);
+            }
+
+            @Override
+            public Object read(Object value, Class<?> type) {
+                return new StringBuilder(value.toString());
+            }
+        });
+        source.setCharAt(1, 'X');
+        assertEquals(List.of("codec:value"), ConditionExecutionViews.bindParameters(condition, codecs));
+
+        List<Object> published = List.of(
+                TenantScope.of("tenant", new StringBuilder(" value ")).value(),
+                ParameterConditionSpec.builder("p", "label", "=").defaultValue(source).build().defaultValue(),
+                CursorPosition.of(List.of(source)).values().getFirst(),
+                CursorPageQuery.after(10, List.of(source), CursorSort.asc("label")).cursor().getFirst(),
+                LogicDeleteDefinition.of("deleted", source, new StringBuilder("yes")).notDeletedValue());
+        published.forEach(value -> assertInstanceOf(StringBuilder.class, value));
+    }
+
+    @Test
+    void logicalTextArraysRemainTypedWhileBindingSnapshotsKeepTheirOldContract() {
+        StringBuilder source = new StringBuilder("text");
+        StringBuilder[] array = {source, source};
+        StringBuilder[] copied = (StringBuilder[]) BindableValueSnapshots.logicalValue(array);
+        source.setCharAt(0, 'X');
+        assertSame(copied[0], copied[1]);
+        assertEquals("text", copied[0].toString());
+        assertEquals("Xext", BindableValueSnapshots.immutableValue(source));
+        CharBuffer chars = (CharBuffer) BindableValueSnapshots.logicalValue(CharBuffer.wrap(" chars "));
+        assertEquals(" chars ", ValueCodecRegistry.standard().write(chars));
+        assertEquals(" chars ", BindableValueSnapshots.immutableValue(chars));
+    }
 
     @Test
     void copiesMutableScalarsOnceAcrossSharedRoots() {

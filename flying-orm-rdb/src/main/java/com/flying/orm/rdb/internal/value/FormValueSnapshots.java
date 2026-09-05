@@ -36,7 +36,7 @@ public final class FormValueSnapshots {
         safeSource.forEach((name, value) -> snapshot.put(name, safeForm.findField(name)
                 .map(field -> snapshotter.snapshot(field.databaseType().logicalType(),
                                                    field.databaseType().isArray(), value))
-                .orElseGet(() -> BindableValueSnapshots.immutableValue(value))));
+                .orElseGet(() -> BindableValueSnapshots.logicalValue(value))));
         return Collections.unmodifiableMap(snapshot);
     }
 
@@ -48,7 +48,7 @@ public final class FormValueSnapshots {
             if (value == null) return null;
             if (type == LogicalType.JSON) return json(value);
             if (sqlArray || type == LogicalType.VECTOR) return sequence(value);
-            return BindableValueSnapshots.immutableValue(value);
+            return BindableValueSnapshots.logicalValue(value);
         }
 
         private Object json(Object value) {
@@ -66,7 +66,7 @@ public final class FormValueSnapshots {
             if (value instanceof Map<?, ?> map) return jsonMap(map);
             if (value instanceof Collection<?> collection) return jsonList(collection);
             if (value.getClass().isArray()) return jsonArray(value);
-            Object scalar = BindableValueSnapshots.immutableScalar(value, null);
+            Object scalar = BindableValueSnapshots.logicalScalar(value);
             if (scalar != value) copies.put(value, scalar);
             return scalar;
         }
@@ -134,14 +134,14 @@ public final class FormValueSnapshots {
                 }
                 return exposed;
             }
-            return BindableValueSnapshots.immutableValue(value);
+            return BindableValueSnapshots.logicalValue(value);
         }
 
         private static Object sequenceItem(Object value) {
             if (value instanceof Collection<?> || value != null && value.getClass().isArray()) {
                 throw new IllegalArgumentException("nested SQL ARRAY or VECTOR values are not supported");
             }
-            return BindableValueSnapshots.immutableValue(value);
+            return BindableValueSnapshots.logicalValue(value);
         }
     }
 }

@@ -53,7 +53,7 @@ final class SchemaMigrationPlanner {
                                    List<ForeignKeyMetadata> foreignKeys,
                                    ReactiveFormMetadataReader metadataReader,
                                    SchemaMigrationOptions options) {
-        DynamicForm safeForm = Objects.requireNonNull(form, "target dynamic form must not be null");
+        DynamicForm safeForm = SchemaMigrationSupport.requireLegacyRelation(form);
         ReactiveFormMetadataReader safeReader = Objects.requireNonNull(
                 metadataReader, "reactive form metadata reader must not be null");
         SchemaMigrationOptions safeOptions = Objects.requireNonNull(options,
@@ -75,7 +75,7 @@ final class SchemaMigrationPlanner {
                                              ReactiveFormMetadataReader metadataReader,
                                              SchemaMigrationOptions migrationOptions,
                                              SchemaMigrationReviewPolicy reviewPolicy) {
-        DynamicForm safeForm = Objects.requireNonNull(form, "target dynamic form must not be null");
+        DynamicForm safeForm = SchemaMigrationSupport.requireLegacyRelation(form);
         ReactiveFormMetadataReader safeReader = Objects.requireNonNull(
                 metadataReader, "reactive form metadata reader must not be null");
         SchemaMigrationOptions safeOptions = Objects.requireNonNull(migrationOptions,
@@ -122,6 +122,8 @@ final class SchemaMigrationPlanner {
 
     List<SqlRequest> migrate(DynamicFormChangeSet changeSet) {
         DynamicFormChangeSet changes = Objects.requireNonNull(changeSet, "dynamic form change set must not be null");
+        // 变更集已保证 source 和 target 指向同一物理关系，这里只校验一次目标身份。
+        SchemaMigrationSupport.requireLegacyRelation(changes.target());
         if (!changes.source().protections().isEmpty() || !changes.target().protections().isEmpty()) {
             throw new IllegalArgumentException("protected fields require a reviewed schema migration plan");
         }
@@ -215,9 +217,9 @@ final class SchemaMigrationPlanner {
                                           List<ForeignKeyMetadata> targetForeignKeys,
                                           SchemaMigrationOptions options) {
         TableMetadata safeCurrent = Objects.requireNonNull(current, "current table metadata must not be null");
-        ProtectedSchemaTarget.validateExistingStorage(safeCurrent, target);
         ProtectedSchemaTarget resolved = ProtectedSchemaTarget.resolve(
                 target, targetIndexes, targetForeignKeys);
+        ProtectedSchemaTarget.validateExistingStorage(safeCurrent, target);
         DynamicForm safeTarget = resolved.form();
         List<IndexMetadata> safeIndexes = resolved.indexes();
         List<ForeignKeyMetadata> safeForeignKeys = resolved.foreignKeys();

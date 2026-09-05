@@ -72,6 +72,9 @@ public final class RelationalMetadataFingerprint {
             encoder.marker("CHECK").text("CHECK_NAME", check.name());
             encodePredicate(encoder, check.predicate());
         }
+        source.partition().ifPresent(partition -> encoder.marker("TABLE_PARTITION")
+                .text("TABLE_PARTITION_STRATEGY", partition.strategy().name())
+                .text("TABLE_PARTITION_COLUMN", partition.column()));
         return encoder.finishHex();
     }
 

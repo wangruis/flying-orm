@@ -17,6 +17,7 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.SQLXML;
+import java.sql.Types;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -39,11 +40,14 @@ public final class JdbcDynamicRowFactory {
     private final ResultSet resultSet;
     private final RowLayout layout;
     private final SqlExecutionOptions options;
+    private final boolean[] limitedColumns;
 
-    private JdbcDynamicRowFactory(ResultSet resultSet, RowLayout layout, SqlExecutionOptions options) {
+    private JdbcDynamicRowFactory(ResultSet resultSet, RowLayout layout,
+                                  SqlExecutionOptions options, boolean[] limitedColumns) {
         this.resultSet = resultSet;
         this.layout = layout;
         this.options = options;
+        this.limitedColumns = limitedColumns;
     }
 
     /**
@@ -52,7 +56,25 @@ public final class JdbcDynamicRowFactory {
     public static JdbcDynamicRowFactory from(ResultSet resultSet, SqlExecutionOptions options) throws SQLException {
         ResultSet safeResultSet = Objects.requireNonNull(resultSet, "jdbc result set must not be null");
         SqlExecutionOptions safeOptions = Objects.requireNonNull(options, "sql execution options must not be null");
-        return new JdbcDynamicRowFactory(safeResultSet, readLayout(safeResultSet.getMetaData()), safeOptions);
+        ResultSetMetaData metadata = Objects.requireNonNull(
+                safeResultSet.getMetaData(), "jdbc result set metadata must not be null");
+        int columnCount = metadata.getColumnCount();
+        List<String> names = new ArrayList<>(columnCount);
+        boolean[] limited = null;
+        boolean hasLimits = safeOptions.maxLargeObjectBytes() > 0 || safeOptions.maxLargeObjectChars() > 0;
+        for (int index = 1; index <= columnCount; index++) {
+            String label = metadata.getColumnLabel(index);
+            names.add(label == null || label.isBlank() ? metadata.getColumnName(index) : label);
+            // 驱动可能已经把 LOB 物化为 byte[]/String；类型只在结果布局建立时读取一次。
+            // 明确的普通标量列不消耗 LOB 额度，未知类型则保留原来的保守大小边界。
+            if (hasLimits && limitMaterializedColumn(metadata.getColumnType(index))) {
+                if (limited == null) {
+                    limited = new boolean[columnCount];
+                }
+                limited[index - 1] = true;
+            }
+        }
+        return new JdbcDynamicRowFactory(safeResultSet, RowLayout.of(names), safeOptions, limited);
     }
 
     /**
@@ -61,23 +83,22 @@ public final class JdbcDynamicRowFactory {
     public DynamicRow readCurrentRow() throws SQLException {
         Object[] values = new Object[layout.size()];
         for (int index = 0; index < values.length; index++) {
-            values[index] = materialize(resultSet.getObject(index + 1));
+            values[index] = materialize(resultSet.getObject(index + 1),
+                    limitedColumns != null && limitedColumns[index]);
         }
         return DynamicRow.owned(layout, values);
     }
 
-    private static RowLayout readLayout(ResultSetMetaData metadata) throws SQLException {
-        ResultSetMetaData safeMetadata = Objects.requireNonNull(metadata, "jdbc result set metadata must not be null");
-        int columnCount = safeMetadata.getColumnCount();
-        List<String> names = new ArrayList<>(columnCount);
-        for (int index = 1; index <= columnCount; index++) {
-            String label = safeMetadata.getColumnLabel(index);
-            names.add(label == null || label.isBlank() ? safeMetadata.getColumnName(index) : label);
-        }
-        return RowLayout.of(names);
+    private static boolean limitMaterializedColumn(int jdbcType) {
+        return switch (jdbcType) {
+            case Types.BLOB, Types.CLOB, Types.NCLOB, Types.SQLXML,
+                    Types.LONGVARCHAR, Types.LONGNVARCHAR, Types.LONGVARBINARY,
+                    Types.OTHER, Types.JAVA_OBJECT, Types.NULL -> true;
+            default -> false;
+        };
     }
 
-    private Object materialize(Object value) throws SQLException {
+    private Object materialize(Object value, boolean limitMaterialized) throws SQLException {
         if (value == null) {
             return null;
         }
@@ -97,10 +118,10 @@ public final class JdbcDynamicRowFactory {
         if (value instanceof Clob clob) {
             return readClob(clob);
         }
-        if (value instanceof byte[] bytes) {
+        if (limitMaterialized && value instanceof byte[] bytes) {
             requireWithinLimit(SqlLargeObjectLimitExceededException.Kind.BINARY,
                                options.maxLargeObjectBytes(), bytes.length);
-        } else if (value instanceof CharSequence text) {
+        } else if (limitMaterialized && value instanceof CharSequence text) {
             requireWithinLimit(SqlLargeObjectLimitExceededException.Kind.CHARACTER,
                                options.maxLargeObjectChars(), text.length());
         }

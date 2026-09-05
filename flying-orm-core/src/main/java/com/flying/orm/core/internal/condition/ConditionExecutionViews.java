@@ -46,7 +46,7 @@ public final class ConditionExecutionViews {
                 valueCodecs, "condition value codecs must not be null");
         OwnedBindableValues.Buffer parameters = OwnedBindableValues.buffer(view.parameterCount());
         for (Object source : view.parameterSources()) {
-            parameters.add(safeCodecs.write(BindableValueSnapshots.immutableValue(source)));
+            parameters.add(safeCodecs.write(BindableValueSnapshots.logicalValue(source)));
         }
         return parameters.publish();
     }

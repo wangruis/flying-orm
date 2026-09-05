@@ -63,7 +63,7 @@ public record BatchOptimisticUpdate(Map<String, Object> values,
      */
     private static Map<String, Object> snapshotValues(Map<String, Object> source) {
         Map<String, Object> snapshot = new LinkedHashMap<>(source.size());
-        source.forEach((name, value) -> snapshot.put(name, BindableValueSnapshots.immutableValue(value)));
+        source.forEach((name, value) -> snapshot.put(name, BindableValueSnapshots.logicalValue(value)));
         return Collections.unmodifiableMap(snapshot);
     }
 }

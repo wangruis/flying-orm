@@ -7,7 +7,8 @@ import com.flying.orm.core.metadata.CheckConstraintDefinition;
 import com.flying.orm.core.metadata.ForeignKeyDefinition;
 import com.flying.orm.core.metadata.IndexDefinition;
 import com.flying.orm.core.metadata.PrimaryKeyDefinition;
-import com.flying.orm.core.metadata.RelationalMetadataFingerprint;
+import com.flying.orm.core.metadata.RelationalSchemaDefinition;
+import com.flying.orm.core.metadata.RelationalSchemaFingerprint;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 import com.flying.orm.rdb.internal.InternalApi;
@@ -16,6 +17,7 @@ import com.flying.orm.rdb.internal.mapping.EntityRelationalMetadataCompiler;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -37,6 +39,7 @@ public final class EntitySchemaDescriptor<T> {
     private final EntityMetadata<T> metadata;
     private final DynamicForm form;
     private final RelationalTableDefinition table;
+    private final RelationalSchemaDefinition schema;
     private final ValueCodecRegistry valueCodecs;
     private final Map<String, EntityTypeMappingRegistry.Mapping> customFieldMappings;
     private final Map<DynamicField, EntityTypeMappingRegistry.Mapping> customFieldCodecs;
@@ -46,10 +49,16 @@ public final class EntitySchemaDescriptor<T> {
     private EntitySchemaDescriptor(EntityTypeMappingRegistry typeMappings,
                                    EntityMetadata<T> metadata,
                                    RelationalTableDefinition table,
+                                   RelationalSchemaDefinition schema,
                                    Map<String, EntityTypeMappingRegistry.Mapping> fieldMappings) {
         this.typeMappings = Objects.requireNonNull(typeMappings, "entity type mappings must not be null");
         this.metadata = Objects.requireNonNull(metadata, "entity metadata must not be null");
         this.table = Objects.requireNonNull(table, "relational table must not be null");
+        this.schema = Objects.requireNonNull(schema, "relational schema must not be null");
+        if (schema.tables().isEmpty() || schema.tables().getFirst() != table) {
+            throw new IllegalArgumentException(
+                    "relational schema must publish its primary table first");
+        }
         form = Objects.requireNonNull(metadata.toDynamicForm(), "entity dynamic form must not be null");
         if (form != metadata.toDynamicForm()) {
             throw new IllegalArgumentException("entity metadata must publish one stable dynamic form");
@@ -81,7 +90,7 @@ public final class EntitySchemaDescriptor<T> {
                                              "entity value codecs must not be null");
         typeMappingsFingerprint = Objects.requireNonNull(typeMappings.fingerprint(),
                                                          "entity type mappings fingerprint must not be null");
-        relationalFingerprint = RelationalMetadataFingerprint.of(table);
+        relationalFingerprint = RelationalSchemaFingerprint.of(schema);
     }
 
     /** 创建实体完整关系描述的构建器。 */
@@ -98,7 +107,7 @@ public final class EntitySchemaDescriptor<T> {
     public static <T> EntitySchemaDescriptor<T> create(EntityTypeMappingRegistry typeMappings,
                                                         EntityMetadata<T> metadata,
                                                         RelationalTableDefinition table) {
-        return new EntitySchemaDescriptor<>(typeMappings, metadata, table, Map.of());
+        return create(typeMappings, metadata, RelationalSchemaDefinition.of(List.of(table)), Map.of());
     }
 
     /** 统一编译器发布字段级精确映射时使用；普通业务代码仍通过 builder 创建描述。 */
@@ -108,7 +117,23 @@ public final class EntitySchemaDescriptor<T> {
             EntityMetadata<T> metadata,
             RelationalTableDefinition table,
             Map<String, EntityTypeMappingRegistry.Mapping> fieldMappings) {
-        return new EntitySchemaDescriptor<>(typeMappings, metadata, table, fieldMappings);
+        return create(typeMappings, metadata, RelationalSchemaDefinition.of(List.of(table)), fieldMappings);
+    }
+
+    /** 内部统一编译器发布完整最终物理 Schema 时使用。 */
+    @InternalApi
+    public static <T> EntitySchemaDescriptor<T> create(
+            EntityTypeMappingRegistry typeMappings,
+            EntityMetadata<T> metadata,
+            RelationalSchemaDefinition schema,
+            Map<String, EntityTypeMappingRegistry.Mapping> fieldMappings) {
+        RelationalSchemaDefinition safeSchema = Objects.requireNonNull(
+                schema, "relational schema must not be null");
+        if (safeSchema.tables().isEmpty()) {
+            throw new IllegalArgumentException("relational schema must contain a primary table");
+        }
+        return new EntitySchemaDescriptor<>(typeMappings, metadata,
+                safeSchema.tables().getFirst(), safeSchema, fieldMappings);
     }
 
     /** @return 本描述使用的不可变类型映射注册表 */
@@ -129,6 +154,11 @@ public final class EntitySchemaDescriptor<T> {
     /** @return Schema、迁移和 DDL 共用的规范关系定义 */
     public RelationalTableDefinition table() {
         return table;
+    }
+
+    /** @return 主关系在首位、并包含保护辅助关系的完整最终物理 Schema */
+    public RelationalSchemaDefinition schema() {
+        return schema;
     }
 
     /** @return 类型映射注册表派生的只读值转换注册表 */

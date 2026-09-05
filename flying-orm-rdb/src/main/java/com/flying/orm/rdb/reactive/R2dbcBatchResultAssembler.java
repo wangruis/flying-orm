@@ -105,7 +105,8 @@ final class R2dbcBatchResultAssembler {
                                                     chunk.startOffset(),
                                                     chunk.rows().size(),
                                                     conflict.conflicts()));
-        } else if (error instanceof R2dbcBatchChunkWriteFailure failure) {
+        } else if (error instanceof R2dbcBatchChunkWriteFailure failure
+                && !containsChunk(committed, failure.chunk())) {
             R2dbcBatchWriterChunks.BatchChunk chunk = failure.chunk();
             results.add(BatchChunkResult.failed(chunk.chunkIndex(),
                                                 chunk.startOffset(),
@@ -241,7 +242,7 @@ final class R2dbcBatchResultAssembler {
                                                            cause,
                                                            recoveryToken));
         }
-        if (activeChunk != null) {
+        if (activeChunk != null && !containsChunk(committed, activeChunk)) {
             results.add(recoveryToken == null
                                 ? BatchChunkResult.unknown(activeChunk.chunkIndex(),
                                                            activeChunk.startOffset(),
@@ -254,6 +255,16 @@ final class R2dbcBatchResultAssembler {
                                                            recoveryToken));
         }
         return results;
+    }
+
+    /**
+     * 截止时间可能正好落在“完成结果已记录、活动标记尚未清除”的交接瞬间。
+     * 这里只在失败结果组装的冷路径按稳定分片位置去重，避免同一输入被报告两次。
+     */
+    private static boolean containsChunk(List<BatchChunkResult> completed,
+                                         R2dbcBatchWriterChunks.BatchChunk candidate) {
+        return completed.stream().anyMatch(chunk -> chunk.chunkIndex() == candidate.chunkIndex()
+                && chunk.startOffset() == candidate.startOffset());
     }
 
     /** 补记已经在执行边界完成快照、但尚未形成完整分片的输入行；这里只保留数量，不保留参数值。 */

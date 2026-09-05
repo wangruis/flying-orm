@@ -30,9 +30,9 @@ class CompleteSchemaMetadataReaderParityTest {
         assertTrue(columns.contains("lower(c.DATA_TYPE) in ('timestamp', 'datetime')"));
         assertTrue(columns.contains("'^current_timestamp([(][0-6]?[)])?$'"));
         assertTrue(columns.contains("lower(c.DATA_TYPE) = 'date'"));
-        assertTrue(columns.contains("'^current_date([(][)])?$'"));
+        assertTrue(columns.contains("'^(current_date|curdate)([(][)])?$'"));
         assertTrue(columns.contains("lower(c.DATA_TYPE) = 'time'"));
-        assertTrue(columns.contains("'^current_time([(][0-6]?[)])?$'"));
+        assertTrue(columns.contains("'^(current_time|curtime)([(][0-6]?[)])?$'"));
     }
 
     @Test

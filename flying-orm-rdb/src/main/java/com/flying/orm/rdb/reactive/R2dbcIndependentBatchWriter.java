@@ -100,16 +100,20 @@ final class R2dbcIndependentBatchWriter {
                                resource -> {
                                    R2dbcBatchDeadline deadline = R2dbcBatchDeadline.start(
                                            request.options().timeout());
+                                   AtomicReference<BatchChunkResult> executed = deadline.timeout().isZero()
+                                           ? null : new AtomicReference<>();
                                    return deadline.protect(
                                            connections.begin(resource)
                                                .then(chunks.executeChunk(resource, request, chunk, transportSql))
-                                               .flatMap(result -> commit(request, resource, result, null))
-                                               .onErrorResume(error -> resource.state()
-                                                       == BatchTransactionState.COMMITTING
-                                                               ? Mono.error(error)
-                                                               : rollback(resource, chunk, error, null)))
+                                               .flatMap(result -> {
+                                                   if (executed != null) {
+                                                       executed.set(result);
+                                                   }
+                                                   return commit(request, resource, result, null);
+                                               })
+                                               .onErrorResume(error -> rollback(resource, chunk, error, null)))
                                                   .onErrorResume(TimeoutException.class,
-                                                                 error -> timeout(resource, chunk, error, null));
+                                                           error -> timeout(resource, chunk, error, null, executed));
                                },
                                connections::closeAfterOutcome,
                               (resource, ignored) -> connections.closeAfterOutcome(resource),
@@ -193,6 +197,7 @@ final class R2dbcIndependentBatchWriter {
             AtomicReference<BatchChunkResult.RecoveryToken> token,
             R2dbcBatchDeadline deadline,
             String transportSql) {
+        AtomicReference<BatchChunkResult> executed = deadline.timeout().isZero() ? null : new AtomicReference<>();
         return deadline.protect(connections.begin(resource)
                    .then(receiptStore.reserve(resource.connection(),
                                               request.options().recovery(),
@@ -200,13 +205,15 @@ final class R2dbcIndependentBatchWriter {
                                               planHash)
                                      .onErrorMap(R2dbcBatchReceiptReservationConflict::classify))
                    .then(chunks.executeChunk(resource, request, chunk, transportSql))
-                   .flatMap(result -> completeReceiptAndCommit(
-                           resource, request, result, planHash, payloadHash, token))
-                    .onErrorResume(error -> resource.state() == BatchTransactionState.COMMITTING
-                            ? Mono.error(error)
-                            : rollback(resource, chunk, error, token.get())))
+                   .flatMap(result -> {
+                       if (executed != null) {
+                           executed.set(result);
+                       }
+                       return completeReceiptAndCommit(resource, request, result, planHash, payloadHash, token);
+                   })
+                    .onErrorResume(error -> rollback(resource, chunk, error, token.get())))
                        .onErrorResume(TimeoutException.class,
-                                      error -> timeout(resource, chunk, error, token.get()));
+                                      error -> timeout(resource, chunk, error, token.get(), executed));
     }
 
     private Mono<BatchChunkResult> completeReceiptAndCommit(
@@ -239,12 +246,6 @@ final class R2dbcIndependentBatchWriter {
                                           BatchChunkResult.RecoveryToken recoveryToken) {
         return connections.commit(resource)
                    .thenReturn(result)
-                   .doOnNext(committed -> {
-                       // commit 已确认而 close 尚未结束时，取消也不能撤销实体的已提交主键。
-                       if (request.completion() instanceof BatchChunkCompletion completion) {
-                           completion.afterChunk(committed);
-                       }
-                   })
                    .onErrorResume(error -> {
                        BatchChunkResult unknown = R2dbcBatchChunkWriteFailure.unknownResult(
                                result, error, recoveryToken);
@@ -255,6 +256,17 @@ final class R2dbcIndependentBatchWriter {
                                    BatchWriteResult.from(BatchWriteOptions.Mode.INDEPENDENT, List.of(unknown))));
                        }
                        return Mono.just(unknown);
+                   })
+                   .doOnNext(committed -> {
+                       // 通知仍在连接归还前，但通知故障不能改写驱动已经确认的提交结果。
+                       if (committed.status() == BatchChunkResult.Status.COMMITTED
+                               && request.completion() instanceof BatchChunkCompletion completion) {
+                           try {
+                               completion.afterChunk(committed);
+                           } catch (Throwable failure) {
+                               throw R2dbcBatchChunkWriteFailure.exact(committed, failure);
+                           }
+                       }
                    });
     }
 
@@ -262,6 +274,10 @@ final class R2dbcIndependentBatchWriter {
                                             R2dbcBatchWriterChunks.BatchChunk chunk,
                                             Throwable error,
                                             BatchChunkResult.RecoveryToken recoveryToken) {
+        BatchTransactionState state = resource.state();
+        if (state != BatchTransactionState.NEW && state != BatchTransactionState.ACTIVE) {
+            return Mono.error(error);
+        }
         if (R2dbcBatchReceiptReservationConflict.find(error) != null) {
             return rollbackReservationConflict(resource, error);
         }
@@ -363,23 +379,21 @@ final class R2dbcIndependentBatchWriter {
                 : Mono.error(failure);
     }
 
-    /**
-     * 将已持有连接后的总截止超时转换为与事务阶段一致的分片结果。
-     *
-     * <p>NEW 和 COMMITTING 都没有可确认的事务回执，不能按失败处理；ACTIVE 则仍先等待 rollback 回执，
-     * 保持普通执行超时的既有失败语义。</p>
-     */
+    /** 总截止只能终止未确认的工作，已确认的事务终态和原始影响行数不再改变。 */
     private Mono<BatchChunkResult> timeout(R2dbcBatchConnectionHandle resource,
                                            R2dbcBatchWriterChunks.BatchChunk chunk,
                                            TimeoutException error,
-                                           BatchChunkResult.RecoveryToken recoveryToken) {
-        if (resource.state() == BatchTransactionState.NEW
-                || resource.state() == BatchTransactionState.COMMITTING
-                || resource.state() == BatchTransactionState.ROLLING_BACK) {
-            return Mono.error(R2dbcBatchChunkWriteFailure.unknown(chunk, error, recoveryToken));
-        }
-        return rollback(resource, chunk, error, recoveryToken)
-                .flatMap(result -> Mono.error(R2dbcBatchChunkWriteFailure.exact(result, error)));
+                                           BatchChunkResult.RecoveryToken recoveryToken,
+                                           AtomicReference<BatchChunkResult> executed) {
+        return switch (resource.state()) {
+            case COMMITTED -> Mono.just(Objects.requireNonNull(executed.get()));
+            case NEW, COMMITTING, ROLLING_BACK ->
+                    Mono.error(R2dbcBatchChunkWriteFailure.unknown(chunk, error, recoveryToken));
+            case ROLLED_BACK -> Mono.error(R2dbcBatchChunkWriteFailure.exact(
+                    BatchChunkResult.failed(chunk.chunkIndex(), chunk.startOffset(), chunk.rows().size(), error), error));
+            case ACTIVE -> rollback(resource, chunk, error, recoveryToken)
+                    .flatMap(result -> Mono.error(R2dbcBatchChunkWriteFailure.exact(result, error)));
+        };
     }
 
 }

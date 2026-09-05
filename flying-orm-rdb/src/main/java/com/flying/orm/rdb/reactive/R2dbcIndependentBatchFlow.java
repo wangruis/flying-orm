@@ -101,10 +101,27 @@ final class R2dbcIndependentBatchFlow {
                                 .map(ChunkOutcome::completed).flux()
                                 .onErrorResume(error -> stoppedChunk(chunk, error, stop));
                         return completion == null ? outcome
-                                : outcome.doOnNext(settled -> completion.afterChunk(settled.result()));
+                                : outcome.map(settled -> notifyCompletion(completion, settled, stop));
                     },
                              safeRequest.options().concurrency(), 1);
         });
+    }
+
+    /** 完成通知失败也必须保留该片已知结果；失败收口中的再次通知不能丢掉原异常。 */
+    private static ChunkOutcome notifyCompletion(BatchChunkCompletion completion,
+                                                  ChunkOutcome outcome,
+                                                  Sinks.Empty<Void> stop) {
+        try {
+            completion.afterChunk(outcome.result());
+            return outcome;
+        } catch (Throwable failure) {
+            stop.tryEmitEmpty();
+            if (outcome.stopFailure() != null) {
+                addSuppressedIfAcyclic(outcome.stopFailure(), failure);
+                return outcome;
+            }
+            return ChunkOutcome.stopped(outcome.result(), failure);
+        }
     }
 
     private Flux<ChunkOutcome> completeChunks(BatchWriteRequest request, Flux<ChunkOutcome> outcomes) {

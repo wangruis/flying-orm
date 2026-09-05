@@ -104,7 +104,7 @@ public final class SqlTemplateOperator {
 
     /** 使用实体缓存映射计划执行类型化查询。 */
     public <T> Flux<T> query(Class<T> type) {
-        return query(entityModels.rowMapper(Objects.requireNonNull(type, "query result type must not be null"),
+        return query(entityModels.rawRowMapper(Objects.requireNonNull(type, "query result type must not be null"),
                                             valueCodecs));
     }
 

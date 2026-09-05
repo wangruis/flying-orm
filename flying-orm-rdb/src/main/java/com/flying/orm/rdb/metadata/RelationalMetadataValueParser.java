@@ -35,7 +35,8 @@ final class RelationalMetadataValueParser {
                     + "(?:\\s+(?:varying|precision|with\\s+time\\s+zone|without\\s+time\\s+zone))?"
                     + "(?:\\s*\\[\\s*\\])?)+\\s*");
     private static final Pattern MYSQL_TEMPORAL_KEYWORD_PRECISION = Pattern.compile(
-            "(?i)^(CURRENT_TIME|CURRENT_TIMESTAMP)\\s*\\(\\s*\\d+\\s*\\)$");
+            "(?i)^(CURRENT_TIME|CURTIME|CURRENT_TIMESTAMP)\\s*\\(\\s*\\d+\\s*\\)$");
+    private static final Pattern ORACLE_TEMPORAL_LITERAL = Pattern.compile("(?i)(DATE|TIMESTAMP)\\s*'([^']*)'");
     private static final Pattern SQL_SERVER_TEMPORAL_CAST = Pattern.compile(
             "(?i)^CAST\\(\\s*(?:CURRENT_TIMESTAMP|GETDATE\\(\\))\\s+AS\\s+(DATE|TIME)\\s*\\)$");
     private static final Pattern SQL_SERVER_TEMPORAL_CONVERT = Pattern.compile(
@@ -86,6 +87,13 @@ final class RelationalMetadataValueParser {
             return ColumnDefault.currentTimestamp();
         }
         String keyword = keywordValue.replace("()", "").toUpperCase(Locale.ROOT);
+        if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL) {
+            keyword = switch (keyword) {
+                case "CURDATE" -> "CURRENT_DATE";
+                case "CURTIME" -> "CURRENT_TIME";
+                default -> keyword;
+            };
+        }
         if ("CURRENT_DATE".equals(keyword)
                 && acceptsTemporalKeyword(keyword, databaseType.logicalType(), dialect)) {
             return ColumnDefault.currentDate();
@@ -100,6 +108,13 @@ final class RelationalMetadataValueParser {
         }
 
         String literal = stripPostgresqlLiteralCast(value, dialect);
+        if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE) {
+            var temporal = ORACLE_TEMPORAL_LITERAL.matcher(literal);
+            if (temporal.matches()) {
+                return ColumnDefault.literal(oracleTemporalLiteral(
+                        temporal.group(1), temporal.group(2), databaseType));
+            }
+        }
         if (isQuotedString(literal)) {
             return ColumnDefault.literal(convertString(unquoteString(literal), databaseType.logicalType()));
         }
@@ -148,6 +163,27 @@ final class RelationalMetadataValueParser {
         } catch (RuntimeException error) {
             throw new IllegalStateException("typed schema literal cannot be parsed safely", error);
         }
+    }
+
+    private static Object oracleTemporalLiteral(String keyword, String value, DatabaseType type) {
+        if ("DATE".equalsIgnoreCase(keyword)
+                && (type.logicalType() == LogicalType.DATE || "ORACLE_DATE".equals(type.baseName()))) {
+            // 物理 Oracle DATE 被映射为 ORACLE_DATE；ANSI DATE 自身仍是无时间部分的 LocalDate。
+            return convertString(value, LogicalType.DATE);
+        }
+        if ("TIMESTAMP".equalsIgnoreCase(keyword)) {
+            if (type.logicalType() == LogicalType.TIMESTAMP) {
+                return convertString(value, LogicalType.TIMESTAMP);
+            }
+            if (type.logicalType() == LogicalType.OFFSET_TIMESTAMP) {
+                int offsetSeparator = value.lastIndexOf(' ');
+                if (offsetSeparator > 10) {
+                    return convertString(value.substring(0, offsetSeparator).replace(' ', 'T')
+                            + value.substring(offsetSeparator + 1), LogicalType.OFFSET_TIMESTAMP);
+                }
+            }
+        }
+        throw new IllegalStateException("typed Oracle schema literal cannot be represented safely");
     }
 
     private static Object number(String value, LogicalType type) {
@@ -283,6 +319,8 @@ final class RelationalMetadataValueParser {
     private enum TokenType {
         IDENTIFIER,
         STRING,
+        DATE_LITERAL,
+        TIMESTAMP_LITERAL,
         NUMBER,
         TRUE,
         FALSE,
@@ -420,6 +458,8 @@ final class RelationalMetadataValueParser {
             advance();
             Object value = switch (token.type()) {
                 case STRING -> convertString(token.text(), type.logicalType());
+                case DATE_LITERAL -> oracleTemporalLiteral("DATE", token.text(), type);
+                case TIMESTAMP_LITERAL -> oracleTemporalLiteral("TIMESTAMP", token.text(), type);
                 case NUMBER -> checkNumber(token.text(), type.logicalType(), dialect);
                 case TRUE -> true;
                 case FALSE -> false;
@@ -557,6 +597,15 @@ final class RelationalMetadataValueParser {
                 return new Token(TokenType.END, "");
             }
             char value = source.charAt(index);
+            if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE
+                    && (value == 'D' || value == 'd' || value == 'T' || value == 't')) {
+                var temporal = ORACLE_TEMPORAL_LITERAL.matcher(source).region(index, source.length());
+                if (temporal.lookingAt()) {
+                    index = temporal.end();
+                    return new Token("DATE".equalsIgnoreCase(temporal.group(1))
+                            ? TokenType.DATE_LITERAL : TokenType.TIMESTAMP_LITERAL, temporal.group(2));
+                }
+            }
             if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.H2
                     && (value == 'C' || value == 'c')) {
                 // H2 会给数值常量补 CAST；只识别当前词法位置，不改写字符串或引号内的标识符。

@@ -115,7 +115,7 @@ public final class NativeSqlOperator {
      * @return 类型化结果流
      */
     public <T> Flux<T> query(Class<T> type) {
-        return query(entityModels.rowMapper(type, valueCodecs));
+        return query(entityModels.rawRowMapper(type, valueCodecs));
     }
 
     /**

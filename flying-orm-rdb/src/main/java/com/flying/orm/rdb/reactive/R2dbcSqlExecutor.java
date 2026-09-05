@@ -239,11 +239,11 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
         SqlExecutionOptions safeOptions = Objects.requireNonNull(
                 options, "sql execution options must not be null");
         List<Object> executionParameters = R2dbcExecutionSession.snapshotExecutionParameters(safeRequest);
-        Mono<Long> source = executionSession.withPreparedStatementMono(
+        Mono<Long> source = executionSession.withPreparedStatementResource(
                 safeRequest, executionParameters, safeOptions, SqlExecutionOperation.UPDATE,
-                (statement, ignored) -> Flux.from(statement.execute())
+                (statement, ignored) -> executionSession.protectMono(Flux.from(statement.execute())
                         .flatMap(Result::getRowsUpdated)
-                        .reduce(0L, R2dbcExecutionCounts::add))
+                        .reduce(0L, R2dbcExecutionCounts::add), safeOptions))
                 .onErrorMap(ReactiveSqlExecutionProtection::translate);
         return observationSupport.observeMono(SqlExecutionOperation.UPDATE,
                                                safeRequest,

@@ -16,6 +16,12 @@ import com.flying.orm.core.sql.render.SqlRequest;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -44,12 +50,10 @@ public final class RelationalSchemaSqlRenderer {
     public static RelationalSchemaSqlRenderer create(SchemaDialect dialect) {
         return new RelationalSchemaSqlRenderer(dialect);
     }
-
     /** 渲染一项结构化 operation；返回顺序就是审核和执行顺序。 */
     public List<SqlRequest> render(SchemaOperation operation) {
         return render(operation, new LinkedHashMap<>());
     }
-
     List<SqlRequest> render(SchemaOperation operation, Map<String, String> existingSequences) {
         SchemaOperation source = Objects.requireNonNull(operation, "schema operation must not be null");
         Map<String, String> createdSequences = new LinkedHashMap<>();
@@ -107,6 +111,7 @@ public final class RelationalSchemaSqlRenderer {
                 .findFirst()
                 .orElse(ValueGeneration.none());
         String sql = "create table " + dialect.relationIdentifier(table.identity()) + " (" + definitions + ")"
+                + partitionClause(table)
                 + dialect.generatedTableClause(identity)
                 + dialect.inlineTableCommentClause(table.comment());
         requests.add(new SqlRequest(sql, List.of()));
@@ -122,7 +127,6 @@ public final class RelationalSchemaSqlRenderer {
         }
         return List.copyOf(requests);
     }
-
     private List<SqlRequest> addColumn(RelationIdentity relation, ColumnDefinition column,
                                       Map<String, String> existingSequences, Map<String, String> createdSequences) {
         List<SqlRequest> requests = new ArrayList<>();
@@ -133,11 +137,9 @@ public final class RelationalSchemaSqlRenderer {
                 .ifPresent(sql -> requests.add(new SqlRequest(sql, List.of())));
         return List.copyOf(requests);
     }
-
     private SqlRequest addConstraint(RelationIdentity relation, String definition) {
         return new SqlRequest("alter table " + dialect.relationIdentifier(relation) + " add " + definition, List.of());
     }
-
     private SqlRequest createIndex(RelationIdentity relation, IndexDefinition index) {
         String indexName = dialect.identifier(index.name());
         if (dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.ORACLE
@@ -195,12 +197,18 @@ public final class RelationalSchemaSqlRenderer {
                 return;
             }
             case LITERAL -> sql.append(" default ").append(literal(defaultValue.value().orElseThrow()));
-            case CURRENT_DATE -> sql.append(dialect.generatedValueStyle()
-                    == SchemaDialect.GeneratedValueStyle.SQL_SERVER
-                    ? " default (cast(current_timestamp as date))" : " default current_date");
-            case CURRENT_TIME -> sql.append(dialect.generatedValueStyle()
-                    == SchemaDialect.GeneratedValueStyle.SQL_SERVER
-                    ? " default (cast(current_timestamp as time))" : " default current_time");
+            case CURRENT_DATE -> sql.append(switch (dialect.generatedValueStyle()) {
+                case MYSQL -> " default (current_date)";
+                case SQL_SERVER -> " default (cast(current_timestamp as date))";
+                default -> " default current_date";
+            });
+            case CURRENT_TIME -> sql.append(switch (dialect.generatedValueStyle()) {
+                case MYSQL -> " default (current_time)";
+                case SQL_SERVER -> " default (cast(current_timestamp as time))";
+                case ORACLE -> throw new UnsupportedOperationException(
+                        "oracle cannot render a current-time default for text-backed TIME storage");
+                default -> " default current_time";
+            });
             case CURRENT_TIMESTAMP -> {
                 sql.append(" default current_timestamp");
                 if (dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.MYSQL
@@ -239,7 +247,7 @@ public final class RelationalSchemaSqlRenderer {
                 + " check (" + predicate(check.predicate()) + ')';
     }
     private String foreignKey(ForeignKeyDefinition foreignKey) {
-        validateForeignKeyActions(foreignKey);
+        RelationalTableDdlValidator.validate(foreignKey, dialect);
         String sql = namedColumns(foreignKey.name(), "foreign key", foreignKey.columns())
                 + " references " + dialect.relationIdentifier(foreignKey.reference())
                 + " (" + columns(foreignKey.referenceColumns()) + ')';
@@ -251,21 +259,6 @@ public final class RelationalSchemaSqlRenderer {
         }
         return sql;
     }
-
-    private void validateForeignKeyActions(ForeignKeyDefinition foreignKey) {
-        SchemaDialect.GeneratedValueStyle style = dialect.generatedValueStyle();
-        if (style == SchemaDialect.GeneratedValueStyle.ORACLE
-                && foreignKey.onUpdate() != ReferentialAction.NO_ACTION) {
-            throw new UnsupportedOperationException("oracle does not support ON UPDATE actions");
-        }
-        if ((style == SchemaDialect.GeneratedValueStyle.ORACLE
-                || style == SchemaDialect.GeneratedValueStyle.SQL_SERVER)
-                && (foreignKey.onDelete() == ReferentialAction.RESTRICT
-                || foreignKey.onUpdate() == ReferentialAction.RESTRICT)) {
-            throw new UnsupportedOperationException("current dialect does not support RESTRICT actions");
-        }
-    }
-
     private String namedColumns(String name, String kind, List<String> columns) {
         return "constraint " + dialect.identifier(name) + ' ' + kind + " (" + columns(columns) + ')';
     }
@@ -274,7 +267,6 @@ public final class RelationalSchemaSqlRenderer {
         columns.forEach(column -> values.add(dialect.identifier(column)));
         return values.toString();
     }
-
     private String predicate(CheckPredicate predicate) {
         return switch (predicate) {
             case CheckPredicate.Comparison comparison -> dialect.identifier(comparison.column()) + ' '
@@ -318,7 +310,26 @@ public final class RelationalSchemaSqlRenderer {
         if (value instanceof Enum<?> enumeration) {
             return dialect.valueLiteral(enumeration.name());
         }
+        if (dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.ORACLE) {
+            // 普通字符串到 Oracle DATE/TIMESTAMP 的隐式转换依赖 NLS；保留受控值的时间类型。
+            return switch (value) {
+                case LocalDate date -> "date " + dialect.valueLiteral(date.toString());
+                case LocalDateTime timestamp -> oracleTimestampLiteral(timestamp, null);
+                case OffsetDateTime timestamp -> oracleTimestampLiteral(
+                        timestamp.toLocalDateTime(), timestamp.getOffset());
+                case Instant instant -> oracleTimestampLiteral(
+                        LocalDateTime.ofInstant(instant, ZoneOffset.UTC), ZoneOffset.UTC);
+                default -> dialect.valueLiteral(value.toString());
+            };
+        }
         return dialect.valueLiteral(value.toString());
+    }
+    private String oracleTimestampLiteral(LocalDateTime timestamp, ZoneOffset offset) {
+        String value = DateTimeFormatter.ISO_LOCAL_DATE_TIME.format(timestamp).replace('T', ' ');
+        if (offset != null) {
+            value += " " + (offset.equals(ZoneOffset.UTC) ? "+00:00" : offset.getId());
+        }
+        return "timestamp " + dialect.valueLiteral(value);
     }
 
     private static String comparisonOperator(CheckPredicate.ComparisonOperator operator) {
@@ -338,12 +349,12 @@ public final class RelationalSchemaSqlRenderer {
     private static List<SqlRequest> one(SqlRequest request) {
         return List.of(request);
     }
-
     private static UnsupportedOperationException unsupported(SchemaOperation.Kind kind) {
         return new UnsupportedOperationException("relational schema operation requires manual SQL: " + kind);
     }
 
     private void validateTableOptions(RelationalTableDefinition table) {
+        RelationalTableDdlValidator.validate(table, dialect);
         List<ColumnDefinition> identities = table.columns().stream()
                 .filter(column -> column.generation().strategy() == ValueGeneration.Strategy.IDENTITY)
                 .toList();
@@ -366,5 +377,10 @@ public final class RelationalSchemaSqlRenderer {
         if (!primaryKeyColumns.getFirst().equals(identity)) {
             throw new UnsupportedOperationException("mysql identity column must be the first primary-key column");
         }
+    }
+    private String partitionClause(RelationalTableDefinition table) {
+        return table.partition().map(partition -> switch (partition.strategy()) {
+            case RANGE -> " partition by range (" + dialect.identifier(partition.column()) + ')';
+        }).orElse("");
     }
 }

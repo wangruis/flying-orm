@@ -9,6 +9,7 @@ import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.RelationalMetadataAdapter;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.metadata.TablePartitionDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 
 import java.util.EnumSet;
@@ -84,6 +85,7 @@ public final class SchemaSnapshot {
     private final Observed<List<IndexDefinition>> indexes;
     private final Observed<List<ForeignKeyDefinition>> foreignKeys;
     private final Observed<List<CheckConstraintDefinition>> checks;
+    private final Observed<TablePartitionDefinition> partition;
     private final Set<UnknownAttribute> unknownAttributes;
     private final RelationalTableDefinition knownDefinition;
 
@@ -97,6 +99,7 @@ public final class SchemaSnapshot {
         indexes = copyList(builder.indexes);
         foreignKeys = copyList(builder.foreignKeys);
         checks = copyList(builder.checks);
+        partition = builder.partition;
         unknownAttributes = Set.copyOf(builder.unknownAttributes);
 
         if (tableState != State.PRESENT) {
@@ -125,6 +128,7 @@ public final class SchemaSnapshot {
                 .indexes(source.indexes())
                 .foreignKeys(source.foreignKeys())
                 .checks(source.checks());
+        source.partition().ifPresentOrElse(builder::partition, builder::partitionAbsent);
         if (source.comment() == null) {
             builder.tableCommentAbsent();
         } else {
@@ -182,44 +186,38 @@ public final class SchemaSnapshot {
     public RelationIdentity identity() {
         return identity;
     }
-
     public State tableState() {
         return tableState;
     }
-
     /** 表注释也是物理结构事实；UNKNOWN 不能当作“数据库没有注释”。 */
     public Observed<String> tableComment() {
         return tableComment;
     }
-
     public Observed<List<ColumnDefinition>> columns() {
         return columns;
     }
-
     public Observed<PrimaryKeyDefinition> primaryKey() {
         return primaryKey;
     }
-
     public Observed<List<UniqueConstraintDefinition>> uniqueConstraints() {
         return uniqueConstraints;
     }
-
     public Observed<List<IndexDefinition>> indexes() {
         return indexes;
     }
-
     public Observed<List<ForeignKeyDefinition>> foreignKeys() {
         return foreignKeys;
     }
-
     public Observed<List<CheckConstraintDefinition>> checks() {
         return checks;
     }
-
+    /** 分区定义与表是否存在一样属于数据库结构事实，不能把 UNKNOWN 当成未分区。 */
+    public Observed<TablePartitionDefinition> partition() {
+        return partition;
+    }
     public Set<UnknownAttribute> unknownAttributes() {
         return unknownAttributes;
     }
-
     /** 只有所有结构项都被数据库明确观察到时，才返回可直接参与精确 diff 的完整表。 */
     public Optional<RelationalTableDefinition> completeTable() {
         if (tableState != State.PRESENT
@@ -230,6 +228,7 @@ public final class SchemaSnapshot {
                 || indexes.state() != State.PRESENT
                 || foreignKeys.state() != State.PRESENT
                 || checks.state() != State.PRESENT
+                || partition.state() == State.UNKNOWN
                 || !unknownAttributes.isEmpty()) {
             return Optional.empty();
         }
@@ -256,6 +255,9 @@ public final class SchemaSnapshot {
         addPresent(indexes, table::addIndex);
         addPresent(foreignKeys, table::addForeignKey);
         addPresent(checks, table::addCheck);
+        if (partition.state() == State.PRESENT) {
+            table.partition(partition.value());
+        }
         return table.build();
     }
 
@@ -266,7 +268,8 @@ public final class SchemaSnapshot {
                 || uniqueConstraints.state() != State.UNKNOWN
                 || indexes.state() != State.UNKNOWN
                 || foreignKeys.state() != State.UNKNOWN
-                || checks.state() != State.UNKNOWN) {
+                || checks.state() != State.UNKNOWN
+                || partition.state() != State.UNKNOWN) {
             throw new IllegalArgumentException("absent or unknown table snapshot must not contain table details");
         }
     }
@@ -297,6 +300,7 @@ public final class SchemaSnapshot {
         private Observed<List<IndexDefinition>> indexes = Observed.unknown();
         private Observed<List<ForeignKeyDefinition>> foreignKeys = Observed.unknown();
         private Observed<List<CheckConstraintDefinition>> checks = Observed.unknown();
+        private Observed<TablePartitionDefinition> partition = Observed.unknown();
         private final EnumSet<UnknownAttribute> unknownAttributes = EnumSet.noneOf(UnknownAttribute.class);
 
         private Builder(RelationIdentity identity) {
@@ -361,6 +365,17 @@ public final class SchemaSnapshot {
 
         public Builder checks(List<CheckConstraintDefinition> value) {
             checks = observedList(value, "check constraints must not be null");
+            return this;
+        }
+
+        public Builder partition(TablePartitionDefinition value) {
+            partition = Observed.present(Objects.requireNonNull(
+                    value, "table partition must not be null"));
+            return this;
+        }
+
+        public Builder partitionAbsent() {
+            partition = Observed.absent();
             return this;
         }
 

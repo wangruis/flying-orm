@@ -22,9 +22,9 @@ public record LogicDeleteDefinition(FieldIdentity identity, Object notDeletedVal
 
     public LogicDeleteDefinition {
         identity = Objects.requireNonNull(identity, "logic delete field identity must not be null");
-        notDeletedValue = BindableValueSnapshots.immutableValue(
+        notDeletedValue = BindableValueSnapshots.logicalValue(
                 Objects.requireNonNull(notDeletedValue, "logic not deleted value must not be null"));
-        deletedValue = BindableValueSnapshots.immutableValue(
+        deletedValue = BindableValueSnapshots.logicalValue(
                 Objects.requireNonNull(deletedValue, "logic deleted value must not be null"));
     }
 
@@ -44,7 +44,7 @@ public record LogicDeleteDefinition(FieldIdentity identity, Object notDeletedVal
      */
     @Override
     public Object notDeletedValue() {
-        return BindableValueSnapshots.immutableValue(notDeletedValue);
+        return BindableValueSnapshots.logicalValue(notDeletedValue);
     }
 
     /**
@@ -54,7 +54,7 @@ public record LogicDeleteDefinition(FieldIdentity identity, Object notDeletedVal
      */
     @Override
     public Object deletedValue() {
-        return BindableValueSnapshots.immutableValue(deletedValue);
+        return BindableValueSnapshots.logicalValue(deletedValue);
     }
 
     public static LogicDeleteDefinition of(String fieldName, Object notDeletedValue, Object deletedValue) {

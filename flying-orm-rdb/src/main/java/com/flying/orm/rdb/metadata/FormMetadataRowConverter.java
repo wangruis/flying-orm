@@ -13,6 +13,7 @@ import com.flying.orm.core.metadata.PrimaryKeyDefinition;
 import com.flying.orm.core.metadata.ReferentialAction;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.metadata.TablePartitionDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.sql.render.SqlIdentifiers;
@@ -131,7 +132,7 @@ final class FormMetadataRowConverter {
                 .indexes(toIndexDefinitions(indexRows))
                 .foreignKeys(toForeignKeyDefinitions(identity, foreignKeyRows))
                 .checks(toCheckConstraints(checkRows, columns, dialect));
-        applyTableComment(snapshot, tableRows);
+        applyTableFacts(snapshot, tableRows, dialect);
         PrimaryKeyDefinition primaryKey = toPrimaryKey(primaryKeyRows);
         if (primaryKey == null) {
             snapshot.primaryKeyAbsent();
@@ -247,19 +248,41 @@ final class FormMetadataRowConverter {
         return (int) cache;
     }
 
-    private static void applyTableComment(SchemaSnapshot.Builder snapshot,
-                                          List<? extends Map<String, Object>> rows) {
+    private static void applyTableFacts(
+            SchemaSnapshot.Builder snapshot,
+            List<? extends Map<String, Object>> rows,
+            InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
         Objects.requireNonNull(rows, "metadata table rows must not be null");
         if (rows.size() != 1) {
             throw new IllegalStateException("present table metadata must contain exactly one table row");
         }
-        requireRepresentable(rows.getFirst(), "TABLE_REPRESENTABLE", null, "table", "<current>");
-        String comment = optionalText(rows.getFirst(), "TABLE_COMMENT");
+        Map<String, Object> row = rows.getFirst();
+        requireRepresentable(
+                row, "TABLE_REPRESENTABLE", "UNSUPPORTED_TABLE_REASON", "table", "<current>");
+        String comment = optionalText(row, "TABLE_COMMENT");
         if (comment == null) {
             snapshot.tableCommentAbsent();
         } else {
             snapshot.tableComment(comment);
         }
+        applyTablePartition(snapshot, row, dialect);
+    }
+
+    private static void applyTablePartition(
+            SchemaSnapshot.Builder snapshot,
+            Map<String, Object> row,
+            InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
+        if (dialect != InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL
+                || !bool(row, "TABLE_PARTITIONED")) {
+            snapshot.partitionAbsent();
+            return;
+        }
+        String strategy = optionalText(row, "PARTITION_STRATEGY");
+        String column = optionalText(row, "PARTITION_COLUMN");
+        if (!"RANGE".equals(strategy) || column == null) {
+            throw new IllegalStateException("partition metadata cannot be represented safely");
+        }
+        snapshot.partition(TablePartitionDefinition.range(column));
     }
 
     private static PrimaryKeyDefinition toPrimaryKey(List<? extends Map<String, Object>> rows) {

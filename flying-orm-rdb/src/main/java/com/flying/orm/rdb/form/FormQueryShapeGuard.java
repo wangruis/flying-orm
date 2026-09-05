@@ -149,9 +149,7 @@ final class FormQueryShapeGuard {
         List<KeysetSort> sorts = page.sorts();
         for (int index = 0; index < sorts.size(); index++) {
             KeysetSort sort = sorts.get(index);
-            if (index < page.callerSortCount()) {
-                readableForm.field(sort.field());
-            }
+            readableForm.field(sort.field());
             requireUnencrypted(form, sort.field(),
                                "encrypted field must not be used for keyset ordering");
             var masking = form.protections().masked(sort.field()).orElse(null);

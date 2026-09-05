@@ -123,7 +123,7 @@ public final class SyncSqlTemplateOperator {
      * @return 映射后的全部结果
      */
     public <T> List<T> query(Class<T> type) {
-        return mappedQuery(entityModels.rowMapper(type, valueCodecs), 0);
+        return mappedQuery(entityModels.rawRowMapper(type, valueCodecs), 0);
     }
 
     /**
@@ -148,7 +148,7 @@ public final class SyncSqlTemplateOperator {
      * @return 零行时返回 null，否则返回唯一的映射结果
      */
     public <T> T one(Class<T> type) {
-        return SyncSqlResultOperations.one(mappedQuery(entityModels.rowMapper(type, valueCodecs), 2),
+        return SyncSqlResultOperations.one(mappedQuery(entityModels.rawRowMapper(type, valueCodecs), 2),
                                            "SQL template one()");
     }
 

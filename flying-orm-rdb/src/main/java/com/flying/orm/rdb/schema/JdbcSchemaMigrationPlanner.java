@@ -46,7 +46,7 @@ final class JdbcSchemaMigrationPlanner {
                              List<ForeignKeyMetadata> foreignKeys,
                              Function<String, TableMetadata> metadataLookup,
                              SchemaMigrationOptions options) {
-        DynamicForm safeForm = Objects.requireNonNull(form, "target dynamic form must not be null");
+        DynamicForm safeForm = SchemaMigrationSupport.requireLegacyRelation(form);
         Function<String, TableMetadata> safeLookup = Objects.requireNonNull(
                 metadataLookup, "schema metadata lookup must not be null");
         SchemaMigrationOptions safeOptions = Objects.requireNonNull(options,
@@ -70,7 +70,7 @@ final class JdbcSchemaMigrationPlanner {
                                        JdbcFormMetadataReader metadataReader,
                                        SchemaMigrationOptions migrationOptions,
                                        SchemaMigrationReviewPolicy reviewPolicy) {
-        DynamicForm safeForm = Objects.requireNonNull(form, "target dynamic form must not be null");
+        DynamicForm safeForm = SchemaMigrationSupport.requireLegacyRelation(form);
         JdbcFormMetadataReader safeReader = Objects.requireNonNull(
                 metadataReader, "jdbc form metadata reader must not be null");
         SchemaMigrationOptions safeOptions = Objects.requireNonNull(migrationOptions,

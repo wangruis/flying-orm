@@ -8,10 +8,7 @@ final class TextValueCodec implements ValueCodec {
     @Override
     public boolean supports(Class<?> targetType) {
         return targetType == String.class
-                || targetType == CharSequence.class
-                || targetType == StringBuilder.class
-                || targetType == StringBuffer.class
-                || targetType == CharBuffer.class
+                || CharSequence.class.isAssignableFrom(targetType)
                 || targetType == Character.class
                 || targetType == char[].class;
     }

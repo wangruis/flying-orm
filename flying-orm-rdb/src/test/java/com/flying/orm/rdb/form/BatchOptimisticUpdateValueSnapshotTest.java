@@ -11,13 +11,44 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class BatchOptimisticUpdateValueSnapshotTest {
+
+    @Test
+    void freezesMutableTextWithoutChangingTheLogicalCodecType() {
+        StringBuilder builder = new StringBuilder("builder");
+        StringBuffer buffer = new StringBuffer("buffer");
+        CharBuffer chars = CharBuffer.wrap(new char[]{'c', 'h', 'a', 'r'});
+        BatchOptimisticUpdate update = new BatchOptimisticUpdate(
+                Map.of("builder", builder, "buffer", buffer, "chars", chars),
+                ConditionGroup.and().where("id", "=", 1L).build(),
+                OptimisticLockOptions.increment("version", 1L));
+        builder.setCharAt(0, 'X');
+        buffer.setCharAt(0, 'X');
+        chars.put(0, 'X');
+
+        Map<String, Object> exported = update.values();
+        StringBuilder exportedBuilder = assertInstanceOf(StringBuilder.class, exported.get("builder"));
+        StringBuffer exportedBuffer = assertInstanceOf(StringBuffer.class, exported.get("buffer"));
+        CharBuffer exportedChars = assertInstanceOf(CharBuffer.class, exported.get("chars"));
+        assertEquals("builder", exportedBuilder.toString());
+        assertEquals("buffer", exportedBuffer.toString());
+        assertEquals("char", exportedChars.toString());
+        exportedBuilder.setCharAt(0, 'Y');
+        exportedBuffer.setCharAt(0, 'Y');
+        exportedChars.position(1);
+
+        assertEquals("builder", update.values().get("builder").toString());
+        assertEquals("buffer", update.values().get("buffer").toString());
+        assertEquals("char", update.values().get("chars").toString());
+    }
 
     @Test
     void freezesMutableUpdateValuesAtConstruction() {

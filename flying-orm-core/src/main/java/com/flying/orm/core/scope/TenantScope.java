@@ -23,7 +23,7 @@ public record TenantScope(String field, Object value) {
                                                    value,
                                                    ConditionValuePolicy.REJECT_EMPTY)
                                         .value();
-        value = BindableValueSnapshots.immutableValue(value);
+        value = BindableValueSnapshots.logicalValue(value);
     }
 
     public static TenantScope of(String field, Object value) {
@@ -32,7 +32,7 @@ public record TenantScope(String field, Object value) {
 
     @Override
     public Object value() {
-        return BindableValueSnapshots.immutableValue(value);
+        return BindableValueSnapshots.logicalValue(value);
     }
 
     /** 包内范围合并读取构造时已经拥有的值，不触发公共访问器的隔离副本。 */

@@ -95,7 +95,7 @@ final class SyncJoinOperations {
             JoinQueryPlanner.PlannedJoin plan,
             GovernedPlanEnvelope<JoinQueryPlanner.PlannedJoin> envelope) {
         return publishedRowMapper(
-                plan.spec(), plan.resultForm(), plan.options(), plan.resultPlan(),
+                plan.spec(), plan.resultForm(), plan.options(), plan.resultPlan(), plan.decodingPlan(),
                 governed ? envelope.fieldUse() : null);
     }
 
@@ -103,7 +103,7 @@ final class SyncJoinOperations {
             JoinQueryPlanner.PlannedJoinPage plan,
             GovernedPlanEnvelope<JoinQueryPlanner.PlannedJoinPage> envelope) {
         return publishedRowMapper(
-                plan.spec(), plan.resultForm(), plan.options(), plan.resultPlan(),
+                plan.spec(), plan.resultForm(), plan.options(), plan.resultPlan(), plan.decodingPlan(),
                 governed ? envelope.fieldUse() : null);
     }
 
@@ -112,10 +112,11 @@ final class SyncJoinOperations {
             com.flying.orm.core.form.DynamicForm resultForm,
             SqlExecutionOptions options,
             JoinResultProtector.ResultPlan resultPlan,
+            FormFieldDecodingPlan decodingPlan,
             FieldUseSnapshot fieldUse) {
         RowMapper<DynamicRow> rowDecoder = decoder.rowDecoder(
                 resultForm, options, com.flying.orm.core.scope.DataScope.none(),
-                com.flying.orm.core.protection.SensitiveDisplayMode.FULL);
+                com.flying.orm.core.protection.SensitiveDisplayMode.FULL, decodingPlan);
         return row -> {
             DynamicRow decoded = rowDecoder.map(row);
             DynamicRow transformed = resultPlan.direct()

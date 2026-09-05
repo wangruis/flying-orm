@@ -69,6 +69,6 @@ public record OptimisticLockOptions(String field,
     }
 
     private static Object snapshot(Object value) {
-        return BindableValueSnapshots.immutableValue(value);
+        return BindableValueSnapshots.logicalValue(value);
     }
 }

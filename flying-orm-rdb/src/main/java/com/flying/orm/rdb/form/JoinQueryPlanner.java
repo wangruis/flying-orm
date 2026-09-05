@@ -6,9 +6,9 @@ import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.join.JoinSource;
 import com.flying.orm.core.page.PageQuery;
-import com.flying.orm.core.scope.FieldScope;
 import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.scope.FieldUseRequirements;
+import com.flying.orm.core.scope.FieldUseSnapshot;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
@@ -52,7 +52,7 @@ final class JoinQueryPlanner {
                                        prepared.businessConditions()),
                                options == null ? defaultOptions : options,
                                prepared.scopes(),
-                               prepared.resultPlan());
+                               prepared.resultPlan(), prepared.decodingPlan());
     }
 
     GovernedPlanEnvelope<PlannedJoin> planGoverned(JoinQuerySpec spec,
@@ -64,15 +64,15 @@ final class JoinQueryPlanner {
         QueryShapeBudget budget = new QueryShapeBudget(limits);
         PreparedJoin prepared = prepare(safeSpec, requirements, budget,
                 FieldUseGuard.effectiveDisplayMode(policy, safeSpec.sensitiveDisplayMode()));
+        FieldUseSnapshot fieldUse = JoinFieldUseGuard.approve(
+                requirements.build(), prepared.scopes(), policy);
         SqlRequest request = renderer.joinQueries().select(
                 safeSpec, prepared.physicalForms(), prepared.protections(), prepared.businessConditions());
+        FieldUseGuard.accountRenderedRequest(budget, request);
         PlannedJoin plan = new PlannedJoin(safeSpec, prepared.resultForm(), request,
                                            options == null ? defaultOptions : options,
-                                           prepared.scopes(), prepared.resultPlan());
-        return new GovernedPlanEnvelope<>(
-                plan,
-                FieldUseGuard.approveCollected(safeSpec.root().form().id(), requirements.build(),
-                                               FieldScope.unrestricted(), request, policy, budget));
+                                           prepared.scopes(), prepared.resultPlan(), prepared.decodingPlan());
+        return new GovernedPlanEnvelope<>(plan, fieldUse);
     }
 
     PlannedJoinPage page(JoinQuerySpec spec, PageQuery page, SqlExecutionOptions options) {
@@ -88,7 +88,7 @@ final class JoinQueryPlanner {
                                    safePage,
                                    options == null ? defaultOptions : options,
                                    prepared.scopes(),
-                                   prepared.resultPlan());
+                                   prepared.resultPlan(), prepared.decodingPlan());
     }
 
     GovernedPlanEnvelope<PlannedJoinPage> pageGoverned(JoinQuerySpec spec,
@@ -102,18 +102,18 @@ final class JoinQueryPlanner {
         QueryShapeBudget budget = new QueryShapeBudget(limits);
         PreparedJoin prepared = prepare(safeSpec, requirements, budget,
                 FieldUseGuard.effectiveDisplayMode(policy, safeSpec.sensitiveDisplayMode()));
+        FieldUseSnapshot fieldUse = JoinFieldUseGuard.approve(
+                requirements.build(), prepared.scopes(), policy);
         JoinQuerySqlRenderer joins = renderer.joinQueries();
         SqlRequest count = joins.count(safeSpec, prepared.physicalForms(), prepared.protections(),
                                        prepared.businessConditions());
         SqlRequest data = joins.select(safeSpec, prepared.physicalForms(), prepared.protections(),
                                        prepared.businessConditions(), safePage);
+        FieldUseGuard.accountRenderedRequest(budget, data);
         PlannedJoinPage plan = new PlannedJoinPage(safeSpec, prepared.resultForm(), count, data, safePage,
                                                    options == null ? defaultOptions : options,
-                                                   prepared.scopes(), prepared.resultPlan());
-        return new GovernedPlanEnvelope<>(
-                plan,
-                FieldUseGuard.approveCollected(safeSpec.root().form().id(), requirements.build(),
-                                               FieldScope.unrestricted(), data, policy, budget));
+                                                   prepared.scopes(), prepared.resultPlan(), prepared.decodingPlan());
+        return new GovernedPlanEnvelope<>(plan, fieldUse);
     }
 
     private PreparedJoin prepare(JoinQuerySpec safeSpec) {
@@ -148,8 +148,10 @@ final class JoinQueryPlanner {
         }
         JoinResultProtector.ResultPlan resultPlan = results.plan(
                 safeSpec, effectiveScopes, displayMode);
-        return new PreparedJoin(JoinResultForms.create(safeSpec, physicalForms), physicalForms, protections,
-                                businessConditions, effectiveScopes, resultPlan);
+        DynamicForm resultForm = JoinResultForms.create(safeSpec, physicalForms);
+        return new PreparedJoin(resultForm, physicalForms, protections,
+                                businessConditions, effectiveScopes, resultPlan,
+                                FormFieldDecodingPlan.joinProjection(safeSpec, resultForm, renderer));
     }
 
     record PlannedJoin(JoinQuerySpec spec,
@@ -157,7 +159,8 @@ final class JoinQueryPlanner {
                        SqlRequest request,
                        SqlExecutionOptions options,
                        Map<JoinSource, com.flying.orm.core.scope.DataScope> scopes,
-                       JoinResultProtector.ResultPlan resultPlan) {
+                       JoinResultProtector.ResultPlan resultPlan,
+                       FormFieldDecodingPlan decodingPlan) {
         PlannedJoin {
             spec = Objects.requireNonNull(spec, "join query spec must not be null");
             resultForm = Objects.requireNonNull(resultForm, "join result form must not be null");
@@ -165,6 +168,7 @@ final class JoinQueryPlanner {
             options = Objects.requireNonNull(options, "join execution options must not be null");
             scopes = Map.copyOf(Objects.requireNonNull(scopes, "join scopes must not be null"));
             resultPlan = Objects.requireNonNull(resultPlan, "join result plan must not be null");
+            decodingPlan = Objects.requireNonNull(decodingPlan, "join decoding plan must not be null");
         }
     }
 
@@ -175,7 +179,8 @@ final class JoinQueryPlanner {
                            PageQuery page,
                            SqlExecutionOptions options,
                            Map<JoinSource, com.flying.orm.core.scope.DataScope> scopes,
-                           JoinResultProtector.ResultPlan resultPlan) {
+                           JoinResultProtector.ResultPlan resultPlan,
+                           FormFieldDecodingPlan decodingPlan) {
         PlannedJoinPage {
             spec = Objects.requireNonNull(spec, "join query spec must not be null");
             resultForm = Objects.requireNonNull(resultForm, "join result form must not be null");
@@ -185,6 +190,7 @@ final class JoinQueryPlanner {
             options = Objects.requireNonNull(options, "join execution options must not be null");
             scopes = Map.copyOf(Objects.requireNonNull(scopes, "join scopes must not be null"));
             resultPlan = Objects.requireNonNull(resultPlan, "join result plan must not be null");
+            decodingPlan = Objects.requireNonNull(decodingPlan, "join decoding plan must not be null");
         }
     }
 
@@ -194,6 +200,7 @@ final class JoinQueryPlanner {
             Map<JoinSource, ConditionGroup> protections,
             Map<JoinSource, ConditionGroup> businessConditions,
             Map<JoinSource, com.flying.orm.core.scope.DataScope> scopes,
-            JoinResultProtector.ResultPlan resultPlan) {
+            JoinResultProtector.ResultPlan resultPlan,
+            FormFieldDecodingPlan decodingPlan) {
     }
 }

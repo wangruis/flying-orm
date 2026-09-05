@@ -24,6 +24,9 @@ import java.util.Objects;
  * <p>渲染器只生成 SQL 请求和迁移计划，不访问数据库，也不启动事务。标识符、类型和自定义 DDL 片段
  * 仍由 {@link SchemaDialect} 做白名单校验。</p>
  *
+ * <p>旧 String 表名保持原有语义。带 catalog、schema 或字面点号的分段关系，请使用
+ * {@link RelationalSchemaSqlRenderer}，避免在兼容入口丢失物理关系身份。</p>
+ *
  * @author wangr
  * @date 2026-08-07
  * @version v1.0
@@ -77,7 +80,7 @@ public final class FormSchemaSqlRenderer {
 
     /** 生成建表 SQL，必要的序列和字段注释会按原来的顺序附在请求列表中。 */
     public List<SqlRequest> createTable(DynamicForm form) {
-        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        DynamicForm safeForm = SchemaMigrationSupport.requireLegacyRelation(form);
         DynamicForm physical = ProtectedFormLayout.physical(safeForm);
         List<SqlRequest> requests = new java.util.ArrayList<>(tables.createTable(physical));
         requests.addAll(tables.createIndexes(physical.table(), physical.toTableMetadata().indexes()));

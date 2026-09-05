@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.bootstrap;
 
 import com.flying.orm.core.sql.render.SqlRenderer;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchMemoryLimits;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.cache.OrmCachePolicy;
@@ -323,6 +324,11 @@ final class FlyingOrmClientBuilderSupport {
         @Override
         public void onExecution(BatchExecutionObservation observation, SqlTransactionSource transactionSource) {
             batch.onExecution(observation, transactionSource);
+        }
+
+        @Override
+        public void onExecutionEvidence(BatchExecutionEvidence evidence) {
+            batch.onExecutionEvidence(evidence);
         }
 
         @Override

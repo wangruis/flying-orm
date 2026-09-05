@@ -4,9 +4,11 @@ import com.flying.orm.core.metadata.ColumnDefinition;
 import com.flying.orm.core.metadata.ColumnDefault;
 import com.flying.orm.core.metadata.CheckConstraintDefinition;
 import com.flying.orm.core.metadata.CheckPredicate;
+import com.flying.orm.core.metadata.ForeignKeyDefinition;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.PrimaryKeyDefinition;
+import com.flying.orm.core.metadata.ReferentialAction;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.rdb.dialect.DatabaseDescriptor;
@@ -178,6 +180,34 @@ class RelationalSchemaDialectConvergenceTest {
         assertTrue(manual.requests().isEmpty());
     }
 
+    @Test
+    void unsupportedSetDefaultForeignKeyActionsStopBeforeSqlGeneration() {
+        assertUnsupportedForeignKeyAction(
+                RdbDialect.mysql(), ReferentialAction.SET_DEFAULT, ReferentialAction.NO_ACTION);
+        assertUnsupportedForeignKeyAction(
+                RdbDialect.mysql(), ReferentialAction.NO_ACTION, ReferentialAction.SET_DEFAULT);
+        assertUnsupportedForeignKeyAction(
+                RdbDialect.oracle(), ReferentialAction.SET_DEFAULT, ReferentialAction.NO_ACTION);
+    }
+
+    @Test
+    void postgresqlKeepsSupportingSetDefaultForeignKeyActions() {
+        RdbDialect dialect = RdbDialect.postgresql();
+        RelationalTableDefinition desired = tableWithForeignKeyActions(
+                ReferentialAction.SET_DEFAULT, ReferentialAction.SET_DEFAULT);
+
+        ReviewedSchemaPlan create = RelationalSchemaPlanReviewer.create(dialect).review(
+                DatabaseDescriptor.of(dialect.name(), "test", dialect), desired,
+                SchemaSnapshot.absent(desired.identity()), SchemaSnapshotCoverage.complete(),
+                SchemaCompatibilityMode.EXACT);
+
+        assertFalse(create.requiresManualAction());
+        assertTrue(create.requests().getFirst().sql().toLowerCase(java.util.Locale.ROOT)
+                .contains("on delete set default"));
+        assertTrue(create.requests().getFirst().sql().toLowerCase(java.util.Locale.ROOT)
+                .contains("on update set default"));
+    }
+
     private static void assertConverged(RdbDialect dialect,
                                         RelationalTableDefinition desired,
                                         RelationalTableDefinition actual) {
@@ -197,5 +227,42 @@ class RelationalSchemaDialectConvergenceTest {
             builder.addColumn(column);
         }
         return builder.build();
+    }
+
+    private static void assertUnsupportedForeignKeyAction(RdbDialect dialect,
+                                                          ReferentialAction onDelete,
+                                                          ReferentialAction onUpdate) {
+        RelationalTableDefinition desired = tableWithForeignKeyActions(onDelete, onUpdate);
+        ReviewedSchemaPlan create = RelationalSchemaPlanReviewer.create(dialect).review(
+                DatabaseDescriptor.of(dialect.name(), "test", dialect), desired,
+                SchemaSnapshot.absent(desired.identity()), SchemaSnapshotCoverage.complete(),
+                SchemaCompatibilityMode.EXACT);
+        assertTrue(create.requiresManualAction(), dialect.name());
+        assertTrue(create.requests().isEmpty(), dialect.name());
+
+        RelationalTableDefinition withoutForeignKey = table(
+                ColumnDefinition.builder("id", "BIGINT").nullable(false).build(),
+                ColumnDefinition.builder("parent_id", "BIGINT").build());
+        ReviewedSchemaPlan alter = RelationalSchemaPlanReviewer.create(dialect).review(
+                DatabaseDescriptor.of(dialect.name(), "test", dialect), desired,
+                SchemaSnapshot.present(withoutForeignKey), SchemaSnapshotCoverage.complete(),
+                SchemaCompatibilityMode.EXACT);
+        assertTrue(alter.requiresManualAction(), dialect.name());
+        assertTrue(alter.requests().isEmpty(), dialect.name());
+    }
+
+    private static RelationalTableDefinition tableWithForeignKeyActions(ReferentialAction onDelete,
+                                                                         ReferentialAction onUpdate) {
+        return RelationalTableDefinition.builder(RelationIdentity.table("sample"))
+                .addColumn(ColumnDefinition.builder("id", "BIGINT").nullable(false).build())
+                .addColumn(ColumnDefinition.builder("parent_id", "BIGINT").build())
+                .addForeignKey(ForeignKeyDefinition.builder("fk_sample_parent")
+                        .addColumn("parent_id")
+                        .reference(RelationIdentity.table("parent_sample"))
+                        .addReferenceColumn("id")
+                        .onDelete(onDelete)
+                        .onUpdate(onUpdate)
+                        .build())
+                .build();
     }
 }

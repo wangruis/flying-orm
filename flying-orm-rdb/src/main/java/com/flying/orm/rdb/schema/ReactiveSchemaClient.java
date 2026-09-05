@@ -30,6 +30,9 @@ import java.util.function.Consumer;
  *
  * <p>DDL 的事务能力由数据库和外部执行上下文决定，本类不会把不支持事务的 DDL 描述成可回滚操作。</p>
  *
+ * <p>旧 String 表名保持原有语义。带 catalog、schema 或字面点号的分段关系，必须使用接受
+ * {@link RelationalTableDefinition} 的关系型 Schema 入口，不能交给旧表单迁移入口。</p>
+ *
  * @author wangr
  * @date 2026-08-07
  * @version v1.0

@@ -4,9 +4,11 @@ import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.exception.RdbException;
 import com.flying.orm.rdb.execution.GeneratedKeyReadException;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.execution.SqlExecutionTimeoutException;
 import com.flying.orm.rdb.execution.SqlResultMemoryLimitExceededException;
 import com.flying.orm.rdb.execution.SqlRowLimitExceededException;
 import com.flying.orm.rdb.execution.SqlWriteResult;
+import com.flying.orm.rdb.result.DynamicRow;
 import io.r2dbc.spi.Blob;
 import io.r2dbc.spi.ColumnMetadata;
 import io.r2dbc.spi.Connection;
@@ -18,24 +20,38 @@ import io.r2dbc.spi.Result;
 import io.r2dbc.spi.Row;
 import io.r2dbc.spi.RowMetadata;
 import io.r2dbc.spi.Statement;
+import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestFactory;
 import org.reactivestreams.Publisher;
+import org.reactivestreams.Subscription;
+import reactor.core.CoreSubscriber;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Hooks;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Operators;
+import reactor.core.scheduler.Schedulers;
+import reactor.util.context.Context;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.TimeoutException;
+import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -232,6 +248,224 @@ class R2dbcGeneratedKeyWriterLayoutTest {
         assertEquals(2, metadata.listReads);
     }
 
+    @TestFactory
+    Stream<DynamicTest> deadlineRetainsOnlyObservedGeneratedKeyWriteEvidence() {
+        return Stream.of(false, true).map(observed -> DynamicTest.dynamicTest(
+                "returning keys deadline [write observed=" + observed + "]", () -> {
+                    AtomicInteger consumptions = new AtomicInteger();
+                    Flux<Result.Segment> segments = observed
+                            ? Flux.<Result.Segment>just(count(4)).concatWith(Flux.never()) : Flux.never();
+                    Fixture fixture = new Fixture(() -> List.of(result(segments, consumptions)));
+                    Duration timeout = Duration.ofSeconds(30);
+                    AtomicReference<Runnable> deadline = new AtomicReference<>();
+                    AtomicReference<Throwable> error = new AtomicReference<>();
+                    AtomicInteger values = new AtomicInteger();
+                    String hook = getClass().getName() + ".keyEvidenceDeadline";
+                    Schedulers.onScheduleHook(hook, task -> {
+                        deadline.compareAndSet(null, task);
+                        return task;
+                    });
+                    Disposable subscription = null;
+                    try {
+                        subscription = fixture.write(OPTIONS.withTimeout(timeout).withCleanupTimeout(Duration.ZERO))
+                                .subscribe(ignored -> values.incrementAndGet(), error::set);
+                        assertEquals(1, consumptions.get());
+                        assertNotNull(deadline.get());
+                        deadline.get().run();
+
+                        Throwable timeoutFailure = error.get();
+                        if (observed) {
+                            GeneratedKeyReadException failure = assertInstanceOf(
+                                    GeneratedKeyReadException.class, timeoutFailure);
+                            assertEquals(4L, failure.affectedRows());
+                            timeoutFailure = failure.getCause();
+                        }
+                        assertEquals(timeout, assertInstanceOf(
+                                SqlExecutionTimeoutException.class, timeoutFailure).timeout());
+                        assertEquals(0, values.get());
+                        assertEquals(1, fixture.closes);
+                    } finally {
+                        if (subscription != null) {
+                            subscription.dispose();
+                        }
+                        Schedulers.resetOnScheduleHook(hook);
+                    }
+                }));
+    }
+
+    @TestFactory
+    Stream<DynamicTest> sharesOneExecutionDeadlineAcrossLobRowsAndColumns() {
+        return Stream.of(false, true).flatMap(query ->
+                Stream.of(Duration.ZERO, Duration.ofSeconds(30)).map(timeout ->
+                        DynamicTest.dynamicTest((query ? "query" : "returning keys") + " [timeout=" + timeout + "]",
+                                () -> assertLobDeadline(query, timeout))));
+    }
+
+    @Test
+    void deadlineBeforeGeneratedKeyResultDeliveryRetainsObservedWriteEvidence() {
+        Metadata metadata = new Metadata(R2dbcType.BIGINT, "id_", 1);
+        AtomicInteger completions = new AtomicInteger();
+        Fixture fixture = new Fixture(() -> List.of(result(
+                Flux.just(count(1), row(metadata, 11L)).doOnComplete(completions::incrementAndGet),
+                new AtomicInteger())));
+        AtomicReference<Runnable> deadline = new AtomicReference<>();
+        AtomicReference<SqlWriteResult> pendingResult = new AtomicReference<>();
+        AtomicReference<Throwable> error = new AtomicReference<>();
+        AtomicInteger values = new AtomicInteger();
+        String hook = getClass().getName() + ".keyResultDeliveryDeadline";
+        Schedulers.onScheduleHook(hook, task -> {
+            deadline.compareAndSet(null, task);
+            return task;
+        });
+        Hooks.onEachOperator(hook, Operators.<Object, Object>lift((operator, actual) ->
+                new CoreSubscriber<Object>() {
+                    public Context currentContext() { return actual.currentContext(); }
+                    public void onSubscribe(Subscription subscription) { actual.onSubscribe(subscription); }
+                    public void onNext(Object value) {
+                        if (value instanceof SqlWriteResult result && pendingResult.compareAndSet(null, result)) {
+                            // The driver completed; pause the first result signal before the deadline receives it.
+                            assertNotNull(deadline.get());
+                            deadline.get().run();
+                        }
+                        actual.onNext(value);
+                    }
+                    public void onError(Throwable failure) { actual.onError(failure); }
+                    public void onComplete() { actual.onComplete(); }
+                }));
+        Disposable subscription = null;
+        try {
+            subscription = fixture.write(OPTIONS.withTimeout(Duration.ofSeconds(30))
+                            .withCleanupTimeout(Duration.ZERO))
+                    .subscribe(ignored -> values.incrementAndGet(), error::set);
+
+            assertEquals(1, completions.get());
+            assertNotNull(pendingResult.get());
+            assertEquals(1L, pendingResult.get().affectedRows());
+            assertEquals(11L, pendingResult.get().generatedKeys().getFirst().get("id_0"));
+            assertEquals(0, values.get());
+            assertEquals(1, fixture.executes);
+            assertEquals(1, fixture.closes);
+            GeneratedKeyReadException failure = assertInstanceOf(GeneratedKeyReadException.class, error.get());
+            assertEquals(1L, failure.affectedRows());
+            assertInstanceOf(SqlExecutionTimeoutException.class, failure.getCause());
+        } finally {
+            if (subscription != null) {
+                subscription.dispose();
+            }
+            Hooks.resetOnEachOperator(hook);
+            Schedulers.resetOnScheduleHook(hook);
+        }
+    }
+
+    private void assertLobDeadline(boolean query, Duration timeout) {
+        Metadata metadata = new Metadata(R2dbcType.BLOB, "payload_", 3);
+        AtomicInteger streams = new AtomicInteger();
+        AtomicInteger completions = new AtomicInteger();
+        AtomicInteger discards = new AtomicInteger();
+        AtomicInteger consumptions = new AtomicInteger();
+        Fixture fixture = new Fixture(() -> List.of(result(Flux.range(1, 3).map(value -> row(metadata,
+                blob(Flux.just(ByteBuffer.wrap(new byte[]{value.byteValue()}))
+                        .doOnSubscribe(ignored -> streams.incrementAndGet())
+                        .doOnComplete(completions::incrementAndGet), discards),
+                blob(Flux.just(ByteBuffer.wrap(new byte[]{(byte) (value + 10)}))
+                        .doOnSubscribe(ignored -> streams.incrementAndGet())
+                        .doOnComplete(completions::incrementAndGet), discards),
+                new byte[]{(byte) (value + 20)})), consumptions)));
+        SqlExecutionOptions options = OPTIONS.withTimeout(timeout).withCleanupTimeout(Duration.ZERO);
+        AtomicInteger scheduledTasks = new AtomicInteger();
+        String hook = getClass().getName() + ".lobExecutionDeadline";
+        Schedulers.onScheduleHook(hook, task -> {
+            scheduledTasks.incrementAndGet();
+            return task;
+        });
+        try {
+            List<DynamicRow> actual = query ? fixture.query(options).collectList().block()
+                    : fixture.write(options).block().generatedKeys();
+
+            assertEquals(3, actual.size());
+            for (int index = 0; index < actual.size(); index++) {
+                assertArrayEquals(new byte[]{(byte) (index + 1)}, (byte[]) actual.get(index).value(0));
+                assertArrayEquals(new byte[]{(byte) (index + 11)}, (byte[]) actual.get(index).value(1));
+                assertArrayEquals(new byte[]{(byte) (index + 21)}, (byte[]) actual.get(index).value(2));
+            }
+            assertEquals(6, streams.get(), "each locator must be subscribed once");
+            assertEquals(6, completions.get());
+            assertEquals(0, discards.get(), "consumed locators must not be discarded again");
+            assertEquals(1, consumptions.get());
+            assertEquals(1, fixture.executes);
+            assertEquals(1, fixture.closes);
+            assertEquals(timeout.isZero() ? 0 : 1, scheduledTasks.get(),
+                    "LOB row and column counts must not add execution deadlines");
+        } finally {
+            Schedulers.resetOnScheduleHook(hook);
+        }
+    }
+
+    @TestFactory
+    Stream<DynamicTest> executionDeadlineCancelsStreamingLobAndDiscardsPendingLob() {
+        return Stream.of(false, true).map(query -> DynamicTest.dynamicTest(
+                query ? "query deadline cleanup" : "returning keys deadline cleanup",
+                () -> assertLobTimeout(query)));
+    }
+
+    private void assertLobTimeout(boolean query) {
+        Metadata metadata = new Metadata(R2dbcType.BLOB, "payload_", 2);
+        AtomicInteger streams = new AtomicInteger();
+        AtomicInteger cancellations = new AtomicInteger();
+        AtomicInteger streamedDiscards = new AtomicInteger();
+        AtomicInteger pendingStreams = new AtomicInteger();
+        AtomicInteger pendingDiscards = new AtomicInteger();
+        Fixture fixture = new Fixture(() -> List.of(result(Flux.just(row(metadata,
+                blob(Flux.<ByteBuffer>never().doOnSubscribe(ignored -> streams.incrementAndGet())
+                        .doOnCancel(cancellations::incrementAndGet), streamedDiscards),
+                blob(Flux.just(ByteBuffer.wrap(new byte[]{2}))
+                        .doOnSubscribe(ignored -> pendingStreams.incrementAndGet()), pendingDiscards))),
+                new AtomicInteger())));
+        Duration timeout = Duration.ofSeconds(30);
+        SqlExecutionOptions options = OPTIONS.withTimeout(timeout).withCleanupTimeout(Duration.ZERO);
+        AtomicReference<Runnable> deadline = new AtomicReference<>();
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        AtomicInteger values = new AtomicInteger();
+        String hook = getClass().getName() + ".lobDeadlineCleanup";
+        Schedulers.onScheduleHook(hook, task -> {
+            deadline.compareAndSet(null, task);
+            return task;
+        });
+        Disposable subscription = null;
+        try {
+            Flux<?> execution = query ? fixture.query(options) : fixture.write(options).flux();
+            subscription = execution.subscribe(ignored -> values.incrementAndGet(), failure::set);
+            assertEquals(1, streams.get());
+            assertNotNull(deadline.get());
+
+            // Drive the real outer timer after LOB registration, without waiting for wall-clock time.
+            deadline.get().run();
+
+            Throwable timeoutFailure = failure.get();
+            if (!query) {
+                GeneratedKeyReadException keyFailure = assertInstanceOf(
+                        GeneratedKeyReadException.class, timeoutFailure);
+                assertEquals(1L, keyFailure.affectedRows());
+                timeoutFailure = keyFailure.getCause();
+            }
+            SqlExecutionTimeoutException timedOut = assertInstanceOf(
+                    SqlExecutionTimeoutException.class, timeoutFailure);
+            assertEquals(timeout, timedOut.timeout());
+            assertInstanceOf(TimeoutException.class, timedOut.getCause());
+            assertEquals(0, values.get());
+            assertEquals(1, cancellations.get());
+            assertEquals(0, streamedDiscards.get());
+            assertEquals(0, pendingStreams.get());
+            assertEquals(1, pendingDiscards.get());
+            assertEquals(1, fixture.closes);
+        } finally {
+            if (subscription != null) {
+                subscription.dispose();
+            }
+            Schedulers.resetOnScheduleHook(hook);
+        }
+    }
+
     @Test
     void cancellationDiscardsThePendingLocatorAndClosesTheConnection() {
         Metadata metadata = new Metadata(R2dbcType.BLOB, "payload_", 2);
@@ -297,6 +531,12 @@ class R2dbcGeneratedKeyWriterLayoutTest {
                 return segments.doOnSubscribe(ignored -> consumptions.incrementAndGet())
                                .concatMap(segment -> Flux.from(mapper.apply(segment)), 1);
             }
+            if (method.getName().equals("map")) {
+                BiFunction<Row, RowMetadata, ?> mapper = (BiFunction<Row, RowMetadata, ?>) arguments[0];
+                return segments.doOnSubscribe(ignored -> consumptions.incrementAndGet())
+                               .ofType(Result.RowSegment.class)
+                               .map(segment -> mapper.apply(segment.row(), segment.row().getMetadata()));
+            }
             throw new UnsupportedOperationException(method.getName());
         });
     }
@@ -350,6 +590,10 @@ class R2dbcGeneratedKeyWriterLayoutTest {
         private Mono<SqlWriteResult> write(SqlExecutionOptions options) {
             return executor.rowsUpdatedReturningKeys(new SqlRequest(
                     "insert into generated_values(payload) select payload from source_values", List.of()), options);
+        }
+
+        private Flux<DynamicRow> query(SqlExecutionOptions options) {
+            return executor.query(new SqlRequest("select payload from source_values", List.of()), options);
         }
     }
 

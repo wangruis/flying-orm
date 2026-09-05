@@ -115,8 +115,8 @@ public record ParameterConditionSpec(String parameter,
 
     private static Object snapshotDefaultValue(Object value) {
         return value instanceof List<?> values
-                ? BindableValueSnapshots.immutableValues(values)
-                : BindableValueSnapshots.immutableValue(value);
+                ? BindableValueSnapshots.logicalValues(values)
+                : BindableValueSnapshots.logicalValue(value);
     }
 
     private record OwnedDefault(ParameterConditionSpec source, Object value) {

@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.result;
 
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.execution.SqlLargeObjectLimitExceededException;
 import com.flying.orm.rdb.exception.RdbErrorKind;
 import com.flying.orm.rdb.exception.RdbException;
 import com.flying.orm.rdb.exception.RdbExceptionTranslator;
@@ -17,17 +18,50 @@ import java.sql.SQLTimeoutException;
 import java.sql.SQLTransientConnectionException;
 import java.sql.Statement;
 import java.sql.Timestamp;
+import java.sql.Types;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /** JDBC 厂商时间对象必须在 ResultSet 资源域内转换为稳定 java.time 值。 */
 class JdbcDynamicRowFactoryTest {
+
+    @Test
+    void knownScalarColumnsDoNotConsumeLargeObjectLimits() throws SQLException {
+        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
+                .withMaxLargeObjectChars(3).withMaxLargeObjectBytes(3);
+        String text = "ordinary text";
+        byte[] binary = {1, 2, 3, 4};
+        for (int type : new int[]{Types.CHAR, Types.VARCHAR, Types.NVARCHAR, Types.BINARY, Types.VARBINARY}) {
+            Object value = type == Types.BINARY || type == Types.VARBINARY ? binary : text;
+            DynamicRow row = assertDoesNotThrow(() -> JdbcDynamicRowFactory.from(
+                    resultSet(value, connection(), type), options).readCurrentRow());
+            assertSame(value, row.value(0));
+        }
+    }
+
+    @Test
+    void materializedLargeObjectsAndUnknownColumnsKeepTheirLimits() throws SQLException {
+        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
+                .withMaxLargeObjectChars(3).withMaxLargeObjectBytes(3);
+        for (int type : new int[]{Types.CLOB, Types.NCLOB, Types.LONGVARCHAR, Types.LONGNVARCHAR,
+                Types.BLOB, Types.LONGVARBINARY, Types.OTHER, Types.JAVA_OBJECT, Types.NULL}) {
+            boolean binary = type == Types.BLOB || type == Types.LONGVARBINARY;
+            Object value = binary ? new byte[]{1, 2, 3, 4} : "large text";
+            SqlLargeObjectLimitExceededException error = assertThrows(SqlLargeObjectLimitExceededException.class,
+                    () -> JdbcDynamicRowFactory.from(resultSet(value, connection(), type), options).readCurrentRow());
+            assertEquals(binary ? SqlLargeObjectLimitExceededException.Kind.BINARY
+                    : SqlLargeObjectLimitExceededException.Kind.CHARACTER, error.kind());
+            assertSame(value, JdbcDynamicRowFactory.from(resultSet(value, connection(), type),
+                    options.withMaxLargeObjectChars(0).withMaxLargeObjectBytes(0)).readCurrentRow().value(0));
+        }
+    }
 
     @Test
     void materializesSqlServerDateTimeOffsetWithoutACompileTimeDriverDependency() throws SQLException {
@@ -137,9 +171,14 @@ class JdbcDynamicRowFactoryTest {
     }
 
     private static ResultSet resultSet(Object value, Connection connection) {
+        return resultSet(value, connection, Types.NULL);
+    }
+
+    private static ResultSet resultSet(Object value, Connection connection, int jdbcType) {
         ResultSetMetaData metadata = proxy(ResultSetMetaData.class, (proxy, method, arguments) -> switch (method.getName()) {
             case "getColumnCount" -> 1;
             case "getColumnLabel", "getColumnName" -> "value";
+            case "getColumnType" -> jdbcType;
             default -> defaultValue(method.getReturnType());
         });
         Statement statement = proxy(Statement.class, (proxy, method, arguments) -> switch (method.getName()) {

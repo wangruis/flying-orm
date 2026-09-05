@@ -78,7 +78,7 @@ final class FormResultDecoder {
         return rowDecoder(safeForm, safeOptions, safeScope, safeDisplayMode, decodingPlan);
     }
 
-    private RowMapper<DynamicRow> rowDecoder(DynamicForm form,
+    RowMapper<DynamicRow> rowDecoder(DynamicForm form,
                                              SqlExecutionOptions options,
                                              DataScope scope,
                                              SensitiveDisplayMode displayMode,
@@ -145,7 +145,7 @@ final class FormResultDecoder {
         return decodeRows(safeForm, rows, options, scope, displayMode, projectedPlan);
     }
 
-    private Flux<DynamicRow> decodeRows(DynamicForm safeForm,
+    Flux<DynamicRow> decodeRows(DynamicForm safeForm,
                                         Flux<DynamicRow> rows,
                                         SqlExecutionOptions options,
                                         DataScope scope,

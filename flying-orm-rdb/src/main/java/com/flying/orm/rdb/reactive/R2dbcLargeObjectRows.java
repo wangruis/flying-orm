@@ -19,6 +19,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.nio.ByteBuffer;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -211,7 +212,10 @@ final class R2dbcLargeObjectRows {
                        Supplier<R2dbcLargeObjectScope> cleanupScope,
                        LargeObjectPlan largeObjectPlan) {
             this.factory = factory;
-            this.options = options;
+            // 原生查询和生成键都已处于 SQL/批量总时限内，不能让每行、每列 LOB 再启动计时器。
+            // 仅在 LOB 布局创建时关闭局部执行超时，大小和清理预算原样保留；普通标量布局直接复用。
+            this.options = largeObjectPlan != null && !options.timeout().isZero()
+                    ? options.withTimeout(Duration.ZERO) : options;
             this.cleanupScope = cleanupScope;
             this.largeObjectPlan = largeObjectPlan;
         }

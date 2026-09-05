@@ -42,6 +42,7 @@ public final class MultiTableSchemaPlanner {
     public Plan plan(RelationalSchemaDefinition desired) {
         RelationalSchemaDefinition safeDesired = Objects.requireNonNull(
                 desired, "desired relational schema must not be null");
+        safeDesired.tables().forEach(RelationalTableDdlValidator::validatePartitionKeys);
         SchemaDependencyGraph graph = SchemaDependencyGraph.of(safeDesired);
         SchemaStronglyConnectedComponents components = graph.stronglyConnectedComponents();
         Set<ForeignKeyDefinition> manualCycleForeignKeys = cycleSupport == ForeignKeyCycleSupport.SUPPORTED
@@ -83,6 +84,7 @@ public final class MultiTableSchemaPlanner {
         source.primaryKey().ifPresent(target::primaryKey);
         source.uniqueConstraints().forEach(target::addUnique);
         source.checks().forEach(target::addCheck);
+        source.partition().ifPresent(target::partition);
         return target.build();
     }
 

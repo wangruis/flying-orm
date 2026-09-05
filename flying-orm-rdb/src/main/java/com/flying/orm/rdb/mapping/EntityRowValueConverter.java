@@ -21,6 +21,14 @@ final class EntityRowValueConverter {
     private EntityRowValueConverter() {
     }
 
+    static Object readCustom(Object value, EntityTypeMappingRegistry.Mapping mapping) {
+        try {
+            return mapping.codec().read(value, mapping.javaType());
+        } catch (IllegalArgumentException error) {
+            throw new MappingException("row value cannot be converted to " + mapping.javaType().getName(), error);
+        }
+    }
+
     static Object convert(Object value,
                           Class<?> targetType,
                           DatabaseType databaseType,

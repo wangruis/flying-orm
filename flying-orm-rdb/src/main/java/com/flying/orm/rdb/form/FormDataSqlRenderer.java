@@ -31,6 +31,7 @@ import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
 /**
@@ -122,22 +123,16 @@ public final class FormDataSqlRenderer {
         return new SqlFragment(condition.sql(), condition.parameters());
     }
 
-    /** 聚合 planner 的包内桥接：值仍按别名结果字段规范化，字段 SQL 由受控表达式映射。 */
-    SqlFragment renderCondition(DynamicForm form,
-                                ConditionGroup where,
-                                UnaryOperator<String> fieldIdentifierRenderer) {
-        FormSqlRenderSupport.ConditionSql condition = support.condition(
-                form, where, fieldIdentifierRenderer);
-        return new SqlFragment(condition.sql(), condition.parameters());
-    }
-
+    /** 聚合 planner 的包内桥接：值按声明来源规范化，别名 SQL 由受控表达式映射。 */
     SqlFragment renderCondition(DynamicForm form,
                                 ConditionGroup where,
                                 UnaryOperator<String> fieldIdentifierRenderer,
                                 UnaryOperator<String> correlatedFieldRenderer,
-                                UnaryOperator<String> outerQualifierRenderer) {
+                                UnaryOperator<String> outerQualifierRenderer,
+                                Function<String, DynamicField> valueFieldResolver) {
         FormSqlRenderSupport.ConditionSql condition = support.condition(
-                form, where, fieldIdentifierRenderer, correlatedFieldRenderer, outerQualifierRenderer);
+                form, where, fieldIdentifierRenderer, correlatedFieldRenderer, outerQualifierRenderer,
+                valueFieldResolver);
         return new SqlFragment(condition.sql(), condition.parameters());
     }
 
@@ -192,7 +187,7 @@ public final class FormDataSqlRenderer {
             Map<DynamicField, EntityTypeMappingRegistry.Mapping> mappings) {
         return new FormDataSqlRenderer(support.withCustomFieldCodecs(mappings),
                                        paginationDialect, upsertDialect, lockingReadDialect,
-                                       protectedFields, decodingPlans);
+                                       protectedFields, decodingPlans.emptyCopy());
     }
 
     /** 为统一客户端装配字段保护运行时；业务代码使用 FlyingOrmClientBuilder 配置密钥环。 */
@@ -362,7 +357,7 @@ public final class FormDataSqlRenderer {
     }
 
     FormFieldDecodingPlan resultDecodingPlan(DynamicForm form) {
-        return decodingPlans.plan(form, this);
+        return decodingPlans.plan(form, this, !support.customFieldCodecs.isEmpty());
     }
 
     EntityTypeMappingRegistry.Mapping customFieldMapping(DynamicField field) {

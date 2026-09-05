@@ -111,7 +111,7 @@ public final class FormAggregatePlanner {
             DynamicField result = DynamicField.of(group.alias(), field.databaseType());
             resultForm.addField(result);
             targets.put(FieldIdentity.of(group.alias()).key(),
-                        new ResultTarget(field, result, expression));
+                        new ResultTarget(field, result, expression, field));
             if (correlatedHaving) {
                 correlatedExpressions.put(FieldIdentity.of(group.alias()).key(),
                                           outerQualifier + "." + reads.identifier(field.name()));
@@ -129,9 +129,13 @@ public final class FormAggregatePlanner {
             select.add(expression + " as " + reads.identifier(aggregate.alias()));
             aggregateFields.add(field);
             DynamicField result = resultField(aggregate, field);
+            DynamicField valueField = switch (aggregate.function()) {
+                case MIN, MAX -> field;
+                case COUNT, COUNT_DISTINCT, SUM, AVG -> result;
+            };
             resultForm.addField(result);
             targets.put(FieldIdentity.of(aggregate.alias()).key(),
-                        new ResultTarget(field, result, expression));
+                        new ResultTarget(field, result, expression, valueField));
             if (correlatedHaving) {
                 correlatedExpressions.put(FieldIdentity.of(aggregate.alias()).key(),
                         AggregateFunctionSqlRenderer.render(
@@ -153,7 +157,8 @@ public final class FormAggregatePlanner {
         targets.forEach((alias, target) -> expressions.put(alias, target.expression()));
         SqlFragment having = safeSpec.having()
                 .map(value -> reads.renderHaving(
-                        aliases, value.condition(), expressions, correlatedExpressions, outerQualifier))
+                        aliases, value.condition(), expressions, correlatedExpressions, outerQualifier,
+                        alias -> targets.get(FieldIdentity.of(alias).key()).valueField()))
                 .orElseGet(() -> new SqlFragment("", List.of()));
 
         StringBuilder sql = new StringBuilder("select ")
@@ -298,11 +303,13 @@ public final class FormAggregatePlanner {
         };
     }
 
-    private record ResultTarget(DynamicField source, DynamicField result, String expression) {
+    private record ResultTarget(DynamicField source, DynamicField result, String expression,
+                                DynamicField valueField) {
         private ResultTarget {
             source = Objects.requireNonNull(source, "aggregate result source must not be null");
             result = Objects.requireNonNull(result, "aggregate result field must not be null");
             expression = Objects.requireNonNull(expression, "aggregate result expression must not be null");
+            valueField = Objects.requireNonNull(valueField, "aggregate value source field must not be null");
         }
     }
 

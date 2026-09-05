@@ -30,6 +30,39 @@ public final class BindableValueSnapshots {
         return new SnapshotSession(true).snapshot(value, null);
     }
 
+    /**
+     * 快照尚未交给 codec 的逻辑值。已知可变标量仍隔离，但文本的领域类型不能提前变成 String。
+     * 应用自定义标量沿用可信交接约定；这里不猜测其内部结构，也不代替应用克隆业务对象。
+     */
+    public static Object logicalValue(Object value) {
+        if (value == null || !value.getClass().isArray()) {
+            return logicalScalar(value);
+        }
+        return new SnapshotSession(true, true).snapshot(value, null);
+    }
+
+    /** 同一逻辑值序列共享数组复制会话，保留元素的领域类型与原有共享关系。 */
+    public static List<Object> logicalValues(List<?> values) {
+        Objects.requireNonNull(values, "logical values must not be null");
+        SnapshotSession session = new SnapshotSession(true, true);
+        List<Object> snapshot = new ArrayList<>(values.size());
+        values.forEach(value -> snapshot.add(session.snapshot(value, null)));
+        return Collections.unmodifiableList(snapshot);
+    }
+
+    /** 逻辑标量的独立副本；只有真正选中标准文本 codec 后才允许把文本转为 String。 */
+    public static Object logicalScalar(Object value) {
+        if (value instanceof CharSequence text && !(text instanceof String)) {
+            if (text instanceof StringBuilder) return new StringBuilder(text);
+            if (text instanceof StringBuffer) return new StringBuffer(text);
+            if (text instanceof java.nio.CharBuffer) {
+                return java.nio.CharBuffer.wrap(text.toString()).asReadOnlyBuffer();
+            }
+            return text;
+        }
+        return immutableScalar(value, null);
+    }
+
     /** Returns whether the supported bind value needs a defensive immutable snapshot. */
     public static boolean requiresImmutableSnapshot(Object value) {
         return value != null
@@ -127,10 +160,16 @@ public final class BindableValueSnapshots {
 
     private static final class SnapshotSession {
         private final boolean freezeScalars;
+        private final boolean logicalValues;
         private final IdentityHashMap<Object, Object> copies = new IdentityHashMap<>();
 
         private SnapshotSession(boolean freezeScalars) {
+            this(freezeScalars, false);
+        }
+
+        private SnapshotSession(boolean freezeScalars, boolean logicalValues) {
             this.freezeScalars = freezeScalars;
+            this.logicalValues = logicalValues;
         }
 
         private Object snapshot(Object value, Class<?> arrayComponentType) {
@@ -147,7 +186,7 @@ public final class BindableValueSnapshots {
             if (!freezeScalars) {
                 return value;
             }
-            Object result = immutableScalar(value, arrayComponentType);
+            Object result = logicalValues ? logicalScalar(value) : immutableScalar(value, arrayComponentType);
             if (result != value) {
                 copies.put(value, result);
             }

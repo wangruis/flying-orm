@@ -130,7 +130,7 @@ final class SqlTemplateRenderer {
             // Extension codecs may consume mutable inputs; each slot must keep the saved value intact.
             value = value instanceof ByteBuffer buffer && buffer.isReadOnly()
                     ? buffer.duplicate().order(buffer.order())
-                    : BindableValueSnapshots.immutableValue(value);
+                    : BindableValueSnapshots.logicalValue(value);
         }
         return codecs.write(value);
     }
@@ -302,7 +302,7 @@ final class SqlTemplateRenderer {
     private static Map<String, Object> snapshotValues(Map<String, ?> values) {
         Map<String, Object> snapshots = new LinkedHashMap<>();
         Objects.requireNonNull(values, "SQL template values must not be null")
-               .forEach((name, value) -> snapshots.put(name, BindableValueSnapshots.immutableValue(value)));
+               .forEach((name, value) -> snapshots.put(name, BindableValueSnapshots.logicalValue(value)));
         return snapshots;
     }
 

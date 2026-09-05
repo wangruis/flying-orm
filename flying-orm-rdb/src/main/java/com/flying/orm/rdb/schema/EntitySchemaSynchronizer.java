@@ -2,6 +2,9 @@ package com.flying.orm.rdb.schema;
 
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.RelationalSchemaDefinition;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
+import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.metadata.IndexMetadata;
 import com.flying.orm.rdb.dialect.DatabaseDescriptor;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
 import com.flying.orm.rdb.metadata.JdbcFormMetadataReader;
@@ -74,8 +77,7 @@ public final class EntitySchemaSynchronizer {
             Collection<Class<?>> entityTypes,
             MultiTableSchemaPlanner.ForeignKeyCycleSupport cycleSupport) {
         List<EntitySchemaTarget> targets = EntitySchemaSyncSupport.targets(models, entityTypes);
-        RelationalSchemaDefinition desired = RelationalSchemaDefinition.of(
-                targets.stream().map(target -> target.descriptor().table()).toList());
+        RelationalSchemaDefinition desired = relationalSchema(targets);
         return new MultiTableSchemaPlanner(database, cycleSupport).plan(desired);
     }
 
@@ -107,7 +109,7 @@ public final class EntitySchemaSynchronizer {
                 safeDatabase, EntitySchemaSyncSupport.targets(models, entityTypes));
         RelationalSchemaPlanReviewer reviewer = jdbc.relationalReviewer();
         List<SchemaSnapshot> snapshots = batch.targets().stream()
-                .map(target -> JdbcSchemaClient.readSnapshot(jdbcMetadata, target.descriptor().table().identity()))
+                .map(target -> JdbcSchemaClient.readSnapshot(jdbcMetadata, target.identity()))
                 .toList();
         List<ReviewedSchemaPlan> plans = reviewRelationalBatch(
                 safeDatabase, safeMode, batch, snapshots, jdbcMetadata.snapshotCoverage(), reviewer);
@@ -151,7 +153,7 @@ public final class EntitySchemaSynchronizer {
             RelationalSchemaPlanReviewer reviewer = reactive.relationalReviewer();
             return Flux.fromIterable(batch.targets())
                     .concatMap(target -> ReactiveSchemaClient.readSnapshot(
-                            reactiveMetadata, target.descriptor().table().identity()))
+                            reactiveMetadata, target.identity()))
                     .collectList()
                     .map(snapshots -> reviewRelationalBatch(safeDatabase, safeMode, batch,
                             snapshots, reactiveMetadata.snapshotCoverage(), reviewer))
@@ -256,14 +258,14 @@ public final class EntitySchemaSynchronizer {
     private static RelationalBatch relationalBatch(
             DatabaseDescriptor database,
             List<EntitySchemaTarget> targets) {
-        RelationalSchemaDefinition desired = RelationalSchemaDefinition.of(
-                targets.stream().map(target -> target.descriptor().table()).toList());
+        RelationalSchemaDefinition desired = relationalSchema(targets);
         MultiTableSchemaPlanner.Plan batch = new MultiTableSchemaPlanner(
                 database, MultiTableSchemaPlanner.ForeignKeyCycleSupport.MANUAL_REQUIRED)
                 .plan(desired);
-        Map<RelationIdentity, EntitySchemaTarget> byIdentity = new HashMap<>(targets.size());
-        targets.forEach(target -> byIdentity.put(target.descriptor().table().identity(), target));
-        List<EntitySchemaTarget> ordered = batch.firstPhase().stream()
+        Map<RelationIdentity, RelationalTableDefinition> byIdentity =
+                new HashMap<>(desired.tables().size());
+        desired.tables().forEach(table -> byIdentity.put(table.identity(), table));
+        List<RelationalTableDefinition> ordered = batch.firstPhase().stream()
                 .map(operation -> byIdentity.get(operation.relation()))
                 .toList();
         Set<ForeignKeyKey> manualForeignKeys = new HashSet<>();
@@ -308,7 +310,33 @@ public final class EntitySchemaSynchronizer {
                 operation.relation(), operation.objectName()));
     }
 
-    private record RelationalBatch(List<EntitySchemaTarget> targets,
+    private static RelationalSchemaDefinition relationalSchema(List<EntitySchemaTarget> targets) {
+        List<RelationalTableDefinition> tables = targets.stream()
+                .flatMap(target -> target.descriptor().schema().tables().stream())
+                .toList();
+        rejectManagedReferencesToProtectedColumns(targets, tables);
+        return RelationalSchemaDefinition.of(tables);
+    }
+
+    private static void rejectManagedReferencesToProtectedColumns(
+            List<EntitySchemaTarget> targets,
+            List<RelationalTableDefinition> tables) {
+        Map<RelationIdentity, DynamicForm> managedForms = new HashMap<>(targets.size());
+        targets.forEach(target -> managedForms.put(
+                target.descriptor().table().identity(), target.descriptor().form()));
+        for (RelationalTableDefinition table : tables) {
+            table.foreignKeys().forEach(foreignKey -> {
+                DynamicForm target = managedForms.get(foreignKey.reference());
+                if (target != null && foreignKey.referenceColumns().stream()
+                        .anyMatch(column -> target.protections().encrypted(column).isPresent())) {
+                    throw new IllegalArgumentException(
+                            "foreign key must not reference an encrypted managed target field");
+                }
+            });
+        }
+    }
+
+    private record RelationalBatch(List<RelationalTableDefinition> targets,
                                    Set<ForeignKeyKey> manualForeignKeys,
                                    Set<RelationIdentity> manualRelations) { }
 
@@ -322,7 +350,7 @@ public final class EntitySchemaSynchronizer {
         Map<String, String> sequences = reviewer.observedSequences(snapshots);
         List<ReviewedSchemaPlan> plans = new ArrayList<>(batch.targets().size());
         for (int index = 0; index < batch.targets().size(); index++) {
-            plans.add(reviewer.review(database, batch.targets().get(index).descriptor().table(),
+            plans.add(reviewer.review(database, batch.targets().get(index),
                     snapshots.get(index), coverage, compatibilityMode(mode), sequences));
         }
         return List.copyOf(plans);
@@ -421,37 +449,61 @@ public final class EntitySchemaSynchronizer {
 
     private SchemaMigrationPlan planJdbc(EntitySchemaTarget target) {
         return jdbc.planCreateOrAlter(target.descriptor().form(),
-                                      target.descriptor().metadata().targetIndexes(), jdbcMetadata,
+                                      legacyIndexes(target), jdbcMetadata,
                                       SchemaMigrationOptions.safe());
     }
 
     private Mono<SchemaMigrationPlan> planReactive(EntitySchemaTarget target) {
         return reactive.planCreateOrAlter(target.descriptor().form(),
-                                           target.descriptor().metadata().targetIndexes(), reactiveMetadata,
+                                           legacyIndexes(target), reactiveMetadata,
                                            SchemaMigrationOptions.safe());
     }
 
     private SchemaMigrationResult executeSafeJdbc(EntitySchemaTarget target) {
         return jdbc.createOrAlterDetailed(target.descriptor().form(),
-                                           target.descriptor().metadata().targetIndexes(), jdbcMetadata);
+                                           legacyIndexes(target), jdbcMetadata);
     }
 
     private Mono<SchemaMigrationResult> executeSafeReactive(EntitySchemaTarget target) {
         return reactive.createOrAlterDetailed(target.descriptor().form(),
-                                               target.descriptor().metadata().targetIndexes(), reactiveMetadata);
+                                               legacyIndexes(target), reactiveMetadata);
     }
 
     private ReviewedSchemaMigrationPlan reviewJdbc(EntitySchemaTarget target) {
         return jdbc.reviewCreateOrAlter(target.descriptor().form(),
-                                        target.descriptor().metadata().targetIndexes(), List.of(), jdbcMetadata,
+                                        legacyIndexes(target), List.of(), jdbcMetadata,
                                         FULL_OPTIONS, SchemaMigrationReviewPolicy.preferOnline());
     }
 
     private Mono<ReviewedSchemaMigrationPlan> reviewReactive(EntitySchemaTarget target) {
         return reactive.reviewCreateOrAlter(target.descriptor().form(),
-                                             target.descriptor().metadata().targetIndexes(),
+                                             legacyIndexes(target),
                                              List.of(), reactiveMetadata,
                                              FULL_OPTIONS, SchemaMigrationReviewPolicy.preferOnline());
+    }
+
+    private static List<IndexMetadata> legacyIndexes(EntitySchemaTarget target) {
+        var descriptor = target.descriptor();
+        if (descriptor.form().protections().encryptedFields().isEmpty()) {
+            return descriptor.metadata().targetIndexes();
+        }
+        RelationalTableDefinition table = descriptor.table();
+        List<IndexMetadata> indexes = new ArrayList<>(
+                table.uniqueConstraints().size() + table.indexes().size());
+        table.uniqueConstraints().forEach(unique -> {
+            IndexMetadata.Builder index = IndexMetadata.builder(unique.name()).unique();
+            unique.columns().forEach(index::addColumn);
+            indexes.add(index.build());
+        });
+        table.indexes().forEach(source -> {
+            IndexMetadata.Builder index = IndexMetadata.builder(source.name());
+            if (source.unique()) {
+                index.unique();
+            }
+            source.keys().forEach(key -> index.addColumn(key.column()));
+            indexes.add(index.build());
+        });
+        return List.copyOf(indexes);
     }
 
     private static EntitySchemaSyncReport validate(List<SchemaMigrationPlan> plans) {

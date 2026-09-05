@@ -34,6 +34,7 @@ public final class SchemaSnapshotFingerprint {
                     .text("INDEXES_STATE", source.indexes().state().name())
                     .text("FOREIGN_KEYS_STATE", source.foreignKeys().state().name())
                     .text("CHECKS_STATE", source.checks().state().name())
+                    .text("TABLE_PARTITION_STATE", source.partition().state().name())
                     .text("KNOWN_DEFINITION", RelationalMetadataFingerprint.of(source.knownDefinition()));
             encoder.integer("UNKNOWN_ATTRIBUTE_COUNT", source.unknownAttributes().size());
             source.unknownAttributes().stream().sorted().forEach(

@@ -7,7 +7,7 @@
 
     <groupId>io.github.wangruis</groupId>
     <artifactId>flying-orm</artifactId>
-    <version>3.2.0</version>
+    <version>3.3.0</version>
     <packaging>pom</packaging>
 
     <name>flying-orm</name>
@@ -45,7 +45,7 @@
         <connection>scm:git:https://github.com/wangruis/flying-orm.git</connection>
         <developerConnection>scm:git:ssh://git@github.com/wangruis/flying-orm.git</developerConnection>
         <url>https://github.com/wangruis/flying-orm</url>
-        <tag>v3.2.0</tag>
+        <tag>v3.3.0</tag>
     </scm>
 
     <modules>
@@ -381,7 +381,7 @@
                             <publishingServerId>central</publishingServerId>
                             <autoPublish>false</autoPublish>
                             <waitUntil>validated</waitUntil>
-                            <deploymentName>flying-orm 3.2.0</deploymentName>
+                            <deploymentName>flying-orm 3.3.0</deploymentName>
                         </configuration>
                     </plugin>
                 </plugins>

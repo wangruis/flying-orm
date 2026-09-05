@@ -104,6 +104,15 @@ final class ReactiveFormResultSupport {
         return decoder.decodeRows(form, rows, options, scope, displayMode, projectedFields);
     }
 
+    Flux<DynamicRow> decodeRows(DynamicForm form,
+                                Flux<DynamicRow> rows,
+                                SqlExecutionOptions options,
+                                DataScope scope,
+                                SensitiveDisplayMode displayMode,
+                                FormFieldDecodingPlan decodingPlan) {
+        return decoder.decodeRows(form, rows, options, scope, displayMode, decodingPlan);
+    }
+
     Mono<Long> optimisticRowsUpdated(DynamicForm form, OptimisticLockOptions lock, SqlRequest request) {
         return executor.rowsUpdated(request).map(rows -> requireOptimisticSuccess(form, lock, rows));
     }

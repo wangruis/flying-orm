@@ -245,16 +245,84 @@ final class PostgreSqlReactiveFormMetadataReader implements ReactiveFormMetadata
             """;
 
     private static final String BASE_TABLE_SQL = """
-            select pg_catalog.obj_description(t.oid, 'pg_class') as TABLE_COMMENT,
-                   (t.relkind = 'r' and not t.relispartition
-                       and not exists (
-                           select 1 from pg_catalog.pg_inherits inheritance
-                           where inheritance.inhrelid = t.oid or inheritance.inhparent = t.oid
-                       )) as TABLE_REPRESENTABLE
-            from pg_catalog.pg_class t
-            join pg_catalog.pg_namespace n on n.oid = t.relnamespace
-            where t.relname = ? and t.relkind in ('r', 'p')
-            """;
+             select pg_catalog.obj_description(t.oid, 'pg_class') as TABLE_COMMENT,
+                    case
+                        when t.relkind = 'r' then not t.relispartition and not exists (
+                            select 1 from pg_catalog.pg_inherits inheritance
+                            where inheritance.inhrelid = t.oid or inheritance.inhparent = t.oid
+                        )
+                        when t.relkind = 'p' then coalesce(
+                            not t.relispartition
+                            and not exists (
+                                select 1 from pg_catalog.pg_inherits inheritance
+                                where inheritance.inhrelid = t.oid
+                            )
+                            and partitioning.partstrat = 'r'
+                            and partitioning.partnatts = 1
+                            and partitioning.partexprs is null
+                            and partitioning.partattrs[0] > 0
+                            and partition_attribute.attnum = partitioning.partattrs[0]
+                            and partition_attribute.attnum > 0
+                            and not partition_attribute.attisdropped
+                            and partition_access_method.amname = 'btree'
+                            and partition_opclass.opcdefault
+                            and partitioning.partcollation[0] = partition_attribute.attcollation,
+                            false)
+                        else false
+                    end as TABLE_REPRESENTABLE,
+                    case
+                        when t.relispartition or exists (
+                            select 1 from pg_catalog.pg_inherits inheritance
+                            where inheritance.inhrelid = t.oid
+                        ) then 'partition or inheritance child'
+                        when t.relkind = 'r' and exists (
+                            select 1 from pg_catalog.pg_inherits inheritance
+                            where inheritance.inhparent = t.oid
+                        ) then 'inheritance parent'
+                        when t.relkind = 'p' and partitioning.partrelid is null
+                            then 'partition metadata'
+                        when t.relkind = 'p' and partitioning.partstrat <> 'r'
+                            then 'non-range partition strategy'
+                        when t.relkind = 'p' and partitioning.partnatts <> 1
+                            then 'multiple partition keys'
+                        when t.relkind = 'p' and (
+                                partitioning.partexprs is not null or partitioning.partattrs[0] = 0)
+                            then 'partition expression'
+                        when t.relkind = 'p' and (
+                                partition_attribute.attnum is null
+                                or partition_attribute.attnum <= 0
+                                or partition_attribute.attisdropped)
+                            then 'partition column metadata'
+                        when t.relkind = 'p' and (
+                                partition_opclass.oid is null
+                                or partition_access_method.oid is null)
+                            then 'partition operator class metadata'
+                        when t.relkind = 'p' and (
+                                partition_access_method.amname <> 'btree'
+                                or not partition_opclass.opcdefault)
+                            then 'non-default partition operator class'
+                        when t.relkind = 'p' and
+                                partitioning.partcollation[0] <> partition_attribute.attcollation
+                            then 'non-default partition collation'
+                        else null
+                    end as UNSUPPORTED_TABLE_REASON,
+                    (t.relkind = 'p') as TABLE_PARTITIONED,
+                    case when partitioning.partstrat = 'r' then 'RANGE' else null end
+                        as PARTITION_STRATEGY,
+                    partition_attribute.attname as PARTITION_COLUMN
+             from pg_catalog.pg_class t
+             join pg_catalog.pg_namespace n on n.oid = t.relnamespace
+             left join pg_catalog.pg_partitioned_table partitioning
+               on partitioning.partrelid = t.oid
+             left join pg_catalog.pg_attribute partition_attribute
+               on partition_attribute.attrelid = t.oid
+              and partition_attribute.attnum = partitioning.partattrs[0]
+             left join pg_catalog.pg_opclass partition_opclass
+               on partition_opclass.oid = partitioning.partclass[0]
+             left join pg_catalog.pg_am partition_access_method
+               on partition_access_method.oid = partition_opclass.opcmethod
+             where t.relname = ? and t.relkind in ('r', 'p')
+             """;
 
     private static final String BASE_PRIMARY_KEY_SQL = """
             select con.conname as CONSTRAINT_NAME,

@@ -218,10 +218,17 @@ final class JdbcBatchRows implements Subscriber<Object[]>, AutoCloseable {
         return remainingNanos;
     }
 
-    private static RuntimeException rethrow(Throwable error) {
+    private static RuntimeException rethrow(Throwable error)
+            throws InterruptedException, TimeoutException {
         // 上游 Error 也是原始失败事实；交给外层事务边界完成 rollback 后再决定如何公开，不能在通道层降级成普通异常。
         if (error instanceof Error fatal) {
             throw fatal;
+        }
+        if (error instanceof InterruptedException interrupted) {
+            throw interrupted;
+        }
+        if (error instanceof TimeoutException timedOut) {
+            throw timedOut;
         }
         if (error instanceof RuntimeException runtime) {
             return runtime;

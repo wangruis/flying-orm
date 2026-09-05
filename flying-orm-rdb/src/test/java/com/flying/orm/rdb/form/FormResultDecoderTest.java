@@ -10,15 +10,25 @@ import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.execution.SqlExecutionTimeoutException;
+import com.flying.orm.rdb.execution.SqlLargeObjectLimitExceededException;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
 import com.flying.orm.rdb.result.DynamicRow;
+import io.r2dbc.spi.Blob;
+import io.r2dbc.spi.Clob;
+import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestFactory;
+import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
+import reactor.core.scheduler.Schedulers;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
 import java.sql.Time;
 import java.sql.Timestamp;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -29,10 +39,16 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -56,6 +72,116 @@ class FormResultDecoderTest {
             assertSame(rows, decoder.decodeRows(form, rows, SqlExecutionOptions.safeDefaults()));
             assertSame(rowFlux, decoder.decodeRows(form, rowFlux, SqlExecutionOptions.safeDefaults()));
         }
+    }
+
+    @Test
+    void materializedLargeObjectFieldsDoNotScheduleAdditionalExecutionDeadlines() {
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.h2());
+        DynamicForm form = DynamicForm.builder("documents", "documents")
+                .addField(DynamicField.of("body", "CLOB"))
+                .addField(DynamicField.of("content", "BLOB"))
+                .build();
+        byte[] content = {1, 2, 3};
+        DynamicRow rawRow = DynamicRow.copyOf(Map.of("body", "text", "content", content));
+        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
+                .withTimeout(Duration.ofSeconds(30)).withCleanupTimeout(Duration.ZERO);
+        AtomicInteger scheduledTasks = new AtomicInteger();
+        String hook = getClass().getName() + ".materializedLargeObjects";
+
+        try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())) {
+            FormResultDecoder decoder = new FormResultDecoder(renderer, models);
+            Schedulers.onScheduleHook(hook, task -> {
+                scheduledTasks.incrementAndGet();
+                return task;
+            });
+            try {
+                DynamicRow decoded = decoder.decodeRows(form, Flux.just(rawRow), options).single().block();
+
+                assertEquals("text", decoded.get("body"));
+                assertArrayEquals(content, assertInstanceOf(byte[].class, decoded.get("content")));
+                assertEquals(0, scheduledTasks.get(),
+                        "already materialized fields must not start another execution deadline");
+            } finally {
+                Schedulers.resetOnScheduleHook(hook);
+            }
+        }
+    }
+
+    @Test
+    void materializedLargeObjectFieldsKeepTheirSizeLimits() {
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.h2());
+        DynamicForm form = DynamicForm.builder("documents", "documents")
+                .addField(DynamicField.of("body", "CLOB"))
+                .addField(DynamicField.of("content", "BLOB"))
+                .build();
+        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
+                .withTimeout(Duration.ofSeconds(30)).withCleanupTimeout(Duration.ZERO)
+                .withMaxLargeObjectBytes(2).withMaxLargeObjectChars(2);
+
+        try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())) {
+            FormResultDecoder decoder = new FormResultDecoder(renderer, models);
+            SqlLargeObjectLimitExceededException binary = assertThrows(
+                    SqlLargeObjectLimitExceededException.class,
+                    () -> decoder.decodeRows(form,
+                            Flux.just(DynamicRow.copyOf(Map.of("content", new byte[]{1, 2, 3}))), options)
+                            .single().block());
+            SqlLargeObjectLimitExceededException character = assertThrows(
+                    SqlLargeObjectLimitExceededException.class,
+                    () -> decoder.decodeRows(form,
+                            Flux.just(DynamicRow.copyOf(Map.of("body", "text"))), options).single().block());
+
+            assertEquals(SqlLargeObjectLimitExceededException.Kind.BINARY, binary.kind());
+            assertEquals(2, binary.maxSize());
+            assertEquals(3, binary.actualSize());
+            assertEquals(SqlLargeObjectLimitExceededException.Kind.CHARACTER, character.kind());
+            assertEquals(2, character.maxSize());
+            assertEquals(4, character.actualSize());
+        }
+    }
+
+    @TestFactory
+    Stream<DynamicTest> rawLargeObjectFieldsKeepTheirReadTimeoutAndCancelContent() {
+        return Stream.of("BLOB", "CLOB").map(dataType -> DynamicTest.dynamicTest(dataType, () -> {
+            FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                    SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.h2());
+            DynamicForm form = DynamicForm.builder("documents", "documents")
+                    .addField(DynamicField.of("content", dataType)).build();
+            AtomicBoolean cancelled = new AtomicBoolean();
+            Object locator = dataType.equals("BLOB")
+                    ? Blob.from(Flux.<ByteBuffer>never().doOnCancel(() -> cancelled.set(true)))
+                    : Clob.from(Flux.<CharSequence>never().doOnCancel(() -> cancelled.set(true)));
+            SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
+                    .withTimeout(Duration.ofSeconds(30)).withCleanupTimeout(Duration.ZERO);
+            AtomicReference<Runnable> deadline = new AtomicReference<>();
+            AtomicReference<Throwable> failure = new AtomicReference<>();
+            String hook = getClass().getName() + ".rawLargeObjects";
+
+            try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())) {
+                FormResultDecoder decoder = new FormResultDecoder(renderer, models);
+                Schedulers.onScheduleHook(hook, task -> {
+                    deadline.set(task);
+                    return task;
+                });
+                Disposable subscription = null;
+                try {
+                    subscription = decoder.decodeRows(form,
+                            Flux.just(DynamicRow.copyOf(Map.of("content", locator))), options)
+                            .subscribe(ignored -> { }, failure::set);
+
+                    assertNotNull(deadline.get(), "a raw LOB must retain its read deadline");
+                    deadline.get().run();
+                    assertInstanceOf(SqlExecutionTimeoutException.class, failure.get());
+                    assertTrue(cancelled.get(), "a read timeout must cancel the LOB content subscription");
+                } finally {
+                    if (subscription != null) {
+                        subscription.dispose();
+                    }
+                    Schedulers.resetOnScheduleHook(hook);
+                }
+            }
+        }));
     }
 
     @Test

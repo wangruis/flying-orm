@@ -245,10 +245,7 @@ final class JdbcBatchEvidenceExecutor {
             long startOffset,
             int inputCount,
             Throwable failure) {
-        BatchExecutionState state = failure instanceof TimeoutException
-                ? BatchExecutionState.TIMED_OUT
-                : failure instanceof InterruptedException
-                        ? BatchExecutionState.CANCELLED : BatchExecutionState.FAILED;
+        BatchExecutionState state = JdbcBatchEvidenceSupport.failureState(failure, false);
         return BatchChunkExecutionFact.of(
                 chunkIndex,
                 startOffset,

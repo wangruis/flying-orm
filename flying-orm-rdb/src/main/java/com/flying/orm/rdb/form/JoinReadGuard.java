@@ -97,7 +97,7 @@ final class JoinReadGuard {
                                 JoinFieldRef field,
                                 FieldUse use) {
         if (requirements != null) {
-            requirements.require(field.field(), use);
+            requirements.requireJoin(field, use);
         }
     }
 

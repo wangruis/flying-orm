@@ -4,6 +4,7 @@ import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.join.JoinFieldRef;
 import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.join.JoinSource;
 import com.flying.orm.core.protection.MaskedFieldDefinition;
@@ -15,6 +16,7 @@ import com.flying.orm.core.scope.FieldUse;
 import com.flying.orm.core.scope.FieldUseOrigin;
 import com.flying.orm.core.scope.FieldUseSnapshot;
 import com.flying.orm.core.scope.FieldVisibility;
+import com.flying.orm.core.scope.JoinFieldDecision;
 import com.flying.orm.core.scope.ScopeAccessException;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.dialect.RdbDialect;
@@ -92,7 +94,12 @@ class FieldVisibilityResultTest {
         JoinQuerySpec join = joinBuilder.selectAs(root, "id", "id")
                                          .selectAs(root, "name", "name")
                                          .build();
-        assertSame(raw, FieldVisibilityPublisher.publishJoin(null, join, raw, snapshot));
+        FieldUseSnapshot joinSnapshot = FieldUseSnapshot.ofJoin(List.of(
+                new JoinFieldDecision(new JoinFieldRef(root, "id"), FieldUse.PROJECT,
+                                      FieldUseOrigin.CALLER, true, FieldVisibility.FULL),
+                new JoinFieldDecision(new JoinFieldRef(root, "name"), FieldUse.PROJECT,
+                                      FieldUseOrigin.CALLER, true, FieldVisibility.FULL)));
+        assertSame(raw, FieldVisibilityPublisher.publishJoin(null, join, raw, joinSnapshot));
 
         String source = Files.readString(Path.of(System.getProperty("basedir"), "src", "main", "java",
                                                  "com", "flying", "orm", "rdb", "form",

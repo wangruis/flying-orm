@@ -30,9 +30,9 @@ final class MySqlReactiveFormMetadataReader implements ReactiveFormMetadataReade
             ((lower(c.DATA_TYPE) in ('timestamp', 'datetime')
               and lower(trim(c.COLUMN_DEFAULT)) regexp '^current_timestamp([(][0-6]?[)])?$')
              or (lower(c.DATA_TYPE) = 'date'
-                 and lower(trim(c.COLUMN_DEFAULT)) regexp '^current_date([(][)])?$')
+                 and lower(trim(c.COLUMN_DEFAULT)) regexp '^(current_date|curdate)([(][)])?$')
              or (lower(c.DATA_TYPE) = 'time'
-                 and lower(trim(c.COLUMN_DEFAULT)) regexp '^current_time([(][0-6]?[)])?$'))
+                 and lower(trim(c.COLUMN_DEFAULT)) regexp '^(current_time|curtime)([(][0-6]?[)])?$'))
             """;
 
     private static final String BASE_COLUMNS_SQL = """

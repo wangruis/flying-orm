@@ -118,6 +118,22 @@ public final class EntityModelRegistry implements AutoCloseable {
                                               safeType, metadata, safeCodecs, customMappings));
     }
 
+    /** 仅供已知数据库原始值入口使用；已解码行和调用方 mapper 继续使用 rowMapper 的宽容语义。 */
+    @InternalApi
+    @SuppressWarnings("unchecked")
+    public <T> RowMapper<T> rawRowMapper(Class<T> type, ValueCodecRegistry valueCodecs) {
+        Class<T> safeType = Objects.requireNonNull(type, "mapping type must not be null");
+        EntitySchemaDescriptor<T> schema = registeredSchema(safeType);
+        if (schema == null || schema.customFieldMappings().isEmpty()) {
+            return rowMapper(safeType, valueCodecs);
+        }
+        ValueCodecRegistry safeCodecs = Objects.requireNonNull(valueCodecs,
+                "value codec registry must not be null");
+        return (MappingPlan<T>) model(new ModelKey(Kind.RAW_ROW_MAPPING, safeType, safeCodecs),
+                ignored -> MappingPlan.createUncached(safeType, schema.metadata(), safeCodecs,
+                        schema.customFieldMappings(), true));
+    }
+
     /**
      * 获取或编译实体约定元数据，容量和过期策略与行映射计划共用同一真实边界。
      *
@@ -186,8 +202,11 @@ public final class EntityModelRegistry implements AutoCloseable {
     public <T> EntityValues<T> entityValues(Class<T> type) {
         Class<T> safeType = Objects.requireNonNull(type, "entity type must not be null");
         EntityMetadata<T> metadata = metadata(safeType);
-        return (EntityValues<T>) model(ModelKey.values(safeType),
-                                       ignored -> EntityValues.createUncached(safeType, metadata, fieldFiller));
+        return (EntityValues<T>) model(ModelKey.values(safeType), ignored -> {
+            EntitySchemaDescriptor<T> schema = registeredSchema(safeType);
+            return EntityValues.createUncached(safeType, metadata, fieldFiller,
+                                              schema == null ? Map.of() : schema.customFieldMappings());
+        });
     }
 
     /**
@@ -367,6 +386,7 @@ public final class EntityModelRegistry implements AutoCloseable {
         METADATA,
         VALUES,
         ROW_MAPPING,
+        RAW_ROW_MAPPING,
         SCHEMA_DESCRIPTOR
     }
 }

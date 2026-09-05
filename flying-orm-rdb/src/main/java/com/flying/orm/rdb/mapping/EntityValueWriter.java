@@ -18,6 +18,12 @@ interface EntityValueWriter {
 
     void write(Object target, Object value, ValueCodecRegistry valueCodecs);
 
+    /** 只在原始行计划编译时包装已注册字段；后续赋值不再重复调用该字段 codec。 */
+    static EntityValueWriter fromRaw(EntityValueWriter writer, EntityTypeMappingRegistry.Mapping mapping) {
+        return (target, value, valueCodecs) -> writer.write(
+                target, EntityRowValueConverter.readCustom(value, mapping), valueCodecs);
+    }
+
     static EntityValueWriter forMethod(Method method,
                                        Class<?> valueType,
                                        EntityFieldMetadata metadata,

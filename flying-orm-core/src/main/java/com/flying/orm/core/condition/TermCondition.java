@@ -69,10 +69,10 @@ public record TermCondition(FieldIdentity identity, String operator, Object valu
     @Override
     public Object value() {
         if (requiresBoundedCollection(operator) && value instanceof List<?> values) {
-            return BindableValueSnapshots.immutableValues(values);
+            return BindableValueSnapshots.logicalValues(values);
         }
         return isStandardOperator(operator)
-                ? BindableValueSnapshots.immutableValue(value)
+                ? BindableValueSnapshots.logicalValue(value)
                 : BindableValueSnapshots.arrayGraph(value);
     }
 
@@ -113,7 +113,7 @@ public record TermCondition(FieldIdentity identity, String operator, Object valu
     /** 在条件入口的单次规范化中取得可变标量所有权，避免发布 AST 时再次遍历集合。 */
     static Object snapshotScalar(String operator, Object value) {
         return isStandardOperator(operator)
-                ? BindableValueSnapshots.immutableValue(value)
+                ? BindableValueSnapshots.logicalValue(value)
                 : BindableValueSnapshots.arrayGraph(value);
     }
 
@@ -142,7 +142,7 @@ public record TermCondition(FieldIdentity identity, String operator, Object valu
             }
             snapshot.add(item);
         }
-        return BindableValueSnapshots.immutableValues(snapshot);
+        return BindableValueSnapshots.logicalValues(snapshot);
     }
 
     private static boolean requiresBoundedCollection(String operator) {

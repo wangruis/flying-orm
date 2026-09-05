@@ -9,6 +9,7 @@ import com.flying.orm.rdb.mapping.EntityFieldFiller;
 import com.flying.orm.rdb.mapping.EntityMappingEvent;
 import com.flying.orm.rdb.mapping.EntityMappingListener;
 import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
 import com.flying.orm.rdb.mapping.MappingException;
 
 import java.beans.IntrospectionException;
@@ -17,15 +18,12 @@ import java.beans.PropertyDescriptor;
 import java.lang.reflect.AccessibleObject;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
 import java.lang.reflect.RecordComponent;
 import java.time.Instant;
 import java.time.OffsetDateTime;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -187,33 +185,49 @@ public final class EntityValues<T> {
     public static <T> EntityValues<T> createUncached(Class<T> type,
                                                      EntityMetadata<T> metadata,
                                                      EntityFieldFiller fieldFiller) {
+        return createUncached(type, metadata, fieldFiller, Map.of());
+    }
+
+    /** 注册表在冷路径绑定精确字段映射，取值时保留应用 codec 所需的领域类型。 */
+    @InternalApi
+    public static <T> EntityValues<T> createUncached(
+            Class<T> type,
+            EntityMetadata<T> metadata,
+            EntityFieldFiller fieldFiller,
+            Map<String, EntityTypeMappingRegistry.Mapping> customMappings) {
+        Map<String, EntityTypeMappingRegistry.Mapping> safeCustomMappings = Objects.requireNonNull(
+                customMappings, "custom entity field mappings must not be null");
         if (type.isRecord()) {
-            return recordValues(type, metadata, fieldFiller);
+            return recordValues(type, metadata, fieldFiller, safeCustomMappings);
         }
-        return beanValues(type, metadata, fieldFiller);
+        return beanValues(type, metadata, fieldFiller, safeCustomMappings);
     }
 
     private static <T> EntityValues<T> recordValues(Class<T> type,
                                                     EntityMetadata<T> metadata,
-                                                    EntityFieldFiller fieldFiller) {
+                                                    EntityFieldFiller fieldFiller,
+                                                    Map<String, EntityTypeMappingRegistry.Mapping> customMappings) {
         Map<String, ValueReader> readers = new LinkedHashMap<>();
         for (RecordComponent component : type.getRecordComponents()) {
+            // findField 同时支持列别名；反射成员只能按真实 Java 属性名选择持久化元数据。
             EntityFieldMetadata field = metadata.findField(component.getName()).orElse(null);
-            if (field == null) {
+            if (field == null || !field.name().equals(component.getName())) {
                 // exist=false 的组件仍是 record 构造参数，但它不属于数据库模型，读取计划必须直接跳过。
                 continue;
             }
             Method accessor = component.getAccessor();
             requireAccessible(accessor, "record accessor");
             // 这里的 key 必须是数据库列名。Repository 后面会拿它去找 DynamicForm 字段并渲染 SQL。
-            readers.put(field.columnName(), stored(new MethodValueReader(accessor), field, component.getType()));
+            readers.put(field.columnName(), stored(new MethodValueReader(accessor), field, component.getType(),
+                                                   customMappings.containsKey(field.name())));
         }
         return new EntityValues<>(readers, metadata, fieldFiller);
     }
 
     private static <T> EntityValues<T> beanValues(Class<T> type,
                                                   EntityMetadata<T> metadata,
-                                                  EntityFieldFiller fieldFiller) {
+                                                  EntityFieldFiller fieldFiller,
+                                                  Map<String, EntityTypeMappingRegistry.Mapping> customMappings) {
         try {
             Map<String, ValueReader> readers = new LinkedHashMap<>();
             Set<String> readProperties = new HashSet<>();
@@ -221,23 +235,28 @@ public final class EntityValues<T> {
             for (PropertyDescriptor property : Introspector.getBeanInfo(type).getPropertyDescriptors()) {
                 Method readMethod = property.getReadMethod();
                 EntityFieldMetadata field = metadata.findField(property.getName()).orElse(null);
-                if (readMethod != null && field != null && !"class".equals(property.getName())) {
+                if (readMethod != null && field != null
+                        && EntityFieldNames.matches(field.name(), property.getName())
+                        && EntityMetadataHierarchy.isPersistentAccessor(readMethod, property.getName())
+                        && !"class".equals(property.getName())) {
                     requireAccessible(readMethod, "bean getter");
                     // Java 里叫 name，表里可能叫 user_name。写库时直接交出列名，调用方不用自己转。
                     readers.put(field.columnName(), stored(new MethodValueReader(readMethod), field,
-                                                           readMethod.getReturnType()));
-                    readProperties.add(property.getName());
+                                                           readMethod.getReturnType(),
+                                                           customMappings.containsKey(field.name())));
+                    readProperties.add(field.name());
                 }
             }
-            for (Field field : persistentFields(type)) {
+            for (Field field : EntityMetadataHierarchy.persistentFields(type)) {
                 EntityFieldMetadata persistentField = metadata.findField(field.getName()).orElse(null);
-                if (!Modifier.isStatic(field.getModifiers())
-                        && persistentField != null
+                if (persistentField != null
+                        && persistentField.name().equals(field.getName())
                         && !readProperties.contains(field.getName())) {
                     requireAccessible(field, "bean field");
                     // 没有 getter 的字段也按同一套实体元数据走，避免 Bean 和 record 表现不一致。
                     readers.put(persistentField.columnName(),
-                                stored(new FieldValueReader(field), persistentField, field.getType()));
+                                stored(new FieldValueReader(field), persistentField, field.getType(),
+                                       customMappings.containsKey(persistentField.name())));
                 }
             }
             return new EntityValues<>(readers, metadata, fieldFiller);
@@ -249,18 +268,6 @@ public final class EntityValues<T> {
     public int logicalWeight() {
         // 与元数据、行映射计划统一使用“反射槽”计量，避免固定头部被三种派生模型重复收费。
         return Math.max(1, readers.size());
-    }
-
-    private static List<Field> persistentFields(Class<?> type) {
-        List<Class<?>> hierarchy = new ArrayList<>();
-        for (Class<?> current = type; current != null && current != Object.class; current = current.getSuperclass()) {
-            hierarchy.add(current);
-        }
-        Collections.reverse(hierarchy);
-        List<Field> fields = new ArrayList<>();
-        // 元数据已经决定哪些父类能持久化，这里只负责找到对应 Field；普通父类字段会在 findField 时被跳过。
-        hierarchy.forEach(current -> Collections.addAll(fields, current.getDeclaredFields()));
-        return fields;
     }
 
     /**
@@ -279,12 +286,17 @@ public final class EntityValues<T> {
         Object read(Object target);
     }
 
-    private static ValueReader stored(ValueReader reader, EntityFieldMetadata field, Class<?> javaType) {
+    private static ValueReader stored(ValueReader reader,
+                                       EntityFieldMetadata field,
+                                       Class<?> javaType,
+                                       boolean customMapping) {
         ValueReader storedReader;
         String enumMember = field.enumValueMember();
         if (enumMember != null) {
             EntityEnumValueCodec codec = EntityEnumValueCodec.create(javaType, enumMember);
             storedReader = target -> codec.write(reader.read(target));
+        } else if (customMapping) {
+            return reader;
         } else {
             EntityEnumStorage storage = field.enumStorage();
             storedReader = storage == EntityEnumStorage.NONE
@@ -297,7 +309,8 @@ public final class EntityValues<T> {
                         return storage == EntityEnumStorage.ORDINAL ? enumValue.ordinal() : enumValue.name();
                     };
         }
-        if (!VARCHAR_TYPE.equals(field.databaseType())) {
+        // @EnumValue 的映射针对声明成员；提取后同样必须保留其原始类型交给自定义 codec。
+        if (customMapping || !VARCHAR_TYPE.equals(field.databaseType())) {
             return storedReader;
         }
         // 这些标准 Java 类型由实体模型明确落为跨方言 VARCHAR；Repository 自动生成的主键/乐观锁条件

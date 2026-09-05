@@ -7,12 +7,15 @@ import com.flying.orm.core.metadata.ForeignKeyMetadata;
 import com.flying.orm.core.metadata.IndexMetadata;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.rdb.protection.ProtectedFormLayout;
+import com.flying.orm.rdb.protection.ProtectedIndexProjection;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * 把公开逻辑表单和索引声明收敛为 Schema 引擎唯一可见的物理目标。
@@ -39,7 +42,7 @@ record ProtectedSchemaTarget(DynamicForm form,
     static ProtectedSchemaTarget resolve(DynamicForm logical,
                                          List<IndexMetadata> indexes,
                                          List<ForeignKeyMetadata> foreignKeys) {
-        DynamicForm safeLogical = Objects.requireNonNull(logical, "target dynamic form must not be null");
+        DynamicForm safeLogical = SchemaMigrationSupport.requireLegacyRelation(logical);
         List<IndexMetadata> safeIndexes = List.copyOf(Objects.requireNonNull(
                 indexes, "target indexes must not be null"));
         List<ForeignKeyMetadata> safeForeignKeys = List.copyOf(Objects.requireNonNull(
@@ -50,21 +53,22 @@ record ProtectedSchemaTarget(DynamicForm form,
 
         DynamicForm physical = ProtectedFormLayout.physical(safeLogical);
         Map<String, IndexMetadata> merged = new LinkedHashMap<>();
-        physical.toTableMetadata().indexes().forEach(index -> merged.put(key(index.name()), index));
+        Set<String> automaticIndexes = new HashSet<>();
+        physical.toTableMetadata().indexes().forEach(index -> {
+            String name = key(index.name());
+            automaticIndexes.add(name);
+            merged.put(name, index);
+        });
         for (IndexMetadata index : safeIndexes) {
-            List<DynamicField> encrypted = index.columns().stream()
-                                                .map(safeLogical::field)
-                                                .filter(field -> safeLogical.protections()
-                                                                            .encrypted(field.name()).isPresent())
-                                                .toList();
-            if (!encrypted.isEmpty()) {
-                if (isAutomaticEncryptedUnique(index, encrypted.getFirst())) {
-                    continue;
-                }
-                throw new IllegalArgumentException("database index must not reference an encrypted field");
+            List<String> projectedColumns = ProtectedIndexProjection.columns(
+                    safeLogical, index.columns(), index.unique());
+            IndexMetadata projected = project(index, projectedColumns);
+            if (index.unique()) {
+                merged.entrySet().removeIf(entry -> automaticIndexes.contains(entry.getKey())
+                        && sameUniqueColumns(entry.getValue(), projected));
             }
-            IndexMetadata previous = merged.putIfAbsent(key(index.name()), index);
-            if (previous != null && !sameIndex(previous, index)) {
+            IndexMetadata previous = merged.putIfAbsent(key(projected.name()), projected);
+            if (previous != null && !sameIndex(previous, projected)) {
                 // 自动索引与上层重复传入的同一声明可以合并；同名但不同定义必须在 DDL 前拒绝。
                 throw new IllegalArgumentException("duplicate protected schema index name");
             }
@@ -123,8 +127,22 @@ record ProtectedSchemaTarget(DynamicForm form,
                 && Objects.equals(source.generation(), target.generation());
     }
 
-    private static boolean isAutomaticEncryptedUnique(IndexMetadata index, DynamicField field) {
-        return index.unique() && index.columns().size() == 1 && field.unique();
+    private static IndexMetadata project(IndexMetadata source, List<String> columns) {
+        if (columns.equals(source.columns())) {
+            return source;
+        }
+        IndexMetadata.Builder builder = IndexMetadata.builder(source.name());
+        if (source.unique()) {
+            builder.unique();
+        }
+        columns.forEach(builder::addColumn);
+        return builder.build();
+    }
+
+    private static boolean sameUniqueColumns(IndexMetadata left, IndexMetadata right) {
+        return left.unique() && right.unique()
+                && left.columns().stream().map(ProtectedSchemaTarget::key).toList()
+                .equals(right.columns().stream().map(ProtectedSchemaTarget::key).toList());
     }
 
     private static boolean sameIndex(IndexMetadata left, IndexMetadata right) {

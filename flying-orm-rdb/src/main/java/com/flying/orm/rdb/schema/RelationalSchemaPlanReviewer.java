@@ -97,7 +97,24 @@ public final class RelationalSchemaPlanReviewer {
                     manual,
                     SchemaRiskClassifier.classify(
                             manual, safeActual, safeDatabase.capabilities()),
-                     preconditions)).build();
+                    preconditions)).build();
+        }
+        try {
+            RelationalTableDdlValidator.validate(safeDesired, dialect.schema());
+        } catch (UnsupportedOperationException unsupported) {
+            SchemaOperation manual = SchemaOperation.of(
+                    SchemaOperation.Kind.VERIFY_MANUALLY,
+                    safeDesired.identity(),
+                    "table-partition",
+                    null,
+                    null,
+                    SchemaOperation.Compatibility.REQUIRES_REVIEW);
+            return plan.addStep(SchemaPlanStep.manual(
+                    0,
+                    manual,
+                    SchemaRiskClassifier.classify(
+                            manual, safeActual, safeDatabase.capabilities()),
+                    preconditions)).build();
         }
         int order = 0;
         Map<String, String> sequences = sharedSequences == null

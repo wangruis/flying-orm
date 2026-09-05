@@ -207,7 +207,7 @@ final class ProtectedFieldValues {
 
     /** 受保护字段只接受业务 codec 编码后的文本值。 */
     static String encodedText(ValueCodecRegistry codecs, Object value) {
-        Object snapshot = BindableValueSnapshots.immutableValue(
+        Object snapshot = BindableValueSnapshots.logicalValue(
                 Objects.requireNonNull(value, "protected field value must not be null"));
         return encodeText(codecs, snapshot);
     }
@@ -219,7 +219,7 @@ final class ProtectedFieldValues {
     static String encodedOwnedText(ValueCodecRegistry codecs, Object value) {
         Object owned = Objects.requireNonNull(value, "protected field value must not be null");
         Object codecValue = owned.getClass().isArray()
-                ? owned : BindableValueSnapshots.immutableScalar(owned, null);
+                ? owned : BindableValueSnapshots.logicalScalar(owned);
         return encodeText(codecs, codecValue);
     }
 

@@ -6,6 +6,8 @@ import com.flying.orm.rdb.batch.BatchChunkResult;
 import com.flying.orm.rdb.batch.BatchExecutionState;
 
 import java.sql.BatchUpdateException;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.BitSet;
 import java.util.List;
@@ -24,16 +26,25 @@ final class JdbcBatchEvidenceSupport {
             return BatchExecutionState.PARTIAL;
         }
         return switch (BatchChunkResult.Failure.from(failure).kind()) {
-            case TIMEOUT -> BatchExecutionState.TIMED_OUT;
+            case TIMEOUT, LOCK_TIMEOUT -> BatchExecutionState.TIMED_OUT;
             case CANCELLED -> BatchExecutionState.CANCELLED;
             default -> BatchExecutionState.FAILED;
         };
     }
 
-    static BatchUpdateException positioned(BatchUpdateException failure,
-                                           long startOffset,
-                                           int inputCount) {
-        return new PositionedBatchUpdateException(failure, startOffset, inputCount);
+    /** 只有主表批处理的返回点才能把驱动更新计数归入业务输入位置。 */
+    static int[] executeBusinessBatch(PreparedStatement statement,
+                                      Counts evidence,
+                                      long startOffset,
+                                      int inputCount) throws SQLException {
+        try {
+            return statement.executeBatch();
+        } catch (BatchUpdateException failure) {
+            if (evidence != null) {
+                evidence.record(failure, startOffset, inputCount);
+            }
+            throw failure;
+        }
     }
 
     record Outcome(BatchChunkExecutionFact fact,
@@ -81,13 +92,7 @@ final class JdbcBatchEvidenceSupport {
             }
         }
 
-        void record(BatchUpdateException failure) {
-            long executionStartOffset = startOffset;
-            int executionInputCount = inputCount;
-            if (failure instanceof PositionedBatchUpdateException positioned) {
-                executionStartOffset = positioned.startOffset;
-                executionInputCount = positioned.inputCount;
-            }
+        void record(BatchUpdateException failure, long executionStartOffset, int executionInputCount) {
             long[] counts = failure.getLargeUpdateCounts();
             if (counts == null) {
                 int[] narrowCounts = failure.getUpdateCounts();
@@ -149,19 +154,4 @@ final class JdbcBatchEvidenceSupport {
         }
     }
 
-    /** 仅在驱动失败时携带当前 SQL-shape 子批次在整批输入中的位置。 */
-    private static final class PositionedBatchUpdateException extends BatchUpdateException {
-
-        private final long startOffset;
-        private final int inputCount;
-
-        private PositionedBatchUpdateException(BatchUpdateException failure,
-                                               long startOffset,
-                                               int inputCount) {
-            super(failure.getMessage(), failure.getSQLState(), failure.getErrorCode(),
-                  failure.getLargeUpdateCounts(), failure);
-            this.startOffset = startOffset;
-            this.inputCount = inputCount;
-        }
-    }
 }

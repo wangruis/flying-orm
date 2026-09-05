@@ -2,22 +2,34 @@ package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.codec.SqlTypedValue;
+import com.flying.orm.rdb.exception.RdbErrorKind;
+import com.flying.orm.rdb.exception.RdbException;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlExecutionPhase;
 import com.flying.orm.rdb.execution.SqlExecutionSequence;
 import com.flying.orm.rdb.execution.SqlExecutionSequenceException;
+import com.flying.orm.rdb.execution.SqlExecutionStepResult;
 import io.r2dbc.spi.Blob;
 import io.r2dbc.spi.Connection;
 import io.r2dbc.spi.ConnectionFactory;
 import io.r2dbc.spi.ConnectionFactoryMetadata;
+import io.r2dbc.spi.R2dbcNonTransientResourceException;
 import io.r2dbc.spi.Result;
 import io.r2dbc.spi.Statement;
+import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestFactory;
 import org.reactivestreams.Publisher;
+import org.reactivestreams.Subscription;
+import reactor.core.CoreSubscriber;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Hooks;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Operators;
 import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Schedulers;
+import reactor.util.context.Context;
 
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
@@ -27,11 +39,17 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.TimeoutException;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -136,6 +154,45 @@ class R2dbcSequenceCleanupOwnershipTest {
         fixture.assertCleanupOnceAndOwnedConnectionClosed();
     }
 
+    @TestFactory
+    Stream<DynamicTest> driverFailurePreservesPhaseAndCompletedWorkAtEverySignalBoundary() {
+        return Stream.of(SqlExecutionPhase.WORK, SqlExecutionPhase.CLEANUP).flatMap(phase ->
+                Stream.of("createStatement", "execute", "publisher").map(point -> DynamicTest.dynamicTest(
+                        phase + " failure from " + point, () -> {
+                            Fixture fixture = new Fixture();
+                            fixture.driverFailureSql = phase == SqlExecutionPhase.WORK
+                                    ? WORK_FAILURE : CLEANUP_FAILURE;
+                            fixture.driverFailurePoint = point;
+                            fixture.driverFailure = new R2dbcNonTransientResourceException(
+                                    "connection became unavailable", "08006");
+                            SqlRequest completed = request(ORDINARY_BEFORE, 1);
+                            List<SqlRequest> work = phase == SqlExecutionPhase.WORK
+                                    ? List.of(completed, request(WORK_FAILURE)) : List.of(completed);
+                            List<SqlRequest> cleanup = phase == SqlExecutionPhase.CLEANUP
+                                    ? List.of(request(CLEANUP, 1), request(CLEANUP_FAILURE))
+                                    : List.of(request(CLEANUP, 1));
+
+                            RuntimeException error = assertThrows(RuntimeException.class,
+                                    () -> fixture.executor.executeInConnection(
+                                            new SqlExecutionSequence(List.of(), work, cleanup),
+                                            SqlExecutionOptions.safeDefaults()).block(Duration.ofSeconds(2)));
+
+                            assertAll(fixture::assertCleanupOnceAndOwnedConnectionClosed, () -> {
+                                SqlExecutionSequenceException failure = assertInstanceOf(
+                                        SqlExecutionSequenceException.class, error);
+                                assertAll(
+                                        () -> assertEquals(phase, failure.phase()),
+                                        () -> assertEquals(1, failure.stepIndex()),
+                                        () -> assertEquals(1, failure.completedWorkSteps().size()),
+                                        () -> assertSame(completed,
+                                                failure.completedWorkSteps().getFirst().request()),
+                                        () -> assertEquals(1L,
+                                                failure.completedWorkSteps().getFirst().rowsUpdated()),
+                                        () -> assertSame(fixture.driverFailure, failure.getCause().getCause()));
+                            });
+                        })));
+    }
+
     @Test
     void keepsOrdinaryRequestsAlignedAroundMutableWrapper() {
         byte[] before = {5};
@@ -160,6 +217,154 @@ class R2dbcSequenceCleanupOwnershipTest {
                 () -> assertSame(afterRequest.parameters().getFirst(), fixture.bound(ORDINARY_AFTER).getFirst()));
     }
 
+    @TestFactory
+    Stream<DynamicTest> deadlinePreservesPhaseAndCompletedDdl() {
+        return Stream.of(SqlExecutionPhase.SETUP, SqlExecutionPhase.WORK, SqlExecutionPhase.CLEANUP)
+                .map(phase -> DynamicTest.dynamicTest(phase + " deadline evidence", () -> {
+                    Fixture fixture = new Fixture();
+                    SqlRequest completedDdl = request("create table completed_ddl (id bigint)");
+                    boolean cleanupDeadline = phase == SqlExecutionPhase.CLEANUP;
+                    SqlExecutionSequence sequence = new SqlExecutionSequence(
+                            phase == SqlExecutionPhase.SETUP
+                                    ? List.of(request(ORDINARY_BEFORE, 1), request(WORK_PENDING)) : List.of(),
+                            phase == SqlExecutionPhase.WORK
+                                    ? List.of(completedDdl, request(WORK_PENDING)) : List.of(completedDdl),
+                            cleanupDeadline ? List.of(request(CLEANUP, 1), request(CLEANUP_PENDING))
+                                    : List.of(request(CLEANUP, 1)));
+                    SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
+                            .withTimeout(cleanupDeadline ? Duration.ZERO : Duration.ofSeconds(30))
+                            .withCleanupTimeout(cleanupDeadline ? Duration.ofSeconds(30) : Duration.ZERO);
+                    AtomicReference<Runnable> deadline = new AtomicReference<>();
+                    AtomicReference<Throwable> error = new AtomicReference<>();
+                    AtomicInteger values = new AtomicInteger();
+                    String hook = getClass().getName() + ".sequenceEvidenceDeadline";
+                    Schedulers.onScheduleHook(hook, task -> {
+                        deadline.compareAndSet(null, task);
+                        return task;
+                    });
+                    Disposable subscription = null;
+                    try {
+                        subscription = fixture.executor.executeInConnection(sequence, options)
+                                .subscribe(ignored -> values.incrementAndGet(), error::set);
+                        assertTrue(fixture.sqls().contains(cleanupDeadline ? CLEANUP_PENDING : WORK_PENDING));
+                        assertNotNull(deadline.get());
+                        deadline.get().run();
+
+                        SqlExecutionSequenceException failure = assertInstanceOf(
+                                SqlExecutionSequenceException.class, error.get());
+                        assertEquals(phase, failure.phase());
+                        assertEquals(1, failure.stepIndex());
+                        assertEquals(phase == SqlExecutionPhase.SETUP ? 0 : 1,
+                                failure.completedWorkSteps().size());
+                        if (phase != SqlExecutionPhase.SETUP) {
+                            assertSame(completedDdl, failure.completedWorkSteps().getFirst().request());
+                            assertEquals(1L, failure.completedWorkSteps().getFirst().rowsUpdated());
+                        }
+                        if (cleanupDeadline) {
+                            assertEquals(RdbErrorKind.TIMEOUT,
+                                    assertInstanceOf(RdbException.class, failure.getCause()).kind());
+                        } else {
+                            assertInstanceOf(com.flying.orm.rdb.execution.SqlExecutionTimeoutException.class,
+                                    failure.getCause());
+                        }
+                        assertInstanceOf(TimeoutException.class, failure.getCause().getCause());
+                        assertEquals(0, values.get());
+                        fixture.assertCleanupOnceAndOwnedConnectionClosed();
+                    } finally {
+                        if (subscription != null) {
+                            subscription.dispose();
+                        }
+                        Schedulers.resetOnScheduleHook(hook);
+                    }
+                }));
+    }
+
+    @TestFactory
+    Stream<DynamicTest> deadlineAfterCompletedWorkDoesNotFailThatStepAgain() {
+        return Stream.of(false, true).map(allWorkCompleted -> DynamicTest.dynamicTest(
+                allWorkCompleted ? "deadline after final work" : "deadline between work steps", () -> {
+                    Fixture fixture = new Fixture();
+                    SqlRequest first = request(ORDINARY_BEFORE, 1);
+                    SqlRequest second = allWorkCompleted ? request(ORDINARY_AFTER, 2) : request(WORK_PENDING);
+                    SqlRequest triggerAfter = allWorkCompleted ? second : first;
+                    List<SqlRequest> expectedCompleted = allWorkCompleted ? List.of(first, second) : List.of(first);
+                    AtomicReference<Runnable> deadline = new AtomicReference<>();
+                    AtomicReference<Throwable> error = new AtomicReference<>();
+                    AtomicBoolean triggered = new AtomicBoolean();
+                    AtomicInteger values = new AtomicInteger();
+                    String hook = getClass().getName() + ".completedStepDeadline";
+                    Schedulers.onScheduleHook(hook, task -> {
+                        deadline.compareAndSet(null, task);
+                        return task;
+                    });
+                    Hooks.onEachOperator(hook, Operators.<Object>lift(
+                            operator -> "peek".equals(operator.stepName()),
+                            (operator, actual) -> new CoreSubscriber<Object>() {
+                                @Override
+                                public Context currentContext() {
+                                    return actual.currentContext();
+                                }
+
+                                @Override
+                                public void onSubscribe(Subscription subscription) {
+                                    actual.onSubscribe(subscription);
+                                }
+
+                                @Override
+                                public void onNext(Object value) {
+                                    // MonoPeek invokes completeStep before this downstream callback. Freeze
+                                    // that exact gap before concatMap can start the next statement.
+                                    if (value instanceof SqlExecutionStepResult result
+                                            && result.request() == triggerAfter
+                                            && triggered.compareAndSet(false, true)) {
+                                        assertNotNull(deadline.get());
+                                        deadline.get().run();
+                                    }
+                                    actual.onNext(value);
+                                }
+
+                                @Override
+                                public void onError(Throwable failure) {
+                                    actual.onError(failure);
+                                }
+
+                                @Override
+                                public void onComplete() {
+                                    actual.onComplete();
+                                }
+                            }));
+                    Disposable subscription = null;
+                    try {
+                        subscription = fixture.executor.executeInConnection(new SqlExecutionSequence(
+                                        List.of(), List.of(first, second), List.of(request(CLEANUP, 1))),
+                                        SqlExecutionOptions.safeDefaults().withTimeout(Duration.ofSeconds(30))
+                                                .withCleanupTimeout(Duration.ZERO))
+                                .subscribe(ignored -> values.incrementAndGet(), error::set);
+
+                        assertTrue(triggered.get());
+                        SqlExecutionSequenceException failure = assertInstanceOf(
+                                SqlExecutionSequenceException.class, error.get());
+                        assertEquals(SqlExecutionPhase.WORK, failure.phase());
+                        assertInstanceOf(com.flying.orm.rdb.execution.SqlExecutionTimeoutException.class,
+                                failure.getCause());
+                        assertEquals(expectedCompleted,
+                                failure.completedWorkSteps().stream().map(SqlExecutionStepResult::request).toList());
+                        assertEquals(expectedCompleted.size(), failure.stepIndex(),
+                                "a deadline must not reclassify an already completed step as the failed step");
+                        assertEquals(allWorkCompleted ? List.of(ORDINARY_BEFORE, ORDINARY_AFTER, CLEANUP)
+                                : List.of(ORDINARY_BEFORE, CLEANUP), fixture.sqls());
+                        assertEquals(0, values.get());
+                        fixture.assertCleanupOnceAndOwnedConnectionClosed();
+                    } finally {
+                        if (subscription != null) {
+                            subscription.dispose();
+                        }
+                        Hooks.resetOnEachOperator(hook);
+                        Schedulers.resetOnScheduleHook(hook);
+                    }
+                }));
+    }
+
     private static SqlRequest request(String sql, Object... parameters) {
         return new SqlRequest(sql, List.of(parameters));
     }
@@ -182,11 +387,22 @@ class R2dbcSequenceCleanupOwnershipTest {
 
         private final List<RecordedStatement> statements = new ArrayList<>();
 
+        private String driverFailureSql;
+
+        private String driverFailurePoint;
+
+        private RuntimeException driverFailure;
+
         private final R2dbcSqlExecutor executor = R2dbcSqlExecutor.create(factory());
 
         private ConnectionFactory factory() {
             Connection connection = proxy(Connection.class, (proxy, method, arguments) -> switch (method.getName()) {
-                case "createStatement" -> statement((String) arguments[0]);
+                case "createStatement" -> {
+                    if ("createStatement".equals(driverFailurePoint) && arguments[0].equals(driverFailureSql)) {
+                        throw driverFailure;
+                    }
+                    yield statement((String) arguments[0]);
+                }
                 case "close" -> Mono.fromRunnable(() -> {
                     connectionCloses.incrementAndGet();
                     connectionClosed.countDown();
@@ -214,7 +430,17 @@ class R2dbcSequenceCleanupOwnershipTest {
                     recorded.values.add(arguments[1]);
                     yield proxy;
                 }
-                case "execute" -> execute(recorded.sql);
+                case "execute" -> {
+                    if (sql.equals(driverFailureSql)) {
+                        if ("execute".equals(driverFailurePoint)) {
+                            throw driverFailure;
+                        }
+                        if ("publisher".equals(driverFailurePoint)) {
+                            yield Flux.error(driverFailure);
+                        }
+                    }
+                    yield execute(recorded.sql);
+                }
                 default -> throw new UnsupportedOperationException(method.getName());
             });
         }

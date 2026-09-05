@@ -15,6 +15,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Function;
 
 /**
  * 把内建条件 term 的业务值转换为动态字段和当前方言真正需要的绑定值。
@@ -35,19 +36,26 @@ final class FormConditionValueNormalizer {
     }
 
     ConditionGroup normalize(DynamicForm form, ConditionGroup where) {
-        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        ConditionGroup safeWhere = Objects.requireNonNull(where, "where condition must not be null");
-        return normalizeGroup(safeForm, safeWhere);
+        return normalize(form, where, null);
     }
 
-    private ConditionGroup normalizeGroup(DynamicForm form, ConditionGroup group) {
+    /** HAVING keeps result aliases in the AST while encoding against their declared value source. */
+    ConditionGroup normalize(DynamicForm form, ConditionGroup where,
+                             Function<String, DynamicField> valueFieldResolver) {
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        ConditionGroup safeWhere = Objects.requireNonNull(where, "where condition must not be null");
+        return normalizeGroup(safeForm, safeWhere, valueFieldResolver);
+    }
+
+    private ConditionGroup normalizeGroup(DynamicForm form, ConditionGroup group,
+                                          Function<String, DynamicField> valueFieldResolver) {
         List<ConditionNode> children = group.children();
         List<ConditionNode> normalized = null;
         for (int index = 0; index < children.size(); index++) {
             ConditionNode child = children.get(index);
             ConditionNode next = child instanceof ConditionGroup nested
-                    ? normalizeGroup(form, nested)
-                    : normalizeTerm(form, (TermCondition) child);
+                    ? normalizeGroup(form, nested, valueFieldResolver)
+                    : normalizeTerm(form, (TermCondition) child, valueFieldResolver);
             if (normalized == null && next != child) {
                 normalized = new ArrayList<>(children.size());
                 normalized.addAll(children.subList(0, index));
@@ -65,7 +73,8 @@ final class FormConditionValueNormalizer {
         return builder.build();
     }
 
-    private TermCondition normalizeTerm(DynamicForm form, TermCondition term) {
+    private TermCondition normalizeTerm(DynamicForm form, TermCondition term,
+                                         Function<String, DynamicField> valueFieldResolver) {
         DynamicField field = form.findField(term.field()).orElse(null);
         if (field == null) {
             Object termValue = term.value();
@@ -84,17 +93,20 @@ final class FormConditionValueNormalizer {
                     ? term
                     : TermCondition.of(field.name(), term.operator(), term.value());
         }
-        support.requireStableOffsetTimeComparison(field, term.operator());
+        DynamicField valueField = valueFieldResolver == null ? field
+                : Objects.requireNonNull(valueFieldResolver.apply(field.name()),
+                                         "condition value source field must not be null");
+        support.requireStableOffsetTimeComparison(valueField, term.operator());
         if (field.name().equals(term.field())
                 && (handler.shape() == ConditionValueShape.NONE
-                || !support.requiresFieldAwareConditionEncoding(field))) {
+                || !support.requiresFieldAwareConditionEncoding(valueField))) {
             return term;
         }
         Object source = term.value();
         NormalizedValue normalized = switch (handler.shape()) {
             case NONE -> NormalizedValue.unchanged(source);
-            case SCALAR -> normalizedScalar(field, source);
-            case COLLECTION, RANGE -> normalizeValues(field, source);
+            case SCALAR -> normalizedScalar(valueField, source);
+            case COLLECTION, RANGE -> normalizeValues(valueField, source);
             case SCALAR_OR_COLLECTION -> throw new IllegalStateException(
                     "standard condition term has an unsupported value shape");
         };

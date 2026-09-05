@@ -169,7 +169,8 @@ public final class LargeObjectValueCodec {
             }
             decoded = materialize(clob, safeOptions.maxLargeObjectChars()).cast(Object.class);
         } else {
-            decoded = Mono.fromSupplier(() -> readMaterialized(value, dataType, safeOptions));
+            // 已物化值只做同步转换和大小检查，不再发生驱动 I/O，也不为每个字段创建计时任务。
+            return Mono.fromSupplier(() -> readMaterialized(value, dataType, safeOptions));
         }
         if (safeOptions.timeout().isZero()) {
             return decoded;

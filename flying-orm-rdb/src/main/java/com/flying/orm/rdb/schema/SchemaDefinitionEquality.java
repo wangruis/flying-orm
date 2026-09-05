@@ -10,6 +10,7 @@ import com.flying.orm.core.metadata.IndexKeyPart;
 import com.flying.orm.core.metadata.PrimaryKeyDefinition;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
+import com.flying.orm.core.metadata.TablePartitionDefinition;
 import com.flying.orm.core.metadata.ValueGeneration;
 
 import java.math.BigDecimal;
@@ -93,6 +94,13 @@ final class SchemaDefinitionEquality {
                 && sameNames(left.referenceColumns(), right.referenceColumns(), schemaDialect)
                 && left.onDelete() == right.onDelete()
                 && left.onUpdate() == right.onUpdate();
+    }
+
+    static boolean samePartition(TablePartitionDefinition left,
+                                 TablePartitionDefinition right,
+                                 SchemaDialect schemaDialect) {
+        return left.strategy() == right.strategy()
+                && sameName(left.column(), right.column(), schemaDialect);
     }
 
     static boolean sameRelation(RelationIdentity left,

@@ -15,6 +15,33 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 class ProtectedFieldValueOwnershipTest {
 
     @Test
+    void textCodecReceivesAnIsolatedLogicalTypeBeforeProtection() {
+        StringBuilder source = new StringBuilder("secret");
+        ValueCodecRegistry codecs = ValueCodecRegistry.standard().withFirst(new ValueCodec() {
+            @Override
+            public boolean supports(Class<?> targetType) {
+                return targetType == StringBuilder.class;
+            }
+
+            @Override
+            public Object write(Object value) {
+                StringBuilder text = (StringBuilder) value;
+                String encoded = "encoded:" + text;
+                text.setLength(0);
+                return encoded;
+            }
+
+            @Override
+            public Object read(Object value, Class<?> targetType) {
+                return value;
+            }
+        });
+        assertEquals("encoded:secret", ProtectedFieldValues.encodedText(codecs, source));
+        assertEquals("encoded:secret", ProtectedFieldValues.encodedOwnedText(codecs, source));
+        assertEquals("secret", source.toString());
+    }
+
+    @Test
     void snapshotsReusableWriteValuesBeforeCallingACodec() {
         byte[] source = {1, 2, 3};
         AtomicReference<Object> received = new AtomicReference<>();

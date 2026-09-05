@@ -10,6 +10,8 @@ import com.flying.orm.core.page.KeysetSort;
 import com.flying.orm.core.page.NullOrder;
 import com.flying.orm.core.protection.MaskedFieldDefinition;
 import com.flying.orm.core.scope.FieldUse;
+import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.scope.FieldScope;
 import com.flying.orm.core.scope.FieldUseOrigin;
 import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.scope.FieldVisibility;
@@ -17,6 +19,8 @@ import com.flying.orm.core.scope.ScopeAccessException;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.form.spec.QuerySpec;
+import com.flying.orm.rdb.lock.LockingReadSpec;
+import com.flying.orm.rdb.lock.ReadLock;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.sync.SyncBatchExecutor;
@@ -32,10 +36,73 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class KeysetFieldUseAndProtectionTest {
+
+    @Test
+    void defaultKeysetCannotReadAnAutomaticallyAppendedKeyDeniedByFieldScope() {
+        AtomicInteger syncExecutions = new AtomicInteger();
+        AtomicInteger reactiveExecutions = new AtomicInteger();
+        QuerySpec query = scopedQuery(FieldScope.readable("payload", "created_at"));
+        KeysetPageQuery page = KeysetPageQuery.first(
+                1, KeysetSort.asc("created_at", NullOrder.LAST));
+
+        assertAll(
+                () -> assertThrows(IllegalArgumentException.class,
+                        () -> client(syncExecutions).keysetPage(query, page)),
+                () -> assertThrows(IllegalArgumentException.class,
+                        () -> reactiveClient(reactiveExecutions).keysetPage(query, page).block()),
+                () -> assertEquals(0, syncExecutions.get()),
+                () -> assertEquals(0, reactiveExecutions.get()));
+    }
+
+    @Test
+    void defaultLockingKeysetRejectsUnreadableAppendedKeysBeforeTransactionAccess() {
+        AtomicInteger syncExecutions = new AtomicInteger();
+        AtomicInteger reactiveExecutions = new AtomicInteger();
+        LockingReadSpec query = LockingReadSpec.of(
+                scopedQuery(FieldScope.readable("payload", "created_at")), ReadLock.update());
+        KeysetPageQuery page = KeysetPageQuery.first(
+                1, KeysetSort.asc("created_at", NullOrder.LAST));
+
+        assertAll(
+                () -> assertThrows(IllegalArgumentException.class,
+                        () -> client(syncExecutions).lockingRead(query, page)),
+                () -> assertThrows(IllegalArgumentException.class,
+                        () -> reactiveClient(reactiveExecutions).lockingRead(query, page).block()),
+                () -> assertEquals(0, syncExecutions.get()),
+                () -> assertEquals(0, reactiveExecutions.get()));
+    }
+
+    @Test
+    void defaultKeysetKeepsReadableUnprojectedKeysInThePublishedPosition() {
+        LocalDateTime first = LocalDateTime.parse("2026-09-05T00:00:00");
+        LocalDateTime second = first.plusMinutes(1);
+        List<DynamicRow> rows = List.of(
+                physicalRow("one", first, 1L), physicalRow("two", second, 2L));
+        QuerySpec query = scopedQuery(FieldScope.readable("payload", "created_at", "id"));
+        KeysetPageQuery page = KeysetPageQuery.first(
+                1, KeysetSort.asc("created_at", NullOrder.LAST));
+
+        KeysetPageResult<DynamicRow> sync = client(new AtomicInteger(), rows).keysetPage(query, page);
+        KeysetPageResult<DynamicRow> reactive = reactiveClient(new AtomicInteger(), rows)
+                .keysetPage(query, page).block();
+
+        assertAll(
+                () -> assertEquals(List.of(first, 1L), sync.nextPosition().values()),
+                () -> assertEquals(List.of(Map.of("payload", "one")), sync.rows()),
+                () -> assertEquals(sync.nextPosition().values(), reactive.nextPosition().values()),
+                () -> assertEquals(sync.rows(), reactive.rows()));
+    }
+
+    private static QuerySpec scopedQuery(FieldScope fields) {
+        return QuerySpec.of(form(), ConditionGroup.and().build())
+                .withProjection(List.of("payload"), List.of())
+                .withScope(DataScope.none().withFields(fields));
+    }
 
     @Test
     void callerSortAndInternalTieBreakerRequireDistinctGrantsBeforeExecution() {
@@ -196,6 +263,10 @@ class KeysetFieldUseAndProtectionTest {
         SyncSqlExecutor executor = (SyncSqlExecutor) Proxy.newProxyInstance(
                 SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{SyncSqlExecutor.class},
                 (proxy, method, arguments) -> {
+                    if (method.getName().equals("currentTransaction")) {
+                        executions.incrementAndGet();
+                        return java.util.Optional.empty();
+                    }
                     if (method.getName().equals("query")) {
                         executions.incrementAndGet();
                         return rows;
@@ -212,12 +283,24 @@ class KeysetFieldUseAndProtectionTest {
     }
 
     private static ReactiveFormClient reactiveClient(AtomicInteger executions) {
+        return reactiveClient(executions, List.of());
+    }
+
+    private static ReactiveFormClient reactiveClient(AtomicInteger executions, List<DynamicRow> rows) {
         ReactiveSqlExecutor executor = new ReactiveSqlExecutor() {
+            @Override
+            public Mono<com.flying.orm.rdb.transaction.R2dbcTransactionContext> currentTransaction() {
+                return Mono.defer(() -> {
+                    executions.incrementAndGet();
+                    return Mono.empty();
+                });
+            }
+
             @Override
             public Flux<DynamicRow> query(com.flying.orm.core.sql.render.SqlRequest request) {
                 return Flux.defer(() -> {
                     executions.incrementAndGet();
-                    return Flux.empty();
+                    return Flux.fromIterable(rows);
                 });
             }
 

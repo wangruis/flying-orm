@@ -165,15 +165,11 @@ final class FormSqlRenderSupport {
      * 表达式只来自聚合 planner，不进入普通条件结构缓存。
      */
     ConditionSql condition(DynamicForm form, ConditionGroup where,
-                           UnaryOperator<String> fieldIdentifierRenderer) {
-        return condition(form, where, fieldIdentifierRenderer, null, null);
-    }
-
-    ConditionSql condition(DynamicForm form, ConditionGroup where,
                            UnaryOperator<String> fieldIdentifierRenderer,
                            UnaryOperator<String> correlatedFieldRenderer,
-                           UnaryOperator<String> outerQualifierRenderer) {
-        ConditionGroup normalized = normalizeCondition(form, where);
+                           UnaryOperator<String> outerQualifierRenderer,
+                           Function<String, DynamicField> valueFieldResolver) {
+        ConditionGroup normalized = conditionValues.normalize(form, where, valueFieldResolver);
         SqlRenderer renderer = normalizedConditionRenderer.withFieldIdentifierRenderer(Objects.requireNonNull(
                         fieldIdentifierRenderer, "condition field identifier renderer must not be null"));
         SqlFragment fragment = correlatedFieldRenderer == null

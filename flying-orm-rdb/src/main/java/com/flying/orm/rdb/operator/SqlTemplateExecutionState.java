@@ -44,7 +44,7 @@ final class SqlTemplateExecutionState {
         if (serverParameters.contains(safeName)) {
             throw new IllegalArgumentException("SQL template server parameter cannot be bound by caller");
         }
-        values.put(safeName, BindableValueSnapshots.immutableValue(value));
+        values.put(safeName, BindableValueSnapshots.logicalValue(value));
     }
 
     void bindAll(Map<String, ?> values) {
@@ -55,7 +55,7 @@ final class SqlTemplateExecutionState {
             if (serverParameters.contains(safeName)) {
                 throw new IllegalArgumentException("SQL template server parameter cannot be bound by caller");
             }
-            prepared.put(safeName, BindableValueSnapshots.immutableValue(entry.getValue()));
+            prepared.put(safeName, BindableValueSnapshots.logicalValue(entry.getValue()));
         }
         this.values.putAll(prepared);
     }
@@ -93,7 +93,7 @@ final class SqlTemplateExecutionState {
                 serverValues, "SQL template server parameter values must not be null");
         LinkedHashMap<String, Object> merged = new LinkedHashMap<>(safeServerValues.size() + snapshot.values().size());
         safeServerValues.forEach((name, value) -> merged.put(
-                name, BindableValueSnapshots.immutableValue(value)));
+                name, BindableValueSnapshots.logicalValue(value)));
         if (!merged.keySet().equals(serverParameters)) {
             throw new IllegalArgumentException("SQL template server parameters do not match declaration");
         }

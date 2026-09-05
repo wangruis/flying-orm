@@ -16,12 +16,36 @@ import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class MetadataQueryVersionProfileTest {
+
+    @Test
+    void mysqlJdbcAndReactiveDictionaryQueriesAdmitOnlyControlledTemporalAliases() {
+        CapturingSyncExecutor jdbcExecutor = new CapturingSyncExecutor();
+        CapturingReactiveExecutor reactiveExecutor = new CapturingReactiveExecutor();
+        RdbDialect dialect = RdbDialect.mysql();
+
+        JdbcFormMetadataReaders.create(jdbcExecutor, dialect).readSnapshot("app", "orders");
+        ReactiveFormMetadataReaders.create(reactiveExecutor, dialect).readSnapshot("app", "orders").block();
+
+        assertEquals(jdbcExecutor.sql, reactiveExecutor.sql);
+        List<Pattern> expressions = Pattern.compile("regexp '([^']+)'")
+                .matcher(jdbcExecutor.sql.getFirst()).results()
+                .map(match -> Pattern.compile(match.group(1)))
+                .toList();
+        for (String expression : List.of("current_date", "current_time(6)", "current_timestamp(6)",
+                "curdate()", "curtime()", "curtime(6)")) {
+            assertTrue(expressions.stream().anyMatch(pattern -> pattern.matcher(expression).matches()), expression);
+        }
+        for (String expression : List.of("curdate() + interval 1 day", "curtime(6) + 1", "rand()")) {
+            assertFalse(expressions.stream().anyMatch(pattern -> pattern.matcher(expression).matches()), expression);
+        }
+    }
 
     @Test
     void sqlServer2012Through2019UseOneJdbcReactiveCompatibleQueryProfile() {

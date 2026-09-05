@@ -1,37 +1,167 @@
 package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
+import com.flying.orm.core.internal.error.ThrowableGraph;
 import com.flying.orm.rdb.batch.BatchChunkResult;
+import com.flying.orm.rdb.batch.BatchRowCountPolicy;
 import com.flying.orm.rdb.batch.BatchWriteException;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
+import com.flying.orm.rdb.internal.batch.BatchChunkCompletion;
 import io.r2dbc.spi.Connection;
 import io.r2dbc.spi.ConnectionFactory;
 import io.r2dbc.spi.ConnectionFactoryMetadata;
 import io.r2dbc.spi.Result;
 import io.r2dbc.spi.Statement;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.DynamicTest;
+import org.junit.jupiter.api.TestFactory;
 import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Signal;
 import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Schedulers;
 
+import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.time.Duration;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** INDEPENDENT 并发失败必须保留其它已启动分片已经确认的数据库结果。 */
 class R2dbcIndependentBatchConcurrencyResultTest {
+
+    @TestFactory
+    Stream<DynamicTest> keepsConfirmedCommitWhenDeadlineArrivesBeforeResultDelivery() {
+        return Stream.of(false, true).flatMap(streaming -> Stream.of(false, true).map(receipt ->
+                DynamicTest.dynamicTest("confirmed commit deadline [streaming=" + streaming
+                                + ", receipt=" + receipt + "]",
+                        () -> assertConfirmedCommit(streaming, receipt, false))));
+    }
+
+    @TestFactory
+    Stream<DynamicTest> keepsConfirmedCommitEvidenceWhenCompletionFails() {
+        return Stream.of(false, true).flatMap(streaming -> Stream.of(false, true).map(receipt ->
+                DynamicTest.dynamicTest("confirmed commit callback [streaming=" + streaming
+                                + ", receipt=" + receipt + "]",
+                        () -> assertConfirmedCommit(streaming, receipt, true))));
+    }
+
+    @Test
+    void keepsConfirmedCommitWhenCompletionAlsoFailsDuringFailureSettlement() {
+        assertConfirmedCommit(false, false, true, true);
+    }
+
+    private static void assertConfirmedCommit(boolean streaming, boolean receipt, boolean completionFails) {
+        assertConfirmedCommit(streaming, receipt, completionFails, false);
+    }
+
+    private static void assertConfirmedCommit(boolean streaming, boolean receipt,
+                                               boolean completionFails, boolean repeatCompletionFailure) {
+        CommitWindowDriver driver = new CommitWindowDriver();
+        AtomicReference<Runnable> deadline = new AtomicReference<>();
+        AtomicBoolean triggered = new AtomicBoolean();
+        AtomicInteger completionNotifications = new AtomicInteger();
+        IllegalStateException callbackFailure = new IllegalStateException("completion failed after commit");
+        BatchChunkCompletion completion = new BatchChunkCompletion() {
+            @Override
+            public void afterChunk(BatchChunkResult result) {
+                completionNotifications.incrementAndGet();
+                boolean firstNotification = triggered.compareAndSet(false, true);
+                if (!firstNotification && !repeatCompletionFailure) {
+                    return;
+                }
+                assertEquals(1, driver.commits, "the driver must confirm commit before the tested window");
+                assertEquals(BatchChunkResult.Status.COMMITTED, result.status());
+                if (completionFails) {
+                    throw callbackFailure;
+                }
+                // This no-I/O notification fixes the real scheduling window between markCommitted
+                // and delivery to the outer deadline. No sleep or production test hook is needed.
+                Runnable task = deadline.get();
+                assertNotNull(task, "the enabled execution deadline must have been scheduled");
+                task.run();
+            }
+
+            @Override
+            public Publisher<Void> afterCompletion(BatchWriteResult result) {
+                return Mono.empty();
+            }
+        };
+        BatchWriteOptions options = BatchWriteOptions.independent(1)
+                .withTimeout(completionFails ? Duration.ZERO : Duration.ofSeconds(30));
+        if (receipt) {
+            options = options.withReceipt("confirmed-commit-window", Duration.ZERO);
+        }
+        BatchWriteRequest request = com.flying.orm.rdb.batch.BatchWriteRequests.request(
+                "update sample set value_col = ?", 1, List.of(Integer.class), SqlBindMarkerStyle.CANONICAL,
+                Flux.<Object[]>just(new Object[]{1}), options, BatchRowCountPolicy.ANY, completion);
+        String hook = R2dbcIndependentBatchConcurrencyResultTest.class.getName() + ".confirmedCommit";
+        if (!completionFails) {
+            Schedulers.onScheduleHook(hook, task -> {
+                deadline.set(task);
+                return task;
+            });
+        }
+        try {
+            R2dbcSqlExecutor executor = R2dbcSqlExecutor.create(driver);
+            Mono<BatchWriteResult> execution = streaming
+                    ? executor.writeBatchChunks(request).collectList()
+                            .map(chunks -> BatchWriteResult.from(BatchWriteOptions.Mode.INDEPENDENT, chunks))
+                    : executor.writeBatch(request);
+            Signal<BatchWriteResult> terminal = execution.materialize().block(Duration.ofSeconds(2));
+
+            assertTrue(triggered.get(), "the test must reach the post-commit notification window");
+            if (repeatCompletionFailure) {
+                assertEquals(2, completionNotifications.get(), "failure settlement must exercise the second notification");
+            }
+            assertEquals(1, driver.commits);
+            assertEquals(0, driver.rollbacks, "confirmed commit must never be followed by ORM rollback");
+            assertEquals(driver.acquires, driver.closes);
+            assertEquals(1, driver.businessStatements);
+            assertEquals(receipt ? 1 : 0, driver.receiptReads);
+            assertEquals(receipt ? 2 : 0, driver.receiptWrites);
+            assertNotNull(terminal);
+            BatchWriteResult result;
+            if (completionFails) {
+                assertTrue(terminal.isOnError(), "completion failure must remain observable");
+                BatchWriteException failure = assertInstanceOf(BatchWriteException.class, terminal.getThrowable());
+                assertSame(callbackFailure, ThrowableGraph.findCause(failure, IllegalStateException.class));
+                result = failure.result();
+            } else {
+                assertTrue(terminal.isOnNext(), () -> "confirmed commit was rewritten as " + terminal);
+                result = terminal.get();
+            }
+            assertNotNull(result);
+            assertEquals(BatchWriteResult.Status.COMMITTED, result.status());
+            assertEquals(1, result.inputCount());
+            assertEquals(7L, result.affectedRows(), "timeout must retain the actual count, not infer it from input");
+            assertEquals(1, result.chunks().size());
+            BatchChunkResult chunk = result.chunks().getFirst();
+            assertEquals(BatchChunkResult.Status.COMMITTED, chunk.status());
+            assertEquals(0, chunk.chunkIndex());
+            assertEquals(0L, chunk.startOffset());
+            assertEquals(7L, chunk.affectedRows());
+        } finally {
+            if (!completionFails) {
+                Schedulers.resetOnScheduleHook(hook);
+            }
+        }
+    }
 
     @Test
     void keepsCommittedSiblingWhenAnotherConcurrentChunkCannotAcquireConnection() {
@@ -332,5 +462,69 @@ class R2dbcIndependentBatchConcurrencyResultTest {
                     case "toString" -> "successful-test-result";
                     default -> throw new UnsupportedOperationException(method.getName());
                 });
+    }
+
+    /** Minimal SPI fixture: a receipt read is empty, each write completes, and commit is acknowledged. */
+    private static final class CommitWindowDriver implements ConnectionFactory {
+
+        private int acquires;
+        private int closes;
+        private int commits;
+        private int rollbacks;
+        private int businessStatements;
+        private int receiptReads;
+        private int receiptWrites;
+
+        @Override
+        public Publisher<? extends Connection> create() {
+            return Mono.fromSupplier(() -> {
+                acquires++;
+                return proxy(Connection.class, (self, method, arguments) -> switch (method.getName()) {
+                    case "createStatement" -> statement((String) arguments[0]);
+                    case "isAutoCommit" -> true;
+                    case "beginTransaction", "setAutoCommit" -> Mono.empty();
+                    case "commitTransaction" -> Mono.fromRunnable(() -> commits++);
+                    case "rollbackTransaction" -> Mono.fromRunnable(() -> rollbacks++);
+                    case "close" -> Mono.fromRunnable(() -> closes++);
+                    default -> throw new AssertionError("unexpected connection call: " + method.getName());
+                });
+            });
+        }
+
+        @Override
+        public ConnectionFactoryMetadata getMetadata() {
+            return () -> "H2";
+        }
+
+        private Statement statement(String sql) {
+            boolean read = sql.startsWith("select plan_hash, payload_hash");
+            boolean receipt = sql.toLowerCase(Locale.ROOT).contains("flying_orm_batch_receipt");
+            return proxy(Statement.class, (self, method, arguments) -> switch (method.getName()) {
+                case "bind", "bindNull", "add" -> self;
+                case "execute" -> {
+                    if (read) {
+                        receiptReads++;
+                    } else if (receipt) {
+                        receiptWrites++;
+                    } else {
+                        businessStatements++;
+                    }
+                    yield Flux.just(proxy(Result.class, (result, resultMethod, resultArguments) -> {
+                        if (read && "map".equals(resultMethod.getName())) {
+                            return Flux.empty();
+                        }
+                        if (!read && "getRowsUpdated".equals(resultMethod.getName())) {
+                            return Mono.just(receipt ? 1L : 7L);
+                        }
+                        throw new AssertionError("unexpected result call: " + resultMethod.getName());
+                    }));
+                }
+                default -> throw new AssertionError("unexpected statement call: " + method.getName());
+            });
+        }
+
+        private static <T> T proxy(Class<T> type, InvocationHandler handler) {
+            return type.cast(Proxy.newProxyInstance(type.getClassLoader(), new Class<?>[]{type}, handler));
+        }
     }
 }

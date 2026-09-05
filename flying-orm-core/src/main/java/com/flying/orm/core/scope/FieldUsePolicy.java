@@ -1,6 +1,8 @@
 package com.flying.orm.core.scope;
 
 import com.flying.orm.core.field.FieldIdentity;
+import com.flying.orm.core.join.JoinFieldRef;
+import com.flying.orm.core.join.JoinSource;
 
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -22,13 +24,18 @@ import java.util.Set;
  */
 public final class FieldUsePolicy {
 
-    private static final FieldUsePolicy UNRESTRICTED = new FieldUsePolicy(Map.of(), true);
+    private static final FieldUsePolicy UNRESTRICTED =
+            new FieldUsePolicy(Map.of(), Map.of(), true);
 
     private final Map<GrantKey, Set<FieldUse>> grants;
+    private final Map<JoinGrantKey, Set<FieldUse>> joinGrants;
     private final boolean unrestricted;
 
-    private FieldUsePolicy(Map<GrantKey, Set<FieldUse>> grants, boolean unrestricted) {
+    private FieldUsePolicy(Map<GrantKey, Set<FieldUse>> grants,
+                           Map<JoinGrantKey, Set<FieldUse>> joinGrants,
+                           boolean unrestricted) {
         this.grants = grants;
+        this.joinGrants = joinGrants;
         this.unrestricted = unrestricted;
     }
 
@@ -82,8 +89,86 @@ public final class FieldUsePolicy {
         return FieldUseSnapshot.of(decisions);
     }
 
+    /**
+     * 用每项要求所属数据源自己的 FieldScope 审批 governed JOIN。
+     *
+     * <p>多源 JOIN 只读取来源限定授权；单源 JOIN 兼容已有裸字段策略，但发布的决定仍带来源身份。</p>
+     */
+    public FieldUseSnapshot approveJoin(FieldUseRequirements requirements,
+                                        Map<JoinSource, FieldScope> scopes) {
+        FieldUseRequirements required = Objects.requireNonNull(
+                requirements, "field use requirements must not be null");
+        if (!required.requirements().isEmpty()) {
+            throw new IllegalArgumentException(
+                    "join approval requires source-qualified field requirements");
+        }
+        Map<JoinSource, FieldScope> safeScopes = Objects.requireNonNull(
+                scopes, "join field scopes must not be null");
+        boolean allScopesUnrestricted = true;
+        for (FieldScope scope : safeScopes.values()) {
+            FieldScope safeScope = Objects.requireNonNull(scope, "join field scope must not be null");
+            if (!safeScope.unrestrictedRead() || !safeScope.unrestrictedWrite()) {
+                allScopesUnrestricted = false;
+                break;
+            }
+        }
+        if (unrestricted && allScopesUnrestricted) {
+            return FieldUseSnapshot.unrestricted();
+        }
+        boolean allowBareCompatibility = safeScopes.size() == 1;
+        List<JoinFieldDecision> decisions = new ArrayList<>(required.joinRequirements().size());
+        for (FieldUseRequirements.JoinRequirement requirement : required.joinRequirements()) {
+            FieldScope scope = safeScopes.get(requirement.field().source());
+            if (scope == null) {
+                throw new IllegalArgumentException(
+                        "join field scope is missing for source ["
+                                + requirement.field().source().ordinal() + "]");
+            }
+            decisions.add(decideJoin(requirement.field(), requirement.use(), requirement.origin(),
+                                     scope, allowBareCompatibility));
+        }
+        return FieldUseSnapshot.ofJoin(decisions);
+    }
+
+    /** 对一项来源限定用途应用 qualified policy、origin 隔离和该来源 FieldScope。 */
+    public JoinFieldDecision decideJoin(JoinFieldRef field,
+                                        FieldUse use,
+                                        FieldUseOrigin origin,
+                                        FieldScope scope) {
+        return decideJoin(field, use, origin, scope, false);
+    }
+
+    private JoinFieldDecision decideJoin(JoinFieldRef field,
+                                         FieldUse use,
+                                         FieldUseOrigin origin,
+                                         FieldScope scope,
+                                         boolean allowBareCompatibility) {
+        JoinFieldRef safeField = Objects.requireNonNull(field, "join field reference must not be null");
+        FieldUse safeUse = Objects.requireNonNull(use, "field use must not be null");
+        FieldUseOrigin safeOrigin = Objects.requireNonNull(origin, "field use origin must not be null");
+        FieldScope safeScope = Objects.requireNonNull(scope, "field scope must not be null");
+        boolean policyAllows = unrestricted
+                || allowsJoin(safeField, safeOrigin, safeUse)
+                || (allowBareCompatibility && allows(safeField.field(), safeOrigin, safeUse));
+        boolean scopeAllows = safeOrigin.internal()
+                || (safeUse.write()
+                        ? safeScope.canWrite(safeField.field())
+                        : safeScope.canRead(safeField.field()));
+        boolean allowed = policyAllows && scopeAllows;
+        FieldVisibility visibility = allowed
+                ? joinVisibility(safeField, safeOrigin, allowBareCompatibility)
+                : FieldVisibility.HIDDEN;
+        return new JoinFieldDecision(
+                safeField, safeUse, safeOrigin, allowed, visibility);
+    }
+
     private boolean allows(String field, FieldUseOrigin origin, FieldUse use) {
         Set<FieldUse> uses = grants.get(new GrantKey(field, origin));
+        return uses != null && uses.contains(use);
+    }
+
+    private boolean allowsJoin(JoinFieldRef field, FieldUseOrigin origin, FieldUse use) {
+        Set<FieldUse> uses = joinGrants.get(new JoinGrantKey(field, origin));
         return uses != null && uses.contains(use);
     }
 
@@ -105,6 +190,33 @@ public final class FieldUsePolicy {
                 ? FieldVisibility.MASKED : FieldVisibility.HIDDEN;
     }
 
+    private FieldVisibility joinVisibility(JoinFieldRef field,
+                                           FieldUseOrigin origin,
+                                           boolean allowBareCompatibility) {
+        if (origin.internal()) {
+            return FieldVisibility.HIDDEN;
+        }
+        if (unrestricted) {
+            return FieldVisibility.FULL;
+        }
+        Set<FieldUse> uses = joinGrants.get(new JoinGrantKey(field, FieldUseOrigin.CALLER));
+        if (uses == null && allowBareCompatibility) {
+            uses = grants.get(new GrantKey(field.field(), FieldUseOrigin.CALLER));
+        }
+        return visibility(uses);
+    }
+
+    private static FieldVisibility visibility(Set<FieldUse> uses) {
+        if (uses == null || !uses.contains(FieldUse.PROJECT)) {
+            return FieldVisibility.HIDDEN;
+        }
+        if (uses.contains(FieldUse.FULL_VALUE)) {
+            return FieldVisibility.FULL;
+        }
+        return uses.contains(FieldUse.MASKED_VALUE)
+                ? FieldVisibility.MASKED : FieldVisibility.HIDDEN;
+    }
+
     private record GrantKey(String field, FieldUseOrigin origin) {
 
         private GrantKey {
@@ -113,10 +225,19 @@ public final class FieldUsePolicy {
         }
     }
 
+    private record JoinGrantKey(JoinFieldRef field, FieldUseOrigin origin) {
+
+        private JoinGrantKey {
+            field = Objects.requireNonNull(field, "join field reference must not be null");
+            origin = Objects.requireNonNull(origin, "field use origin must not be null");
+        }
+    }
+
     /** 单线程配置期 builder；build 会深复制所有 EnumSet。 */
     public static final class Builder {
 
         private final Map<GrantKey, EnumSet<FieldUse>> grants = new LinkedHashMap<>();
+        private Map<JoinGrantKey, EnumSet<FieldUse>> joinGrants;
 
         public Builder allow(String field, FieldUse first, FieldUse... rest) {
             return allow(field, FieldUseOrigin.CALLER, first, rest);
@@ -151,6 +272,29 @@ public final class FieldUsePolicy {
             return allow(field, safeOrigin, first, rest);
         }
 
+        public Builder allowJoin(JoinFieldRef field, FieldUse first, FieldUse... rest) {
+            return allowJoin(field, FieldUseOrigin.CALLER, first, rest);
+        }
+
+        public Builder allowJoin(JoinFieldRef field,
+                                 FieldUseOrigin origin,
+                                 FieldUse first,
+                                 FieldUse... rest) {
+            JoinGrantKey key = new JoinGrantKey(field, origin);
+            if (joinGrants == null) {
+                joinGrants = new LinkedHashMap<>();
+            }
+            EnumSet<FieldUse> uses = joinGrants.computeIfAbsent(
+                    key, ignored -> EnumSet.noneOf(FieldUse.class));
+            uses.add(Objects.requireNonNull(first, "field use must not be null"));
+            if (rest != null) {
+                for (FieldUse use : rest) {
+                    uses.add(Objects.requireNonNull(use, "field use must not be null"));
+                }
+            }
+            return this;
+        }
+
         /**
          * 设置 caller 结果显示上限。FULL 同时允许 masked 输出；MASKED 不授予明文；HIDDEN
          * 只撤销显示用途，不影响该字段已经显式授予的 FILTER、SORT 或写入用途。
@@ -173,13 +317,44 @@ public final class FieldUsePolicy {
             return this;
         }
 
+        /** 设置一个来源限定 JOIN 字段的 caller 结果显示上限。 */
+        public Builder joinVisibility(JoinFieldRef field, FieldVisibility visibility) {
+            JoinGrantKey key = new JoinGrantKey(field, FieldUseOrigin.CALLER);
+            if (joinGrants == null) {
+                joinGrants = new LinkedHashMap<>();
+            }
+            EnumSet<FieldUse> uses = joinGrants.computeIfAbsent(
+                    key, ignored -> EnumSet.noneOf(FieldUse.class));
+            uses.remove(FieldUse.PROJECT);
+            uses.remove(FieldUse.FULL_VALUE);
+            uses.remove(FieldUse.MASKED_VALUE);
+            switch (Objects.requireNonNull(visibility, "field visibility must not be null")) {
+                case FULL -> uses.addAll(EnumSet.of(
+                        FieldUse.PROJECT, FieldUse.FULL_VALUE, FieldUse.MASKED_VALUE));
+                case MASKED -> uses.addAll(EnumSet.of(FieldUse.PROJECT, FieldUse.MASKED_VALUE));
+                case HIDDEN -> {
+                    // 显示用途已经移除，其他用途保持原样。
+                }
+            }
+            return this;
+        }
+
         public FieldUsePolicy build() {
-            if (grants.isEmpty()) {
-                return new FieldUsePolicy(Map.of(), false);
+            boolean noJoinGrants = joinGrants == null || joinGrants.isEmpty();
+            if (grants.isEmpty() && noJoinGrants) {
+                return new FieldUsePolicy(Map.of(), Map.of(), false);
             }
             Map<GrantKey, Set<FieldUse>> frozen = new LinkedHashMap<>();
             grants.forEach((key, uses) -> frozen.put(key, Set.copyOf(uses)));
-            return new FieldUsePolicy(Map.copyOf(frozen), false);
+            Map<JoinGrantKey, Set<FieldUse>> frozenJoin;
+            if (noJoinGrants) {
+                frozenJoin = Map.of();
+            } else {
+                Map<JoinGrantKey, Set<FieldUse>> values = new LinkedHashMap<>();
+                joinGrants.forEach((key, uses) -> values.put(key, Set.copyOf(uses)));
+                frozenJoin = Map.copyOf(values);
+            }
+            return new FieldUsePolicy(Map.copyOf(frozen), frozenJoin, false);
         }
     }
 }

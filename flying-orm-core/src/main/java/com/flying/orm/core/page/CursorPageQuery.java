@@ -49,12 +49,12 @@ public record CursorPageQuery(int size, List<CursorSort> sorts, List<Object> cur
      */
     @Override
     public List<Object> cursor() {
-        return BindableValueSnapshots.immutableValues(cursor);
+        return BindableValueSnapshots.logicalValues(cursor);
     }
 
     static List<Object> snapshotCursor(List<?> values) {
         List<?> safeValues = Objects.requireNonNull(values, "cursor values must not be null");
-        List<Object> snapshot = BindableValueSnapshots.immutableValues(safeValues);
+        List<Object> snapshot = BindableValueSnapshots.logicalValues(safeValues);
         snapshot.forEach(value -> Objects.requireNonNull(value, "cursor value must not be null"));
         return snapshot;
     }

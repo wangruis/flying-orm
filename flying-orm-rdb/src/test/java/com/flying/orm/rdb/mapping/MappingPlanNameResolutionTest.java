@@ -38,6 +38,73 @@ class MappingPlanNameResolutionTest {
         assertEquals(new UserProjection("wangr", null, 0), value);
     }
 
+    @Test
+    void resolvesExplicitRecordColumnByJavaPropertyLabel() {
+        AliasedRecord value = RowMapper.of(AliasedRecord.class)
+                .map(DynamicRow.copyOf(Map.of("name", "stored")));
+
+        assertEquals(new AliasedRecord("stored"), value);
+    }
+
+    @Test
+    void resolvesExplicitRecordColumnByPhysicalLabel() {
+        AliasedRecord value = RowMapper.of(AliasedRecord.class)
+                .map(DynamicRow.copyOf(Map.of("stored_name", "stored")));
+
+        assertEquals(new AliasedRecord("stored"), value);
+    }
+
+    @Test
+    void resolvesExplicitAliasToTheRecordJavaProperty() {
+        AliasedRecord value = RowMapper.of(AliasedRecord.class)
+                .withAliases(Map.of("selected_name", "name"))
+                .map(Map.of("selected_name", "stored"));
+
+        assertEquals(new AliasedRecord("stored"), value);
+    }
+
+    @Test
+    void preservesPhysicalRecordLabelWhenBothLabelsArePresent() {
+        Map<String, Object> row = new LinkedHashMap<>();
+        row.put("stored_name", null);
+        row.put("name", "alias value");
+
+        assertEquals(new AliasedRecord(null), RowMapper.of(AliasedRecord.class).map(row));
+    }
+
+    @Test
+    void resolvesExplicitBeanColumnByJavaPropertyLabel() {
+        AliasedBean value = RowMapper.of(AliasedBean.class)
+                .map(DynamicRow.copyOf(Map.of("name", "stored")));
+
+        assertEquals("stored", value.name);
+    }
+
+    @Test
+    void resolvesExplicitBeanColumnByPhysicalLabel() {
+        AliasedBean value = RowMapper.of(AliasedBean.class)
+                .map(DynamicRow.copyOf(Map.of("stored_name", "stored")));
+
+        assertEquals("stored", value.name);
+    }
+
+    private record AliasedRecord(@TableField("stored_name") String name) {
+    }
+
+    private static final class AliasedBean {
+
+        @TableField("stored_name")
+        private String name;
+
+        public String getName() {
+            return name;
+        }
+
+        public void setName(String value) {
+            name = value;
+        }
+    }
+
     private record UserName(String userName) {
     }
 

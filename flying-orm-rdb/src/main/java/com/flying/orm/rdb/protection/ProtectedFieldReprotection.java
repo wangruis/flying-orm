@@ -70,13 +70,32 @@ public final class ProtectedFieldReprotection {
     public Map<String, Object> valuesNeedingPlaintextMigration(DynamicForm form,
                                                                 Map<String, Object> legacyPlaintextValues,
                                                                 Map<String, Object> targetPhysicalValues) {
+        return valuesNeedingPlaintextMigration(form, legacyPlaintextValues, targetPhysicalValues,
+                DataScope.none(), ValueCodecRegistry.standard());
+    }
+
+    /**
+     * 使用与目标写入一致的可信租户范围和 codec，认证已有密文并提取尚需迁移的旧明文。
+     *
+     * @param form 带保护声明的逻辑表单
+     * @param legacyPlaintextValues 可信迁移查询读取的旧明文字段和值
+     * @param targetPhysicalValues 可信迁移查询读取的目标密文字段和值
+     * @param scope 与目标写入一致的可信租户范围
+     * @param codecs 与目标写入一致的值 codec
+     * @return 尚需迁移的逻辑字段值；空 Map 表示该行可幂等跳过
+     */
+    public Map<String, Object> valuesNeedingPlaintextMigration(DynamicForm form,
+                                                                Map<String, Object> legacyPlaintextValues,
+                                                                Map<String, Object> targetPhysicalValues,
+                                                                DataScope scope,
+                                                                ValueCodecRegistry codecs) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
         Map<String, Object> legacy = Objects.requireNonNull(
                 legacyPlaintextValues, "legacy plaintext values must not be null");
         Map<String, Object> target = Objects.requireNonNull(
                 targetPhysicalValues, "target physical values must not be null");
-        DataScope safeScope = DataScope.none();
-        ValueCodecRegistry safeCodecs = ValueCodecRegistry.standard();
+        DataScope safeScope = Objects.requireNonNull(scope, "data scope must not be null");
+        ValueCodecRegistry safeCodecs = Objects.requireNonNull(codecs, "value codec registry must not be null");
         String tenant = null;
         Map<String, Object> result = new LinkedHashMap<>();
         int protectedFieldCount = safeForm.protections().encryptedFields().size();

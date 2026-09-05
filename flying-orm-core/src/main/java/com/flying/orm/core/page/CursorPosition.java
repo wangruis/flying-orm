@@ -20,7 +20,7 @@ public record CursorPosition(List<Object> values) {
     private static final CursorPosition FIRST = new CursorPosition(List.of());
 
     public CursorPosition {
-        values = BindableValueSnapshots.immutableValues(
+        values = BindableValueSnapshots.logicalValues(
                 Objects.requireNonNull(values, "cursor position values must not be null"));
     }
 
@@ -44,7 +44,7 @@ public record CursorPosition(List<Object> values) {
 
     @Override
     public List<Object> values() {
-        return BindableValueSnapshots.immutableValues(values);
+        return BindableValueSnapshots.logicalValues(values);
     }
 
     @SuppressWarnings("unchecked")

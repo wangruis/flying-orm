@@ -36,7 +36,9 @@ public final class SqlExecutionSequenceException extends RuntimeException implem
     /** @return 失败发生在会话准备、真正工作还是会话清理阶段 */
     public SqlExecutionPhase phase() { return phase; }
 
-    /** @return 失败 SQL 在对应阶段内从零开始的位置 */
+    /**
+     * @return 失败位置，从零开始；两条 SQL 之间超时则指向下一条，阶段已执行完时等于该阶段的语句数
+     */
     public int stepIndex() { return stepIndex; }
 
     /** @return 失败之前已经执行完成的 work SQL，只读且按原执行顺序排列 */

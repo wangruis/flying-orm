@@ -18,25 +18,40 @@ import io.r2dbc.spi.ConnectionFactory;
 import io.r2dbc.spi.ConnectionFactoryMetadata;
 import io.r2dbc.spi.Result;
 import io.r2dbc.spi.Statement;
+import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestFactory;
 import org.reactivestreams.Publisher;
+import org.reactivestreams.Subscription;
+import reactor.core.CoreSubscriber;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Hooks;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Operators;
+import reactor.core.scheduler.Schedulers;
+import reactor.util.context.Context;
 
 import java.lang.reflect.Proxy;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class R2dbcAtomicBatchTimeoutInputCountTest {
 
@@ -179,6 +194,97 @@ class R2dbcAtomicBatchTimeoutInputCountTest {
         assertEquals(1, error.result().inputCount());
         assertEquals(BatchChunkResult.Status.FAILED,
                      error.result().chunks().getFirst().status());
+    }
+
+    @TestFactory
+    Stream<DynamicTest> doesNotCountCompletedChunkTwiceWhenDeadlineInterruptsItsHandoff() {
+        return Stream.of(false, true).map(external -> DynamicTest.dynamicTest(
+                external ? "external completed chunk handoff" : "owned completed chunk handoff", () -> {
+                    AtomicInteger commits = new AtomicInteger();
+                    AtomicInteger rollbacks = new AtomicInteger();
+                    Connection connection = successfulConnection(commits, rollbacks);
+                    R2dbcSqlExecutor executor = external
+                            ? R2dbcSqlExecutor.create(connectionFactory(Mono.error(new AssertionError(
+                                    "external transaction must bypass the connection factory"))))
+                                    .withTransactionParticipant(() -> Mono.just(
+                                            R2dbcTransactionContext.external(connection)))
+                            : R2dbcSqlExecutor.create(connectionFactory(connection));
+                    BatchWriteRequest request = com.flying.orm.rdb.batch.BatchWriteRequests.request(
+                            "insert into batch_people(name_col) values (?)", 1, List.of(String.class),
+                            SqlBindMarkerStyle.CANONICAL,
+                            Flux.just(new Object[]{"name-0"}, new Object[]{"name-1"}),
+                            BatchWriteOptions.atomic(2).withTimeout(Duration.ofSeconds(30)));
+                    AtomicReference<Runnable> deadline = new AtomicReference<>();
+                    AtomicReference<Throwable> error = new AtomicReference<>();
+                    AtomicBoolean triggered = new AtomicBoolean();
+                    AtomicInteger values = new AtomicInteger();
+                    String hook = getClass().getName() + ".completedChunkDeadline";
+                    Schedulers.onScheduleHook(hook, task -> {
+                        deadline.compareAndSet(null, task);
+                        return task;
+                    });
+                    Hooks.onEachOperator(hook, Operators.<Object>lift(
+                            operator -> "peek".equals(operator.stepName()),
+                            (operator, actual) -> new CoreSubscriber<Object>() {
+                                @Override
+                                public Context currentContext() {
+                                    return actual.currentContext();
+                                }
+
+                                @Override
+                                public void onSubscribe(Subscription subscription) {
+                                    actual.onSubscribe(subscription);
+                                }
+
+                                @Override
+                                public void onNext(Object value) {
+                                    // MonoPeek has recorded the completed chunk. Pause before the
+                                    // downstream success signal can clear the active-chunk reference.
+                                    if (value instanceof BatchChunkResult
+                                            && triggered.compareAndSet(false, true)) {
+                                        assertNotNull(deadline.get());
+                                        deadline.get().run();
+                                    }
+                                    actual.onNext(value);
+                                }
+
+                                @Override
+                                public void onError(Throwable failure) {
+                                    actual.onError(failure);
+                                }
+
+                                @Override
+                                public void onComplete() {
+                                    actual.onComplete();
+                                }
+                            }));
+                    Disposable subscription = null;
+                    try {
+                        subscription = executor.writeBatch(request)
+                                .subscribe(ignored -> values.incrementAndGet(), error::set);
+
+                        assertTrue(triggered.get());
+                        BatchWriteException failure = assertInstanceOf(BatchWriteException.class, error.get());
+                        BatchWriteResult result = failure.result();
+                        assertEquals(0, values.get());
+                        assertEquals(0, commits.get());
+                        assertEquals(external ? 0 : 1, rollbacks.get());
+                        assertEquals(external ? BatchChunkResult.Status.UNKNOWN : BatchChunkResult.Status.ROLLED_BACK,
+                                result.chunks().getFirst().status());
+                        assertAll(
+                                () -> assertEquals(2, result.inputCount(),
+                                        "a completed chunk must not be counted again as the active chunk"),
+                                () -> assertEquals((long) result.chunks().size(), result.chunks().stream()
+                                        .map(BatchChunkResult::chunkIndex).distinct().count(),
+                                        "each input chunk must have one terminal result"));
+                    } finally {
+                        if (subscription != null) {
+                            subscription.dispose();
+                        }
+                        Hooks.resetOnEachOperator(hook);
+                        Schedulers.resetOnScheduleHook(hook);
+                    }
+                }));
     }
 
     @Test

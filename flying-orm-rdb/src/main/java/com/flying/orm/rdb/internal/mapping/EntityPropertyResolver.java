@@ -3,6 +3,7 @@ package com.flying.orm.rdb.internal.mapping;
 import com.flying.orm.core.lambda.EntityProperty;
 import com.flying.orm.core.internal.error.ThrowableGraph;
 import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.mapping.EntityFieldMetadata;
 import com.flying.orm.rdb.mapping.MappingException;
 
 import java.beans.Introspector;
@@ -60,7 +61,12 @@ public final class EntityPropertyResolver {
             throw new MappingException("entity property belongs to another type: " + method.owner().getName());
         }
         try {
-            return safeMetadata.field(method.property()).columnName();
+            EntityFieldMetadata field = safeMetadata.field(method.property());
+            if (!field.name().equals(method.property())
+                    && !EntityFieldNames.matches(field.name(), method.property())) {
+                throw new IllegalArgumentException("entity property must match its Java member name");
+            }
+            return field.columnName();
         } catch (IllegalArgumentException error) {
             throw new MappingException("entity property is not persistent: " + safeType.getName()
                                                + "." + method.property(), error);
@@ -105,7 +111,11 @@ public final class EntityPropertyResolver {
                 || void.class.equals(accessor.getReturnType())) {
             throw new MappingException("method is not a direct entity property accessor: " + accessor);
         }
-        return new LambdaMethod(owner, propertyName(owner, accessor));
+        String propertyName = propertyName(owner, accessor);
+        if (!EntityMetadataHierarchy.isPersistentAccessor(accessor, propertyName)) {
+            throw new MappingException("entity property is not persistent: " + owner.getName() + "." + propertyName);
+        }
+        return new LambdaMethod(owner, propertyName);
     }
 
     private static String propertyName(Class<?> owner, Method accessor) {

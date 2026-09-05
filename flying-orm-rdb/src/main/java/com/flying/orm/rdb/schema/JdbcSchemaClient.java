@@ -31,6 +31,9 @@ import java.util.function.Consumer;
  * {@code SyncSqlExecutor} 使用同一个 {@link JdbcTransactionParticipant}；客户端只检查和复用，
  * 不提交、不回滚，也不关闭上层持有的连接。</p>
  *
+ * <p>旧 String 表名保持原有语义。带 catalog、schema 或字面点号的分段关系，必须使用接受
+ * {@link RelationalTableDefinition} 的关系型 Schema 入口，不能交给旧表单迁移入口。</p>
+ *
  * @author wangr
  * @version v2.0.0
  */

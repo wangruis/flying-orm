@@ -39,7 +39,8 @@ public final class SchemaSnapshotCoverage {
         COLUMN_COLLATION,
         INDEX_DIRECTION,
         FOREIGN_KEY_ACTION,
-        FOREIGN_KEY_REFERENCE_SCOPE
+        FOREIGN_KEY_REFERENCE_SCOPE,
+        TABLE_PARTITION
     }
 
     private static final SchemaSnapshotCoverage NONE = new SchemaSnapshotCoverage(Set.of());

@@ -31,6 +31,7 @@ public final class RelationalTableDefinition {
     private final List<IndexDefinition> indexes;
     private final List<ForeignKeyDefinition> foreignKeys;
     private final List<CheckConstraintDefinition> checks;
+    private final TablePartitionDefinition partition;
 
     private RelationalTableDefinition(Builder builder) {
         identity = builder.identity;
@@ -45,6 +46,7 @@ public final class RelationalTableDefinition {
         indexes = List.copyOf(builder.indexes);
         foreignKeys = List.copyOf(builder.foreignKeys);
         checks = List.copyOf(builder.checks);
+        partition = builder.partition;
 
         validateConstraintNames();
         validateColumnReferences();
@@ -111,6 +113,11 @@ public final class RelationalTableDefinition {
         return checks;
     }
 
+    /** @return 可选的受控分区父表定义 */
+    public Optional<TablePartitionDefinition> partition() {
+        return Optional.ofNullable(partition);
+    }
+
     private void validateConstraintNames() {
         Set<String> constraintNames = new HashSet<>();
         Set<String> indexNames = new HashSet<>();
@@ -170,6 +177,18 @@ public final class RelationalTableDefinition {
         for (CheckConstraintDefinition check : checks) {
             requirePredicateColumns(check.predicate());
         }
+        if (partition != null) {
+            ColumnDefinition key = columnsByName.findExact(partition.column(), "column name")
+                    .orElseThrow(() -> new IllegalArgumentException(
+                            "table partition references an unknown column"));
+            if (key.databaseType().isArray() || switch (key.databaseType().logicalType()) {
+                case DATE, TIMESTAMP, OFFSET_TIMESTAMP -> false;
+                default -> true;
+            }) {
+                throw new IllegalArgumentException(
+                        "table partition column must be a scalar date or timestamp");
+            }
+        }
     }
 
     private void requireColumns(List<String> names, String owner) {
@@ -208,6 +227,7 @@ public final class RelationalTableDefinition {
         private final List<IndexDefinition> indexes = new ArrayList<>();
         private final List<ForeignKeyDefinition> foreignKeys = new ArrayList<>();
         private final List<CheckConstraintDefinition> checks = new ArrayList<>();
+        private TablePartitionDefinition partition;
 
         private Builder(RelationIdentity identity) {
             this.identity = Objects.requireNonNull(identity, "relation identity must not be null");
@@ -267,6 +287,16 @@ public final class RelationalTableDefinition {
 
         public Builder check(CheckConstraintDefinition definition) {
             return addCheck(definition);
+        }
+
+        /** 声明受控分区父表；一张表只能有一项分区定义。 */
+        public Builder partition(TablePartitionDefinition definition) {
+            if (partition != null) {
+                throw new IllegalStateException("table partition is already defined");
+            }
+            partition = Objects.requireNonNull(
+                    definition, "table partition definition must not be null");
+            return this;
         }
 
         public RelationalTableDefinition build() {

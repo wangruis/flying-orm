@@ -16,6 +16,7 @@ import io.r2dbc.spi.Statement;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -61,19 +62,28 @@ final class R2dbcProtectedWriteExecutor {
     private Mono<SqlWriteResult> execute(R2dbcBatchConnectionHandle resource,
                                          ProtectedWriteWork work,
                                          SqlExecutionOptions options) {
+        R2dbcGeneratedKeyWriter.Accumulator keys = work.requiresGeneratedKeys()
+                ? new R2dbcGeneratedKeyWriter.Accumulator(options, resource::largeObjects) : null;
         Mono<SqlWriteResult> transaction = connections.begin(resource)
                 .then(readOwners(resource.connection(), work, options, resource.largeObjects()))
                 .flatMap(owners -> writeForOwners(
-                        resource.connection(), work, owners, options, resource.largeObjects())
+                        resource.connection(), work, owners, keys)
                         .flatMap(result -> {
+                            if (keys != null) {
+                                keys.completeHandoff();
+                            }
                             work.requireStableOwnerSet(owners, result);
                             return replaceTokens(resource.connection(), work, owners, result)
                                     .thenReturn(result);
                         }))
                 .flatMap(result -> connections.commit(resource).thenReturn(result));
         // 超时必须发生在事务资源域内，BEGIN/COMMIT 回执丢失才能按状态升级为 UNKNOWN。
-        return session.protectMono(transaction, options)
-                      .onErrorResume(error -> recover(resource, error));
+        Mono<SqlWriteResult> execution = session.protectMono(transaction, options);
+        if (keys != null) {
+            // 先保存截止前已观察到的写入，再由原事务状态裁决回滚或外部参与事实。
+            execution = execution.onErrorMap(keys::wrapFailure);
+        }
+        return execution.onErrorResume(error -> recover(resource, error));
     }
 
     private Mono<List<Map<String, Object>>> readOwners(Connection connection,
@@ -84,7 +94,9 @@ final class R2dbcProtectedWriteExecutor {
             return Mono.just(List.of(work.knownOwner()));
         }
         SqlRequest request = work.ownerQuery();
-        SqlExecutionOptions ownerReadOptions = ProtectedWriteWork.ownerReadOptions(options);
+        // 外层事务已统一限制执行时间，这里只保留 owner 结果预算，避免为同次更新再创建超时任务。
+        SqlExecutionOptions ownerReadOptions = ProtectedWriteWork.ownerReadOptions(
+                options.timeout().isZero() ? options : options.withTimeout(Duration.ZERO));
         Statement statement = session.prepareStatement(
                 connection, request, request.parameters());
         Flux<DynamicRow> rows = Flux.from(statement.execute())
@@ -98,26 +110,23 @@ final class R2dbcProtectedWriteExecutor {
     private Mono<SqlWriteResult> writeForOwners(Connection connection,
                                                  ProtectedWriteWork work,
                                                  List<Map<String, Object>> owners,
-                                                 SqlExecutionOptions options,
-                                                 R2dbcLargeObjectScope largeObjects) {
+                                                 R2dbcGeneratedKeyWriter.Accumulator keys) {
         if (work.kind() == ProtectedWriteWork.Kind.UPDATE && owners.isEmpty()) {
             return Mono.just(new SqlWriteResult(0L, List.of()));
         }
         SqlRequest request = work.kind() == ProtectedWriteWork.Kind.UPDATE
                 ? work.writeRequestForOwners(owners) : work.writeRequest();
-        return write(connection, work, request, options, largeObjects);
+        return write(connection, work, request, keys);
     }
 
     private Mono<SqlWriteResult> write(Connection connection,
                                        ProtectedWriteWork work,
                                        SqlRequest request,
-                                       SqlExecutionOptions options,
-                                       R2dbcLargeObjectScope largeObjects) {
+                                       R2dbcGeneratedKeyWriter.Accumulator keys) {
         Statement statement = session.prepareStatement(
                 connection, request, request.parameters());
         if (work.requiresGeneratedKeys()) {
-            return R2dbcGeneratedKeyWriter.collect(
-                    statement, options, largeObjects, work.generatedOwnerField());
+            return keys.collect(statement, work.generatedOwnerField());
         }
         return Flux.from(statement.execute())
                    .flatMap(Result::getRowsUpdated)

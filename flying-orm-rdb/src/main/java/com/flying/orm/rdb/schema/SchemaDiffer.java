@@ -9,6 +9,7 @@ import com.flying.orm.core.metadata.PrimaryKeyDefinition;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
+import com.flying.orm.core.metadata.TablePartitionDefinition;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.rdb.dialect.DialectCapabilities;
 import com.flying.orm.rdb.dialect.DialectCapabilityId;
@@ -110,6 +111,7 @@ public final class SchemaDiffer {
                                     SchemaDialect schemaDialect) {
         RelationIdentity relation = desired.identity();
         diffTableComment(desired, actual, operations);
+        diffPartition(desired, actual, operations, schemaDialect);
         diffColumns(relation, desired.columns(), actual.columns().value(), operations, schemaDialect);
         diffColumnOrder(desired, actual, operations, schemaDialect);
         diffPrimaryKey(desired, actual, operations, mysql, schemaDialect);
@@ -203,6 +205,25 @@ public final class SchemaDiffer {
                 || actual.tableComment().state() == SchemaSnapshot.State.ABSENT
                 && desired.comment() != null) {
             operations.add(manual(desired, actual, "table-comment"));
+        }
+    }
+
+    private static void diffPartition(RelationalTableDefinition desired,
+                                      SchemaSnapshot actual,
+                                      List<SchemaOperation> operations,
+                                      SchemaDialect schemaDialect) {
+        if (actual.partition().state() == SchemaSnapshot.State.UNKNOWN) {
+            operations.add(manual(desired, actual, "table-partition"));
+            return;
+        }
+        TablePartitionDefinition target = desired.partition().orElse(null);
+        TablePartitionDefinition current = actual.partition().value();
+        if (target == null && current == null) {
+            return;
+        }
+        if (target == null || current == null
+                || !SchemaDefinitionEquality.samePartition(current, target, schemaDialect)) {
+            operations.add(manual(desired, actual, "table-partition"));
         }
     }
 

@@ -207,12 +207,7 @@ public final class ConditionValueNormalizer {
         }
         Object startValue = start.value();
         Object endValue = end.value();
-        if (!startValue.getClass().equals(endValue.getClass()) || !(startValue instanceof Comparable<?> comparable)) {
-            throw error(ConditionValueException.Error.RANGE_TYPE_MISMATCH,
-                        "range values must use the same comparable type");
-        }
-        int compared = compareRangeValues(startValue, endValue, comparable);
-        if (compared > 0) {
+        if (compareRangeValues(startValue, endValue) > 0) {
             throw error(ConditionValueException.Error.RANGE_ORDER_INVALID,
                         "range start must not be greater than range end");
         }
@@ -221,7 +216,15 @@ public final class ConditionValueNormalizer {
 
     /** 带偏移时间按数据库时间线语义比较；Comparable 在绝对时间相等后还会比较本地表示。 */
     @SuppressWarnings("unchecked")
-    private static int compareRangeValues(Object start, Object end, Comparable<?> comparable) {
+    private static int compareRangeValues(Object start, Object end) {
+        // 文本仍按原有去空白后的字符顺序比较，比较视图不能覆盖交给 codec 的领域值。
+        if (start instanceof CharSequence && end instanceof CharSequence) {
+            return start.toString().strip().compareTo(end.toString().strip());
+        }
+        if (!start.getClass().equals(end.getClass()) || !(start instanceof Comparable<?> comparable)) {
+            throw error(ConditionValueException.Error.RANGE_TYPE_MISMATCH,
+                        "range values must use the same comparable type");
+        }
         if (start instanceof OffsetDateTime startTime) {
             OffsetDateTime endTime = (OffsetDateTime) end;
             return startTime.isBefore(endTime) ? -1 : startTime.isAfter(endTime) ? 1 : 0;
@@ -260,7 +263,7 @@ public final class ConditionValueNormalizer {
                 return Scalar.empty(ConditionValueException.Error.BLANK_VALUE);
             }
             requireStringLength(stripped, maxStringLength);
-            cleaned = stripped;
+            cleaned = normalizedText(text, stripped);
         }
         if (isNonScalarContainer(value, allowsArray)) {
             throw error(ConditionValueException.Error.SHAPE_NOT_ALLOWED,
@@ -276,13 +279,25 @@ public final class ConditionValueNormalizer {
                 return Scalar.empty(ConditionValueException.Error.BLANK_VALUE);
             }
             requireStringLength(stripped, maxStringLength);
-            return Scalar.of(stripped);
+            return Scalar.of(normalizedText(text, stripped));
         }
         if (isNonScalarContainer(converted, allowsArray)) {
             throw error(ConditionValueException.Error.SHAPE_NOT_ALLOWED,
                         "condition value converter must return a scalar value");
         }
         return Scalar.of(converted);
+    }
+
+    /** 普通文本仍去掉首尾空白；领域文本的 Java 类型必须留给随后选择的 codec。 */
+    private static Object normalizedText(CharSequence value, String stripped) {
+        if (value instanceof String) return stripped;
+        if (stripped.length() == value.length()) return value;
+        if (value instanceof StringBuilder) return new StringBuilder(stripped);
+        if (value instanceof StringBuffer) return new StringBuffer(stripped);
+        if (value instanceof java.nio.CharBuffer) {
+            return java.nio.CharBuffer.wrap(stripped).asReadOnlyBuffer();
+        }
+        return value;
     }
 
     private static void requireStringLength(String value, int maxStringLength) {

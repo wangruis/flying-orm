@@ -76,7 +76,7 @@ final class FieldVisibilityPublisher {
         }
         boolean allFull = true;
         for (JoinProjection projection : safeSpec.projections()) {
-            if (safeSnapshot.visibility(projection.field().field()) != FieldVisibility.FULL) {
+            if (safeSnapshot.joinVisibility(projection.field()) != FieldVisibility.FULL) {
                 allFull = false;
                 break;
             }
@@ -88,7 +88,7 @@ final class FieldVisibilityPublisher {
         for (JoinProjection projection : safeSpec.projections()) {
             String sourceField = projection.field().field();
             String alias = projection.alias();
-            FieldVisibility visibility = safeSnapshot.visibility(sourceField);
+            FieldVisibility visibility = safeSnapshot.joinVisibility(projection.field());
             if (visibility == FieldVisibility.HIDDEN) {
                 continue;
             }

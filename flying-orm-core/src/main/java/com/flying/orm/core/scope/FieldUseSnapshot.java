@@ -1,6 +1,7 @@
 package com.flying.orm.core.scope;
 
 import com.flying.orm.core.field.FieldIdentity;
+import com.flying.orm.core.join.JoinFieldRef;
 
 import java.util.HashMap;
 import java.util.List;
@@ -20,19 +21,26 @@ import java.util.Optional;
 public final class FieldUseSnapshot {
 
     private static final FieldUseSnapshot UNRESTRICTED =
-            new FieldUseSnapshot(List.of(), true);
+            new FieldUseSnapshot(List.of(), List.of(), true);
 
     private final List<FieldDecision> decisions;
+    private final List<JoinFieldDecision> joinDecisions;
     private final boolean unrestricted;
     private final boolean allowed;
     private final Map<String, FieldVisibility> callerVisibility;
+    private final Map<JoinFieldRef, FieldVisibility> callerJoinVisibility;
 
-    private FieldUseSnapshot(List<FieldDecision> decisions, boolean unrestricted) {
+    private FieldUseSnapshot(List<FieldDecision> decisions,
+                             List<JoinFieldDecision> joinDecisions,
+                             boolean unrestricted) {
         this.decisions = List.copyOf(Objects.requireNonNull(
                 decisions, "field decisions must not be null"));
+        this.joinDecisions = List.copyOf(Objects.requireNonNull(
+                joinDecisions, "join field decisions must not be null"));
         this.unrestricted = unrestricted;
         boolean allAllowed = true;
-        Map<String, FieldVisibility> compiled = unrestricted ? null : new HashMap<>();
+        Map<String, FieldVisibility> compiled = unrestricted || this.decisions.isEmpty()
+                ? null : new HashMap<>();
         for (FieldDecision decision : this.decisions) {
             allAllowed &= decision.allowed();
             if (compiled == null
@@ -44,8 +52,22 @@ public final class FieldUseSnapshot {
             compiled.merge(decision.field(), decision.visibility(),
                            FieldUseSnapshot::mostVisible);
         }
+        Map<JoinFieldRef, FieldVisibility> compiledJoin = unrestricted || this.joinDecisions.isEmpty()
+                ? null : new HashMap<>();
+        for (JoinFieldDecision decision : this.joinDecisions) {
+            allAllowed &= decision.allowed();
+            if (compiledJoin == null
+                    || !decision.allowed()
+                    || decision.origin() != FieldUseOrigin.CALLER
+                    || decision.visibility() == FieldVisibility.HIDDEN) {
+                continue;
+            }
+            compiledJoin.merge(decision.field(), decision.visibility(),
+                               FieldUseSnapshot::mostVisible);
+        }
         this.allowed = unrestricted || allAllowed;
         this.callerVisibility = compiled == null ? Map.of() : Map.copyOf(compiled);
+        this.callerJoinVisibility = compiledJoin == null ? Map.of() : Map.copyOf(compiledJoin);
     }
 
     /** @return 旧入口和显式 unrestricted preview 共用的零分配快照 */
@@ -55,7 +77,12 @@ public final class FieldUseSnapshot {
 
     /** 创建一次受治理调用的不可变 decision 快照。 */
     public static FieldUseSnapshot of(List<FieldDecision> decisions) {
-        return new FieldUseSnapshot(decisions, false);
+        return new FieldUseSnapshot(decisions, List.of(), false);
+    }
+
+    /** 创建一次 governed JOIN 的不可变来源限定 decision 快照。 */
+    public static FieldUseSnapshot ofJoin(List<JoinFieldDecision> decisions) {
+        return new FieldUseSnapshot(List.of(), decisions, false);
     }
 
     public List<FieldDecision> decisions() {
@@ -64,6 +91,14 @@ public final class FieldUseSnapshot {
 
     public List<FieldDecision> deniedDecisions() {
         return decisions.stream().filter(FieldDecision::denied).toList();
+    }
+
+    public List<JoinFieldDecision> joinDecisions() {
+        return joinDecisions;
+    }
+
+    public List<JoinFieldDecision> deniedJoinDecisions() {
+        return joinDecisions.stream().filter(JoinFieldDecision::denied).toList();
     }
 
     /** @return 所有要求是否都获准 */
@@ -101,6 +136,36 @@ public final class FieldUseSnapshot {
         }
         String key = FieldIdentity.of(field).key();
         return callerVisibility.getOrDefault(key, FieldVisibility.HIDDEN);
+    }
+
+    /** 查找一项精确到 JOIN 来源和 origin 的决定。 */
+    public Optional<JoinFieldDecision> joinDecision(JoinFieldRef field,
+                                                    FieldUse use,
+                                                    FieldUseOrigin origin) {
+        JoinFieldRef safeField = Objects.requireNonNull(field, "join field reference must not be null");
+        FieldUse safeUse = Objects.requireNonNull(use, "field use must not be null");
+        FieldUseOrigin safeOrigin = Objects.requireNonNull(origin, "field use origin must not be null");
+        if (unrestricted) {
+            FieldVisibility visibility = safeOrigin.internal()
+                    ? FieldVisibility.HIDDEN : FieldVisibility.FULL;
+            return Optional.of(new JoinFieldDecision(
+                    safeField, safeUse, safeOrigin, true, visibility));
+        }
+        return joinDecisions.stream()
+                .filter(value -> value.field().equals(safeField)
+                        && value.use() == safeUse
+                        && value.origin() == safeOrigin)
+                .findFirst();
+    }
+
+    /** 返回来源限定 caller 字段在本次 JOIN 快照中的最高显示级别。 */
+    public FieldVisibility joinVisibility(JoinFieldRef field) {
+        if (unrestricted) {
+            return FieldVisibility.FULL;
+        }
+        return callerJoinVisibility.getOrDefault(
+                Objects.requireNonNull(field, "join field reference must not be null"),
+                FieldVisibility.HIDDEN);
     }
 
     private static FieldVisibility mostVisible(FieldVisibility left, FieldVisibility right) {

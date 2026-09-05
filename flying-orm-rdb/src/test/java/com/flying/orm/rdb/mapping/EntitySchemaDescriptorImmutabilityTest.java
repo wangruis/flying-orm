@@ -62,6 +62,7 @@ class EntitySchemaDescriptorImmutabilityTest {
         assertThrows(UnsupportedOperationException.class, () -> first.table().indexes().clear());
         assertThrows(UnsupportedOperationException.class, () -> first.table().foreignKeys().clear());
         assertThrows(UnsupportedOperationException.class, () -> first.table().checks().clear());
+        assertThrows(UnsupportedOperationException.class, () -> first.schema().tables().clear());
     }
 
     private static ForeignKeyDefinition foreignKey(String name, String localColumn, String targetColumn) {

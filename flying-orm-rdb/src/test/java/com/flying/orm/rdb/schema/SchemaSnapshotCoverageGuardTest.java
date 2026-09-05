@@ -61,6 +61,7 @@ class SchemaSnapshotCoverageGuardTest {
 
             assertEquals(jdbc, reactive, dialect.name());
             assertTrue(jdbc.observes(SchemaSnapshotCoverage.Fact.TABLE_EXISTENCE), dialect.name());
+            assertTrue(jdbc.observes(SchemaSnapshotCoverage.Fact.TABLE_PARTITION), dialect.name());
             assertTrue(jdbc.observes(SchemaSnapshotCoverage.Fact.COLUMNS), dialect.name());
             assertTrue(jdbc.observes(SchemaSnapshotCoverage.Fact.CHECK_CONSTRAINTS), dialect.name());
             assertTrue(jdbc.observes(SchemaSnapshotCoverage.Fact.COLUMN_DEFAULT), dialect.name());

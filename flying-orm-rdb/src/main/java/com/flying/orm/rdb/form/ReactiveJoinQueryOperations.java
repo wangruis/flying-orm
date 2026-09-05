@@ -5,6 +5,8 @@ import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.join.JoinSource;
 import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageResult;
+import com.flying.orm.core.protection.SensitiveDisplayMode;
+import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.result.DynamicRow;
 import reactor.core.publisher.Flux;
@@ -58,7 +60,8 @@ final class ReactiveJoinQueryOperations extends ReactiveFormOperationSupport {
 
     private Flux<DynamicRow> select(JoinQueryPlanner.PlannedJoin plan) {
         Flux<DynamicRow> rows = results.decodeRows(
-                plan.resultForm(), executor.query(plan.request(), plan.options()), plan.options());
+                plan.resultForm(), executor.query(plan.request(), plan.options()), plan.options(),
+                DataScope.none(), SensitiveDisplayMode.FULL, plan.decodingPlan());
         return plan.resultPlan().direct() ? rows
                 : ReactiveProtectionCpuBoundary.sequence(
                         rows, plan.resultPlan().requiresCpuBoundary(),
@@ -109,7 +112,8 @@ final class ReactiveJoinQueryOperations extends ReactiveFormOperationSupport {
 
     private Flux<DynamicRow> pageRows(JoinQueryPlanner.PlannedJoinPage plan) {
         Flux<DynamicRow> rows = results.decodeRows(
-                plan.resultForm(), executor.query(plan.dataRequest(), plan.options()), plan.options());
+                plan.resultForm(), executor.query(plan.dataRequest(), plan.options()), plan.options(),
+                DataScope.none(), SensitiveDisplayMode.FULL, plan.decodingPlan());
         return plan.resultPlan().direct() ? rows
                 : ReactiveProtectionCpuBoundary.sequence(
                         rows, plan.resultPlan().requiresCpuBoundary(),

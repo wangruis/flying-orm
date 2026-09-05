@@ -6,6 +6,7 @@ import com.flying.orm.core.field.FieldIdentity;
 import com.flying.orm.core.metadata.ColumnMetadata;
 import com.flying.orm.core.metadata.ForeignKeyMetadata;
 import com.flying.orm.core.metadata.IndexMetadata;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.core.type.LogicalType;
@@ -32,10 +33,16 @@ final class SchemaMigrationSupport {
     private SchemaMigrationSupport() {
     }
 
-    static SchemaMigrationRiskLevel riskLevel(SchemaOperation operation,
-                                              SchemaSnapshot actual,
-                                              DialectCapabilities capabilities) {
-        return SchemaRiskClassifier.classify(operation, actual, capabilities);
+    /** 旧入口只按 String 表名工作，不能静默丢弃命名空间或重新解释关系名中的字面点号。 */
+    static DynamicForm requireLegacyRelation(DynamicForm form) {
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        RelationIdentity identity = safeForm.relationIdentity().orElse(null);
+        if (identity != null && (identity.catalog().isPresent() || identity.schema().isPresent()
+                || identity.table().indexOf('.') >= 0)) {
+            throw new IllegalArgumentException(
+                    "structured relation identity requires the relational schema API");
+        }
+        return safeForm;
     }
 
     static boolean safeIncremental(SchemaOperation operation,
@@ -69,7 +76,7 @@ final class SchemaMigrationSupport {
         Objects.requireNonNull(capabilities, "dialect capabilities must not be null");
         SchemaMigrationRiskLevel highest = SchemaMigrationRiskLevel.LOW;
         for (SchemaOperation operation : safeOperations) {
-            SchemaMigrationRiskLevel risk = riskLevel(operation, actual, capabilities);
+            SchemaMigrationRiskLevel risk = SchemaRiskClassifier.classify(operation, actual, capabilities);
             if (risk.ordinal() > highest.ordinal()) {
                 highest = risk;
             }

@@ -57,49 +57,16 @@ final class R2dbcGeneratedKeyWriter {
                                String generatedKeyColumn) {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
         SqlExecutionOptions safeOptions = Objects.requireNonNull(options, "sql execution options must not be null");
-        return session.withPreparedStatementMono(
+        return session.withPreparedStatementResource(
                 safeRequest,
                 executionParameters,
                 safeOptions,
                 SqlExecutionOperation.UPDATE,
-                (statement, largeObjects) -> collect(statement, safeOptions, largeObjects, generatedKeyColumn));
-    }
-
-    static Mono<SqlWriteResult> collect(Statement statement,
-                                        SqlExecutionOptions options,
-                                        R2dbcLargeObjectScope largeObjects) {
-        R2dbcLargeObjectScope safeScope = Objects.requireNonNull(
-                largeObjects, "large object cleanup scope must not be null");
-        return collect(statement, options, () -> safeScope, null);
-    }
-
-    static Mono<SqlWriteResult> collect(Statement statement,
-                                        SqlExecutionOptions options,
-                                        R2dbcLargeObjectScope largeObjects,
-                                        String generatedKeyColumn) {
-        R2dbcLargeObjectScope safeScope = Objects.requireNonNull(
-                largeObjects, "large object cleanup scope must not be null");
-        return collect(statement, options, () -> safeScope, generatedKeyColumn);
-    }
-
-    static Mono<SqlWriteResult> collect(Statement statement,
-                                        SqlExecutionOptions options,
-                                        Supplier<R2dbcLargeObjectScope> largeObjects,
-                                        String generatedKeyColumn) {
-        if (generatedKeyColumn == null) {
-            statement.returnGeneratedValues();
-        } else {
-            String column = generatedKeyColumn.trim();
-            if (column.isEmpty()) {
-                return Mono.error(new IllegalArgumentException("generated key column must not be blank"));
-            }
-            statement.returnGeneratedValues(column);
-        }
-        Accumulator accumulator = new Accumulator(options, largeObjects);
-        return Flux.from(statement.execute())
-                   .concatMap(result -> Flux.from(result.flatMap(new ResultConsumer(accumulator))), 1)
-                   .then(Mono.fromSupplier(accumulator::result))
-                   .onErrorMap(accumulator::wrapFailure);
+                (statement, largeObjects) -> {
+                    Accumulator accumulator = new Accumulator(safeOptions, largeObjects);
+                    return session.protectMono(accumulator.collect(statement, generatedKeyColumn), safeOptions)
+                            .onErrorMap(accumulator::wrapFailure);
+                });
     }
 
     /** 一个 Result 的行共享布局；更新计数和键预算仍由整个 Statement 累计。 */
@@ -137,7 +104,7 @@ final class R2dbcGeneratedKeyWriter {
     }
 
     /** 每次订阅单独创建，所有可变状态都不会跨请求共享。 */
-    private static final class Accumulator {
+    static final class Accumulator {
 
         private final SqlExecutionOptions options;
         private final Supplier<R2dbcLargeObjectScope> largeObjects;
@@ -147,21 +114,37 @@ final class R2dbcGeneratedKeyWriter {
         private boolean updateCountSeen;
         private long generatedRowsSeen;
         private boolean writeObserved;
+        private boolean handoffCompleted;
 
-        private Accumulator(SqlExecutionOptions options,
+        Accumulator(SqlExecutionOptions options,
                             Supplier<R2dbcLargeObjectScope> largeObjects) {
             this.options = options;
             this.largeObjects = Objects.requireNonNull(
                     largeObjects, "large object cleanup scope must not be null");
         }
 
-        private void addAffectedRows(long rows) {
+        Mono<SqlWriteResult> collect(Statement statement, String generatedKeyColumn) {
+            if (generatedKeyColumn == null) {
+                statement.returnGeneratedValues();
+            } else {
+                String column = generatedKeyColumn.trim();
+                if (column.isEmpty()) {
+                    return Mono.error(new IllegalArgumentException("generated key column must not be blank"));
+                }
+                statement.returnGeneratedValues(column);
+            }
+            return Flux.from(statement.execute())
+                    .concatMap(result -> Flux.from(result.flatMap(new ResultConsumer(this))), 1)
+                    .then(Mono.fromSupplier(this::result));
+        }
+
+        private synchronized void addAffectedRows(long rows) {
             writeObserved = true;
             updateCountSeen = true;
             affectedRows = R2dbcExecutionCounts.add(affectedRows, rows);
         }
 
-        private Mono<Void> addKey(Result.RowSegment segment, ResultConsumer consumer) {
+        private synchronized Mono<Void> addKey(Result.RowSegment segment, ResultConsumer consumer) {
             writeObserved = true;
             generatedRowsSeen = R2dbcExecutionCounts.add(generatedRowsSeen, 1L);
             if (options.maxRows() > 0 && keys.size() >= options.maxRows()) {
@@ -180,15 +163,21 @@ final class R2dbcGeneratedKeyWriter {
             }).then();
         }
 
-        private SqlWriteResult result() {
+        private synchronized SqlWriteResult result() {
             // 有些驱动只发布生成键行而不发布 UpdateCount；单行 insert 时每个键行代表一条成功写入。
             long rows = updateCountSeen ? affectedRows : generatedRowsSeen;
             return new SqlWriteResult(rows, keys);
         }
 
-        private Throwable wrapFailure(Throwable failure) {
+        /** 保护写收到生成键后才进入侧索引阶段；内部构造出结果不等于它已经交付。 */
+        synchronized void completeHandoff() {
+            handoffCompleted = true;
+        }
+
+        synchronized Throwable wrapFailure(Throwable failure) {
             VirtualMachineError fatal = findVirtualMachineError(failure);
-            if (fatal != null || !writeObserved || failure instanceof GeneratedKeyReadException) {
+            // 结果交接前的截止仍保留写入证据；已进入侧索引或提交阶段的错误不改写含义。
+            if (fatal != null || !writeObserved || handoffCompleted || failure instanceof GeneratedKeyReadException) {
                 return fatal == null ? failure : fatal;
             }
             long rows = updateCountSeen ? affectedRows : generatedRowsSeen;

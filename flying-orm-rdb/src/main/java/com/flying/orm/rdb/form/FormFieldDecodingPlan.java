@@ -2,6 +2,8 @@ package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.join.JoinProjection;
+import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.rdb.codec.ArrayValueCodec;
 import com.flying.orm.rdb.codec.LargeObjectValueCodec;
@@ -51,6 +53,28 @@ final class FormFieldDecodingPlan {
 
     boolean isEmpty() {
         return fields.isEmpty();
+    }
+
+    /** JOIN 别名只改变结果标签，解码规则仍归属于原始字段身份。 */
+    static FormFieldDecodingPlan joinProjection(JoinQuerySpec spec,
+                                                 DynamicForm resultForm,
+                                                 FormDataSqlRenderer renderer) {
+        Map<DynamicForm, FormFieldDecodingPlan> sources = new HashMap<>();
+        Map<String, Decoding> projected = new HashMap<>();
+        boolean projectedAsync = false;
+        boolean projectedProtectionCpu = false;
+        for (JoinProjection projection : spec.projections()) {
+            DynamicForm source = projection.field().source().form();
+            FormFieldDecodingPlan sourcePlan = sources.computeIfAbsent(source, renderer::resultDecodingPlan);
+            Decoding decoding = sourcePlan.decoding(source.field(projection.field().field()));
+            if (decoding != null) {
+                projected.put(resultForm.field(projection.alias()).normalizedName(), decoding);
+                projectedAsync |= decoding.kind().requiresAsync();
+                projectedProtectionCpu |= decoding.kind() == Kind.ENCRYPTED;
+            }
+        }
+        return projected.isEmpty()
+                ? EMPTY : new FormFieldDecodingPlan(projected, projectedAsync, projectedProtectionCpu);
     }
 
     int size() {

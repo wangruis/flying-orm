@@ -67,10 +67,9 @@ final class JdbcBatchChunkExecutor {
                     evidence.fact(chunkIndex, BatchExecutionState.FAILED, conflict), conflict,
                     evidence.databaseWorkAttempted());
         } catch (BatchUpdateException partial) {
-            evidence.record(partial);
             return new JdbcBatchEvidenceSupport.Outcome(
-                    evidence.fact(chunkIndex, evidence.hasSuccess()
-                            ? BatchExecutionState.PARTIAL : BatchExecutionState.FAILED, partial), partial,
+                    evidence.fact(chunkIndex,
+                            JdbcBatchEvidenceSupport.failureState(partial, evidence.hasSuccess()), partial), partial,
                     evidence.databaseWorkAttempted());
         } catch (SQLException | RuntimeException | TimeoutException failure) {
             BatchExecutionState state = JdbcBatchEvidenceSupport.failureState(failure, evidence.hasSuccess());
@@ -122,7 +121,8 @@ final class JdbcBatchChunkExecutor {
             deadline.remaining();
             JdbcStatementControl.requireNotInterrupted(statement);
             markDatabaseWorkAttempted(evidence);
-            int[] counts = statement.executeBatch();
+            int[] counts = JdbcBatchEvidenceSupport.executeBusinessBatch(
+                    statement, evidence, startOffset, safeRows.size());
             result = result(safeRequest, chunkIndex, startOffset, safeRows.size(), counts, evidence);
         }
         protectedSideIndex.complete(safeConnection, protectedRows, result, deadline);
@@ -269,7 +269,8 @@ final class JdbcBatchChunkExecutor {
             applyTimeout(statement, deadline.remaining());
             JdbcStatementControl.requireNotInterrupted(statement);
             markDatabaseWorkAttempted(evidence);
-            int[] counts = statement.executeBatch();
+            int[] counts = JdbcBatchEvidenceSupport.executeBusinessBatch(
+                    statement, evidence, startOffset + offset, limit - offset);
             JdbcStatementControl.requireNotInterrupted(statement);
             deadline.remaining();
             if (counts == null || counts.length != limit - offset) {
@@ -288,12 +289,6 @@ final class JdbcBatchChunkExecutor {
                 }
             }
             return affectedRows;
-        } catch (BatchUpdateException failure) {
-            if (evidence == null) {
-                throw failure;
-            }
-            throw JdbcBatchEvidenceSupport.positioned(
-                    failure, startOffset + offset, limit - offset);
         }
     }
 

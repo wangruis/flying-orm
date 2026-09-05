@@ -19,7 +19,10 @@ import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 import java.util.concurrent.CompletionException;
+import java.util.function.Supplier;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -27,6 +30,42 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RepositoryEntityIdSupportTest {
+
+    @Test
+    void generatedKeyUsesPersistentParentInsteadOfTransientChildField() {
+        ShadowedGeneratedId entity = new ShadowedGeneratedId();
+
+        assertInheritedGeneratedKey(ShadowedGeneratedId.class, entity, () -> entity.id);
+    }
+
+    @Test
+    void generatedKeyIgnoresAccessorsOfAnExcludedChildProperty() {
+        ShadowedGeneratedPropertyId entity = new ShadowedGeneratedPropertyId();
+
+        assertInheritedGeneratedKey(ShadowedGeneratedPropertyId.class, entity, () -> entity.id);
+    }
+
+    private static <T extends GeneratedParent> void assertInheritedGeneratedKey(
+            Class<T> type, T entity, Supplier<Long> excludedId) {
+        try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.disabled())) {
+            RepositoryEntityIdSupport<T> ids = RepositoryEntityIdSupport.create(models.metadata(type), models);
+            assertAll(
+                    () -> assertDoesNotThrow(() -> ids.prepare(entity)),
+                    () -> assertNull(ids.currentGeneratedKey(entity)),
+                    () -> {
+                        ids.applyGeneratedKey(entity, DynamicRow.copyOf(Map.of("id", 42L)));
+                        assertAll(
+                                () -> assertEquals(42L, ((GeneratedParent) entity).id),
+                                () -> assertEquals(99L, excludedId.get()));
+                    },
+                    () -> {
+                        ids.restoreGeneratedKey(entity, null);
+                        assertAll(
+                                () -> assertNull(((GeneratedParent) entity).id),
+                                () -> assertEquals(99L, excludedId.get()));
+                    });
+        }
+    }
 
     @Test
     void usesDescriptorCodecWhenWritingBackDatabaseGeneratedKey() {
@@ -136,6 +175,31 @@ class RepositoryEntityIdSupportTest {
         private String tenantId;
         @TableId(type = IdType.AUTO)
         private Long id;
+    }
+
+    private static class GeneratedParent {
+
+        @TableId(type = IdType.AUTO)
+        private Long id;
+    }
+
+    private static final class ShadowedGeneratedId extends GeneratedParent {
+
+        private transient Long id = 99L;
+    }
+
+    private static final class ShadowedGeneratedPropertyId extends GeneratedParent {
+
+        @TableField(exist = false)
+        private Long id = 99L;
+
+        public Long getId() {
+            return id;
+        }
+
+        public void setId(Long value) {
+            id = value;
+        }
     }
 
     @TableName("composite_assigned_id")

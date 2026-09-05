@@ -12,6 +12,8 @@ import com.flying.orm.core.metadata.ForeignKeyDefinition;
 import com.flying.orm.core.metadata.IndexDefinition;
 import com.flying.orm.core.metadata.PrimaryKeyDefinition;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
+import com.flying.orm.core.metadata.RelationalSchemaDefinition;
+import com.flying.orm.core.metadata.TablePartitionDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.type.DatabaseType;
@@ -21,6 +23,7 @@ import com.flying.orm.rdb.mapping.EntityMetadata;
 import com.flying.orm.rdb.mapping.EntitySchemaDescriptor;
 import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
 import com.flying.orm.rdb.mapping.MappingException;
+import com.flying.orm.rdb.protection.ProtectedRelationalSchemaProjector;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
@@ -85,6 +88,8 @@ public final class EntityRelationalMetadataCompiler {
                         uniques.values(), indexes.values());
         Set<String> primaryKeyColumns = primaryKey == null
                 ? Set.of() : Set.copyOf(primaryKey.columns());
+        TablePartitionDefinition partition = EntityPartitionCompiler.compile(
+                safeType, compilation.excludedFields(), properties);
         List<EntityFieldMetadata> strictFields = new ArrayList<>(properties.size());
         Map<String, EntityTypeMappingRegistry.Mapping> fieldMappings =
                 new LinkedHashMap<>(properties.size());
@@ -102,6 +107,9 @@ public final class EntityRelationalMetadataCompiler {
         if (primaryKey != null) {
             table.primaryKey(primaryKey);
         }
+        if (partition != null) {
+            table.partition(partition);
+        }
         uniques.values().forEach(table::addUnique);
         indexes.values().forEach(table::addIndex);
         foreignKeys.values().forEach(table::addForeignKey);
@@ -111,8 +119,11 @@ public final class EntityRelationalMetadataCompiler {
             EntityMetadata<T> metadata = compilation.relationalMetadata(strictFields);
             RelationalTableDefinition relationalTable = table.build();
             requireSameColumns(metadata.toDynamicForm(), relationalTable);
+            RelationalSchemaDefinition physicalSchema =
+                    ProtectedRelationalSchemaProjector.project(
+                            metadata.toDynamicForm(), relationalTable);
             return EntitySchemaDescriptor.create(
-                    safeMappings, metadata, relationalTable, fieldMappings);
+                    safeMappings, metadata, physicalSchema, fieldMappings);
         } catch (MappingException error) {
             throw error;
         } catch (IllegalArgumentException | IllegalStateException error) {
