@@ -19,7 +19,7 @@ flying-orm 是一个为运行时动态表单而生、同时提供实体 Reposito
 <dependency>
     <groupId>io.github.wangruis</groupId>
     <artifactId>flying-orm-rdb</artifactId>
-    <version>3.2.0</version>
+    <version>3.3.0</version>
 </dependency>
 ```
 
@@ -59,10 +59,12 @@ DynamicForm userForm = DynamicForm.builder("user", "app_user")
 
 实体也可以作为完整期望关系模型的唯一来源：`@TableName` / `@TableCatalog` 声明表身份，`@TableComment` 声明表注释，
 `@TableColumn` 声明列结构与列注释，`@TablePrimaryKey`、`@TableUnique`、`@TableIndex`、
-`@TableForeignKey` 和 `@TableCheck` 声明受控约束。显式调用
+`@TableForeignKey`、`@TableCheck` 和 `@TablePartition` 声明受控关系结构；当前分区原语只支持 PostgreSQL 单列时间 `RANGE`。显式调用
 `EntitySchemaSynchronizer.synchronizeRelational(...)` 或响应式入口后，flying-orm 才会执行
 “注解编译 → Schema diff → 精确 SQL 审阅 → 前置条件复核 → DDL → 执行后回读验证”；普通 Repository/CRUD 不会自动进入这条冷路径。
 自动执行要求元数据读取器明确声明能够完整回读所有被比较的结构事实。内置 PostgreSQL、MySQL、Oracle、SQL Server 和 H2 读取器均提供完整关系快照，覆盖表与列、PK、UK、索引、FK、CHECK、默认值、生成方式及注释；第三方读取器若只声明部分 coverage，审阅阶段会返回人工步骤和零 SQL，不会先执行 DDL 再把未知事实误报为成功。
+
+`@EncryptedField` 的密文列、EXACT/SUFFIX 搜索列和按需的 CONTAINS 辅助表由 ORM 从同一实体描述投影到最终物理关系，并与 CRUD、指纹、DDL、回读和差异共用一条链路。只有能够保持语义的唯一约束和等值索引才会投影；主键、外键、分区键、范围约束或不安全的复合保护索引会在 SQL 发送前明确拒绝。未启用保护的普通实体不增加 CRUD 热路径成本。
 
 ### 3. 查询与写入
 
@@ -127,10 +129,10 @@ Mono<BatchExecutionEvidence> evidence = forms.writeBatchEvidence(batch);
 
 ## 正式能力导航
 
-下列能力属于 `3.2.0` 的公开能力；分组只用于阅读导航。
+下列能力属于 `3.3.0` 的公开能力；分组只用于阅读导航。
 
-- [常用正式能力](CAPABILITIES.md)：可空复合 keyset、轻量 JOIN、结构化条件、字段用途、查询预算、类型化聚合、批量执行证据、Repository 和实体注解 Schema 闭环。
-- [专业正式能力](ADVANCED-CAPABILITIES.md)：DatabaseOperator、SQL 模板、受控原生 SQL、外部事务、锁定读取、超时、观测、缓存、方言和受治理扩展。
+- [常用正式能力](CAPABILITIES.md)：可空复合 keyset、来源隔离的受治理 JOIN、结构化条件、字段用途、查询预算、类型化聚合、批量执行证据、保护关系投影、Repository 和实体注解 Schema 闭环。
+- [专业正式能力](ADVANCED-CAPABILITIES.md)：DatabaseOperator、SQL 模板、受控原生 SQL、外部事务、锁定读取、超时、观测、缓存、方言、保护字段关系模型、PostgreSQL 分区父表和受治理扩展。
 
 ## 默认安全行为
 
@@ -142,11 +144,8 @@ Mono<BatchExecutionEvidence> evidence = forms.writeBatchEvidence(batch);
 
 ## 从源码构建
 
-```powershell
-& 'D:\apache-maven-3.9.16\bin\mvn.cmd' `
-  '-Dmaven.repo.local=D:\MavenRepository' `
-  '-pl' 'flying-orm-core,flying-orm-rdb' `
-  '-am' verify
+```bash
+mvn -pl flying-orm-core,flying-orm-rdb -am verify
 ```
 
 ## License

@@ -1,6 +1,6 @@
 # flying-orm 专业正式能力
 
-本页说明基础设施接入、复杂查询和运维治理能力。它们是 `3.2.0` 的公开能力，并继续复用统一 SQL、参数绑定、Scope、事务参与、超时、观测和错误分类管线。
+本页说明基础设施接入、复杂查询和运维治理能力。它们是 `3.3.0` 的公开能力，并继续复用统一 SQL、参数绑定、Scope、事务参与、超时、观测和错误分类管线。
 
 ## DatabaseOperator 链式 DML
 
@@ -83,7 +83,26 @@ DDL 审核还冻结 `SchemaSnapshotCoverage`。内置五方言 metadata reader �
 
 旧的自定义 handler/codec 继续作为 trusted startup extension。它们缺少 descriptor 时不会被偷偷暴露给可配置查询；governed 路径会在 SQL/连接前拒绝。请求只能选择装配时已允许的 term，不能传入 renderer、handler、codec 或任意 SQL。扩展必须保持参数化 SQL、稳定类型语义和资源所有权；不通过反射扫描或后台线程把轻量内核变成容器框架。
 
-当前没有生产调用链证据的全文、空间、窗口/CTE、复杂索引、分区、物化视图、RLS、触发器和 COPY，不预建万能 SPI。
+当前没有生产调用链证据的全文、空间、窗口/CTE、复杂索引、物化视图、RLS、触发器和 COPY，不预建万能 SPI。
+
+### 保护字段与关系 Schema 单一投影
+
+实体关系 Schema 与 CRUD 共用同一份最终物理关系模型。实体上的 `@EncryptedField` 不再只影响写入和查询改写：Schema 冷路径会按启用的保护模式投影密文列、EXACT/SUFFIX 搜索列以及按需的 CONTAINS 辅助表，再由同一个关系模型生成指纹、差异、DDL、回读和执行后验证。
+
+只有能够保持原语义的唯一约束和等值索引才会投影到保护列。主键、外键、分区键、范围约束以及无法保持语义的复合保护索引会在 SQL 发送前明确拒绝，不会静默替换列名。未启用字段保护的实体直接复用原关系定义，不增加普通 CRUD 热路径成本。
+
+### 实体分区父表
+
+`@TablePartition` 是 3.3.0 的受控关系原语，当前只开放 PostgreSQL 单列时间 `RANGE`：
+
+```java
+@TablePartition(strategy = TablePartition.Strategy.RANGE, property = "createdAt")
+class JobEntity {
+    private Instant createdAt;
+}
+```
+
+分区键必须是持久化、未加密的 DATE/TIMESTAMP 属性；策略和物理列名进入关系元数据、指纹、DDL、回读和差异。分区表上的主键、唯一约束和唯一索引必须包含分区键。其他方言会在 SQL 前明确失败关闭，不静默创建普通表。ORM 只负责父表和元数据；下一分区创建时点、范围、留存、归档、删除和协调由上层编排。
 
 ## 性能调优与验证
 
@@ -98,7 +117,7 @@ DDL 审核还冻结 `SchemaSnapshotCoverage`。内置五方言 metadata reader �
 
 ## 公共 API 与数据库认证
 
-`3.2.0` 的发版验证覆盖公共 API/ABI 比较、完整质量门禁、发布制品检查，以及 PostgreSQL、MySQL、Oracle 和 SQL Server 的 Docker 实库往返认证。H2 由自动化测试覆盖；静态方言合同和 Mock 驱动结果不替代真实数据库证据。
+`3.3.0` 的发版验证覆盖公共 API/ABI 比较、完整质量门禁、发布制品检查，以及保护关系投影、受治理 JOIN 来源隔离和 PostgreSQL 分区父表的关系契约。H2 由自动化测试覆盖；静态方言合同和 Mock 驱动结果不替代真实数据库证据。
 
 ## 继续阅读
 

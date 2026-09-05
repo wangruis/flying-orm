@@ -1,6 +1,6 @@
 # flying-orm 常用正式能力
 
-本页承接 [README](README.md) 的 DynamicForm 主路径。这里列出的是 `3.2.0` 提供的公开能力。
+本页承接 [README](README.md) 的 DynamicForm 主路径。这里列出的是 `3.3.0` 提供的公开能力。
 
 ## 分页与游标分页
 
@@ -46,6 +46,8 @@ Flux<DynamicRow> rows = forms.selectJoin(query);
 ```
 
 JOIN 面向受控等值关联和常规多表读取；复杂数据库专有查询可使用正式的模板或受控原生 SQL 能力。
+
+受治理 JOIN 的字段用途始终保留 `JoinSource + field` 的来源身份。两个来源存在同名字段时，PROJECT、FILTER、SORT、JOIN、FULL、MASKED 和 HIDDEN 决策分别按来源审批；表别名、JOIN 别名和投影别名只影响 SQL/结果表达，不会改变授权身份。缺少任一来源字段授权时，在申请连接或生成 SQL 前失败。
 
 ## 参数条件与结构化条件
 
@@ -135,7 +137,7 @@ SyncFormRepository<UserEntity> syncUsers = clients.syncRepository(UserEntity.cla
 
 实体的非数据库属性统一使用 `@TableField(exist = false)` 或 Java `transient`。它们不参与查询投影、实体取值、插入、更新、批量或 DDL；对应的 bean/record 构造位置由映射计划保留 Java 默认值。请不要叠加列、主键、索引或约束注解；这类冲突会被结构编译器拒绝。
 
-实体关系结构由同一份启动期描述符编译：表/catalog/schema、表和列注释、列类型/长度/精度/默认值/生成方式、命名主键、唯一约束、复合索引及方向、外键及引用动作、受控 CHECK 都进入不可变 `RelationalTableDefinition` 和稳定指纹。属性名到列名仍复用现有实体映射规则；`Map<String, Object>` 等结构化属性通过明确注册的 JSON 类型映射承接，不把 hsweb/easy-orm 的 `@Comment`、`@ColumnType` 或 `@JsonCodec` 变成 flying-orm 依赖。
+实体关系结构由同一份启动期描述符编译：表/catalog/schema、表和列注释、列类型/长度/精度/默认值/生成方式、命名主键、唯一约束、复合索引及方向、外键及引用动作、受控 CHECK 和受控分区声明都进入不可变 `RelationalTableDefinition` 和稳定指纹。属性名到列名仍复用现有实体映射规则；`Map<String, Object>` 等结构化属性通过明确注册的 JSON 类型映射承接，不把 hsweb/easy-orm 的 `@Comment`、`@ColumnType` 或 `@JsonCodec` 变成 flying-orm 依赖。
 
 ## Schema 与元数据
 
@@ -143,7 +145,9 @@ Schema 能力包括数据库元数据读取、纯函数 diff、风险审核、�
 
 `ReviewedSchemaPlan` 冻结数据库描述、capability 指纹、desired/actual 指纹、精确 `SqlRequest`、顺序、风险和前置条件。执行前重读 actual，不一致则以 `PRECONDITION_FAILED` 结束且不执行 SQL；执行后再重读并验证目标结构。因此“SQL 已发送”或 `rowsUpdated` 不会被冒充为“Schema 已收敛”。
 
-`EntitySchemaSynchronizer.synchronizeRelational(...)` 和 `synchronizeRelationalReactive(...)` 直接使用实体描述符中的完整关系模型，不再降级为旧的 `DynamicForm + index` 投影。`VALIDATE` 只比对；`SAFE_UPDATE` 只接受低风险且无需人工 SQL 的增量；`FULL_UPDATE` 对非低风险计划要求与审核计划指纹完全一致的批准。响应式入口保持冷发布器并按表串行执行，JDBC/R2DBC 都只执行已经审核冻结的 SQL。
+`EntitySchemaSynchronizer.synchronizeRelational(...)` 和 `synchronizeRelationalReactive(...)` 使用实体描述符投影出的最终关系模型，不再降级为旧的 `DynamicForm + index` 投影。字段保护产生的密文列、搜索列和按需辅助表，与 CRUD 使用同一物理关系定义；`@TablePartition` 的策略和分区键也沿同一链路进入指纹、DDL、回读和验证。`VALIDATE` 只比对；`SAFE_UPDATE` 只接受低风险且无需人工 SQL 的增量；`FULL_UPDATE` 对非低风险计划要求与审核计划指纹完全一致的批准。响应式入口保持冷发布器并按表串行执行，JDBC/R2DBC 都只执行已经审核冻结的 SQL。
+
+当前分区原语只支持 PostgreSQL 单列时间 `RANGE`。其他方言遇到分区实体会在 SQL 发送前明确失败关闭，不会静默创建普通表；分区子表创建、范围、留存和归档仍由上层编排。
 
 MySQL 表或列注释含反斜线时，上层必须把每个 Schema 同步连接配置为 `NO_BACKSLASH_ESCAPES`。flying-orm 会在第一条相关 DDL 前抽取一个 Schema 连接做 fail-fast 校验，不满足则以 `EXECUTOR_CAPABILITY_REQUIRED` 拒绝且不发送 DDL；ORM 不修改 `sql_mode`，也不把这次抽样冒充为异构连接池的同连接证明。正确性契约仍是所有 Schema 连接配置一致；不含反斜线的注释不会执行该查询，普通 CRUD 路径也不受影响。
 
@@ -159,6 +163,8 @@ flying-orm 不替代企业迁移平台，也不会在普通 CRUD 热路径自动
 - `DynamicForm.Builder.encrypted(...)` 或 `masked(...)`。
 
 未声明字段不会自动加密、生成搜索 token 或脱敏。上层服务只需提供版本化密钥材料；密钥来源、部署配置和权限体系不进入 flying-orm。
+
+Schema 冷路径会把同一实体的保护声明投影为最终物理关系：密文列、EXACT/SUFFIX 搜索列和按需的 CONTAINS 辅助表统一进入关系元数据、DDL、回读和差异。只有能够保持语义的唯一约束和等值索引才会投影；主键、外键、分区键、范围约束或不安全的复合保护索引会在 SQL 前拒绝。
 
 - EXACT：使用字段和租户隔离的搜索 token 进行精确匹配。
 - SUFFIX：按声明的后缀长度生成 token，适合手机号后几位等明确需求。
