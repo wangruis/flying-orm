@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.dialect.RdbDialectResolver;
@@ -23,7 +24,7 @@ import java.util.function.Supplier;
  * @author wangr
  * @version v3.2
  */
-public final class VerifiedSchemaPlanExecutor {
+final class VerifiedSchemaPlanExecutor {
 
     private VerifiedSchemaPlanExecutor() {
     }
@@ -54,7 +55,7 @@ public final class VerifiedSchemaPlanExecutor {
         RdbDialect databaseDialect = RdbDialectResolver.tryResolveName(safePlan.database().dialectId())
                 .orElse(null);
         return new JdbcSchemaMigrationExecutor(
-                safeExecutor, executionRenderer(safePlan, databaseDialect), SchemaMigrationObserver.noop(),
+                safeExecutor, SchemaMigrationObserver.noop(),
                 databaseDialect == null ? SchemaDdlTransactionSupport.UNKNOWN
                         : SchemaDdlTransactionSupport.from(databaseDialect),
                 safeExecutor::currentTransaction, ignored -> { })
@@ -91,11 +92,11 @@ public final class VerifiedSchemaPlanExecutor {
         Objects.requireNonNull(options, "schema SQL execution options must not be null");
         JdbcPlanExecution safeExecution = Objects.requireNonNull(
                 execution, "reviewed JDBC plan execution must not be null");
-        RelationalTableDefinition desired = safePlan.desiredTable().orElse(null);
-        if (desired == null) {
+        VerificationTarget target = verificationTarget(safePlan);
+        if (target == null) {
             return reportWithoutExecution(safePlan, SchemaExecutionStatus.FAILED, null);
         }
-        if (!executionAuthorized(safePlan, approval)) {
+        if (!safePlan.acceptsApproval(approval)) {
             return reportWithoutExecution(safePlan, SchemaExecutionStatus.FAILED, null);
         }
 
@@ -119,7 +120,8 @@ public final class VerifiedSchemaPlanExecutor {
             return reportWithoutExecution(safePlan, SchemaExecutionStatus.UNKNOWN, null);
         }
         String beforeFingerprint = SchemaSnapshotFingerprint.of(before);
-        if (!preconditionsMatch(safePlan, beforeFingerprint, coverageFingerprint)) {
+        if (!sameTargetRelation(safePlan, target.identity(), before.identity())
+                || !preconditionsMatch(safePlan, beforeFingerprint, coverageFingerprint)) {
             return reportWithoutExecution(
                     safePlan, SchemaExecutionStatus.PRECONDITION_FAILED, beforeFingerprint);
         }
@@ -139,7 +141,7 @@ public final class VerifiedSchemaPlanExecutor {
             return withoutPostSnapshot(safePlan, attempt, beforeFingerprint);
         }
         return verifiedReport(
-                safePlan, desired, attempt, beforeFingerprint, after);
+                safePlan, target, attempt, beforeFingerprint, after);
     }
 
     /** 响应式执行入口，并在第一次元数据读取或 SQL 前核对当前 reader coverage。 */
@@ -170,19 +172,10 @@ public final class VerifiedSchemaPlanExecutor {
         RdbDialect databaseDialect = RdbDialectResolver.tryResolveName(safePlan.database().dialectId())
                 .orElse(null);
         return new SchemaMigrationExecutor(
-                safeExecutor, executionRenderer(safePlan, databaseDialect), SchemaMigrationObserver.noop(),
+                safeExecutor, SchemaMigrationObserver.noop(),
                 databaseDialect == null ? SchemaDdlTransactionSupport.UNKNOWN
                         : SchemaDdlTransactionSupport.from(databaseDialect))
                 .executeReviewed(safePlan, snapshotReader, coverageReader, metadataInvalidator, safeOptions);
-    }
-
-    private static FormSchemaSqlRenderer executionRenderer(ReviewedSchemaPlan plan, RdbDialect databaseDialect) {
-        SchemaDialect schemaDialect = plan.comparisonDialect();
-        if (schemaDialect == null) {
-            schemaDialect = databaseDialect == null ? SchemaDialect.standard() : databaseDialect.schema();
-        }
-        // 只为会话保护读取方言；审核 SQL 仍原样交给迁移执行器。
-        return FormSchemaSqlRenderer.create(schemaDialect);
     }
 
     static Mono<SchemaExecutionReport> executeReactiveGuarded(
@@ -216,11 +209,11 @@ public final class VerifiedSchemaPlanExecutor {
         Objects.requireNonNull(options, "schema SQL execution options must not be null");
         ReactivePlanExecution safeExecution = Objects.requireNonNull(
                 execution, "reviewed reactive plan execution must not be null");
-        RelationalTableDefinition desired = safePlan.desiredTable().orElse(null);
-        if (desired == null) {
+        VerificationTarget target = verificationTarget(safePlan);
+        if (target == null) {
             return Mono.just(reportWithoutExecution(safePlan, SchemaExecutionStatus.FAILED, null));
         }
-        if (!executionAuthorized(safePlan, approval)) {
+        if (!safePlan.acceptsApproval(approval)) {
             return Mono.just(reportWithoutExecution(safePlan, SchemaExecutionStatus.FAILED, null));
         }
 
@@ -243,14 +236,14 @@ public final class VerifiedSchemaPlanExecutor {
                     .switchIfEmpty(Mono.just(SnapshotRead.failure()))
                     .onErrorResume(RuntimeException.class, failure -> Mono.just(SnapshotRead.failure()))
                     .flatMap(read -> executeAfterReactivePrecondition(
-                            safePlan, desired, safeExecution, safeReader,
+                            safePlan, target, safeExecution, safeReader,
                             coverageFingerprint, read));
         });
     }
 
     private static Mono<SchemaExecutionReport> executeAfterReactivePrecondition(
             ReviewedSchemaPlan plan,
-            RelationalTableDefinition desired,
+            VerificationTarget target,
             ReactivePlanExecution execution,
             Supplier<Mono<SchemaSnapshot>> reader,
             String coverageFingerprint,
@@ -259,7 +252,8 @@ public final class VerifiedSchemaPlanExecutor {
             return Mono.just(reportWithoutExecution(plan, SchemaExecutionStatus.UNKNOWN, null));
         }
         String beforeFingerprint = SchemaSnapshotFingerprint.of(read.snapshot());
-        if (!preconditionsMatch(plan, beforeFingerprint, coverageFingerprint)) {
+        if (!sameTargetRelation(plan, target.identity(), read.snapshot().identity())
+                || !preconditionsMatch(plan, beforeFingerprint, coverageFingerprint)) {
             return Mono.just(reportWithoutExecution(
                     plan, SchemaExecutionStatus.PRECONDITION_FAILED, beforeFingerprint));
         }
@@ -274,7 +268,7 @@ public final class VerifiedSchemaPlanExecutor {
                     }
                     return readReactive(reader)
                             .map(after -> verifiedReport(
-                                    plan, desired, attempt, beforeFingerprint,
+                                    plan, target, attempt, beforeFingerprint,
                                     after))
                             .switchIfEmpty(Mono.just(withoutPostSnapshot(
                                     plan, attempt, beforeFingerprint)))
@@ -284,20 +278,27 @@ public final class VerifiedSchemaPlanExecutor {
     }
 
     private static SchemaExecutionReport verifiedReport(ReviewedSchemaPlan plan,
-                                                        RelationalTableDefinition desired,
+                                                        VerificationTarget target,
                                                         ExecutionAttempt attempt,
                                                         String beforeFingerprint,
                                                         SchemaSnapshot after) {
         String afterFingerprint = SchemaSnapshotFingerprint.of(after);
         SchemaCompatibilityReport verification;
         try {
-            verification = SchemaDiffer.diff(
-                    desired,
-                    after,
-                    plan.database().capabilities(),
-                    plan.compatibilityMode(),
-                    plan.database().dialectId(),
-                    plan.comparisonDialect());
+            verification = target.state() == ReviewedSchemaPlan.TargetState.PRESENT
+                    ? SchemaDiffer.diff(
+                            target.desiredTable(),
+                            after,
+                            plan.database().capabilities(),
+                            plan.compatibilityMode(),
+                            plan.database().dialectId(),
+                            plan.comparisonDialect())
+                    : SchemaDiffer.diffAbsent(
+                            target.identity(),
+                            after,
+                            plan.database().capabilities(),
+                            plan.compatibilityMode(),
+                            plan.comparisonDialect());
         } catch (RuntimeException failure) {
             return SchemaExecutionReport.of(
                     plan.fingerprint(),
@@ -314,6 +315,32 @@ public final class VerifiedSchemaPlanExecutor {
         return SchemaExecutionReport.of(
                 plan.fingerprint(), status, attempt.steps(),
                 beforeFingerprint, afterFingerprint, verification);
+    }
+
+    private static VerificationTarget verificationTarget(ReviewedSchemaPlan plan) {
+        ReviewedSchemaPlan.TargetState state = plan.targetState().orElse(null);
+        RelationIdentity identity = plan.targetIdentity().orElse(null);
+        if (state == null || identity == null) {
+            return null;
+        }
+        RelationalTableDefinition desired = plan.desiredTable().orElse(null);
+        if (state == ReviewedSchemaPlan.TargetState.PRESENT) {
+            return desired != null && identity.equals(desired.identity())
+                    ? new VerificationTarget(state, identity, desired) : null;
+        }
+        if (desired != null || plan.compatibilityMode() != SchemaCompatibilityMode.EXACT) {
+            return null;
+        }
+        return new VerificationTarget(state, identity, null);
+    }
+
+    private static boolean sameTargetRelation(ReviewedSchemaPlan plan,
+                                              RelationIdentity target,
+                                              RelationIdentity observed) {
+        SchemaDialect dialect = plan.comparisonDialect();
+        return dialect == null
+                ? target.equals(observed)
+                : SchemaDefinitionEquality.sameRelation(target, observed, dialect);
     }
 
     private static SchemaExecutionReport withoutPostSnapshot(ReviewedSchemaPlan plan,
@@ -361,17 +388,6 @@ public final class VerifiedSchemaPlanExecutor {
     private static boolean completedExecution(SchemaExecutionStatus status) {
         return status == SchemaExecutionStatus.SUCCESS
                 || status == SchemaExecutionStatus.EXTERNAL_TRANSACTION_PENDING;
-    }
-
-    private static boolean executionAuthorized(ReviewedSchemaPlan plan,
-                                               SchemaMigrationApproval approval) {
-        if (plan.requiresManualAction()) {
-            return false;
-        }
-        if (plan.risk() == SchemaMigrationRiskLevel.LOW) {
-            return true;
-        }
-        return approval != null && plan.fingerprint().equals(approval.planFingerprint());
     }
 
     private static Mono<SchemaSnapshot> readReactive(Supplier<Mono<SchemaSnapshot>> reader) {
@@ -483,5 +499,10 @@ public final class VerifiedSchemaPlanExecutor {
         private static SnapshotRead failure() {
             return new SnapshotRead(null);
         }
+    }
+
+    private record VerificationTarget(ReviewedSchemaPlan.TargetState state,
+                                      RelationIdentity identity,
+                                      RelationalTableDefinition desiredTable) {
     }
 }

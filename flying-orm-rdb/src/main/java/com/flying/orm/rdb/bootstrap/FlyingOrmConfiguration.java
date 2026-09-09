@@ -20,9 +20,13 @@ import java.util.Objects;
  * <p>{@code dialect} 为空表示从统一运行入口自动识别；有值时直接采用显式配置，物理数据源拓扑由上层治理。
  * SQL 日志默认关闭，完整 SQL 和参数仍由 {@link SqlExecutionLogOptions} 单独控制。</p>
  *
+ * <p>默认执行、清理和批量时限均为零，恢复模式为 NONE。正批量时限、正清理时限及 RECEIPT
+ * 在对应选项的配置入口明确拒绝；ATOMIC 非空批量要求上层外部事务。
+ * 普通单条 JDBC Statement 的显式超时提示仍由 executionOptions 透传，不增加独立监听时限配置。</p>
+ *
  * @param dialect                  显式方言名，{@code null} 表示自动识别
  * @param executionOptions         普通 SQL 默认执行保护
- * @param batchWriteOptions        默认批量策略，默认 ATOMIC
+ * @param batchWriteOptions        默认批量策略，ATOMIC 只参与上层外部事务
  * @param batchMemoryLimits        进程级批量硬上限
  * @param cachePolicy              元数据、SQL 计划、条件计划和实体映射缓存策略
  * @param migrationExecutionOptions DDL 默认执行保护

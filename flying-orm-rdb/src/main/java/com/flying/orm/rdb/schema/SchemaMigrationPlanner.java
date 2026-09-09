@@ -5,11 +5,13 @@ import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.form.DynamicFormChangeSet;
 import com.flying.orm.core.form.FieldChange;
 import com.flying.orm.core.metadata.ColumnMetadata;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.ForeignKeyMetadata;
 import com.flying.orm.core.metadata.IndexMetadata;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.DialectCapabilities;
+import com.flying.orm.rdb.metadata.JdbcFormMetadataReader;
 import com.flying.orm.rdb.metadata.ReactiveFormMetadataReader;
 import reactor.core.publisher.Mono;
 
@@ -54,19 +56,22 @@ final class SchemaMigrationPlanner {
                                    ReactiveFormMetadataReader metadataReader,
                                    SchemaMigrationOptions options) {
         DynamicForm safeForm = SchemaMigrationSupport.requireLegacyRelation(form);
+        List<IndexMetadata> safeIndexes = List.copyOf(Objects.requireNonNull(
+                indexes, "target indexes must not be null"));
+        List<ForeignKeyMetadata> safeForeignKeys = List.copyOf(Objects.requireNonNull(
+                foreignKeys, "target foreign keys must not be null"));
         ReactiveFormMetadataReader safeReader = Objects.requireNonNull(
                 metadataReader, "reactive form metadata reader must not be null");
         SchemaMigrationOptions safeOptions = Objects.requireNonNull(options,
                                                                      "schema migration options must not be null");
         return safeReader.readTable(safeForm.table())
-                         .flatMap(current -> protectedSchemas.planExistingReactive(
-                                 safeForm,
-                                 migrateSafelyPlan(current, safeForm, indexes, foreignKeys, safeOptions),
-                                 safeReader,
-                                 safeOptions))
+                         .flatMap(current -> migrateSafelyPlanReactive(
+                                 current, safeForm, safeIndexes, safeForeignKeys, safeOptions, safeReader)
+                                 .flatMap(primary -> protectedSchemas.planExistingReactive(
+                                         safeForm, primary, safeReader, safeOptions)))
                          .onErrorResume(SchemaMigrationPlanner::isTableNotFound,
                                         failure -> Mono.just(createTablePlan(
-                                                safeForm, indexes, foreignKeys)));
+                                                safeForm, safeIndexes, safeForeignKeys)));
     }
 
     Mono<ReviewedSchemaMigrationPlan> review(DynamicForm form,
@@ -76,6 +81,10 @@ final class SchemaMigrationPlanner {
                                              SchemaMigrationOptions migrationOptions,
                                              SchemaMigrationReviewPolicy reviewPolicy) {
         DynamicForm safeForm = SchemaMigrationSupport.requireLegacyRelation(form);
+        List<IndexMetadata> safeIndexes = List.copyOf(Objects.requireNonNull(
+                indexes, "target indexes must not be null"));
+        List<ForeignKeyMetadata> safeForeignKeys = List.copyOf(Objects.requireNonNull(
+                foreignKeys, "target foreign keys must not be null"));
         ReactiveFormMetadataReader safeReader = Objects.requireNonNull(
                 metadataReader, "reactive form metadata reader must not be null");
         SchemaMigrationOptions safeOptions = Objects.requireNonNull(migrationOptions,
@@ -83,18 +92,73 @@ final class SchemaMigrationPlanner {
         SchemaMigrationReviewPolicy safePolicy = Objects.requireNonNull(reviewPolicy,
                                                                          "migration review policy must not be null");
         return safeReader.readTable(safeForm.table())
-                         .flatMap(current -> protectedSchemas.reviewExistingReactive(
-                                 safeForm,
-                                 current,
-                                 migrateSafelyPlan(current, safeForm, indexes, foreignKeys, safeOptions),
-                                 safeReader,
-                                 safeOptions,
-                                 safePolicy))
+                         .flatMap(current -> physicalSnapshot(current, safeForm, safeOptions, safeReader)
+                                 .map(java.util.Optional::of)
+                                 .defaultIfEmpty(java.util.Optional.empty())
+                                 .flatMap(snapshot -> protectedSchemas.reviewExistingReactive(
+                                         safeForm, current,
+                                         migrateSafelyPlan(current, safeForm, safeIndexes, safeForeignKeys,
+                                                 safeOptions, snapshot.orElse(null)),
+                                         safeReader, safeOptions, safePolicy, snapshot.orElse(null))))
                          .onErrorResume(SchemaMigrationPlanner::isTableNotFound,
                                         failure -> Mono.just(protectedSchemas.reviewCreated(
                                                 safeForm,
-                                                createPrimaryTablePlan(safeForm, indexes, foreignKeys),
+                                                createPrimaryTablePlan(safeForm, safeIndexes, safeForeignKeys),
                                                 safePolicy)));
+    }
+
+    SchemaMigrationPlan planJdbc(DynamicForm form,
+                                   List<IndexMetadata> indexes,
+                                   List<ForeignKeyMetadata> foreignKeys,
+                                   JdbcFormMetadataReader metadataReader,
+                                   SchemaMigrationOptions options) {
+        DynamicForm safeForm = Objects.requireNonNull(form, "target dynamic form must not be null");
+        JdbcFormMetadataReader safeReader = Objects.requireNonNull(
+                metadataReader, "jdbc form metadata reader must not be null");
+        SchemaMigrationOptions safeOptions = Objects.requireNonNull(
+                options, "schema migration options must not be null");
+        SchemaMigrationSupport.requireLegacyRelation(safeForm);
+        try {
+            TableMetadata current = safeReader.readTable(safeForm.table());
+            SchemaMigrationPlan primary = migrateSafelyPlan(
+                    current, safeForm, indexes, foreignKeys, safeOptions,
+                    physicalSnapshotJdbc(current, safeForm, safeOptions, safeReader));
+            return protectedSchemas.planExistingJdbc(safeForm, primary, safeReader, safeOptions);
+        } catch (IllegalArgumentException failure) {
+            if (!isTableNotFound(failure)) {
+                throw failure;
+            }
+            return createTablePlan(safeForm, indexes, foreignKeys);
+        }
+    }
+
+    ReviewedSchemaMigrationPlan reviewJdbc(DynamicForm form,
+                                             List<IndexMetadata> indexes,
+                                             List<ForeignKeyMetadata> foreignKeys,
+                                             JdbcFormMetadataReader metadataReader,
+                                             SchemaMigrationOptions migrationOptions,
+                                             SchemaMigrationReviewPolicy reviewPolicy) {
+        DynamicForm safeForm = SchemaMigrationSupport.requireLegacyRelation(form);
+        JdbcFormMetadataReader safeReader = Objects.requireNonNull(
+                metadataReader, "jdbc form metadata reader must not be null");
+        SchemaMigrationOptions safeOptions = Objects.requireNonNull(
+                migrationOptions, "schema migration options must not be null");
+        SchemaMigrationReviewPolicy safePolicy = Objects.requireNonNull(
+                reviewPolicy, "migration review policy must not be null");
+        try {
+            TableMetadata current = safeReader.readTable(safeForm.table());
+            SchemaSnapshot snapshot = physicalSnapshotJdbc(current, safeForm, safeOptions, safeReader);
+            SchemaMigrationPlan primary = migrateSafelyPlan(
+                    current, safeForm, indexes, foreignKeys, safeOptions, snapshot);
+            return protectedSchemas.reviewExistingJdbc(
+                    safeForm, current, primary, safeReader, safeOptions, safePolicy, snapshot);
+        } catch (IllegalArgumentException failure) {
+            if (!isTableNotFound(failure)) {
+                throw failure;
+            }
+            return protectedSchemas.reviewCreated(
+                    safeForm, createPrimaryTablePlan(safeForm, indexes, foreignKeys), safePolicy);
+        }
     }
 
     SchemaMigrationPlan createTablePlan(DynamicForm target,
@@ -160,7 +224,7 @@ final class SchemaMigrationPlanner {
                 requests.add(new SqlRequest(dialect.alterColumnTypeSql(rawTable,
                                                                         target.name(),
                                                                         tables.dataType(target),
-                                                                        tables.columnDefinition(target)), List.of()));
+                                                                        tables.replacementColumnDefinition(target, null)), List.of()));
             }
             if (commentChanged && !commentInFullDefinition) {
                 requests.add(new SqlRequest(separateCommentChange.orElseThrow(), List.of()));
@@ -216,6 +280,87 @@ final class SchemaMigrationPlanner {
                                           List<IndexMetadata> targetIndexes,
                                           List<ForeignKeyMetadata> targetForeignKeys,
                                           SchemaMigrationOptions options) {
+        return migrateSafelyPlan(current, target, targetIndexes, targetForeignKeys, options, null);
+    }
+
+    Mono<SchemaMigrationPlan> migrateSafelyPlanReactive(TableMetadata current,
+                                                       DynamicForm target,
+                                                       List<IndexMetadata> indexes,
+                                                       List<ForeignKeyMetadata> foreignKeys,
+                                                       SchemaMigrationOptions options,
+                                                       ReactiveFormMetadataReader reader) {
+        return physicalSnapshot(current, target, options, reader)
+                .map(snapshot -> migrateSafelyPlan(current, target, indexes, foreignKeys, options, snapshot))
+                .switchIfEmpty(Mono.fromSupplier(() ->
+                        migrateSafelyPlan(current, target, indexes, foreignKeys, options)));
+    }
+
+    Mono<SchemaSnapshot> physicalSnapshot(TableMetadata current, DynamicForm target,
+                                          SchemaMigrationOptions options, ReactiveFormMetadataReader reader) {
+        return needsPhysicalSnapshot(current, target, options)
+                ? reader.readSnapshot(target.table())
+                        .switchIfEmpty(Mono.error(new IllegalStateException(
+                                "rewriting an existing column requires a physical schema snapshot")))
+                : Mono.empty();
+    }
+
+    SchemaSnapshot physicalSnapshotJdbc(TableMetadata current, DynamicForm target,
+                                         SchemaMigrationOptions options, JdbcFormMetadataReader reader) {
+        return needsPhysicalSnapshot(current, target, options) ? reader.readSnapshot(target.table()) : null;
+    }
+
+    private boolean needsPhysicalSnapshot(TableMetadata current, DynamicForm target,
+                                           SchemaMigrationOptions options) {
+        if (!dialect.rewritesFullColumnDefinition()) {
+            return false;
+        }
+        for (DynamicField field : target.fields()) {
+            String source = SchemaMigrationSupport.renameSourceForTarget(options.columnRenames(), field.name());
+            ColumnMetadata column = current.findColumn(source == null ? field.name() : source).orElse(null);
+            if (column == null
+                    || source == null && !column.name().equals(field.name())
+                    || column.primaryKey() != field.primaryKey()) {
+                continue;
+            }
+            // Only fetch physical facts for changes SchemaColumnShapeChange will execute.
+            boolean temporalChanged = SchemaMigrationSupport.logicalTemporalTypeChanged(
+                    column.databaseType(), field.databaseType());
+            if (column.nullable() != field.nullable()) {
+                if (!temporalChanged
+                        && SchemaMigrationSupport.sameStorageShape(column, field, tables)
+                        && (field.nullable() || options.columnChangeAllowed())) {
+                    return true;
+                }
+                continue;
+            }
+            if (!ProtectedSchemaTarget.sameProtectedStorage(column, field)) {
+                boolean shapeChanged = !SchemaMigrationSupport.sameColumnShape(column, field, tables);
+                if (shapeChanged || temporalChanged) {
+                    boolean storageApplied = shapeChanged && !temporalChanged
+                            && SchemaMigrationSupport.safeWidening(column, field, tables)
+                            || options.columnChangeAllowed() && SchemaGeneratedValueComparison.same(column, field);
+                    if (!storageApplied) {
+                        continue;
+                    }
+                    if (shapeChanged) {
+                        return true;
+                    }
+                }
+            }
+            if (!Objects.equals(tables.storageComment(column), tables.storageComment(field))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    SchemaMigrationPlan migrateSafelyPlan(TableMetadata current,
+                                          DynamicForm target,
+                                          List<IndexMetadata> targetIndexes,
+                                          List<ForeignKeyMetadata> targetForeignKeys,
+                                          SchemaMigrationOptions options,
+                                          SchemaSnapshot snapshot) {
+        RelationalTableDefinition physical = SchemaTableSqlRenderer.physicalColumns(snapshot);
         TableMetadata safeCurrent = Objects.requireNonNull(current, "current table metadata must not be null");
         ProtectedSchemaTarget resolved = ProtectedSchemaTarget.resolve(
                 target, targetIndexes, targetForeignKeys);
@@ -291,11 +436,13 @@ final class SchemaMigrationPlanner {
                                                          column,
                                                          field,
                                                          safeOptions,
-                                                         primaryKeyChanged),
+                                                         primaryKeyChanged,
+                                                         physical == null ? null : physical.column(lookupName)),
                         dialect,
                         tables).apply();
                 if (storageApplied) {
-                    tables.addMissingComment(requests, safeTarget.table(), column, field);
+                    tables.addMissingComment(requests, safeTarget.table(), column, field,
+                            physical == null ? null : physical.column(lookupName));
                 }
             } else if (!primaryKeyChanged || !field.primaryKey()) {
                 requests.add(new SqlRequest(dialect.addColumnSql(rawTable, tables.columnDefinition(field)), List.of()));
@@ -355,7 +502,7 @@ final class SchemaMigrationPlanner {
     }
 
     /** 元数据读取器用稳定异常前缀表示目标表还不存在，此时计划应自然退化为建表。 */
-    private static boolean isTableNotFound(Throwable error) {
+    static boolean isTableNotFound(Throwable error) {
         if (!(error instanceof IllegalArgumentException) || error.getMessage() == null) {
             return false;
         }

@@ -4,13 +4,13 @@ import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.metadata.ReactiveFormMetadataReader;
+import com.flying.orm.rdb.metadata.JdbcFormMetadataReader;
 import com.flying.orm.rdb.protection.ProtectedContainsLayout;
 import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
-import java.util.function.Function;
 
 /**
  * 把受保护字段的辅助表作为独立迁移段接入主表计划。
@@ -52,7 +52,7 @@ final class ProtectedSchemaMigrationPlanner {
 
     SchemaMigrationPlan planExistingJdbc(DynamicForm logical,
                                          SchemaMigrationPlan primary,
-                                         Function<String, TableMetadata> lookup,
+                                         JdbcFormMetadataReader lookup,
                                          SchemaMigrationOptions options) {
         return ProtectedContainsLayout.resolve(logical)
                                       .map(layout -> combine(primary, readJdbcPlan(layout, lookup, options)))
@@ -64,8 +64,9 @@ final class ProtectedSchemaMigrationPlanner {
                                                               SchemaMigrationPlan primary,
                                                               ReactiveFormMetadataReader reader,
                                                               SchemaMigrationOptions options,
-                                                              SchemaMigrationReviewPolicy policy) {
-        ReviewedSchemaMigrationPlan primaryReview = reviewer().review(primaryCurrent, primary, policy);
+                                                              SchemaMigrationReviewPolicy policy,
+                                                              SchemaSnapshot snapshot) {
+        ReviewedSchemaMigrationPlan primaryReview = reviewer().review(primaryCurrent, primary, policy, snapshot);
         return ProtectedContainsLayout.resolve(logical)
                                       .map(layout -> readReactiveReviewed(layout, reader, options, policy)
                                               .map(side -> combine(primaryReview, side)))
@@ -75,10 +76,11 @@ final class ProtectedSchemaMigrationPlanner {
     ReviewedSchemaMigrationPlan reviewExistingJdbc(DynamicForm logical,
                                                     TableMetadata primaryCurrent,
                                                     SchemaMigrationPlan primary,
-                                                    Function<String, TableMetadata> lookup,
+                                                    JdbcFormMetadataReader lookup,
                                                     SchemaMigrationOptions options,
-                                                    SchemaMigrationReviewPolicy policy) {
-        ReviewedSchemaMigrationPlan primaryReview = reviewer().review(primaryCurrent, primary, policy);
+                                                    SchemaMigrationReviewPolicy policy,
+                                                    SchemaSnapshot snapshot) {
+        ReviewedSchemaMigrationPlan primaryReview = reviewer().review(primaryCurrent, primary, policy, snapshot);
         return ProtectedContainsLayout.resolve(logical)
                                       .map(layout -> combine(primaryReview,
                                               readJdbcReviewed(layout, lookup, options, policy)))
@@ -102,18 +104,21 @@ final class ProtectedSchemaMigrationPlanner {
                                                        ReactiveFormMetadataReader reader,
                                                        SchemaMigrationOptions options) {
         return reader.readTable(layout.table().table())
-                     .map(current -> migrateContainsPlan(layout, current, options))
-                     .onErrorResume(ProtectedSchemaMigrationPlanner::isTableNotFound,
+                     .flatMap(current -> planner.migrateSafelyPlanReactive(
+                             current, layout.table(), layout.indexes(), layout.foreignKeys(), options, reader))
+                     .onErrorResume(SchemaMigrationPlanner::isTableNotFound,
                                     failure -> Mono.just(createContainsPlan(layout)));
     }
 
     private SchemaMigrationPlan readJdbcPlan(ProtectedContainsLayout layout,
-                                             Function<String, TableMetadata> lookup,
+                                             JdbcFormMetadataReader lookup,
                                              SchemaMigrationOptions options) {
         try {
-            return migrateContainsPlan(layout, lookup.apply(layout.table().table()), options);
+            TableMetadata current = lookup.readTable(layout.table().table());
+            return migrateContainsPlan(layout, current, options,
+                    planner.physicalSnapshotJdbc(current, layout.table(), options, lookup));
         } catch (IllegalArgumentException failure) {
-            if (!isTableNotFound(failure)) {
+            if (!SchemaMigrationPlanner.isTableNotFound(failure)) {
                 throw failure;
             }
             return createContainsPlan(layout);
@@ -125,21 +130,27 @@ final class ProtectedSchemaMigrationPlanner {
                                                                    SchemaMigrationOptions options,
                                                                    SchemaMigrationReviewPolicy policy) {
         return reader.readTable(layout.table().table())
-                     .map(current -> reviewer().review(current, migrateContainsPlan(layout, current, options), policy))
-                     .onErrorResume(ProtectedSchemaMigrationPlanner::isTableNotFound,
+                     .flatMap(current -> planner.physicalSnapshot(current, layout.table(), options, reader)
+                             .map(java.util.Optional::of)
+                             .defaultIfEmpty(java.util.Optional.empty())
+                             .map(snapshot -> reviewer().review(current,
+                                     migrateContainsPlan(layout, current, options, snapshot.orElse(null)),
+                                     policy, snapshot.orElse(null))))
+                     .onErrorResume(SchemaMigrationPlanner::isTableNotFound,
                                     failure -> Mono.just(reviewer().review(
                                             layout.table().toTableMetadata(), createContainsPlan(layout), policy)));
     }
 
     private ReviewedSchemaMigrationPlan readJdbcReviewed(ProtectedContainsLayout layout,
-                                                          Function<String, TableMetadata> lookup,
+                                                          JdbcFormMetadataReader lookup,
                                                           SchemaMigrationOptions options,
                                                           SchemaMigrationReviewPolicy policy) {
         try {
-            TableMetadata current = lookup.apply(layout.table().table());
-            return reviewer().review(current, migrateContainsPlan(layout, current, options), policy);
+            TableMetadata current = lookup.readTable(layout.table().table());
+            SchemaSnapshot snapshot = planner.physicalSnapshotJdbc(current, layout.table(), options, lookup);
+            return reviewer().review(current, migrateContainsPlan(layout, current, options, snapshot), policy, snapshot);
         } catch (IllegalArgumentException failure) {
-            if (!isTableNotFound(failure)) {
+            if (!SchemaMigrationPlanner.isTableNotFound(failure)) {
                 throw failure;
             }
             return reviewer().review(layout.table().toTableMetadata(), createContainsPlan(layout), policy);
@@ -148,9 +159,10 @@ final class ProtectedSchemaMigrationPlanner {
 
     private SchemaMigrationPlan migrateContainsPlan(ProtectedContainsLayout layout,
                                                      TableMetadata current,
-                                                     SchemaMigrationOptions options) {
+                                                     SchemaMigrationOptions options,
+                                                     SchemaSnapshot snapshot) {
         return planner.migrateSafelyPlan(
-                current, layout.table(), layout.indexes(), layout.foreignKeys(), options);
+                current, layout.table(), layout.indexes(), layout.foreignKeys(), options, snapshot);
     }
 
     private SchemaMigrationPlan createContainsPlan(ProtectedContainsLayout layout) {
@@ -212,11 +224,4 @@ final class ProtectedSchemaMigrationPlanner {
                 migration, new SchemaRollbackPlan(rollback, gaps), online);
     }
 
-    private static boolean isTableNotFound(Throwable error) {
-        if (!(error instanceof IllegalArgumentException) || error.getMessage() == null) {
-            return false;
-        }
-        String message = error.getMessage();
-        return message.equals("table metadata not found") || message.startsWith("table metadata not found:");
-    }
 }

@@ -5,19 +5,27 @@ import com.flying.orm.core.internal.Names;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * 命名唯一约束。复合列的声明顺序会原样保留，供差异比较和 DDL 渲染使用。
  *
  * @param name 约束名
  * @param columns 约束列，顺序与声明一致
+ * @param nullPolicy NULL 参与唯一性判断的规则
  * @author wangr
  * @version v3.2
  */
-public record UniqueConstraintDefinition(String name, List<String> columns) {
+public record UniqueConstraintDefinition(String name, List<String> columns, UniqueNullPolicy nullPolicy) {
+
+    /** 保留普通唯一约束的构造合同，NULL 规则沿用数据库默认值。 */
+    public UniqueConstraintDefinition(String name, List<String> columns) {
+        this(name, columns, UniqueNullPolicy.DEFAULT);
+    }
 
     public UniqueConstraintDefinition {
         name = Names.requireText(name, "unique constraint name");
+        nullPolicy = Objects.requireNonNull(nullPolicy, "unique constraint null policy must not be null");
         if (columns == null) {
             throw new IllegalArgumentException("unique constraint columns must not be null");
         }

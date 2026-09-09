@@ -8,6 +8,8 @@ import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.execution.SqlExecutionSequence;
+import com.flying.orm.rdb.execution.SqlExecutionSequenceResult;
 import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.transaction.R2dbcTransactionContext;
@@ -173,6 +175,42 @@ abstract class ForwardingReactiveSqlExecutor implements ReactiveSqlExecutor {
     @Override
     public Mono<BatchResolution> resolveUnknown(BatchChunkResult.RecoveryToken token) {
         return delegate.resolveUnknown(token);
+    }
+
+    /** 只在底层执行器具备连接级序列能力时保留该能力，普通调用仍经过逻辑策略装饰器。 */
+    private static final class ScopedForwardingReactiveSqlExecutor
+            extends ForwardingReactiveSqlExecutor
+            implements ConnectionScopedReactiveSqlExecutor {
+
+        private final ConnectionScopedReactiveSqlExecutor scopedDelegate;
+        private final ReactiveSqlExecutor structuralDelegate;
+
+        private ScopedForwardingReactiveSqlExecutor(
+                ReactiveSqlExecutor decorated,
+                ReactiveSqlExecutor structuralDelegate,
+                ConnectionScopedReactiveSqlExecutor scopedDelegate) {
+            super(decorated);
+            this.structuralDelegate = Objects.requireNonNull(
+                    structuralDelegate, "structural delegate must not be null");
+            this.scopedDelegate = Objects.requireNonNull(
+                    scopedDelegate, "connection-scoped delegate must not be null");
+        }
+
+        @Override
+        ReactiveSqlExecutor delegate() {
+            return structuralDelegate;
+        }
+
+        private ForwardingReactiveSqlExecutor decorator() {
+            return (ForwardingReactiveSqlExecutor) super.delegate();
+        }
+
+        @Override
+        public Mono<SqlExecutionSequenceResult> executeInConnection(
+                SqlExecutionSequence sequence,
+                SqlExecutionOptions options) {
+            return scopedDelegate.executeInConnection(sequence, options);
+        }
     }
 
 }

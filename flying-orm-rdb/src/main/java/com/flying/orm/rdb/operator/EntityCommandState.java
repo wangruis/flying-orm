@@ -4,6 +4,7 @@ import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.internal.mapping.EntityValues;
 
 import java.util.Objects;
 
@@ -20,13 +21,18 @@ final class EntityCommandState<T> {
 
     private final EntityMetadata<T> metadata;
     private final DynamicForm form;
-    private final EntityWhereBuilder<T> where;
+    private final EntityCondition<T> where;
     private DataScope scope = DataScope.none();
 
     EntityCommandState(EntityMetadata<T> metadata, DynamicForm form, SqlRenderer renderer) {
+        this(metadata, form, renderer, null);
+    }
+
+    EntityCommandState(EntityMetadata<T> metadata, DynamicForm form, SqlRenderer renderer,
+                       EntityValues<T> entityValues) {
         this.metadata = Objects.requireNonNull(metadata, "entity metadata must not be null");
         this.form = Objects.requireNonNull(form, "dynamic form must not be null");
-        this.where = new EntityWhereBuilder<>(metadata, renderer);
+        this.where = new EntityCondition<>(metadata, renderer, entityValues);
     }
 
     EntityMetadata<T> metadata() {
@@ -37,7 +43,7 @@ final class EntityCommandState<T> {
         return form;
     }
 
-    EntityWhereBuilder<T> where() {
+    EntityCondition<T> where() {
         return where;
     }
 

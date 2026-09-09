@@ -151,11 +151,26 @@ final class HiddenProjectionLayout {
                 physicalRow, "physical keyset row must not be null");
         List<Object> values = new ArrayList<>(positionLabels.size());
         for (String label : positionLabels) {
-            if (!safeRow.containsKey(label)) {
+            if (safeRow.containsKey(label)) {
+                values.add(safeRow.get(label));
+                continue;
+            }
+            // Resolve driver case folding only; entity camel/snake aliases are not form identities.
+            int found = -1;
+            for (int column = 0; column < safeRow.columnCount(); column++) {
+                if (label.equalsIgnoreCase(safeRow.columnName(column))) {
+                    if (found >= 0) {
+                        throw new IllegalArgumentException(
+                                "physical keyset row contains ambiguous cursor columns");
+                    }
+                    found = column;
+                }
+            }
+            if (found < 0) {
                 throw new IllegalArgumentException(
                         "physical keyset row does not contain a required cursor column");
             }
-            values.add(safeRow.get(label));
+            values.add(safeRow.value(found));
         }
         return CursorPosition.of(values);
     }

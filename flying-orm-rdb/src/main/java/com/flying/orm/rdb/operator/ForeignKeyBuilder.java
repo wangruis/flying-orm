@@ -12,12 +12,11 @@ import com.flying.orm.core.metadata.ForeignKeyMetadata;
 public final class ForeignKeyBuilder {
 
     private final CreateOrAlterTableBuilder table;
-
     private final ForeignKeyMetadata.Builder foreignKey;
 
     ForeignKeyBuilder(CreateOrAlterTableBuilder table, String name) {
         this.table = table;
-        this.foreignKey = ForeignKeyMetadata.builder(CreateOrAlterTableBuilder.requireText(name, "foreign key name"));
+        this.foreignKey = ForeignKeyMetadata.builder(DdlStructureDraft.requireText(name, "foreign key name"));
     }
 
     /**
@@ -27,7 +26,7 @@ public final class ForeignKeyBuilder {
      * @return 当前外键构建器
      */
     public ForeignKeyBuilder column(String name) {
-        foreignKey.addColumn(CreateOrAlterTableBuilder.requireText(name, "foreign key column"));
+        foreignKey.addColumn(DdlStructureDraft.requireText(name, "foreign key column"));
         return this;
     }
 
@@ -53,7 +52,7 @@ public final class ForeignKeyBuilder {
      * @return 当前外键构建器
      */
     public ForeignKeyBuilder referenceTable(String name) {
-        foreignKey.referenceTable(CreateOrAlterTableBuilder.requireText(name, "foreign key reference table"));
+        foreignKey.referenceTable(DdlStructureDraft.requireText(name, "foreign key reference table"));
         return this;
     }
 
@@ -64,7 +63,7 @@ public final class ForeignKeyBuilder {
      * @return 当前外键构建器
      */
     public ForeignKeyBuilder referenceColumn(String name) {
-        foreignKey.addReferenceColumn(CreateOrAlterTableBuilder.requireText(name, "foreign key reference column"));
+        foreignKey.addReferenceColumn(DdlStructureDraft.requireText(name, "foreign key reference column"));
         return this;
     }
 
@@ -89,7 +88,7 @@ public final class ForeignKeyBuilder {
      * @return 所属表构建器
      */
     public CreateOrAlterTableBuilder commit() {
-        table.addForeignKey(foreignKey.build());
+        table.draft().addForeignKey(foreignKey.build());
         return table;
     }
 }

@@ -4,7 +4,6 @@ import org.reactivestreams.Publisher;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
-import java.util.Objects;
 
 /**
  * 不依赖 Spring 的实体生命周期扩展点。
@@ -34,10 +33,7 @@ public interface ReactiveEntityListener<T> {
      */
     @SafeVarargs
     static <T> ReactiveEntityListener<T> compose(ReactiveEntityListener<T>... listeners) {
-        List<ReactiveEntityListener<T>> ordered = List.of(listeners).stream()
-                                                       .map(listener -> Objects.requireNonNull(
-                                                               listener, "entity lifecycle listener must not be null"))
-                                                       .toList();
+        List<ReactiveEntityListener<T>> ordered = List.of(listeners);
         return event -> reactor.core.publisher.Flux.fromIterable(ordered)
                                                     .concatMap(listener -> Mono.from(listener.onEvent(event)))
                                                     .then();

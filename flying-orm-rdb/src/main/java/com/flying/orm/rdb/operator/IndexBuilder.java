@@ -12,12 +12,11 @@ import com.flying.orm.core.metadata.IndexMetadata;
 public final class IndexBuilder {
 
     private final CreateOrAlterTableBuilder table;
-
     private final IndexMetadata.Builder index;
 
     IndexBuilder(CreateOrAlterTableBuilder table, String name) {
         this.table = table;
-        this.index = IndexMetadata.builder(CreateOrAlterTableBuilder.requireText(name, "index name"));
+        this.index = IndexMetadata.builder(DdlStructureDraft.requireText(name, "index name"));
     }
 
     /**
@@ -37,7 +36,7 @@ public final class IndexBuilder {
      * @return 当前索引构建器
      */
     public IndexBuilder column(String name) {
-        index.addColumn(CreateOrAlterTableBuilder.requireText(name, "index column"));
+        index.addColumn(DdlStructureDraft.requireText(name, "index column"));
         return this;
     }
 
@@ -62,7 +61,7 @@ public final class IndexBuilder {
      * @return 所属表构建器
      */
     public CreateOrAlterTableBuilder commit() {
-        table.addIndex(index.build());
+        table.draft().addIndex(index.build());
         return table;
     }
 }

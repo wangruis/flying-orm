@@ -65,6 +65,9 @@ final class DmlQueryCommand {
         String safeRenderedTable = renderer.identifier(safeTable);
         this.table = safeTable;
         this.renderedTable = safeRenderedTable;
+        this.governedForm = null;
+        this.fieldUsePolicy = null;
+        this.queryShapeLimits = null;
     }
 
     /** DynamicForm/metadata 入口显式启用治理；物理表 string 入口仍是 trusted。 */

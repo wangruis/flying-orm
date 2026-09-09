@@ -4,7 +4,6 @@ import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.sql.render.SqlRequest;
 
-import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -77,8 +76,7 @@ public final class SchemaDialect {
                           RenameColumnStyle renameColumnStyle,
                           GeneratedValueStyle generatedValueStyle,
                           ColumnChangeStyle columnChangeStyle,
-                          SchemaOnlineDdlSupport onlineDdlSupport,
-                          SchemaLockTimeoutStyle lockTimeoutStyle) {
+                          SchemaOnlineDdlSupport onlineDdlSupport) {
         this.types = new SchemaDialectTypeSupport(quoteOpen, quoteClose, typeMappings, generatedValueStyle);
         this.ddl = new SchemaDialectDdlSupport(types,
                                                columnCommentStyle,
@@ -87,8 +85,7 @@ public final class SchemaDialect {
                                                renameColumnStyle,
                                                generatedValueStyle,
                                                columnChangeStyle,
-                                               onlineDdlSupport,
-                                               lockTimeoutStyle);
+                                               onlineDdlSupport);
         this.generation = new SchemaDialectGenerationSupport(types, generatedValueStyle);
         this.generatedValueStyle = Objects.requireNonNull(generatedValueStyle,
                                                           "generated value style must not be null");
@@ -134,6 +131,10 @@ public final class SchemaDialect {
         return types.dataType(value, length, precision, scale);
     }
 
+    String physicalDataType(String value, Integer length, Integer precision, Integer scale) {
+        return types.physicalDataType(value, length, precision, scale);
+    }
+
     boolean sameDataType(String left, String right) {
         return types.sameDataType(left, right);
     }
@@ -169,6 +170,13 @@ public final class SchemaDialect {
         return ddl.columnCommentChangeSql(table, column, previousComment, targetComment);
     }
 
+    Optional<String> columnCommentChangeSql(RelationIdentity table,
+                                            String column,
+                                            String previousComment,
+                                            String targetComment) {
+        return ddl.columnCommentChangeSql(table, column, previousComment, targetComment);
+    }
+
     public String dropIndexSql(String table, String index) {
         return ddl.dropIndexSql(table, index);
     }
@@ -177,16 +185,49 @@ public final class SchemaDialect {
         return ddl.dropIndexSql(table, index);
     }
 
+    String dropConstraintSql(RelationIdentity table, String constraint) {
+        return ddl.dropConstraintSql(table, constraint);
+    }
+
+    String dropConstraintSql(RelationIdentity table, String constraint, SchemaOperation.Kind kind) {
+        return ddl.dropConstraintSql(table, constraint, kind);
+    }
+
+    String changeConstraintSql(RelationIdentity table,
+                               String actualConstraint,
+                               String desiredDefinition,
+                               SchemaOperation.Kind kind) {
+        return ddl.changeConstraintSql(table, actualConstraint, desiredDefinition, kind);
+    }
+
+    String dropColumnSql(RelationIdentity table, String column) {
+        return ddl.dropColumnSql(table, column);
+    }
+
+    String renameConstraintSql(RelationIdentity table, String actual, String desired) {
+        return ddl.renameConstraintSql(table, actual, desired);
+    }
+
+    String renameIndexSql(RelationIdentity table, String actual, String desired) {
+        return ddl.renameIndexSql(table, actual, desired);
+    }
+
+    String dropTableSql(RelationIdentity table) {
+        return ddl.dropTableSql(table);
+    }
+
+    String alterColumnDefaultSql(RelationIdentity table,
+                                 String column,
+                                 String defaultExpression) {
+        return ddl.alterColumnDefaultSql(table, column, defaultExpression);
+    }
+
     public SchemaOnlineDdlSupport onlineDdlSupport() {
         return onlineDdlSupport;
     }
 
     public SqlRequest preferOnline(SqlRequest request) {
         return ddl.preferOnline(request);
-    }
-
-    SchemaDdlSessionGuard lockTimeoutGuard(Duration timeout) {
-        return ddl.lockTimeoutGuard(timeout);
     }
 
     public String renameColumnSql(String table, String oldName, String newName) {
@@ -217,6 +258,15 @@ public final class SchemaDialect {
         return ddl.alterColumnTypeSql(table, column, databaseType);
     }
 
+    String alterColumnTypeSql(RelationIdentity table, String column, String databaseType) {
+        return ddl.alterColumnTypeSql(table, column, databaseType);
+    }
+
+    String alterColumnTypeSql(RelationIdentity table, String column, String databaseType,
+                              String columnDefinition, boolean nullable, String collation) {
+        return ddl.alterColumnTypeSql(table, column, databaseType, columnDefinition, nullable, collation);
+    }
+
     /** MySQL 修改列类型时必须重放完整列定义，避免隐式丢失非空、生成策略或注释。 */
     String alterColumnTypeSql(String table,
                               String column,
@@ -234,6 +284,18 @@ public final class SchemaDialect {
                                      String databaseType, String columnDefinition,
                                      boolean nullable) {
         return ddl.alterColumnNullabilitySql(table, column, databaseType, columnDefinition, nullable);
+    }
+
+    String alterColumnNullabilitySql(RelationIdentity table, String column,
+                                     String databaseType, String columnDefinition,
+                                     boolean nullable) {
+        return ddl.alterColumnNullabilitySql(table, column, databaseType, columnDefinition, nullable);
+    }
+
+    String alterColumnNullabilitySql(RelationIdentity table, String column,
+                                     String databaseType, String columnDefinition,
+                                     boolean nullable, String collation) {
+        return ddl.alterColumnNullabilitySql(table, column, databaseType, columnDefinition, nullable, collation);
     }
     public String generatedValueClause(ValueGeneration generation, String databaseType) {
         return this.generation.generatedValueClause(generation, databaseType);
@@ -278,7 +340,6 @@ public final class SchemaDialect {
         private GeneratedValueStyle generatedValueStyle = GeneratedValueStyle.NONE;
         private ColumnChangeStyle columnChangeStyle = ColumnChangeStyle.STANDARD;
         private SchemaOnlineDdlSupport onlineDdlSupport = SchemaOnlineDdlSupport.NONE;
-        private SchemaLockTimeoutStyle lockTimeoutStyle = SchemaLockTimeoutStyle.NONE;
 
         private Builder() {
         }
@@ -390,28 +451,28 @@ public final class SchemaDialect {
             return this;
         }
 
-        /** 使用 MySQL session lock_wait_timeout，单位为向上取整后的秒。 */
+        /** MySQL 会话锁等待由上层管理；此兼容入口始终拒绝。 */
         public Builder mysqlLockTimeout() {
-            lockTimeoutStyle = SchemaLockTimeoutStyle.MYSQL;
-            return this;
+            throw new UnsupportedOperationException(
+                    "MySQL session lock timeout must be managed by the caller");
         }
 
-        /** 使用 PostgreSQL lock_timeout，保留毫秒精度。 */
+        /** PostgreSQL 会话锁等待由上层管理；此兼容入口始终拒绝。 */
         public Builder postgresqlLockTimeout() {
-            lockTimeoutStyle = SchemaLockTimeoutStyle.POSTGRESQL;
-            return this;
+            throw new UnsupportedOperationException(
+                    "PostgreSQL session lock timeout must be managed by the caller");
         }
 
-        /** 使用 Oracle ddl_lock_timeout，单位为向上取整后的秒。 */
+        /** Oracle 会话锁等待由上层管理；此兼容入口始终拒绝。 */
         public Builder oracleLockTimeout() {
-            lockTimeoutStyle = SchemaLockTimeoutStyle.ORACLE;
-            return this;
+            throw new UnsupportedOperationException(
+                    "Oracle session lock timeout must be managed by the caller");
         }
 
-        /** 使用 SQL Server LOCK_TIMEOUT，单位为毫秒。 */
+        /** SQL Server 会话锁等待由上层管理；此兼容入口始终拒绝。 */
         public Builder sqlServerLockTimeout() {
-            lockTimeoutStyle = SchemaLockTimeoutStyle.SQL_SERVER;
-            return this;
+            throw new UnsupportedOperationException(
+                    "SQL Server session lock timeout must be managed by the caller");
         }
 
         public SchemaDialect build() {
@@ -427,8 +488,7 @@ public final class SchemaDialect {
                                      renameColumnStyle,
                                      generatedValueStyle,
                                      columnChangeStyle,
-                                     onlineDdlSupport,
-                                     lockTimeoutStyle);
+                                     onlineDdlSupport);
         }
     }
 }

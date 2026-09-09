@@ -5,7 +5,6 @@ import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.internal.binding.SqlNullParameter;
-import com.flying.orm.rdb.internal.template.SqlStatements;
 import com.flying.orm.rdb.template.SqlTemplateEngine;
 
 import java.util.LinkedHashMap;
@@ -20,13 +19,7 @@ import java.util.Objects;
  */
 final class NativeSqlExecutionState {
 
-    private final ValueCodecRegistry valueCodecs;
-
-    private final RdbDialect dialect;
-
-    private final String sql;
-
-    private final boolean jdbcBindMarkers;
+    private final SqlTemplateEngine.PreparedNativeSql preparedSql;
 
     private final Map<String, Object> values = new LinkedHashMap<>();
 
@@ -40,11 +33,11 @@ final class NativeSqlExecutionState {
                             RdbDialect dialect,
                             String sql,
                             boolean jdbcBindMarkers) {
-        this.valueCodecs = Objects.requireNonNull(valueCodecs, "value codec registry must not be null");
-        this.dialect = Objects.requireNonNull(dialect, "RDB dialect must not be null");
-        // 原生入口也必须只有一条语句，避免参数化入口被误当成多语句执行通道。
-        this.sql = SqlStatements.requireSingle(sql, dialect);
-        this.jdbcBindMarkers = jdbcBindMarkers;
+        this.preparedSql = SqlTemplateEngine.prepareNative(
+                sql,
+                Objects.requireNonNull(dialect, "RDB dialect must not be null"),
+                Objects.requireNonNull(valueCodecs, "value codec registry must not be null"),
+                jdbcBindMarkers);
     }
 
     void bind(String name, Object value) {
@@ -71,9 +64,7 @@ final class NativeSqlExecutionState {
     }
 
     SqlRequest request() {
-        // 编译阶段会校验少传、多传参数，并按 SQL 里的位置生成最终参数列表。
-        return jdbcBindMarkers
-                ? SqlTemplateEngine.compileNativeJdbc(sql, values, dialect, valueCodecs)
-                : SqlTemplateEngine.compileNative(sql, values, dialect, valueCodecs);
+        // SQL 结构已在调用状态创建时编译；这里只校验本次参数并按占位符顺序绑定。
+        return preparedSql.render(values);
     }
 }

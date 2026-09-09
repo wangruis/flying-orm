@@ -1,5 +1,7 @@
 package com.flying.orm.rdb.reactive;
 
+import static com.flying.orm.core.internal.error.ThrowableGraph.findVirtualMachineError;
+
 import com.flying.orm.rdb.batch.BatchChunkResult;
 import com.flying.orm.rdb.batch.BatchChunkExecutionFact;
 import com.flying.orm.rdb.batch.BatchRowConflict;
@@ -14,8 +16,6 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
-import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.LongConsumer;
 
 import static java.util.Objects.requireNonNull;
@@ -52,23 +52,6 @@ final class R2dbcBatchWriterChunks {
     /** Splits rows while reporting how many inputs have been snapshotted at the execution boundary. */
     Flux<BatchChunk> chunks(BatchWriteRequest request, LongConsumer acceptedRows) {
         return R2dbcBatchChunker.chunks(request, acceptedRows);
-    }
-
-    /** 正常完成或失败会清除当前片；截止时间取消时保留它，供结果报告恢复已接收行数。 */
-    static <T> Mono<T> trackActiveChunk(AtomicReference<BatchChunk> activeChunk,
-                                        BatchChunk chunk,
-                                        Mono<T> execution) {
-        return Mono.defer(() -> {
-            activeChunk.set(chunk);
-            return execution
-                    .doOnSuccess(ignored -> activeChunk.compareAndSet(chunk, null))
-                    .doOnError(ignored -> activeChunk.compareAndSet(chunk, null));
-        });
-    }
-
-    static Throwable timeoutFailure(AtomicReference<BatchChunk> activeChunk, TimeoutException error) {
-        BatchChunk chunk = activeChunk.get();
-        return chunk == null ? error : new R2dbcBatchChunkWriteFailure(chunk, error);
     }
 
     /**
@@ -124,7 +107,15 @@ final class R2dbcBatchWriterChunks {
                 || error instanceof Error) {
             return error;
         }
-        return new R2dbcBatchChunkWriteFailure(chunk, RdbExceptionTranslator.translate(error));
+        return translatedChunkFailure(chunk, error);
+    }
+
+    /** 驱动错误仍是原始信号时提升 VME，不能先藏进 ORM 的普通分片包装。 */
+    private static Throwable translatedChunkFailure(BatchChunk chunk, Throwable error) {
+        VirtualMachineError fatal = findVirtualMachineError(error);
+        return fatal == null
+                ? new R2dbcBatchChunkWriteFailure(chunk, RdbExceptionTranslator.translate(error))
+                : fatal;
     }
 
     private Mono<BatchChunkResult> executeBusinessChunk(R2dbcBatchConnectionHandle resource,
@@ -147,8 +138,12 @@ final class R2dbcBatchWriterChunks {
         } else {
             business = executeDriverBatch(connection, request, chunk, transportSql, evidence);
         }
-        return business.flatMap(result -> protectedSideIndex.complete(connection, prepared, result)
-                                                               .thenReturn(result));
+        return business.flatMap(result -> {
+            if (evidence != null) {
+                evidence.completeBusinessRows(chunk.rows().size());
+            }
+            return protectedSideIndex.complete(connection, prepared, result).thenReturn(result);
+        });
     }
 
     /**
@@ -205,8 +200,7 @@ final class R2dbcBatchWriterChunks {
                     .onErrorMap(error -> error instanceof R2dbcBatchChunkConflictFailure
                             || error instanceof R2dbcBatchChunkWriteFailure
                             ? error
-                            : new R2dbcBatchChunkWriteFailure(
-                                    chunk, RdbExceptionTranslator.translate(error)));
+                            : translatedChunkFailure(chunk, error));
         });
     }
 
@@ -236,8 +230,7 @@ final class R2dbcBatchWriterChunks {
                                                                 chunk.startOffset(),
                                                                 chunk.rows().size(),
                                                                 affectedRows))
-                .onErrorMap(error -> new R2dbcBatchChunkWriteFailure(chunk,
-                                                                     RdbExceptionTranslator.translate(error)));
+                .onErrorMap(error -> translatedChunkFailure(chunk, error));
     }
     private Mono<BatchChunkResult> executeDriverBatch(Connection connection,
                                                       BatchWriteRequest request,
@@ -263,11 +256,10 @@ final class R2dbcBatchWriterChunks {
                                                                      chunk.startOffset(),
                                                                      chunk.rows().size(),
                                                                      affectedRows))
-                    .onErrorMap(error -> new R2dbcBatchChunkWriteFailure(chunk,
-                                                                         RdbExceptionTranslator.translate(error)));
+                    .onErrorMap(error -> translatedChunkFailure(chunk, error));
         }).onErrorMap(error -> error instanceof R2dbcBatchChunkWriteFailure
                 ? error
-                : new R2dbcBatchChunkWriteFailure(chunk, RdbExceptionTranslator.translate(error)));
+                : translatedChunkFailure(chunk, error));
     }
 
     private Mono<BatchChunkResult> executeExactlyOneChunk(Connection connection,
@@ -286,7 +278,7 @@ final class R2dbcBatchWriterChunks {
                             || error instanceof R2dbcBatchChunkConflictFailure) {
                         return error;
                     }
-                    return new R2dbcBatchChunkWriteFailure(chunk, RdbExceptionTranslator.translate(error));
+                    return translatedChunkFailure(chunk, error);
                 });
     }
 
@@ -308,7 +300,7 @@ final class R2dbcBatchWriterChunks {
                             || error instanceof R2dbcBatchChunkConflictFailure) {
                         return error;
                     }
-                    return new R2dbcBatchChunkWriteFailure(chunk, RdbExceptionTranslator.translate(error));
+                    return translatedChunkFailure(chunk, error);
                 });
     }
 

@@ -2,9 +2,7 @@ package com.flying.orm.rdb.repository;
 
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.rdb.execution.GeneratedKeyReadException;
-import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.form.ReactiveFormClient;
 import com.flying.orm.rdb.internal.mapping.EntityValues;
 import com.flying.orm.rdb.form.spec.WriteSpec;
@@ -19,7 +17,7 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * 负责单实体写入以及逻辑删除、乐观锁条件的组合。
+ * 负责单实体写入和自动版本锁，逻辑删除使用绑定表单的统一规则。
  *
  * <p>它只拼出 {@link WriteSpec} 并交给 {@link ReactiveFormClient}。Scope、安全校验、租户校验、SQL 渲染、
  * 执行保护和事务仍由表单客户端及其下层执行器完成，这里没有第二套写入实现。</p>
@@ -76,68 +74,39 @@ final class ReactiveRepositoryEntityWriter<T> {
                 }));
     }
 
-    Mono<Long> update(T entity, ConditionGroup where, Object... modifiers) {
+    Mono<Long> update(T entity, ConditionGroup where) {
         T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
         return lifecycle.update(safeEntity, client::currentTransaction, () -> {
             Map<String, Object> allValues = metadata.versionField().isPresent()
                     ? entityValues.read(safeEntity) : null;
             Map<String, Object> row = entityValues.readForUpdate(safeEntity);
-            ConditionGroup activeWhere = RepositoryLogicDeletes.activeWhere(metadata, form, where);
-            Optional<OptimisticLockOptions> lock = allValues == null
-                    ? Optional.empty() : RepositoryOptimisticLocks.incrementLock(metadata, allValues);
-            return lock.map(value -> executeUpdate(RepositoryOptimisticLocks.withoutLockField(row, value),
-                                                   activeWhere, prepend(value, modifiers)))
-                    .orElseGet(() -> executeUpdate(row, activeWhere, modifiers));
+            OptimisticLockOptions lock = allValues == null ? null
+                    : RepositoryOptimisticLocks.incrementLock(metadata, allValues).orElse(null);
+            if (lock != null) {
+                row = RepositoryOptimisticLocks.withoutLockField(row, lock);
+            }
+            WriteSpec spec = WriteSpec.updateOwned(form, row, where);
+            return client.update(lock == null ? spec : spec.withLock(lock));
         });
     }
 
-    Mono<Long> updateWithLock(T entity,
-                              ConditionGroup where,
-                              OptimisticLockOptions lock,
-                              Object... modifiers) {
-        T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
-        return lifecycle.update(safeEntity, client::currentTransaction, () -> executeUpdate(
-                RepositoryOptimisticLocks.withoutLockField(entityValues.readForUpdate(safeEntity), lock),
-                RepositoryLogicDeletes.activeWhere(metadata, form, where),
-                prepend(lock, modifiers)));
+    Mono<Long> delete(ConditionGroup where) {
+        return client.delete(WriteSpec.delete(form, where));
     }
 
-    Mono<Long> delete(ConditionGroup where, Object... modifiers) {
-        ConditionGroup activeWhere = RepositoryLogicDeletes.activeWhere(metadata, form, where);
-        return RepositoryLogicDeletes.deleteValues(metadata, form)
-                .map(values -> executeUpdate(values, activeWhere, modifiers))
-                .orElseGet(() -> executeDelete(where, modifiers));
-    }
-
-    Mono<Long> delete(T entity, ConditionGroup where, Object... modifiers) {
+    Mono<Long> delete(T entity, ConditionGroup where) {
         T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
         return lifecycle.remove(safeEntity, client::currentTransaction, () -> {
-            ConditionGroup activeWhere = RepositoryLogicDeletes.activeWhere(metadata, form, where);
-            Optional<OptimisticLockOptions> lock = metadata.versionField().isPresent()
-                    ? RepositoryOptimisticLocks.incrementLock(metadata, entityValues.read(safeEntity))
-                    : Optional.empty();
-            Optional<Map<String, Object>> logicDelete = RepositoryLogicDeletes.deleteValues(metadata, form);
-            if (logicDelete.isPresent()) {
-                return lock.map(value -> executeUpdate(logicDelete.get(), activeWhere, prepend(value, modifiers)))
-                        .orElseGet(() -> executeUpdate(logicDelete.get(), activeWhere, modifiers));
-            }
-            return lock.map(value -> executeDelete(where, prepend(value, modifiers)))
-                    .orElseGet(() -> executeDelete(where, modifiers));
+            OptimisticLockOptions lock = metadata.versionField().isPresent()
+                    ? RepositoryOptimisticLocks.incrementLock(metadata, entityValues.read(safeEntity)).orElse(null)
+                    : null;
+            WriteSpec spec = WriteSpec.delete(form, where);
+            return client.delete(lock == null ? spec : spec.withLock(lock));
         });
     }
 
-    Mono<Long> physicalDelete(ConditionGroup where, Object... modifiers) {
-        return client.physicalDelete(applyWriteModifiers(WriteSpec.delete(form, where), modifiers));
-    }
-
-    private Mono<Long> executeUpdate(Map<String, Object> row,
-                                     ConditionGroup where,
-                                     Object... modifiers) {
-        return client.update(applyWriteModifiers(WriteSpec.updateOwned(form, row, where), modifiers));
-    }
-
-    private Mono<Long> executeDelete(ConditionGroup where, Object... modifiers) {
-        return client.delete(applyWriteModifiers(WriteSpec.delete(form, where), modifiers));
+    Mono<Long> physicalDelete(ConditionGroup where) {
+        return client.physicalDelete(WriteSpec.delete(form, where));
     }
 
     private Mono<Long> executeInsert(T entity, boolean externalTransaction) {
@@ -182,29 +151,4 @@ final class ReactiveRepositoryEntityWriter<T> {
         }
     }
 
-    /**
-     * 乐观锁要和调用方传入的 Scope、执行保护放进同一个扁平数组。直接把 {@code modifiers}
-     * 当成另一个 varargs 参数会得到嵌套的 {@code Object[]}，后面的类型检查就会把它当成未知修饰项。
-     */
-    private static Object[] prepend(Object first, Object[] modifiers) {
-        Object[] safeModifiers = Objects.requireNonNull(modifiers, "repository write modifiers must not be null");
-        Object[] combined = new Object[safeModifiers.length + 1];
-        combined[0] = Objects.requireNonNull(first, "repository write modifier must not be null");
-        System.arraycopy(safeModifiers, 0, combined, 1, safeModifiers.length);
-        return combined;
-    }
-
-    private WriteSpec applyWriteModifiers(WriteSpec initial, Object... modifiers) {
-        WriteSpec current = initial;
-        for (Object modifier : modifiers) {
-            current = switch (Objects.requireNonNull(modifier, "repository write modifier must not be null")) {
-                case DataScope scope -> current.withScope(scope);
-                case OptimisticLockOptions lock -> current.withLock(lock);
-                case SqlExecutionOptions options -> current.withExecutionOptions(options);
-                default -> throw new IllegalArgumentException(
-                        "unsupported repository write modifier: " + modifier.getClass().getName());
-            };
-        }
-        return current;
-    }
 }

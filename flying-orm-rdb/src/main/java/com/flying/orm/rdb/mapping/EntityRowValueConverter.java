@@ -54,8 +54,9 @@ final class EntityRowValueConverter {
             if (customCodec != null) {
                 return customCodec.read(value, targetType);
             }
-            // byte[] 是二进制值，不是 SQL Array；只有真正的对象/基本类型数组走数组 codec。
-            if ((targetType.isArray() && targetType != byte[].class)
+            // Binary and textual array carriers use their scalar codecs, not SQL Array decoding.
+            if ((targetType.isArray() && targetType != byte[].class
+                    && targetType != Byte[].class && targetType != char[].class)
                     || (Collection.class.isAssignableFrom(targetType)
                     && value != null
                     && value.getClass().isArray()

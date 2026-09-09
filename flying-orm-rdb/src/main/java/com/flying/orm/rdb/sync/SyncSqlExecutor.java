@@ -23,7 +23,7 @@ import java.util.Optional;
 import javax.sql.DataSource;
 
 /**
- * 同步 SQL 执行契约。V2 的同步内核直接使用原生 JDBC，和响应式 R2DBC 内核各自管理自己的连接与执行生命周期。
+ * 同步 SQL 执行契约。原生 JDBC 执行 SQL 并释放所拥有的资源；外部事务和执行、清理时限由上层治理。
  *
  * @author wangr
  * @date 2026-07-29
@@ -165,7 +165,11 @@ public interface SyncSqlExecutor {
         return rowsUpdatedReturningKeys(request, options);
     }
 
-    /** ORM 内部受保护字段写工作单元；只有能够控制同一连接事务的原生执行器可以覆盖。 */
+    /**
+     * ORM 内部受保护字段多语句工作单元，只参与同一连接上的上层外部事务。
+     * 原生 JDBC 缺少外部事务时抛出 IllegalStateException；正总 timeout 配置抛出
+     * UnsupportedOperationException，不改成逐语句超时。其余结果和参数透传选项保留。
+     */
     default SqlWriteResult atomicProtectedWrite(ProtectedWriteWork work, SqlExecutionOptions options) {
         Objects.requireNonNull(work, "protected write work must not be null");
         Objects.requireNonNull(options, "sql execution options must not be null");

@@ -34,8 +34,9 @@ import java.util.Objects;
  * <p>这个类故意只保留面向使用者的 Repository 方法。查询、单实体写入、批量执行和生命周期顺序分别放在
  * 独立协作者中，避免同步入口随着功能增加重新长成第二个 ORM 内核。</p>
  *
- * <p>同步批量支持 ATOMIC 和 INDEPENDENT；R2DBC 专用的回执恢复配置会在 JDBC 订阅输入 Publisher
- * 和获取连接前拒绝。</p>
+ * <p>同步批量支持 ATOMIC 和 INDEPENDENT；非空 ATOMIC 批量由外部管理事务，
+ * INDEPENDENT 批量仅按分片自有事务。回执恢复由上层管理，JDBC 和 R2DBC 均在订阅输入 Publisher
+ * 和获取连接前拒绝此类配置。</p>
  *
  * @param <T> 实体类型
  * @author wangr
@@ -48,6 +49,7 @@ public final class SyncFormRepository<T> {
     private final DynamicForm boundForm;
     private final Class<T> entityType;
     private final EntityValues<T> entityValues;
+    private final ReactiveEntityListener<T> listener;
     private final SyncRepositoryEntityWriter<T> entityWriter;
     private final SyncRepositoryBatchCoordinator<T> batchCoordinator;
     private final SyncRepositoryReadMapper<T> readMapper;
@@ -61,13 +63,14 @@ public final class SyncFormRepository<T> {
         this.boundForm = Objects.requireNonNull(form, "repository form must not be null");
         this.entityType = Objects.requireNonNull(type, "repository type must not be null");
         this.entityValues = Objects.requireNonNull(entityValues, "repository entity values must not be null");
+        this.listener = listener;
 
         EntityMetadata<T> metadata = client.entityModels().metadata(type);
         this.form = RepositoryLogicDeletes.bind(metadata, boundForm);
         RepositoryEntityIdSupport<T> ids = RepositoryEntityIdSupport.create(
                 metadata, client.entityModels());
         SyncRepositoryLifecycleSupport<T> lifecycle = new SyncRepositoryLifecycleSupport<>(
-                metadata, listener, new SyncRepositoryAwaiter(client.timeout()));
+                metadata, listener, new SyncRepositoryAwaiter());
         this.entityWriter = new SyncRepositoryEntityWriter<>(
                 client, this.form, metadata, this.entityValues, lifecycle);
         this.batchCoordinator = new SyncRepositoryBatchCoordinator<>(
@@ -86,8 +89,10 @@ public final class SyncFormRepository<T> {
      * 返回带有额外监听器的新 Repository。实例本身不可变，因此可以安全地在并发请求之间复用。
      */
     public SyncFormRepository<T> withListener(ReactiveEntityListener<T> listener) {
+        ReactiveEntityListener<T> additional = Objects.requireNonNull(
+                listener, "entity lifecycle listener must not be null");
         return new SyncFormRepository<>(client, boundForm, entityType, entityValues,
-                                        Objects.requireNonNull(listener, "entity lifecycle listener must not be null"));
+                this.listener == null ? additional : ReactiveEntityListener.compose(this.listener, additional));
     }
 
     /** @return 当前实体的同步 Lambda 查询命令 */
@@ -140,23 +145,27 @@ public final class SyncFormRepository<T> {
         return batchCoordinator.updateChunks(entities, scope, options);
     }
 
-    public long update(T entity, ConditionGroup where) { return entityWriter.update(entity, where); }
+    public long update(T entity, ConditionGroup where) { return entityWriter.update(entity, conditions(where)); }
 
-    public long delete(ConditionGroup where) { return entityWriter.delete(where); }
-    public long delete(T entity, ConditionGroup where) { return entityWriter.delete(entity, where); }
+    public long delete(ConditionGroup where) { return entityWriter.delete(conditions(where)); }
+    public long delete(T entity, ConditionGroup where) { return entityWriter.delete(entity, conditions(where)); }
 
-    public long physicalDelete(ConditionGroup where) { return entityWriter.physicalDelete(where); }
+    public long physicalDelete(ConditionGroup where) { return entityWriter.physicalDelete(conditions(where)); }
 
-    public List<T> select(ConditionGroup where) { return readMapper.select(where, null, null); }
+    public List<T> select(ConditionGroup where) { return readMapper.select(conditions(where), null, null); }
     /** 在调用方 JDBC 事务内按受控锁读取当前实体；事务生命周期仍归调用方。 */
     public List<T> lockingRead(ConditionGroup where, ReadLock lock) {
-        return readMapper.lockingRead(where, lock);
+        return readMapper.lockingRead(conditions(where), lock);
     }
     /** 在当前 Repository 绑定的表单上执行类型化聚合。 */
     public List<AggregateRow> aggregate(AggregateSpec spec) {
         return client.aggregate(requireRepositoryAggregate(spec));
     }
-    public PageResult<T> page(ConditionGroup where, PageQuery page) { return readMapper.page(where, page, null, null); }
+    public PageResult<T> page(ConditionGroup where, PageQuery page) { return readMapper.page(conditions(where), page, null, null); }
+
+    private ConditionGroup conditions(ConditionGroup where) {
+        return entityValues.normalizeCondition(where, client.entityRenderer().terms());
+    }
 
     private AggregateSpec requireRepositoryAggregate(AggregateSpec spec) {
         AggregateSpec safeSpec = Objects.requireNonNull(spec, "aggregate spec must not be null");

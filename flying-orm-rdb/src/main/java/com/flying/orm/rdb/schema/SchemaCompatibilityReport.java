@@ -22,9 +22,6 @@ public final class SchemaCompatibilityReport {
         this.mode = Objects.requireNonNull(mode, "schema compatibility mode must not be null");
         this.operations = List.copyOf(Objects.requireNonNull(
                 operations, "schema operations must not be null"));
-        if (this.operations.stream().anyMatch(Objects::isNull)) {
-            throw new IllegalArgumentException("schema operations must not contain null");
-        }
         this.status = accepted() ? SchemaCompatibilityStatus.COMPATIBLE
                                  : SchemaCompatibilityStatus.INCOMPATIBLE;
     }

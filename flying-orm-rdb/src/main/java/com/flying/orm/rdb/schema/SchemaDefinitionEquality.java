@@ -10,8 +10,10 @@ import com.flying.orm.core.metadata.IndexKeyPart;
 import com.flying.orm.core.metadata.PrimaryKeyDefinition;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
+import com.flying.orm.core.metadata.UniqueNullPolicy;
 import com.flying.orm.core.metadata.TablePartitionDefinition;
 import com.flying.orm.core.metadata.ValueGeneration;
+import com.flying.orm.core.type.DatabaseType;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -28,21 +30,27 @@ import java.util.Objects;
  */
 final class SchemaDefinitionEquality {
 
+    private static final String POSTGRESQL_VECTOR_EXTENSION_MARKER = "_flying_orm_pgvector_";
+
     private SchemaDefinitionEquality() {
     }
 
     static boolean sameColumn(ColumnDefinition left,
                               ColumnDefinition right,
                               SchemaDialect schemaDialect,
-                              RelationIdentity relation) {
+                              RelationIdentity relation,
+                              boolean physicalActualTypes) {
         return sameName(left.name(), right.name(), schemaDialect)
-                && sameColumnType(left, right, schemaDialect)
+                && sameColumnType(left, right, schemaDialect, physicalActualTypes)
                 && left.nullable() == right.nullable()
                 && sameDefault(left.defaultValue(), right.defaultValue())
                 && Objects.equals(left.comment(), right.comment())
                 && sameGeneration(left.generation(), right.generation(), schemaDialect, relation)
-                && Objects.equals(left.charset(), right.charset())
-                && Objects.equals(left.collation(), right.collation());
+                // The left side is observed metadata; only explicitly desired options constrain it.
+                && (right.defaultConstraintName() == null || sameNullableName(
+                        left.defaultConstraintName(), right.defaultConstraintName(), schemaDialect))
+                && (right.charset() == null || right.charset().equals(left.charset()))
+                && (right.collation() == null || right.collation().equals(left.collation()));
     }
 
     static boolean samePrimaryKey(PrimaryKeyDefinition left,
@@ -56,7 +64,20 @@ final class SchemaDefinitionEquality {
                               UniqueConstraintDefinition right,
                               SchemaDialect schemaDialect) {
         return sameName(left.name(), right.name(), schemaDialect)
-                && sameNames(left.columns(), right.columns(), schemaDialect);
+                && sameNames(left.columns(), right.columns(), schemaDialect)
+                && (left.nullPolicy() == right.nullPolicy() || nativeNullsDistinct(schemaDialect));
+    }
+
+    /** 只比较可观察的物理语义，不把读回的 DEFAULT 改写成用户的声明意图。 */
+    static boolean nativeNullsDistinct(SchemaDialect dialect) {
+        return dialect != null && switch (dialect.generatedValueStyle()) {
+            case POSTGRESQL, MYSQL, H2 -> true;
+            default -> false;
+        };
+    }
+
+    static boolean ordinaryUnique(UniqueConstraintDefinition unique, SchemaDialect dialect) {
+        return unique.nullPolicy() == UniqueNullPolicy.DEFAULT || nativeNullsDistinct(dialect);
     }
 
     static boolean sameCheck(CheckConstraintDefinition left,
@@ -117,9 +138,20 @@ final class SchemaDefinitionEquality {
                 ? value.toLowerCase(Locale.ROOT) : value;
     }
 
-    private static boolean sameColumnType(ColumnDefinition left,
-                                          ColumnDefinition right,
-                                          SchemaDialect schemaDialect) {
+    static boolean sameColumnType(ColumnDefinition left,
+                                  ColumnDefinition right,
+                                  SchemaDialect schemaDialect,
+                                  boolean physicalActualTypes) {
+        if (!physicalActualTypes && schemaDialect != null) {
+            return schemaDialect.sameDataType(
+                    desiredColumnType(schemaDialect, left), desiredColumnType(schemaDialect, right));
+        }
+        return sameColumnType(left, right, schemaDialect);
+    }
+
+    static boolean sameColumnType(ColumnDefinition left,
+                                  ColumnDefinition right,
+                                  SchemaDialect schemaDialect) {
         if (schemaDialect == null) {
             return left.databaseType().equals(right.databaseType())
                     && Objects.equals(left.length(), right.length())
@@ -127,8 +159,48 @@ final class SchemaDefinitionEquality {
                     && Objects.equals(left.scale(), right.scale())
                     && Objects.equals(left.temporalPrecision(), right.temporalPrecision());
         }
-        return schemaDialect.sameDataType(
-                renderedType(schemaDialect, left), renderedType(schemaDialect, right));
+        String actual = actualColumnType(schemaDialect, left);
+        return schemaDialect.sameDataType(actual, desiredColumnType(schemaDialect, right));
+    }
+
+    static String actualColumnType(SchemaDialect dialect, ColumnDefinition column) {
+        return observedColumnType(dialect, column);
+    }
+
+    static String actualColumnDdlType(SchemaDialect dialect,
+                                      ColumnDefinition column,
+                                      boolean physicalActualTypes) {
+        return physicalActualTypes
+                ? actualColumnDdlType(dialect, column) : desiredColumnType(dialect, column);
+    }
+
+    static String actualColumnDdlType(SchemaDialect dialect, ColumnDefinition column) {
+        String actual = actualColumnType(dialect, column);
+        if (dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.POSTGRESQL) {
+            return actual;
+        }
+        DatabaseType parsed = DatabaseType.of(actual).requireSafe("actual column data type");
+        String base = parsed.baseName().toLowerCase(Locale.ROOT);
+        if (!base.startsWith(POSTGRESQL_VECTOR_EXTENSION_MARKER)
+                || !base.endsWith(".vector")) {
+            return actual;
+        }
+        String schema = base.substring(
+                POSTGRESQL_VECTOR_EXTENSION_MARKER.length(), base.length() - ".vector".length());
+        String arguments = parsed.arguments().isEmpty()
+                ? "" : "(" + String.join(",", parsed.arguments()) + ")";
+        return schema + ".vector" + arguments + "[]".repeat(parsed.arrayDimensions());
+    }
+
+    static String observedColumnType(SchemaDialect dialect, ColumnDefinition column) {
+        Integer precision = column.databaseType().isTemporal()
+                ? column.temporalPrecision() : column.precision();
+        return dialect.physicalDataType(
+                column.databaseType().declaration(), column.length(), precision, column.scale());
+    }
+
+    static String desiredColumnType(SchemaDialect dialect, ColumnDefinition column) {
+        return renderedType(dialect, column);
     }
 
     private static String renderedType(SchemaDialect dialect, ColumnDefinition column) {
@@ -138,7 +210,7 @@ final class SchemaDefinitionEquality {
                 column.databaseType().declaration(), column.length(), precision, column.scale());
     }
 
-    private static boolean sameGeneration(ValueGeneration actual,
+    static boolean sameGeneration(ValueGeneration actual,
                                           ValueGeneration desired,
                                           SchemaDialect schemaDialect,
                                           RelationIdentity relation) {
@@ -177,7 +249,7 @@ final class SchemaDefinitionEquality {
         return relation.schema().orElseThrow() + "." + actual;
     }
 
-    private static boolean sameDefault(ColumnDefault left, ColumnDefault right) {
+    static boolean sameDefault(ColumnDefault left, ColumnDefault right) {
         if (left.kind() != right.kind()) {
             return false;
         }
@@ -259,6 +331,19 @@ final class SchemaDefinitionEquality {
             }
         }
         return true;
+    }
+
+    static boolean sameCandidateKeyColumns(List<String> left,
+                                           List<String> right,
+                                           SchemaDialect schemaDialect) {
+        if (schemaDialect == null
+                || schemaDialect.generatedValueStyle()
+                != SchemaDialect.GeneratedValueStyle.POSTGRESQL) {
+            return sameNames(left, right, schemaDialect);
+        }
+        return left.size() == right.size()
+                && left.stream().allMatch(leftName -> right.stream()
+                        .anyMatch(rightName -> sameName(leftName, rightName, schemaDialect)));
     }
 
     private static boolean sameNullableName(String left,

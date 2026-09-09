@@ -58,8 +58,7 @@ public final class DynamicForm {
         List<DynamicField> copiedFields = List.copyOf(fields);
         Map<String, DynamicField> indexedFields = new LinkedHashMap<>(Names.mapCapacity(copiedFields.size()));
         for (DynamicField field : copiedFields) {
-            DynamicField safeField = Objects.requireNonNull(field, "dynamic field must not be null");
-            DynamicField previous = indexedFields.putIfAbsent(safeField.normalizedName(), safeField);
+            DynamicField previous = indexedFields.putIfAbsent(field.normalizedName(), field);
             if (previous != null) {
                 throw new IllegalArgumentException("duplicate dynamic field name");
             }

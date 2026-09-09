@@ -1,7 +1,5 @@
 package com.flying.orm.rdb.operator;
 
-import com.flying.orm.core.form.DynamicField;
-
 /**
  * 一次新增列操作的可变构建器。
  *
@@ -15,23 +13,11 @@ import com.flying.orm.core.form.DynamicField;
 public final class ColumnBuilder {
 
     private final CreateOrAlterTableBuilder table;
-
-    private String name;
-
-    private String dataType;
-
-    private boolean primaryKey;
-
-    private Integer length;
-
-    private Integer precision;
-
-    private Integer scale;
-
-    private String comment;
+    private final DdlStructureDraft.ColumnDraft column;
 
     ColumnBuilder(CreateOrAlterTableBuilder table) {
         this.table = table;
+        this.column = table.draft().column();
     }
 
     /**
@@ -41,7 +27,7 @@ public final class ColumnBuilder {
      * @return 当前列构建器
      */
     public ColumnBuilder name(String name) {
-        this.name = CreateOrAlterTableBuilder.requireText(name, "column name");
+        column.name(name);
         return this;
     }
 
@@ -52,14 +38,7 @@ public final class ColumnBuilder {
      * @return 当前列构建器
      */
     public ColumnBuilder number(int precision) {
-        if (precision < 1) {
-            throw new IllegalArgumentException("number precision must be positive");
-        }
-        this.dataType = precision <= 10 ? "INTEGER" : precision <= 19 ? "BIGINT" : "DECIMAL";
-        if ("DECIMAL".equals(this.dataType)) {
-            this.precision = precision;
-            this.scale = 0;
-        }
+        column.number(precision);
         return this;
     }
 
@@ -70,11 +49,7 @@ public final class ColumnBuilder {
      * @return 当前列构建器
      */
     public ColumnBuilder varchar(int length) {
-        if (length < 1) {
-            throw new IllegalArgumentException("varchar length must be positive");
-        }
-        this.dataType = "VARCHAR";
-        this.length = length;
+        column.varchar(length);
         return this;
     }
 
@@ -84,7 +59,7 @@ public final class ColumnBuilder {
      * @return 当前列构建器
      */
     public ColumnBuilder primaryKey() {
-        this.primaryKey = true;
+        column.primaryKey();
         return this;
     }
 
@@ -95,7 +70,7 @@ public final class ColumnBuilder {
      * @return 当前列构建器
      */
     public ColumnBuilder comment(String comment) {
-        this.comment = CreateOrAlterTableBuilder.requireText(comment, "column comment");
+        column.comment(comment);
         return this;
     }
 
@@ -105,12 +80,7 @@ public final class ColumnBuilder {
      * @return 所属表的构建器
      */
     public CreateOrAlterTableBuilder commit() {
-        String safeName = CreateOrAlterTableBuilder.requireText(name, "column name");
-        String safeType = CreateOrAlterTableBuilder.requireText(dataType, "column data type");
-        DynamicField field = primaryKey ? DynamicField.primaryKey(safeName, safeType) : DynamicField.of(safeName, safeType);
-        table.addField(field.withLength(length)
-                            .withPrecision(precision, scale)
-                            .withComment(comment));
+        column.commit();
         return table;
     }
 }

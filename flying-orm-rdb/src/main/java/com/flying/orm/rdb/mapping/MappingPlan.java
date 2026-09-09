@@ -3,11 +3,13 @@ package com.flying.orm.rdb.mapping;
 import com.flying.orm.core.codec.ValueCodec;
 import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.type.DatabaseType;
+import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.core.internal.error.ThrowableGraph;
 import com.flying.orm.rdb.internal.mapping.EntityEnumValueCodec;
 import com.flying.orm.rdb.internal.mapping.EntityFieldNames;
 import com.flying.orm.rdb.internal.mapping.EntityMetadataHierarchy;
 import com.flying.orm.rdb.internal.mapping.EntityMetadataResolver;
+import com.flying.orm.rdb.json.JsonValueCodec;
 import com.flying.orm.rdb.result.DynamicRow;
 
 import java.beans.IntrospectionException;
@@ -39,6 +41,18 @@ import java.util.Objects;
  * @version v1.0
  */
 final class MappingPlan<T> implements RowMapper<T> {
+
+    private static final ValueCodec DECODED_JSON = new ValueCodec() {
+        @Override
+        public boolean supports(Class<?> targetType) {
+            return JsonValueCodec.supportsTarget(targetType);
+        }
+
+        @Override
+        public Object read(Object value, Class<?> targetType) {
+            return JsonValueCodec.readDecoded(value, targetType);
+        }
+    };
 
     private final RecordWriter<T> recordWriter;
     private final BeanWriter<T> beanWriter;
@@ -112,14 +126,41 @@ final class MappingPlan<T> implements RowMapper<T> {
             ValueCodecRegistry valueCodecs,
             Map<String, EntityTypeMappingRegistry.Mapping> customMappings,
             boolean rawInput) {
+        return createUncached(type, metadata, valueCodecs, customMappings, rawInput, false);
+    }
+
+    static <T> MappingPlan<T> createUncached(
+            Class<T> type,
+            EntityMetadata<T> metadata,
+            ValueCodecRegistry valueCodecs,
+            Map<String, EntityTypeMappingRegistry.Mapping> customMappings,
+            boolean rawInput,
+            boolean decodedInput) {
         Map<String, EntityTypeMappingRegistry.Mapping> safeCustomMappings = Objects.requireNonNull(
                 customMappings, "custom entity field mappings must not be null");
         if (type.isRecord()) {
-            return new MappingPlan<>(recordWriter(type, metadata, safeCustomMappings, rawInput),
+            return new MappingPlan<>(recordWriter(type, metadata, safeCustomMappings, rawInput, decodedInput),
                     null, valueCodecs);
         }
-        return new MappingPlan<>(null, beanWriter(type, metadata, safeCustomMappings, rawInput),
+        return new MappingPlan<>(null, beanWriter(type, metadata, safeCustomMappings, rawInput, decodedInput),
                 valueCodecs);
+    }
+
+    /** Choose the input representation once, preserving explicit field codec precedence. */
+    private static ValueCodec fieldCodec(EntityFieldMetadata field,
+                                         Class<?> targetType,
+                                         EntityTypeMappingRegistry.Mapping customMapping,
+                                         boolean rawInput,
+                                         boolean decodedInput) {
+        if (rawInput) {
+            return null;
+        }
+        if (customMapping != null) {
+            return customMapping.codec();
+        }
+        return decodedInput && !field.databaseType().isArray()
+                && field.databaseType().logicalType() == LogicalType.JSON
+                && JsonValueCodec.supportsTarget(targetType) ? DECODED_JSON : null;
     }
 
     /** 映射计划的稳定逻辑重量，用反射写入槽数量近似长期占用，不在热路径扫描对象字节。 */
@@ -132,7 +173,8 @@ final class MappingPlan<T> implements RowMapper<T> {
             Class<T> type,
             EntityMetadata<T> metadata,
             Map<String, EntityTypeMappingRegistry.Mapping> customMappings,
-            boolean rawInput) {
+            boolean rawInput,
+            boolean decodedInput) {
         try {
             RecordComponent[] components = type.getRecordComponents();
             Class<?>[] parameterTypes = Arrays.stream(components)
@@ -165,7 +207,8 @@ final class MappingPlan<T> implements RowMapper<T> {
                 enumStorage[index] = field.enumStorage();
                 enumValues[index] = EntityRowValueConverter.enumValueCodec(component.getType(), field);
                 EntityTypeMappingRegistry.Mapping customMapping = customMappings.get(field.name());
-                customCodecs[index] = customMapping == null ? null : customMapping.codec();
+                customCodecs[index] = fieldCodec(
+                        field, component.getType(), customMapping, rawInput, decodedInput);
                 if (rawMappings != null) {
                     rawMappings[index] = customMapping;
                 }
@@ -194,7 +237,8 @@ final class MappingPlan<T> implements RowMapper<T> {
             Class<T> type,
             EntityMetadata<T> metadata,
             Map<String, EntityTypeMappingRegistry.Mapping> customMappings,
-            boolean rawInput) {
+            boolean rawInput,
+            boolean decodedInput) {
         try {
             Constructor<T> constructor = type.getDeclaredConstructor();
             requireAccessible(constructor, "bean constructor");
@@ -211,7 +255,8 @@ final class MappingPlan<T> implements RowMapper<T> {
                     EntityTypeMappingRegistry.Mapping customMapping = customMappings.get(field.name());
                     EntityValueWriter writer = EntityValueWriter.forMethod(
                             writeMethod, writeMethod.getParameterTypes()[0], field,
-                            rawInput || customMapping == null ? null : customMapping.codec());
+                            fieldCodec(field, writeMethod.getParameterTypes()[0],
+                                    customMapping, rawInput, decodedInput));
                     if (rawInput && customMapping != null) {
                         writer = EntityValueWriter.fromRaw(writer, customMapping);
                     }
@@ -230,7 +275,8 @@ final class MappingPlan<T> implements RowMapper<T> {
                     EntityTypeMappingRegistry.Mapping customMapping = customMappings.get(persistentField.name());
                     EntityValueWriter writer = EntityValueWriter.forField(
                             field, field.getType(), persistentField,
-                            rawInput || customMapping == null ? null : customMapping.codec());
+                            fieldCodec(persistentField, field.getType(),
+                                    customMapping, rawInput, decodedInput));
                     if (rawInput && customMapping != null) {
                         writer = EntityValueWriter.fromRaw(writer, customMapping);
                     }

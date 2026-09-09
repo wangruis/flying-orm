@@ -21,7 +21,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * 在同一条连接上依次执行 setup、work 和 cleanup。
@@ -86,9 +85,8 @@ final class R2dbcSequenceExecutor {
                                                               SqlExecutionOptions options) {
         return Mono.usingWhen(
                 executionSession.acquireConnection().map(SequenceResource::new),
-                resource -> R2dbcSqlDeadline.start(options)
-                        .bind(executeSequence(resource, sequence,
-                                              setupParameters, workParameters, options)),
+                resource -> executeSequence(resource, sequence,
+                                            setupParameters, workParameters, options),
                 resource -> finishSequence(resource, sequence.cleanup(), cleanupParameters, options, null),
                 (resource, error) -> finishSequence(
                         resource, sequence.cleanup(), cleanupParameters, options, error),
@@ -108,20 +106,18 @@ final class R2dbcSequenceExecutor {
                         resource, sequence.work(), workParameters, SqlExecutionPhase.WORK, options))
                 .collectList()
                 .map(ignored -> new SqlExecutionSequenceResult(resource.completed));
-        // 截止异常也属于当前步骤；证据转换必须在唯一执行时限之外。
-        return executionSession.protectMono(work, options).onErrorMap(resource::failure);
+        return work.onErrorMap(resource::failure);
     }
 
     /** 清理只归 usingWhen 的单个终态回调所有，取消不能重启已经开始的清理序列。 */
     private Mono<Void> finishSequence(SequenceResource resource, List<SqlRequest> cleanup,
                                       List<List<Object>> cleanupParameters, SqlExecutionOptions options,
                                       Throwable primary) {
-        R2dbcCleanupDeadline deadline = resource.cleanupDeadline(options);
         return executeSequenceCleanup(resource, cleanup, cleanupParameters,
-                options, deadline).materialize().flatMap(signal -> {
+                options).materialize().flatMap(signal -> {
                     if (!signal.hasError()) {
                         return executionSession.closeAfterResult(
-                                resource.lease, SqlExecutionOperation.UPDATE, primary == null, deadline);
+                                resource.lease, SqlExecutionOperation.UPDATE, primary == null);
                     }
                     Throwable failure = Objects.requireNonNull(signal.getThrowable());
                     if (primary != null) {
@@ -129,7 +125,7 @@ final class R2dbcSequenceExecutor {
                     }
                     return executionSession.closeAfterCleanupFailure(
                             resource.lease, SqlExecutionOperation.UPDATE,
-                            ResourceCleanupObservation.Phase.SESSION_CLEANUP, false, failure, deadline)
+                            ResourceCleanupObservation.Phase.SESSION_CLEANUP, false, failure)
                             .then(primary == null ? Mono.error(failure) : Mono.empty());
                 });
     }
@@ -137,12 +133,11 @@ final class R2dbcSequenceExecutor {
     private Mono<Void> executeSequenceCleanup(SequenceResource resource,
                                               List<SqlRequest> cleanup,
                                               List<List<Object>> cleanupParameters,
-                                              SqlExecutionOptions options,
-                                              R2dbcCleanupDeadline deadline) {
+                                              SqlExecutionOptions options) {
         resource.startStep(SqlExecutionPhase.CLEANUP, 0);
         Mono<Void> execution = executeSequencePhase(
                 resource, cleanup, cleanupParameters, SqlExecutionPhase.CLEANUP, options).then();
-        return deadline.protect(execution).onErrorMap(resource::failure);
+        return execution.onErrorMap(resource::failure);
     }
 
     private Flux<SqlExecutionStepResult> executeSequencePhase(SequenceResource resource,
@@ -197,11 +192,10 @@ final class R2dbcSequenceExecutor {
         return error;
     }
 
-    /** 单次订阅唯一的资源和执行进度；截止线程只读取同一份已确认步骤。 */
+    /** 单次订阅唯一的资源和执行进度；保留已确认步骤。 */
     private static final class SequenceResource {
 
         private final R2dbcExecutionSession.ConnectionLease lease;
-        private final AtomicReference<R2dbcCleanupDeadline> cleanupDeadline = new AtomicReference<>();
         private final List<SqlExecutionStepResult> completed = new ArrayList<>();
         private SqlExecutionPhase phase = SqlExecutionPhase.SETUP;
         private int stepIndex;
@@ -219,24 +213,16 @@ final class R2dbcSequenceExecutor {
             if (completedPhase == SqlExecutionPhase.WORK) {
                 completed.add(result);
             }
-            // 成功证据与下一位置一起发布，截止不能把刚完成的 SQL 再记成失败。
+            // 成功证据与下一位置一起发布，不把刚完成的 SQL 再记成失败。
             stepIndex = result.stepIndex() + 1;
         }
 
         private synchronized Throwable failure(Throwable error) {
-            // 只在错误时复制证据；与步骤记录互斥，避免计时线程读取正在追加的 ArrayList。
+            // 只在错误时复制证据；与步骤记录互斥，避免异步信号读取正在追加的 ArrayList。
             VirtualMachineError fatal = findVirtualMachineError(error);
             return fatal == null ? new SqlExecutionSequenceException(
                     phase, stepIndex, completed, RdbExceptionTranslator.translate(error)) : fatal;
         }
 
-        private R2dbcCleanupDeadline cleanupDeadline(SqlExecutionOptions options) {
-            R2dbcCleanupDeadline current = cleanupDeadline.get();
-            if (current != null) {
-                return current;
-            }
-            R2dbcCleanupDeadline created = R2dbcCleanupDeadline.start(options.cleanupTimeout());
-            return cleanupDeadline.compareAndSet(null, created) ? created : cleanupDeadline.get();
-        }
     }
 }

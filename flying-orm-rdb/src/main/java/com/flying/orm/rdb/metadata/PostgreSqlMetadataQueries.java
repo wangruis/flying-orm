@@ -1,35 +1,40 @@
 package com.flying.orm.rdb.metadata;
 
-import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.sql.render.SqlRequest;
-import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
-import com.flying.orm.rdb.schema.SchemaSnapshot;
-import com.flying.orm.rdb.schema.SchemaSnapshotCoverage;
+import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.rdb.type.DatabaseTypes;
-import reactor.core.publisher.Mono;
 
 import java.util.List;
-import java.util.Objects;
 
 /**
- * PostgreSQL 的动态表单元数据读取器，读取 information_schema，并用 pg_catalog 补充列注释和数据库特有信息。
- * 所有 schema/table 条件都使用参数绑定，调用方名称不会直接拼进字典 SQL。
- * 具体实现由 {@link ReactiveFormMetadataReaders} 在包内选择，业务不直接依赖系统表查询细节。
+ * PostgreSQL 的元数据查询定义。这里仅保存 information_schema 和 pg_catalog 的方言事实，
+ * 查询编排和结果组装统一由 {@link InformationSchemaFormMetadataReader} 负责。
  *
  * @author wangr
  * @date 2026-07-28
  * @version v1.0
  */
-final class PostgreSqlReactiveFormMetadataReader implements ReactiveFormMetadataReader, ReactiveMetadataExecutorSource {
+final class PostgreSqlMetadataQueries {
 
     private static final String BASE_COLUMNS_SQL = """
             select c.column_name as COLUMN_NAME,
                    c.table_schema as RESOLUTION_SCHEMA,
-                   case when c.data_type = 'ARRAY' or c.data_type in ('bit', 'bit varying')
+                   case when c.data_type in ('ARRAY', 'USER-DEFINED', 'bit', 'bit varying')
                         then pg_catalog.format_type(column_attribute.atttypid,
                                                     column_attribute.atttypmod)
                         else c.data_type end as DATA_TYPE,
+                   c.data_type as LOGICAL_DATA_TYPE,
+                   pg_catalog.format_type(column_attribute.atttypid,
+                                          column_attribute.atttypmod) as PHYSICAL_DATA_TYPE,
+                   case when element_type.oid is null
+                        then column_type_schema.nspname
+                        else element_type_schema.nspname end as PHYSICAL_TYPE_SCHEMA,
+                   case when element_type.oid is null
+                        then column_type.typname
+                        else element_type.typname end as PHYSICAL_TYPE_NAME,
+                   case when element_type.oid is null then false else true end as PHYSICAL_ARRAY,
+                   coalesce(element_extension.extname,
+                            column_extension.extname) as PHYSICAL_TYPE_EXTENSION,
                    c.character_maximum_length as CHARACTER_MAXIMUM_LENGTH,
                    c.numeric_precision as NUMERIC_PRECISION,
                    c.numeric_scale as NUMERIC_SCALE,
@@ -115,6 +120,31 @@ final class PostgreSqlReactiveFormMetadataReader implements ReactiveFormMetadata
             join pg_catalog.pg_attribute column_attribute
               on column_attribute.attrelid = column_table.oid
              and column_attribute.attnum = c.ordinal_position
+            join pg_catalog.pg_type column_type
+              on column_type.oid = column_attribute.atttypid
+            join pg_catalog.pg_namespace column_type_schema
+              on column_type_schema.oid = column_type.typnamespace
+            left join pg_catalog.pg_type element_type
+              on element_type.oid = column_type.typelem
+             and column_type.typtype <> 'd'
+             and column_type.typcategory = 'A'
+             and element_type.typarray = column_type.oid
+            left join pg_catalog.pg_namespace element_type_schema
+              on element_type_schema.oid = element_type.typnamespace
+            left join pg_catalog.pg_depend column_extension_dependency
+              on column_extension_dependency.classid = 'pg_catalog.pg_type'::pg_catalog.regclass
+             and column_extension_dependency.objid = column_type.oid
+             and column_extension_dependency.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
+             and column_extension_dependency.deptype = 'e'
+            left join pg_catalog.pg_extension column_extension
+              on column_extension.oid = column_extension_dependency.refobjid
+            left join pg_catalog.pg_depend element_extension_dependency
+              on element_extension_dependency.classid = 'pg_catalog.pg_type'::pg_catalog.regclass
+             and element_extension_dependency.objid = element_type.oid
+             and element_extension_dependency.refclassid = 'pg_catalog.pg_extension'::pg_catalog.regclass
+             and element_extension_dependency.deptype = 'e'
+            left join pg_catalog.pg_extension element_extension
+              on element_extension.oid = element_extension_dependency.refobjid
             left join pg_catalog.pg_attrdef column_default
               on column_default.adrelid = column_table.oid
              and column_default.adnum = column_attribute.attnum
@@ -203,6 +233,7 @@ final class PostgreSqlReactiveFormMetadataReader implements ReactiveFormMetadata
               and not exists (
                   select 1 from pg_catalog.pg_constraint owned_constraint
                   where owned_constraint.conindid = ix.indexrelid
+                    and owned_constraint.contype in ('p', 'u', 'x')
               )
             """;
 
@@ -392,69 +423,21 @@ final class PostgreSqlReactiveFormMetadataReader implements ReactiveFormMetadata
             where con.contype = 'c' and t.relname = ?
             """;
 
-    private final InformationSchemaFormMetadataReader delegate;
-
-    private PostgreSqlReactiveFormMetadataReader(ReactiveSqlExecutor executor) {
-        this.delegate = new InformationSchemaFormMetadataReader(Objects.requireNonNull(executor,
-                                                                                       "reactive sql executor must not be null"),
-                                                                queries());
-    }
-
-    static PostgreSqlReactiveFormMetadataReader create(ReactiveSqlExecutor executor) {
-        return new PostgreSqlReactiveFormMetadataReader(executor);
+    private PostgreSqlMetadataQueries() {
     }
 
     static InformationSchemaFormMetadataReader.Queries queries() {
         return InformationSchemaFormMetadataReader.Queries.complete(
-                PostgreSqlReactiveFormMetadataReader::columnQuery,
-                PostgreSqlReactiveFormMetadataReader::indexQuery,
-                PostgreSqlReactiveFormMetadataReader::foreignKeyQuery,
-                PostgreSqlReactiveFormMetadataReader::logicalType,
-                PostgreSqlReactiveFormMetadataReader::tableQuery,
-                PostgreSqlReactiveFormMetadataReader::primaryKeyQuery,
-                PostgreSqlReactiveFormMetadataReader::uniqueConstraintQuery,
-                PostgreSqlReactiveFormMetadataReader::checkConstraintQuery,
+                PostgreSqlMetadataQueries::columnQuery,
+                PostgreSqlMetadataQueries::indexQuery,
+                PostgreSqlMetadataQueries::foreignKeyQuery,
+                PostgreSqlMetadataQueries::logicalType,
+                PostgreSqlMetadataQueries::physicalType,
+                PostgreSqlMetadataQueries::tableQuery,
+                PostgreSqlMetadataQueries::primaryKeyQuery,
+                PostgreSqlMetadataQueries::uniqueConstraintQuery,
+                PostgreSqlMetadataQueries::checkConstraintQuery,
                 InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL);
-    }
-
-    @Override
-    public ReactiveSqlExecutor metadataExecutor() {
-        return delegate.metadataExecutor();
-    }
-
-    @Override
-    public SchemaSnapshotCoverage snapshotCoverage() {
-        return delegate.snapshotCoverage();
-    }
-
-    @Override
-    public Mono<DynamicForm> readForm(String formId, String table) {
-        return delegate.readForm(formId, table);
-    }
-
-    @Override
-    public Mono<DynamicForm> readForm(String formId, String schema, String table) {
-        return delegate.readForm(formId, schema, table);
-    }
-
-    @Override
-    public Mono<TableMetadata> readTable(String table) {
-        return delegate.readTable(table);
-    }
-
-    @Override
-    public Mono<TableMetadata> readTable(String schema, String table) {
-        return delegate.readTable(schema, table);
-    }
-
-    @Override
-    public Mono<SchemaSnapshot> readSnapshot(String table) {
-        return delegate.readSnapshot(table);
-    }
-
-    @Override
-    public Mono<SchemaSnapshot> readSnapshot(String schema, String table) {
-        return delegate.readSnapshot(schema, table);
     }
 
     private static SqlRequest columnQuery(String schema, String table) {
@@ -534,5 +517,9 @@ final class PostgreSqlReactiveFormMetadataReader implements ReactiveFormMetadata
 
     private static String logicalType(String dataType) {
         return DatabaseTypes.logicalDeclaration(dataType, "postgresql");
+    }
+
+    private static String physicalType(String dataType) {
+        return DatabaseType.of(dataType).requireSafe("PostgreSQL physical data type").declaration();
     }
 }

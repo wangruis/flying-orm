@@ -2,6 +2,7 @@ package com.flying.orm.rdb.schema;
 
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.metadata.ColumnMetadata;
+import com.flying.orm.core.metadata.ColumnDefinition;
 import com.flying.orm.core.sql.render.SqlRequest;
 
 import java.util.List;
@@ -83,7 +84,7 @@ final class SchemaColumnShapeChange {
                 input.table(),
                 input.target().name(),
                 tables.dataType(input.target()),
-                tables.columnDefinition(input.target()),
+                tables.replacementColumnDefinition(input.target(), input.physical()),
                 input.target().nullable()), List.of()));
         return true;
     }
@@ -129,7 +130,7 @@ final class SchemaColumnShapeChange {
                 input.table(),
                 input.target().name(),
                 tables.dataType(input.target()),
-                tables.columnDefinition(input.target())), List.of()));
+                tables.replacementColumnDefinition(input.target(), input.physical())), List.of()));
     }
 
     /** 一个已有列形态变化的稳定输入。 */
@@ -137,7 +138,13 @@ final class SchemaColumnShapeChange {
                  ColumnMetadata current,
                  DynamicField target,
                  SchemaMigrationOptions options,
-                 boolean primaryKeyChanged) {
+                 boolean primaryKeyChanged,
+                 ColumnDefinition physical) {
+
+        Input(String table, ColumnMetadata current, DynamicField target,
+              SchemaMigrationOptions options, boolean primaryKeyChanged) {
+            this(table, current, target, options, primaryKeyChanged, null);
+        }
 
         Input {
             table = Objects.requireNonNull(table, "schema migration table must not be null");

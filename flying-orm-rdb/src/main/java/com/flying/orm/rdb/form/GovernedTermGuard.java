@@ -6,6 +6,7 @@ import com.flying.orm.core.condition.TermHandler;
 import com.flying.orm.core.condition.TermRegistry;
 import com.flying.orm.core.scope.FieldUse;
 import com.flying.orm.rdb.dialect.DialectCapabilities;
+import com.flying.orm.rdb.protection.ProtectedConditions;
 
 import java.util.Objects;
 
@@ -29,7 +30,18 @@ final class GovernedTermGuard {
         if (safeTerms == TermRegistry.standard()) {
             return;
         }
-        TermHandler handler = safeTerms.handler(term.operator());
+        TermHandler handler = safeTerms.find(term.operator()).orElse(null);
+        if (handler == null) {
+            // 保护搜索由保护规划器校验并下沉；治理仍审批原逻辑字段的 FILTER 用途。
+            // 注册的同名自定义 handler 必须继续经过下面的扩展描述器审批。
+            if (use == FieldUse.FILTER
+                    && (ProtectedConditions.EXACT.equals(term.operator())
+                    || ProtectedConditions.SUFFIX.equals(term.operator())
+                    || ProtectedConditions.CONTAINS.equals(term.operator()))) {
+                return;
+            }
+            throw new IllegalArgumentException("term does not exist");
+        }
         TermHandler standard = TermRegistry.standard().find(term.operator()).orElse(null);
         if (handler == standard) {
             return;

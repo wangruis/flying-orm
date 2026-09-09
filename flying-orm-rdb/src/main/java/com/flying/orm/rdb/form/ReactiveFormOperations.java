@@ -1,6 +1,8 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.QueryShapeLimits;
+import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.join.JoinSource;
 import com.flying.orm.core.page.CursorPageQuery;
 import com.flying.orm.core.page.CursorPageResult;
 import com.flying.orm.core.page.KeysetPageQuery;
@@ -8,6 +10,7 @@ import com.flying.orm.core.page.KeysetPageResult;
 import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageResult;
 import com.flying.orm.core.join.JoinQuerySpec;
+import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.scope.FieldUseSnapshot;
@@ -15,12 +18,17 @@ import com.flying.orm.rdb.batch.BatchChunkResult;
 import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteResult;
+import com.flying.orm.rdb.aggregate.AggregateResultDecoder;
+import com.flying.orm.rdb.aggregate.AggregateRow;
+import com.flying.orm.rdb.aggregate.AggregateSpec;
+import com.flying.orm.rdb.aggregate.FormAggregatePlanner;
 import com.flying.orm.rdb.form.spec.BatchSpec;
 import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.lock.LockingReadRequiredTransactionException;
 import com.flying.orm.rdb.lock.LockingReadSpec;
+import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
 import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
@@ -33,9 +41,9 @@ import java.util.Objects;
 /**
  * 动态表单内部操作总入口。
  *
- * <p>它只负责把不可变的 QuerySpec、WriteSpec、BatchSpec 分派到查询、分页、写入、删除和批量协作者。
- * 各协作者通过组合明确依赖关系，并共享本对象创建的 Scope 合并器、结果映射器和默认执行配置。这样既没有
- * 多层继承带来的隐式方法来源，也不会让同步门面复制一套 SQL、安全校验或执行保护逻辑。</p>
+ * <p>查询、JOIN、聚合和单条写入都由本类直接拥有，避免为同一个执行所有者再建立无状态转发层。
+ * 只有需要独立流式状态机的批量写入仍交给专用协作者；它们共享本对象创建的 Scope 合并器、结果映射器
+ * 和默认执行配置，不复制 SQL、安全校验或执行保护逻辑。</p>
  *
  * @author wangr
  * @date 2026-08-06
@@ -45,27 +53,135 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
 
     final ReactiveFormBatchInsertOperations batchInserts;
     final ReactiveFormBatchUpdateOperations batchUpdates;
-    final ReactiveJoinQueryOperations joins;
+    private final JoinQueryPlanner joinPlanner;
 
-    ReactiveFormOperations(ReactiveFormOperationContext context) {
-        super(context);
+    ReactiveFormOperations(ReactiveSqlExecutor executor, FormConfiguration configuration) {
+        super(executor, configuration);
         this.batchInserts = new ReactiveFormBatchInsertOperations(this);
         this.batchUpdates = new ReactiveFormBatchUpdateOperations(this);
-        this.joins = new ReactiveJoinQueryOperations(this);
+        this.joinPlanner = new JoinQueryPlanner(renderer, scopes, defaultExecutionOptions);
     }
 
     Flux<DynamicRow> selectJoin(JoinQuerySpec spec, com.flying.orm.rdb.execution.SqlExecutionOptions options) {
-        return joins.select(spec, options);
+        JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
+        if (governed) {
+            return requiresProtectedPlanning(safeSpec)
+                    ? ReactiveProtectionCpuBoundary.plan(() -> joinPlanner.planGoverned(
+                            safeSpec, options, fieldUsePolicy, queryShapeLimits))
+                                                   .flatMapMany(this::selectJoin)
+                    : selectJoin(joinPlanner.planGoverned(
+                            safeSpec, options, fieldUsePolicy, queryShapeLimits));
+        }
+        return requiresProtectedPlanning(safeSpec)
+                ? ReactiveProtectionCpuBoundary.plan(() -> joinPlanner.plan(safeSpec, options))
+                                               .flatMapMany(this::selectJoinPlan)
+                : selectJoinPlan(joinPlanner.plan(safeSpec, options));
     }
 
     FieldUseSnapshot previewFieldUse(JoinQuerySpec spec) {
-        return joins.previewFieldUse(spec);
+        return governed
+                ? joinPlanner.planGoverned(spec, null, fieldUsePolicy, queryShapeLimits).fieldUse()
+                : FieldUseSnapshot.unrestricted();
     }
 
     Mono<PageResult<DynamicRow>> pageJoin(JoinQuerySpec spec,
                                           PageQuery page,
                                           com.flying.orm.rdb.execution.SqlExecutionOptions options) {
-        return joins.page(spec, page, options);
+        JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
+        PageQuery safePage = Objects.requireNonNull(page, "join page query must not be null");
+        if (governed) {
+            return requiresProtectedPlanning(safeSpec)
+                    ? ReactiveProtectionCpuBoundary.plan(() -> joinPlanner.pageGoverned(
+                            safeSpec, safePage, options, fieldUsePolicy, queryShapeLimits))
+                                                   .flatMap(this::pageJoin)
+                    : pageJoin(joinPlanner.pageGoverned(
+                            safeSpec, safePage, options, fieldUsePolicy, queryShapeLimits));
+        }
+        return requiresProtectedPlanning(safeSpec)
+                ? ReactiveProtectionCpuBoundary.plan(
+                        () -> joinPlanner.page(safeSpec, safePage, options))
+                                               .flatMap(this::pageJoinPlan)
+                : pageJoinPlan(joinPlanner.page(safeSpec, safePage, options));
+    }
+
+    private Flux<DynamicRow> selectJoin(
+            GovernedPlanEnvelope<JoinQueryPlanner.PlannedJoin> envelope) {
+        JoinQueryPlanner.PlannedJoin plan = envelope.plan();
+        return selectJoinPlan(plan).map(row -> FieldUseGuard.applyJoinVisibility(
+                renderer, plan.spec(), row, envelope.fieldUse()));
+    }
+
+    private Flux<DynamicRow> selectJoinPlan(JoinQueryPlanner.PlannedJoin plan) {
+        Flux<DynamicRow> rows = results.decodeRows(
+                plan.resultForm(), executor.query(plan.request(), plan.options()), plan.options(),
+                DataScope.none(), SensitiveDisplayMode.FULL, plan.decodingPlan());
+        return plan.resultPlan().direct() ? rows
+                : ReactiveProtectionCpuBoundary.sequence(
+                        rows, plan.resultPlan().requiresCpuBoundary(),
+                        ReactiveProtectionCpuBoundary.QUERY_PREFETCH)
+                .map(plan.resultPlan()::transform);
+    }
+
+    private Mono<PageResult<DynamicRow>> pageJoin(
+            GovernedPlanEnvelope<JoinQueryPlanner.PlannedJoinPage> envelope) {
+        JoinQueryPlanner.PlannedJoinPage plan = envelope.plan();
+        return pageJoinPlan(plan).map(result -> PageResult.of(
+                result.rows().stream()
+                        .map(row -> FieldUseGuard.applyJoinVisibility(
+                                renderer, plan.spec(), row, envelope.fieldUse()))
+                        .toList(),
+                result.total(), plan.page()));
+    }
+
+    private Mono<PageResult<DynamicRow>> pageJoinPlan(
+            JoinQueryPlanner.PlannedJoinPage plan) {
+        Mono<Long> total = executor.query(plan.countRequest(), plan.options())
+                                   .next()
+                                   .map(CountResultReader::read)
+                                   .defaultIfEmpty(0L);
+        return total.flatMap(count -> count == 0L
+                ? Mono.just(PageResult.of(List.of(), 0L, plan.page()))
+                : pageJoinRows(plan)
+                        .collectList()
+                        .map(rows -> PageResult.of(rows, count, plan.page())));
+    }
+
+    private Flux<DynamicRow> pageJoinRows(
+            JoinQueryPlanner.PlannedJoinPage plan) {
+        Flux<DynamicRow> rows = results.decodeRows(
+                plan.resultForm(), executor.query(plan.dataRequest(), plan.options()), plan.options(),
+                DataScope.none(), SensitiveDisplayMode.FULL, plan.decodingPlan());
+        return plan.resultPlan().direct() ? rows
+                : ReactiveProtectionCpuBoundary.sequence(
+                        rows, plan.resultPlan().requiresCpuBoundary(),
+                        ReactiveProtectionCpuBoundary.QUERY_PREFETCH)
+                .map(plan.resultPlan()::transform);
+    }
+
+    FieldUseSnapshot previewFieldUse(AggregateSpec spec) {
+        return aggregatePlan(Objects.requireNonNull(
+                spec, "aggregate spec must not be null")).fieldUse();
+    }
+
+    Flux<AggregateRow> aggregate(AggregateSpec spec) {
+        AggregateSpec safeSpec = Objects.requireNonNull(
+                spec, "aggregate spec must not be null");
+        return requiresProtectedPlanning(safeSpec)
+                ? ReactiveProtectionCpuBoundary.plan(() -> aggregatePlan(safeSpec))
+                                               .flatMapMany(this::executeAggregate)
+                : executeAggregate(aggregatePlan(safeSpec));
+    }
+
+    private Flux<AggregateRow> executeAggregate(FormAggregatePlanner.Plan plan) {
+        AggregateResultDecoder aggregateDecoder = new AggregateResultDecoder(plan);
+        return executor.query(plan.request(), plan.options()).map(aggregateDecoder::decode);
+    }
+
+    private FormAggregatePlanner.Plan aggregatePlan(AggregateSpec spec) {
+        return new FormAggregatePlanner(
+                renderer, configuration.resolver(), configuration.dataScope(),
+                defaultExecutionOptions, fieldUsePolicy, queryShapeLimits)
+                .plan(spec);
     }
 
     Flux<DynamicRow> selectSpec(QuerySpec spec) {
@@ -333,6 +449,32 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
         };
     }
 
+    private boolean requiresProtectedPlanning(JoinQuerySpec spec) {
+        for (JoinSource source : spec.sources()) {
+            DynamicForm form = source.form();
+            if (form.protections().encryptedFields().isEmpty()) {
+                continue;
+            }
+            DataScope effectiveScope = scopes.effectiveScope(spec.scope(source));
+            if (ReactiveProtectionCpuBoundary.usesEncryptedCondition(form, spec.where(source))
+                    || ReactiveProtectionCpuBoundary.usesEncryptedScope(form, effectiveScope)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean requiresProtectedPlanning(AggregateSpec spec) {
+        QuerySpec query = spec.query();
+        if (query.form().protections().encryptedFields().isEmpty()) {
+            return false;
+        }
+        DataScope effectiveScope = configuration.dataScope().and(query.scope());
+        return ReactiveProtectionCpuBoundary.usesEncryptedCondition(query.form(), query.where())
+                || ReactiveProtectionCpuBoundary.usesEncryptedScope(query.form(), effectiveScope)
+                || query.structuredInput().isPresent();
+    }
+
     boolean requiresProtectedPlanning(QuerySpec spec) {
         if (spec.form().protections().encryptedFields().isEmpty()) {
             return false;
@@ -347,7 +489,7 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
         return Mono.defer(() -> Objects.requireNonNull(
                         executor.currentTransaction(),
                         "current R2DBC transaction lookup must not return null"))
-                .switchIfEmpty(Mono.error(new LockingReadRequiredTransactionException()))
+                .switchIfEmpty(Mono.error(LockingReadRequiredTransactionException::new))
                 .then();
     }
 

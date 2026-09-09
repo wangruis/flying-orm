@@ -19,6 +19,11 @@ import java.util.Optional;
  * <p>规格只保存冷 Publisher 引用，不收集全量数据。insert/upsert 行为使用字段 Map，update 行为使用
  * {@link BatchOptimisticUpdate}；三个命名工厂把行类型与操作固定在一起，执行时仍逐行校验并按有界策略分片。</p>
  *
+ * <p>upsert 合并客户端默认 Scope 与本规格 Scope，在同一条 SQL 内检查已有冲突目标行。
+ * 内置方言仅在目标范围条件为 TRUE 时更新；FALSE 或 NULL 会产生数据库失败，不能改写范围外记录。
+ * 新行沿用 insert 的租户值与字段权限规则，没有更新列的幂等插入保留 no-op。
+ * 不支持目标范围的扩展方言在交付执行请求前明确拒绝，不静默丢弃 Scope。</p>
+ *
  * @author wangr
  * @date 2026-08-04
  * @version v1.0
@@ -85,7 +90,7 @@ public final class BatchSpec {
         return operation;
     }
 
-    /** @return 本次批量写入的数据范围；insert/upsert 用于租户和字段保护，update 还会限制 WHERE。 */
+    /** @return 本次数据范围；insert 用于租户和字段保护，update 限制 WHERE，upsert 约束冲突更新的目标行。 */
     public DataScope scope() {
         return scope;
     }

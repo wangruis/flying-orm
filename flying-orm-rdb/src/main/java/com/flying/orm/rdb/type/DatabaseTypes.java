@@ -14,6 +14,7 @@ import java.time.Period;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.UUID;
 
 /**
  * Explicit database-driver and metadata policies layered on Core's shared database type model.
@@ -65,6 +66,11 @@ public final class DatabaseTypes {
             case DATE -> LocalDate.class;
             case TIME -> "ORACLE".equals(dialect) ? String.class : LocalTime.class;
             case INTERVAL -> oracleIntervalParameterType(safeType, dialect);
+            case UUID -> switch (dialect) {
+                case "H2", "POSTGRESQL" -> UUID.class;
+                case "MYSQL", "ORACLE", "SQLSERVER" -> String.class;
+                default -> Object.class;
+            };
             default -> Object.class;
         };
     }

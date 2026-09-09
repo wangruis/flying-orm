@@ -3,6 +3,7 @@ package com.flying.orm.rdb.form;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.LogicalOperator;
 import com.flying.orm.core.join.JoinClause;
+import com.flying.orm.core.join.JoinFieldRef;
 import com.flying.orm.core.join.JoinFieldPair;
 import com.flying.orm.core.join.JoinOrder;
 import com.flying.orm.core.join.JoinProjection;
@@ -11,6 +12,7 @@ import com.flying.orm.core.join.JoinSource;
 import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.sql.render.SqlFragment;
 import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.dialect.PaginationDialect;
 
 import java.util.ArrayList;
@@ -33,13 +35,11 @@ final class JoinQuerySqlRenderer {
 
     private static final ConditionGroup EMPTY = ConditionGroup.and().build();
 
-    private final JoinSourceSqlRenderer sources;
     private final PaginationDialect pagination;
     private final FormSqlRenderSupport support;
 
     JoinQuerySqlRenderer(FormSqlRenderSupport support, PaginationDialect pagination) {
         this.support = Objects.requireNonNull(support, "form SQL render support must not be null");
-        this.sources = new JoinSourceSqlRenderer(this.support);
         this.pagination = Objects.requireNonNull(pagination, "join pagination dialect must not be null");
     }
 
@@ -108,14 +108,14 @@ final class JoinQuerySqlRenderer {
         String projection = count ? "count(*) as total" : projections(safeSpec.projections());
         StringBuilder sql = new StringBuilder("select ").append(projection)
                                                            .append(" from ")
-                                                           .append(sources.relation(
+                                                           .append(relation(
                                                                    safeSpec.root(),
                                                                    form(safeForms, safeSpec.root()),
                                                                    protection(safeProtections, safeSpec.root()),
                                                                    parameters));
         for (JoinClause join : safeSpec.joins()) {
             sql.append(' ').append(keyword(join)).append(' ')
-               .append(sources.relation(join.source(),
+               .append(relation(join.source(),
                                         form(safeForms, join.source()),
                                         protection(safeProtections, join.source()),
                                         parameters))
@@ -159,10 +159,77 @@ final class JoinQuerySqlRenderer {
                               Map<JoinSource, ConditionGroup> businessConditions) {
     }
 
+    private String alias(JoinSource source) {
+        return support.identifier("t" + Objects.requireNonNull(
+                source, "join source must not be null").ordinal());
+    }
+
+    private String field(JoinFieldRef field) {
+        JoinFieldRef safeField = Objects.requireNonNull(field, "join field must not be null");
+        return alias(safeField.source()) + "." + support.identifier(safeField.field());
+    }
+
+    private void requireStableOffsetTimeOrdering(JoinFieldRef field) {
+        JoinFieldRef safeField = Objects.requireNonNull(field, "join field must not be null");
+        support.requireStableOffsetTimeOrdering(
+                safeField.source().form().field(safeField.field()));
+    }
+
+    private String aliasIdentifier(String alias) {
+        // JoinProjection 已验证为单段别名；H2 的普通标识符折叠不能改变结果绑定身份。
+        return "h2".equals(support.dialectName) ? '"' + alias + '"' : support.identifier(alias);
+    }
+
+    private String relation(JoinSource source,
+                            com.flying.orm.core.form.DynamicForm physicalForm,
+                            ConditionGroup protection,
+                            List<Object> parameters) {
+        JoinSource safeSource = Objects.requireNonNull(source, "join source must not be null");
+        SqlFragment filter = condition(safeSource, physicalForm, protection, false);
+        parameters.addAll(filter.parameters());
+        String table = support.identifier(safeSource.form());
+        if (filter.sql().isBlank()) {
+            return table + " " + alias(safeSource);
+        }
+        return "(select * from " + table + " where " + filter.sql() + ") " + alias(safeSource);
+    }
+
+    private SqlFragment businessCondition(JoinSource source,
+                                          com.flying.orm.core.form.DynamicForm physicalForm,
+                                          ConditionGroup condition) {
+        return condition(source, physicalForm, condition, true);
+    }
+
+    /** 源内保护条件不带别名，业务条件使用来源别名；相关项沿用同一受控限定符。 */
+    private SqlFragment condition(JoinSource source,
+                                  com.flying.orm.core.form.DynamicForm physicalForm,
+                                  ConditionGroup condition,
+                                  boolean qualified) {
+        JoinSource safeSource = Objects.requireNonNull(source, "join source must not be null");
+        com.flying.orm.core.form.DynamicForm safeForm = Objects.requireNonNull(
+                physicalForm, "join physical form must not be null");
+        ConditionGroup safeCondition = support.normalizeCondition(
+                safeForm, Objects.requireNonNull(condition, "join condition must not be null"));
+        SqlRenderer renderer = support.normalizedConditionRenderer().withFieldIdentifierRenderer(name -> {
+            String sourceField = safeForm.field(name).name();
+            return qualified
+                    ? alias(safeSource) + "." + support.identifier(sourceField)
+                    : support.identifier(sourceField);
+        });
+        if (!renderer.hasCorrelatedTerms()) {
+            return renderer.renderWhere(safeCondition);
+        }
+        String qualifier = qualified ? alias(safeSource) : support.identifier(safeForm);
+        return renderer.renderWhere(
+                safeCondition,
+                name -> qualifier + "." + support.identifier(safeForm.field(name).name()),
+                name -> qualifier);
+    }
+
     private String projections(List<JoinProjection> projections) {
         StringJoiner selected = new StringJoiner(", ");
         for (JoinProjection projection : projections) {
-            selected.add(sources.field(projection.field()) + " as " + sources.aliasIdentifier(projection.alias()));
+            selected.add(field(projection.field()) + " as " + aliasIdentifier(projection.alias()));
         }
         return selected.toString();
     }
@@ -170,7 +237,7 @@ final class JoinQuerySqlRenderer {
     private String on(JoinClause join) {
         StringJoiner conditions = new StringJoiner(" and ");
         for (JoinFieldPair pair : join.on()) {
-            conditions.add(sources.field(pair.left()) + " = " + sources.field(pair.right()));
+            conditions.add(field(pair.left()) + " = " + field(pair.right()));
         }
         return conditions.toString();
     }
@@ -183,7 +250,7 @@ final class JoinQuerySqlRenderer {
         StringJoiner where = new StringJoiner(" and ");
         for (JoinSource source : spec.sources()) {
             ConditionGroup condition = businessConditions.get(source);
-            SqlFragment fragment = sources.businessCondition(
+            SqlFragment fragment = businessCondition(
                     source, form(physicalForms, source), condition);
             if (!fragment.sql().isBlank()) {
                 where.add(condition.operator() == LogicalOperator.OR && condition.children().size() > 1
@@ -203,8 +270,8 @@ final class JoinQuerySqlRenderer {
         }
         StringJoiner order = new StringJoiner(", ", " order by ", "");
         for (JoinOrder item : orders) {
-            sources.requireStableOffsetTimeOrdering(item.field());
-            order.add(sources.field(item.field()) + " " + item.direction().name().toLowerCase(java.util.Locale.ROOT));
+            requireStableOffsetTimeOrdering(item.field());
+            order.add(field(item.field()) + " " + item.direction().name().toLowerCase(java.util.Locale.ROOT));
         }
         sql.append(order);
     }

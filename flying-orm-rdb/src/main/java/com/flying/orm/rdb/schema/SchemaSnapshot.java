@@ -12,8 +12,11 @@ import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.metadata.TablePartitionDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 
+import com.flying.orm.core.type.DatabaseType;
+
 import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -80,6 +83,8 @@ public final class SchemaSnapshot {
     private final State tableState;
     private final Observed<String> tableComment;
     private final Observed<List<ColumnDefinition>> columns;
+    private final boolean physicalColumnTypes;
+    private final Map<String, DatabaseType> observedLogicalTypes;
     private final Observed<PrimaryKeyDefinition> primaryKey;
     private final Observed<List<UniqueConstraintDefinition>> uniqueConstraints;
     private final Observed<List<IndexDefinition>> indexes;
@@ -94,6 +99,8 @@ public final class SchemaSnapshot {
         tableState = builder.tableState;
         tableComment = builder.tableComment;
         columns = copyList(builder.columns);
+        physicalColumnTypes = builder.physicalColumnTypes;
+        observedLogicalTypes = builder.observedLogicalTypes;
         primaryKey = builder.primaryKey;
         uniqueConstraints = copyList(builder.uniqueConstraints);
         indexes = copyList(builder.indexes);
@@ -196,6 +203,12 @@ public final class SchemaSnapshot {
     public Observed<List<ColumnDefinition>> columns() {
         return columns;
     }
+    boolean physicalColumnTypes() {
+        return physicalColumnTypes;
+    }
+    Map<String, DatabaseType> observedLogicalTypes() {
+        return observedLogicalTypes;
+    }
     public Observed<PrimaryKeyDefinition> primaryKey() {
         return primaryKey;
     }
@@ -295,6 +308,8 @@ public final class SchemaSnapshot {
         private State tableState = State.UNKNOWN;
         private Observed<String> tableComment = Observed.unknown();
         private Observed<List<ColumnDefinition>> columns = Observed.unknown();
+        private boolean physicalColumnTypes;
+        private Map<String, DatabaseType> observedLogicalTypes = Map.of();
         private Observed<PrimaryKeyDefinition> primaryKey = Observed.unknown();
         private Observed<List<UniqueConstraintDefinition>> uniqueConstraints = Observed.unknown();
         private Observed<List<IndexDefinition>> indexes = Observed.unknown();
@@ -324,6 +339,32 @@ public final class SchemaSnapshot {
 
         public Builder columns(List<ColumnDefinition> value) {
             columns = Observed.present(List.copyOf(Objects.requireNonNull(value, "columns must not be null")));
+            physicalColumnTypes = false;
+            observedLogicalTypes = Map.of();
+            return this;
+        }
+
+        /**
+         * 内部元数据装配边界：列类型已经来自数据库物理声明，不得再次套用逻辑类型映射。
+         * 调用方规范定义应继续使用 {@link #columns(List)}。
+         */
+        public Builder physicalColumns(List<ColumnDefinition> value) {
+            columns(value);
+            physicalColumnTypes = true;
+            return this;
+        }
+
+        /**
+         * Retains logical types actually observed alongside physical declarations.
+         * Keys are actual column names; a missing entry means unknown, not an absent marker.
+         * User comments and physical column types remain unchanged.
+         */
+        public Builder physicalColumns(List<ColumnDefinition> value,
+                                       Map<String, DatabaseType> logicalTypes) {
+            Map<String, DatabaseType> observed = Map.copyOf(
+                    Objects.requireNonNull(logicalTypes, "observed logical types must not be null"));
+            physicalColumns(value);
+            observedLogicalTypes = observed;
             return this;
         }
 

@@ -67,17 +67,7 @@ public final class SqlTermRegistry {
                 }
                 descriptors.add(value);
             });
-            // 内置 handler 复用 STANDARD 中的对象身份，执行层据此区分内置语义和同名自定义语义，
-            // 不新增公开缓存能力，也不会把自定义 handler 误当成内置快速路径。
-            TermHandler standard = TermRegistry.standard().find(normalizedId).orElse(null);
-            boolean structuralCacheSafe = safeHandler instanceof SimpleSqlTermHandler simple
-                    && simple.structuralCacheSafe()
-                    && standard != null
-                    && standard.shape() == shape;
-            conditionTerms.add(structuralCacheSafe
-                    ? standard
-                    : descriptor.<TermHandler>map(value -> TermHandler.described(value, shape))
-                                .orElseGet(() -> TermHandler.simple(safeHandler.id(), shape)));
+            conditionTerms.add(conditionTerm(safeHandler, shape, descriptor));
         }
         handlersById = Map.copyOf(indexedHandlers);
         this.hasCorrelatedTerms = correlated;
@@ -139,6 +129,21 @@ public final class SqlTermRegistry {
      */
     TermRegistry conditionTerms() {
         return conditionTerms;
+    }
+
+    /** Shares built-in term identity without constructing a second SQL registry. */
+    static TermHandler conditionTerm(SqlTermHandler handler,
+                                     ConditionValueShape shape,
+                                     Optional<TermExtensionDescriptor> descriptor) {
+        TermHandler standard = TermRegistry.standard().find(handler.id()).orElse(null);
+        boolean structuralCacheSafe = handler instanceof SimpleSqlTermHandler simple
+                && simple.structuralCacheSafe()
+                && standard != null
+                && standard.shape() == shape;
+        return structuralCacheSafe
+                ? standard
+                : descriptor.<TermHandler>map(value -> TermHandler.described(value, shape))
+                            .orElseGet(() -> TermHandler.simple(handler.id(), shape));
     }
 
     private static DescriptorState descriptorState(List<TermExtensionDescriptor> descriptors) {

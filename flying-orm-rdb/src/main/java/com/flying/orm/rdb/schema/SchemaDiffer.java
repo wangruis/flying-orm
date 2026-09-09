@@ -5,12 +5,14 @@ import com.flying.orm.core.metadata.ColumnDefault;
 import com.flying.orm.core.metadata.ColumnDefinition;
 import com.flying.orm.core.metadata.ForeignKeyDefinition;
 import com.flying.orm.core.metadata.IndexDefinition;
+import com.flying.orm.core.metadata.IndexKeyPart;
 import com.flying.orm.core.metadata.PrimaryKeyDefinition;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 import com.flying.orm.core.metadata.TablePartitionDefinition;
 import com.flying.orm.core.metadata.ValueGeneration;
+import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.rdb.dialect.DialectCapabilities;
 import com.flying.orm.rdb.dialect.DialectCapabilityId;
 
@@ -39,7 +41,9 @@ public final class SchemaDiffer {
 
     private static final Comparator<SchemaOperation> OPERATION_ORDER =
             Comparator.comparing(SchemaOperation::kind)
-                      .thenComparing(SchemaOperation::objectName);
+                      // Stable sorting retains desired column ordinals for append-only ADD COLUMN SQL.
+                      .thenComparing(operation -> operation.kind() == SchemaOperation.Kind.ADD_COLUMN
+                              ? "" : operation.objectName());
 
     /** 无状态对象可以安全复用；主要为依赖注入式调用保留。 */
     public SchemaDiffer() {
@@ -58,6 +62,58 @@ public final class SchemaDiffer {
                                                  DialectCapabilities capabilities,
                                                  SchemaCompatibilityMode mode) {
         return diff(desired, actual, capabilities, mode, null);
+    }
+
+    /**
+     * 比较调用方明确声明的“不存在”目标。该入口只描述删除意图，绝不从缺少 desired 表推断删除。
+     */
+    public static SchemaCompatibilityReport diffAbsent(RelationIdentity desiredAbsent,
+                                                        SchemaSnapshot actual,
+                                                        DialectCapabilities capabilities,
+                                                        SchemaCompatibilityMode mode) {
+        return diffAbsent(desiredAbsent, actual, capabilities, mode, null);
+    }
+
+    static SchemaCompatibilityReport diffAbsent(RelationIdentity desiredAbsent,
+                                                 SchemaSnapshot actual,
+                                                 DialectCapabilities capabilities,
+                                                 SchemaCompatibilityMode mode,
+                                                 SchemaDialect schemaDialect) {
+        RelationIdentity target = Objects.requireNonNull(
+                desiredAbsent, "absent relational target identity must not be null");
+        SchemaSnapshot observed = Objects.requireNonNull(
+                actual, "actual schema snapshot must not be null");
+        Objects.requireNonNull(capabilities, "dialect capabilities must not be null");
+        SchemaCompatibilityMode compatibilityMode = Objects.requireNonNull(
+                mode, "schema compatibility mode must not be null");
+        requireSameRelation(target, observed.identity(), schemaDialect);
+
+        List<SchemaOperation> operations = switch (observed.tableState()) {
+            case ABSENT -> List.of();
+            case PRESENT -> observed.completeTable()
+                    .<List<SchemaOperation>>map(table -> List.of(SchemaOperation.of(
+                            SchemaOperation.Kind.DROP_TABLE,
+                            target,
+                            target.table(),
+                            table,
+                            null,
+                            SchemaOperation.Compatibility.REQUIRES_REVIEW)))
+                    .orElseGet(() -> List.of(SchemaOperation.of(
+                            SchemaOperation.Kind.VERIFY_MANUALLY,
+                            target,
+                            "table-definition",
+                            observed,
+                            null,
+                            SchemaOperation.Compatibility.REQUIRES_REVIEW)));
+            case UNKNOWN -> List.of(SchemaOperation.of(
+                    SchemaOperation.Kind.VERIFY_MANUALLY,
+                    target,
+                    "table-state",
+                    observed,
+                    null,
+                    SchemaOperation.Compatibility.REQUIRES_REVIEW));
+        };
+        return SchemaCompatibilityReport.of(compatibilityMode, operations);
     }
 
     static SchemaCompatibilityReport diff(RelationalTableDefinition desired,
@@ -112,12 +168,16 @@ public final class SchemaDiffer {
         RelationIdentity relation = desired.identity();
         diffTableComment(desired, actual, operations);
         diffPartition(desired, actual, operations, schemaDialect);
-        diffColumns(relation, desired.columns(), actual.columns().value(), operations, schemaDialect);
+        diffColumns(relation, desired.columns(), actual.columns().value(), operations, schemaDialect,
+                    actual.physicalColumnTypes(), actual.observedLogicalTypes());
         diffColumnOrder(desired, actual, operations, schemaDialect);
         diffPrimaryKey(desired, actual, operations, mysql, schemaDialect);
+        UniqueIndexComparison uniqueIndexes = uniqueIndexComparison(
+                desired, actual, indexesForComparison(desired, actual.indexes(), mysql),
+                mysql, schemaDialect);
         diffObservedList(relation,
-                         desired.uniqueConstraints(),
-                         actual.uniqueConstraints(),
+                         uniqueIndexes.desiredUniques(),
+                         uniqueIndexes.actualUniques(),
                          UniqueConstraintDefinition::name,
                          (left, right) -> SchemaDefinitionEquality.sameUnique(left, right, schemaDialect),
                          SchemaOperation.Kind.ADD_UNIQUE,
@@ -127,8 +187,8 @@ public final class SchemaDiffer {
                          operations,
                          schemaDialect);
         diffObservedList(relation,
-                         desired.indexes(),
-                         indexesForComparison(desired, actual.indexes(), mysql),
+                         uniqueIndexes.desiredIndexes(),
+                         uniqueIndexes.actualIndexes(),
                          IndexDefinition::name,
                          (left, right) -> SchemaDefinitionEquality.sameIndex(left, right, schemaDialect),
                          SchemaOperation.Kind.ADD_INDEX,
@@ -161,6 +221,68 @@ public final class SchemaDiffer {
                          schemaDialect);
         actual.unknownAttributes().stream().sorted().forEach(attribute -> operations.add(
                 manual(desired, actual, "unknown-" + attribute.name().toLowerCase(java.util.Locale.ROOT))));
+    }
+
+    /**
+     * MySQL 用同一个 BTREE 对象实现 UNIQUE 约束和 UNIQUE INDEX，字典却把两种声明放在不同查询中。
+     * 比较前只在本地把同名的跨模型对象投影成索引，避免把一次物理变化误报成“删约束再建索引”。
+     */
+    private static UniqueIndexComparison uniqueIndexComparison(
+            RelationalTableDefinition desired,
+            SchemaSnapshot actual,
+            SchemaSnapshot.Observed<List<IndexDefinition>> comparableIndexes,
+            boolean mysql,
+            SchemaDialect schemaDialect) {
+        if (!mysql
+                || actual.uniqueConstraints().state() != SchemaSnapshot.State.PRESENT
+                || comparableIndexes.state() != SchemaSnapshot.State.PRESENT) {
+            return new UniqueIndexComparison(
+                    desired.uniqueConstraints(), actual.uniqueConstraints(),
+                    desired.indexes(), comparableIndexes);
+        }
+
+        List<UniqueConstraintDefinition> desiredUniques = new ArrayList<>(desired.uniqueConstraints());
+        List<UniqueConstraintDefinition> actualUniques = new ArrayList<>(actual.uniqueConstraints().value());
+        List<IndexDefinition> desiredIndexes = new ArrayList<>(desired.indexes());
+        List<IndexDefinition> actualIndexes = new ArrayList<>(comparableIndexes.value());
+
+        Map<String, UniqueConstraintDefinition> actualUniquesByName = byName(
+                actualUniques, UniqueConstraintDefinition::name, schemaDialect);
+        for (IndexDefinition target : desired.indexes()) {
+            UniqueConstraintDefinition current = actualUniquesByName.get(
+                    SchemaDefinitionEquality.canonicalName(target.name(), schemaDialect));
+            if (current != null && SchemaDefinitionEquality.ordinaryUnique(current, schemaDialect)) {
+                actualUniques.remove(current);
+                actualIndexes.add(asAscendingUniqueIndex(current));
+            }
+        }
+
+        Map<String, IndexDefinition> actualIndexesByName = byName(
+                comparableIndexes.value(), IndexDefinition::name, schemaDialect);
+        for (UniqueConstraintDefinition target : desired.uniqueConstraints()) {
+            IndexDefinition current = actualIndexesByName.get(
+                    SchemaDefinitionEquality.canonicalName(target.name(), schemaDialect));
+            if (current != null && SchemaDefinitionEquality.ordinaryUnique(target, schemaDialect)) {
+                desiredUniques.remove(target);
+                desiredIndexes.add(asAscendingUniqueIndex(target));
+            }
+        }
+        return new UniqueIndexComparison(
+                desiredUniques, SchemaSnapshot.Observed.present(actualUniques),
+                desiredIndexes, SchemaSnapshot.Observed.present(actualIndexes));
+    }
+
+    private static IndexDefinition asAscendingUniqueIndex(UniqueConstraintDefinition constraint) {
+        IndexDefinition.Builder builder = IndexDefinition.builder(constraint.name()).unique();
+        constraint.columns().stream().map(IndexKeyPart::asc).forEach(builder::addKey);
+        return builder.build();
+    }
+
+    private record UniqueIndexComparison(
+            List<UniqueConstraintDefinition> desiredUniques,
+            SchemaSnapshot.Observed<List<UniqueConstraintDefinition>> actualUniques,
+            List<IndexDefinition> desiredIndexes,
+            SchemaSnapshot.Observed<List<IndexDefinition>> actualIndexes) {
     }
 
     private static SchemaSnapshot.Observed<List<IndexDefinition>> indexesForComparison(
@@ -231,7 +353,9 @@ public final class SchemaDiffer {
                                     List<ColumnDefinition> desired,
                                     List<ColumnDefinition> actual,
                                     List<SchemaOperation> operations,
-                                    SchemaDialect schemaDialect) {
+                                    SchemaDialect schemaDialect,
+                                    boolean physicalActualTypes,
+                                    Map<String, DatabaseType> observedLogicalTypes) {
         Map<String, ColumnDefinition> desiredByName = byName(
                 desired, ColumnDefinition::name, schemaDialect);
         Map<String, ColumnDefinition> actualByName = byName(
@@ -249,7 +373,11 @@ public final class SchemaDiffer {
                         safeColumnAddition(target)
                                 ? SchemaOperation.Compatibility.SAFE_INCREMENTAL
                                 : SchemaOperation.Compatibility.REQUIRES_REVIEW));
-            } else if (!SchemaDefinitionEquality.sameColumn(current, target, schemaDialect, relation)) {
+            } else if (!SchemaDefinitionEquality.sameColumn(
+                    current, target, schemaDialect, relation, physicalActualTypes)
+                    || SchemaColumnCommentCodec.logicalTypeChangeRequiresReview(schemaDialect, current,
+                            physicalActualTypes ? observedLogicalTypes.get(current.name()) : current.databaseType(),
+                            target.databaseType())) {
                 operations.add(SchemaOperation.of(
                         SchemaOperation.Kind.CHANGE_COLUMN,
                         relation,
@@ -282,17 +410,24 @@ public final class SchemaDiffer {
         Set<String> desiredNames = names(desired.columns(), ColumnDefinition::name, schemaDialect);
         Set<String> actualNames = names(
                 actual.columns().value(), ColumnDefinition::name, schemaDialect);
-        List<String> desiredCommon = desired.columns().stream()
+        List<String> desiredOrder = desired.columns().stream()
                 .map(ColumnDefinition::name)
                 .map(name -> SchemaDefinitionEquality.canonicalName(name, schemaDialect))
-                .filter(actualNames::contains)
                 .toList();
-        List<String> actualCommon = actual.columns().value().stream()
-                .map(ColumnDefinition::name)
-                .map(name -> SchemaDefinitionEquality.canonicalName(name, schemaDialect))
-                .filter(desiredNames::contains)
-                .toList();
-        if (!desiredCommon.equals(actualCommon)) {
+        List<String> plannedOrder = new ArrayList<>(desiredOrder.size());
+        for (ColumnDefinition column : actual.columns().value()) {
+            String name = SchemaDefinitionEquality.canonicalName(column.name(), schemaDialect);
+            if (desiredNames.contains(name)) {
+                plannedOrder.add(name);
+            }
+        }
+        // 旧列保留原顺序，现有 ADD COLUMN 方言都追加到表尾；无法按此得到目标顺序时提前人工处理。
+        for (String name : desiredOrder) {
+            if (!actualNames.contains(name)) {
+                plannedOrder.add(name);
+            }
+        }
+        if (!desiredOrder.equals(plannedOrder)) {
             operations.add(manual(desired, actual, "column-order"));
         }
     }

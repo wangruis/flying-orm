@@ -14,7 +14,6 @@ import com.flying.orm.rdb.transaction.JdbcTransactionParticipant;
 
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -59,7 +58,6 @@ final class JdbcIndependentBatchExecutor {
             throw new IllegalArgumentException("jdbc independent batch currently supports concurrency=1");
         }
         List<BatchChunkResult> results = new ArrayList<>();
-        JdbcBatchSupport.BatchDeadline inputDeadline = JdbcBatchSupport.BatchDeadline.start(Duration.ZERO);
         JdbcBatchSupport.ChunkReadProgress readProgress = new JdbcBatchSupport.ChunkReadProgress();
         boolean notifyingCompletion = false;
         try (JdbcBatchRows rows = new JdbcBatchRows(
@@ -69,7 +67,7 @@ final class JdbcIndependentBatchExecutor {
             List<ProtectedBatchRows.RowView> chunk;
             while (true) {
                 try {
-                    chunk = readChunk(rows, request, offset, chunkIndex, inputDeadline, readProgress);
+                    chunk = readChunk(rows, request, offset, chunkIndex, readProgress);
                 } catch (RuntimeException | Error | InterruptedException | TimeoutException error) {
                     rethrowVirtualMachineError(error);
                     restoreInterrupt(error);
@@ -114,11 +112,6 @@ final class JdbcIndependentBatchExecutor {
             restoreInterrupt(error);
             throw failure("jdbc independent batch failed", error,
                           inputFailureResult(results, readProgress.acceptedRows(), error));
-        } catch (TimeoutException error) {
-            rethrowTryWithResourcesVirtualMachineError(error);
-            restoreInterrupt(error);
-            throw failure("jdbc independent batch failed", error,
-                          inputFailureResult(results, readProgress.acceptedRows(), error));
         }
     }
 
@@ -158,8 +151,8 @@ final class JdbcIndependentBatchExecutor {
                                            int chunkIndex,
                                            long offset,
                                            List<ProtectedBatchRows.RowView> rows,
-                                           JdbcBatchExecutionObservationSupport.BatchContext context)
-            throws TimeoutException {
+                                           JdbcBatchExecutionObservationSupport.BatchContext context) {
+        BatchChunkResult outcome = null;
         try (JdbcConnectionProvider.JdbcConnectionLease lease = connections.acquire()) {
             context.transactionSource(lease.transactionSource() == SqlTransactionSource.EXTERNAL
                     ? SqlTransactionSource.EXTERNAL : SqlTransactionSource.INTERNAL);
@@ -167,43 +160,43 @@ final class JdbcIndependentBatchExecutor {
                 throw new JdbcExternalTransactionModeException(
                         "INDEPENDENT batch cannot use an external jdbc transaction connection");
             }
-            JdbcBatchSupport.BatchDeadline deadline = JdbcBatchSupport.BatchDeadline.start(
-                    request.options().timeout());
             Connection connection = lease.connection();
-            deadline.remaining();
             boolean transactionFinished = false;
             boolean commitAttempted = false;
             try {
                 if (connection.getAutoCommit()) {
                     connection.setAutoCommit(false);
                 }
-                BatchChunkResult result = chunks.execute(connection, request, chunkIndex, offset, rows, deadline);
+                BatchChunkResult result = chunks.execute(connection, request, chunkIndex, offset, rows);
                 if (result.status() == BatchChunkResult.Status.CONFLICTED) {
                     JdbcBatchSupport.RollbackOutcome rollback = rollbackQuietly(connection);
                     transactionFinished = rollback.confirmed();
                     if (transactionFinished) {
                         lease.markTransactionOutcomeConfirmed();
-                        return result;
+                        outcome = result;
+                        return outcome;
                     }
                     SQLException uncertainty = new SQLException("jdbc batch conflict rollback failed");
                     if (rollback.cleanupFatal() != null) {
                         throw rollback.cleanupFatal();
                     }
                     lease.markTransactionOutcomeUnknown(uncertainty);
-                    return BatchChunkResult.unknown(chunkIndex, offset, rows.size(), uncertainty);
+                    outcome = BatchChunkResult.unknown(chunkIndex, offset, rows.size(), uncertainty);
+                    return outcome;
                 }
-                deadline.remaining();
                 JdbcStatementControl.requireNotInterrupted();
                 commitAttempted = true;
                 connection.commit();
+                outcome = result;
                 transactionFinished = true;
                 lease.markTransactionOutcomeConfirmed();
-                return result;
-            } catch (SQLException | RuntimeException | Error | TimeoutException error) {
+                return outcome;
+            } catch (SQLException | RuntimeException | Error error) {
                 if (commitAttempted) {
                     rethrowVirtualMachineError(error);
                     lease.markTransactionOutcomeUnknown(error);
-                    return BatchChunkResult.unknown(chunkIndex, offset, rows.size(), error);
+                    outcome = BatchChunkResult.unknown(chunkIndex, offset, rows.size(), error);
+                    return outcome;
                 }
                 JdbcBatchSupport.RollbackOutcome rollback = rollbackQuietly(connection, error);
                 transactionFinished = rollback.confirmed();
@@ -218,17 +211,22 @@ final class JdbcIndependentBatchExecutor {
                 } else {
                     lease.markTransactionOutcomeUnknown(error);
                 }
-                return transactionFinished
+                outcome = transactionFinished
                         ? BatchChunkResult.failed(chunkIndex, offset, rows.size(), error)
                         : BatchChunkResult.unknown(chunkIndex, offset, rows.size(), error);
+                return outcome;
             }
-        } catch (SQLException | TimeoutException error) {
+        } catch (SQLException error) {
             rethrowTryWithResourcesVirtualMachineError(error);
             throw failure("jdbc independent batch chunk failed", error,
                           BatchWriteResult.from(BatchWriteOptions.Mode.INDEPENDENT, List.of(
                                   BatchChunkResult.failed(chunkIndex, offset, rows.size(), error))));
         } catch (RuntimeException | Error error) {
             rethrowTryWithResourcesVirtualMachineError(error);
+            if (outcome != null) {
+                throw failure("jdbc independent batch cleanup failed", error,
+                              BatchWriteResult.from(BatchWriteOptions.Mode.INDEPENDENT, List.of(outcome)));
+            }
             throw error;
         }
     }

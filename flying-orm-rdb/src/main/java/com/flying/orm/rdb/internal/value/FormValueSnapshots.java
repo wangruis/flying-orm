@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.internal.value;
 
+import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.internal.value.BindableValueSnapshots;
 import com.flying.orm.core.type.LogicalType;
@@ -31,18 +32,35 @@ public final class FormValueSnapshots {
     public static Map<String, Object> snapshot(DynamicForm form, Map<String, Object> source) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
         Map<String, Object> safeSource = Objects.requireNonNull(source, "form values must not be null");
-        Snapshotter snapshotter = new Snapshotter();
+        if (safeSource.isEmpty()) {
+            return Map.of();
+        }
         Map<String, Object> snapshot = new LinkedHashMap<>(safeSource.size());
-        safeSource.forEach((name, value) -> snapshot.put(name, safeForm.findField(name)
-                .map(field -> snapshotter.snapshot(field.databaseType().logicalType(),
-                                                   field.databaseType().isArray(), value))
-                .orElseGet(() -> BindableValueSnapshots.logicalValue(value))));
+        Snapshotter snapshotter = null;
+        for (Map.Entry<String, Object> entry : safeSource.entrySet()) {
+            Object value = entry.getValue();
+            DynamicField field = safeForm.findField(entry.getKey()).orElse(null);
+            if (value == null || field == null) {
+                snapshot.put(entry.getKey(), BindableValueSnapshots.logicalValue(value));
+                continue;
+            }
+            LogicalType type = field.databaseType().logicalType();
+            boolean sqlArray = field.databaseType().isArray();
+            if (type == LogicalType.JSON || sqlArray || type == LogicalType.VECTOR) {
+                if (snapshotter == null) {
+                    snapshotter = new Snapshotter();
+                }
+                snapshot.put(entry.getKey(), snapshotter.snapshot(type, sqlArray, value));
+            } else {
+                snapshot.put(entry.getKey(), BindableValueSnapshots.logicalValue(value));
+            }
+        }
         return Collections.unmodifiableMap(snapshot);
     }
 
     private static final class Snapshotter {
-        private final IdentityHashMap<Object, Object> copies = new IdentityHashMap<>();
-        private final IdentityHashMap<Object, Boolean> active = new IdentityHashMap<>();
+        private IdentityHashMap<Object, Object> copies;
+        private IdentityHashMap<Object, Boolean> active;
 
         private Object snapshot(LogicalType type, boolean sqlArray, Object value) {
             if (value == null) return null;
@@ -53,33 +71,33 @@ public final class FormValueSnapshots {
 
         private Object json(Object value) {
             if (value == null) return null;
-            if (active.containsKey(value)) {
+            if (active(value)) {
                 throw new IllegalArgumentException("JSON form value must not contain cycles");
             }
-            Object existing = copies.get(value);
+            Object existing = copyOf(value);
             if (existing != null) return existing;
             if (value instanceof JsonNode node) {
                 JsonNode copy = node.deepCopy();
-                copies.put(value, copy);
+                remember(value, copy);
                 return copy;
             }
             if (value instanceof Map<?, ?> map) return jsonMap(map);
             if (value instanceof Collection<?> collection) return jsonList(collection);
             if (value.getClass().isArray()) return jsonArray(value);
             Object scalar = BindableValueSnapshots.logicalScalar(value);
-            if (scalar != value) copies.put(value, scalar);
+            if (scalar != value) remember(value, scalar);
             return scalar;
         }
 
         private Object jsonMap(Map<?, ?> source) {
             Map<Object, Object> copy = new LinkedHashMap<>(source.size());
             Map<Object, Object> exposed = Collections.unmodifiableMap(copy);
-            copies.put(source, exposed);
-            active.put(source, Boolean.TRUE);
+            remember(source, exposed);
+            enter(source);
             try {
                 source.forEach((key, value) -> copy.put(key, json(value)));
             } finally {
-                active.remove(source);
+                leave(source);
             }
             return exposed;
         }
@@ -87,12 +105,12 @@ public final class FormValueSnapshots {
         private Object jsonList(Collection<?> source) {
             List<Object> copy = new ArrayList<>(source.size());
             List<Object> exposed = Collections.unmodifiableList(copy);
-            copies.put(source, exposed);
-            active.put(source, Boolean.TRUE);
+            remember(source, exposed);
+            enter(source);
             try {
                 source.forEach(value -> copy.add(json(value)));
             } finally {
-                active.remove(source);
+                leave(source);
             }
             return exposed;
         }
@@ -102,39 +120,65 @@ public final class FormValueSnapshots {
             if (source.getClass().getComponentType().isPrimitive()) {
                 Object copy = Array.newInstance(source.getClass().getComponentType(), length);
                 System.arraycopy(source, 0, copy, 0, length);
-                copies.put(source, copy);
+                remember(source, copy);
                 return copy;
             }
             Object[] copy = new Object[length];
-            copies.put(source, copy);
-            active.put(source, Boolean.TRUE);
+            remember(source, copy);
+            enter(source);
             try {
                 for (int index = 0; index < length; index++) copy[index] = json(Array.get(source, index));
             } finally {
-                active.remove(source);
+                leave(source);
             }
             return copy;
         }
 
         private Object sequence(Object value) {
             if (value instanceof Collection<?> collection) {
-                if (active.containsKey(value)) {
+                if (active(value)) {
                     throw new IllegalArgumentException("SQL ARRAY or VECTOR value must not contain cycles");
                 }
-                Object existing = copies.get(value);
+                Object existing = copyOf(value);
                 if (existing != null) return existing;
                 List<Object> copy = new ArrayList<>(collection.size());
                 List<Object> exposed = Collections.unmodifiableList(copy);
-                copies.put(value, exposed);
-                active.put(value, Boolean.TRUE);
+                remember(value, exposed);
+                enter(value);
                 try {
                     collection.forEach(item -> copy.add(sequenceItem(item)));
                 } finally {
-                    active.remove(value);
+                    leave(value);
                 }
                 return exposed;
             }
             return BindableValueSnapshots.logicalValue(value);
+        }
+
+        private Object copyOf(Object source) {
+            return copies == null ? null : copies.get(source);
+        }
+
+        private void remember(Object source, Object copy) {
+            if (copies == null) {
+                copies = new IdentityHashMap<>();
+            }
+            copies.put(source, copy);
+        }
+
+        private boolean active(Object source) {
+            return active != null && active.containsKey(source);
+        }
+
+        private void enter(Object source) {
+            if (active == null) {
+                active = new IdentityHashMap<>();
+            }
+            active.put(source, Boolean.TRUE);
+        }
+
+        private void leave(Object source) {
+            active.remove(source);
         }
 
         private static Object sequenceItem(Object value) {

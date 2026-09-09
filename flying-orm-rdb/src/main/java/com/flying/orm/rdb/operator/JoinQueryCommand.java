@@ -39,8 +39,13 @@ final class JoinQueryCommand {
 
     JoinQueryCommand join(JoinType type, DynamicForm form, String leftField, String rightField) {
         requireMutable();
-        JoinSource joined = spec.join(type, form, root, leftField, rightField);
-        sources.put(Objects.requireNonNull(form, "joined form must not be null"), joined);
+        DynamicForm safeForm = Objects.requireNonNull(form, "joined form must not be null");
+        if (sources.containsKey(safeForm)) {
+            throw new IllegalArgumentException("join form identity is ambiguous; "
+                    + "use JoinQuerySpec with explicit JoinSource references for self joins");
+        }
+        JoinSource joined = spec.join(type, safeForm, root, leftField, rightField);
+        sources.put(safeForm, joined);
         lastJoined = joined;
         return this;
     }

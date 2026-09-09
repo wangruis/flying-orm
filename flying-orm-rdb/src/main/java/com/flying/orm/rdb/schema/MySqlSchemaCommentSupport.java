@@ -22,6 +22,7 @@ final class MySqlSchemaCommentSupport {
     private static final SqlRequest MODE_QUERY = new SqlRequest(
             "select @@SESSION.sql_mode as sql_mode", List.of());
     private static final SqlLexicalScanner.Rules MYSQL_RULES = SqlLexicalScanner.rulesFor("mysql");
+    private static final SqlLexicalScanner.Rules COMMENT_LITERAL_RULES = SqlLexicalScanner.rulesFor("standard");
 
     private MySqlSchemaCommentSupport() {
     }
@@ -29,6 +30,22 @@ final class MySqlSchemaCommentSupport {
     static String literal(SchemaDialectTypeSupport types, String comment, boolean mysql) {
         String literal = types.quoteLiteral(comment);
         return mysql && comment.indexOf('\\') >= 0 ? MODE_MARKER + " " + literal : literal;
+    }
+
+    /** Reads only the existing marker and its following NO_BACKSLASH_ESCAPES string literal. */
+    static int markedLiteralEnd(String sql, int offset) {
+        if (!sql.startsWith(MODE_MARKER, offset)) {
+            return offset;
+        }
+        int literalStart = offset + MODE_MARKER.length();
+        while (literalStart < sql.length() && Character.isWhitespace(sql.charAt(literalStart))) {
+            literalStart++;
+        }
+        if (literalStart == sql.length() || sql.charAt(literalStart) != '\'') {
+            return offset;
+        }
+        return SqlLexicalScanner.segmentEnd(
+                SqlLexicalScanner.protectedSegmentAt(sql, literalStart, COMMENT_LITERAL_RULES, false));
     }
 
     static boolean requiresModeValidation(List<SqlRequest> requests) {

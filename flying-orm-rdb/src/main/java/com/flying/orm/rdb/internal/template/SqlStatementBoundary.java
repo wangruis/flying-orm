@@ -162,10 +162,11 @@ final class SqlStatementBoundary {
         return switch (word) {
             case "SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "REPLACE", "UPSERT", "CALL",
                     "CREATE", "ALTER", "DROP", "TRUNCATE", "GRANT", "REVOKE", "COMMENT", "EXPLAIN", "SHOW",
-                    "DESCRIBE", "DESC", "SET", "VALUES", "EXEC", "EXECUTE", "BEGIN", "COMMIT", "ROLLBACK",
+                    "DESCRIBE", "SET", "VALUES", "EXEC", "EXECUTE", "BEGIN", "COMMIT", "ROLLBACK",
                     "WAITFOR", "USE", "DECLARE", "BACKUP", "BULK", "CHECKPOINT", "DBCC", "DENY", "KILL",
                     "PRINT", "RAISERROR", "RECONFIGURE", "RESTORE", "RETURN", "SAVE", "SHUTDOWN", "THROW",
                     "OPEN", "CLOSE", "DEALLOCATE", "FETCH", "ENABLE", "DISABLE" -> true;
+            case "DESC" -> !sqlServerDialect;
             default -> false;
         };
     }

@@ -7,7 +7,7 @@ package com.flying.orm.core.condition;
  * 更严格的不可变副本；ORM 在生成 SQL 和获取连接前完成计费。</p>
  *
  * @author wangr
- * @version v3.2.0
+ * @version v4.0.0
  */
 public record QueryShapeLimits(int maxProjectionCount,
                                int maxJoinCount,

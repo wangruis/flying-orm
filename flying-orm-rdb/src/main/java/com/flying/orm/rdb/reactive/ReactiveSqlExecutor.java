@@ -19,7 +19,6 @@ import com.flying.orm.rdb.transaction.R2dbcTransactionContext;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.time.Duration;
 import java.util.Objects;
 
 /**
@@ -73,15 +72,15 @@ public interface ReactiveSqlExecutor {
     }
 
     /**
-     * 给任意执行器套一层默认执行保护。调用方显式传 options 时，显式值优先。原生执行器会在连接可用后实施
-     * SQL timeout；只实现单参数方法的自定义执行器仍保留查询结果容量保护，但不会给不可分阶段的 Publisher
-     * 叠加连接获取计时器。
+     * 给任意执行器套一层默认结果保护。调用方显式传 options 时，显式值优先。
+     * 响应式执行时限由上层拥有；非零 SQL timeout 明确拒绝，不在 ORM 内创建计时器。
      *
      * @param options 默认执行保护
      * @return 带默认执行保护的执行器
      */
     default ReactiveSqlExecutor withDefaultExecutionOptions(SqlExecutionOptions options) {
-        return DefaultOptionsReactiveSqlExecutor.create(this, options);
+        return DefaultOptionsReactiveSqlExecutor.create(
+                this, ReactiveSqlExecutionProtection.requireSupportedOptions(options));
     }
 
     /**
@@ -101,8 +100,8 @@ public interface ReactiveSqlExecutor {
     Flux<DynamicRow> query(SqlRequest request);
 
     /**
-     * 带执行保护的查询。接口默认实现无法区分外部事务解析、连接池排队与 SQL 阶段，因此只负责返回行数和
-     * 累计估算字节上限；能够识别连接可用边界的执行器必须覆盖本方法，并在连接可用后实施 SQL timeout。
+     * 带结果保护的查询。保留返回行数和累计估算字节上限；非零 SQL timeout 明确拒绝，
+     * 执行时限与取消策略由调用方拥有。
      *
      * @param request SQL 请求
      * @param options 执行保护选项
@@ -110,11 +109,8 @@ public interface ReactiveSqlExecutor {
      */
     default Flux<DynamicRow> query(SqlRequest request, SqlExecutionOptions options) {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
-        SqlExecutionOptions safeOptions = Objects.requireNonNull(
-                options, "sql execution options must not be null");
-        SqlExecutionOptions resultOptions = safeOptions.timeout().isZero()
-                ? safeOptions : safeOptions.withTimeout(Duration.ZERO);
-        return protectRows(query(safeRequest), safeRequest.sql(), resultOptions);
+        SqlExecutionOptions safeOptions = ReactiveSqlExecutionProtection.requireSupportedOptions(options);
+        return protectRows(query(safeRequest), safeRequest.sql(), safeOptions);
     }
 
     /**
@@ -126,8 +122,7 @@ public interface ReactiveSqlExecutor {
     Mono<Long> rowsUpdated(SqlRequest request);
 
     /**
-     * 带执行选项的写入。接口默认实现无法知道连接何时可用，因此不会给整个自定义 Publisher 叠加 ORM timer；
-     * 能够识别连接可用边界的执行器必须覆盖本方法，并在连接可用后实施 SQL timeout。
+     * 带执行选项的写入。非零 SQL timeout 明确拒绝，不为 Publisher 创建 ORM timer。
      *
      * @param request SQL 请求
      * @param options 执行保护选项
@@ -135,7 +130,7 @@ public interface ReactiveSqlExecutor {
      */
     default Mono<Long> rowsUpdated(SqlRequest request, SqlExecutionOptions options) {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
-        Objects.requireNonNull(options, "sql execution options must not be null");
+        ReactiveSqlExecutionProtection.requireSupportedOptions(options);
         return rowsUpdated(safeRequest);
     }
 
@@ -174,7 +169,7 @@ public interface ReactiveSqlExecutor {
         return rowsUpdatedReturningKeys(request, options);
     }
 
-    /** ORM 内部受保护字段写工作单元；只有能够控制同一连接事务的原生执行器可以覆盖。 */
+    /** ORM 内部受保护字段工作单元，必须使用上层提供的外部事务连接。 */
     default Mono<SqlWriteResult> atomicProtectedWrite(ProtectedWriteWork work, SqlExecutionOptions options) {
         Objects.requireNonNull(work, "protected write work must not be null");
         Objects.requireNonNull(options, "sql execution options must not be null");
@@ -183,7 +178,8 @@ public interface ReactiveSqlExecutor {
     }
 
     /**
-     * 执行带分片语义的批量写入，默认明确报错，真正实现由 R2DBC 批量 writer 提供。
+     * 执行带分片语义的批量写入。非空 ATOMIC 必须参与外部事务；
+     * 只有明确的 INDEPENDENT 模式允许各片自有局部事务。默认实现明确拒绝。
      *
      * @param request 批量写入请求
      * @return 批量写入结果
@@ -193,7 +189,7 @@ public interface ReactiveSqlExecutor {
         return Mono.error(new UnsupportedOperationException("reactive sql executor does not support chunked batch writes"));
     }
 
-    /** 执行批量并返回独立 SQL 执行证据；旧实现必须显式拒绝，不能退化为 legacy 结果。 */
+    /** 在外部事务中执行 ATOMIC 批量并返回 SQL 证据，不把参与事实伪装为已提交。 */
     default Mono<BatchExecutionEvidence> writeBatchEvidence(BatchWriteRequest request) {
         Objects.requireNonNull(request, "batch evidence request must not be null");
         return Mono.error(new UnsupportedOperationException(
@@ -233,14 +229,14 @@ public interface ReactiveSqlExecutor {
     }
 
     /**
-     * 查询 UNKNOWN 批量结果的后续确认状态。
+     * 保留兼容签名；事务恢复由上层拥有，ORM 明确拒绝执行。
      *
      * @param token 恢复令牌
      * @return 确认结果
      */
     default Mono<BatchResolution> resolveUnknown(BatchChunkResult.RecoveryToken token) {
         Objects.requireNonNull(token, "batch recovery token must not be null");
-        return Mono.error(new UnsupportedOperationException("reactive sql executor does not support batch recovery"));
+        return Mono.error(new UnsupportedOperationException("batch recovery must be controlled by the caller"));
     }
 
     private static Flux<DynamicRow> protectRows(Flux<DynamicRow> source,

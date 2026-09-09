@@ -64,7 +64,7 @@ final class R2dbcGeneratedKeyWriter {
                 SqlExecutionOperation.UPDATE,
                 (statement, largeObjects) -> {
                     Accumulator accumulator = new Accumulator(safeOptions, largeObjects);
-                    return session.protectMono(accumulator.collect(statement, generatedKeyColumn), safeOptions)
+                    return accumulator.collect(statement, generatedKeyColumn)
                             .onErrorMap(accumulator::wrapFailure);
                 });
     }
@@ -176,7 +176,7 @@ final class R2dbcGeneratedKeyWriter {
 
         synchronized Throwable wrapFailure(Throwable failure) {
             VirtualMachineError fatal = findVirtualMachineError(failure);
-            // 结果交接前的截止仍保留写入证据；已进入侧索引或提交阶段的错误不改写含义。
+            // 结果交接前的读取失败仍保留写入证据；已进入侧索引阶段的错误不改写含义。
             if (fatal != null || !writeObserved || handoffCompleted || failure instanceof GeneratedKeyReadException) {
                 return fatal == null ? failure : fatal;
             }

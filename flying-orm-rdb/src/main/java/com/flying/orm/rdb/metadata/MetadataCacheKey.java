@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.metadata;
 
+import com.flying.orm.core.metadata.RelationIdentity;
 import reactor.core.publisher.Mono;
 
 import java.util.Objects;
@@ -22,6 +23,16 @@ record MetadataCacheKey(Kind kind, String formId, String schema, String table) {
     static MetadataCacheKey table(String schema, String table) {
         String[] tableParts = splitTable(schema, table);
         return new MetadataCacheKey(Kind.TABLE, null, tableParts[0], tableParts[1]);
+    }
+
+    /** 关系型入口已经完成分段，不能再按点号猜测。catalog 由连接身份承接，不进入本地缓存键。 */
+    static MetadataCacheKey table(RelationIdentity relation) {
+        RelationIdentity target = Objects.requireNonNull(
+                relation, "metadata cache relation must not be null");
+        String schema = target.schema().map(value -> requireText(value, "metadata cache schema"))
+                .orElse(null);
+        return new MetadataCacheKey(
+                Kind.TABLE, null, schema, requireText(target.table(), "metadata cache table"));
     }
 
     MetadataCacheKey asForm(String formId) {

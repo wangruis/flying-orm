@@ -13,7 +13,6 @@ import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
@@ -35,15 +34,11 @@ final class R2dbcLargeObjectRow {
     private static final DatabaseType CLOB_TYPE = DatabaseType.of("CLOB");
 
     private final DynamicRow row;
-    private final SqlExecutionOptions options;
     private final List<LobSlot> slots;
     private final Map<Integer, Object> replacements = new LinkedHashMap<>();
 
-    private R2dbcLargeObjectRow(DynamicRow row,
-                                SqlExecutionOptions options,
-                                List<LobSlot> slots) {
+    private R2dbcLargeObjectRow(DynamicRow row, List<LobSlot> slots) {
         this.row = row;
-        this.options = options;
         this.slots = slots;
     }
 
@@ -63,7 +58,7 @@ final class R2dbcLargeObjectRow {
                 }
             }
         }
-        return new R2dbcLargeObjectRow(row, options, List.copyOf(slots));
+        return new R2dbcLargeObjectRow(row, List.copyOf(slots));
     }
 
     static R2dbcLargeObjectRow captured(List<Object> locators, SqlExecutionOptions options) {
@@ -74,7 +69,7 @@ final class R2dbcLargeObjectRow {
                 slots.add(new LobSlot(-1, locator, options));
             }
         }
-        return new R2dbcLargeObjectRow(null, options, List.copyOf(slots));
+        return new R2dbcLargeObjectRow(null, List.copyOf(slots));
     }
 
     boolean isEmpty() {
@@ -88,11 +83,7 @@ final class R2dbcLargeObjectRow {
                    .then(Mono.fromSupplier(() -> row.withValues(replacements)));
     }
 
-    Duration cleanupTimeout() {
-        return options.cleanupTimeout();
-    }
-
-    Mono<Void> discardPending(R2dbcCleanupDeadline deadline) {
+    Mono<Void> discardPending() {
         AtomicReference<Throwable> cleanupFailure = new AtomicReference<>();
         Mono<Void> cleanup = Flux.fromIterable(slots)
                                  .concatMap(slot -> slot.discard().onErrorResume(error -> {
@@ -100,7 +91,7 @@ final class R2dbcLargeObjectRow {
                                      return Mono.empty();
                                  }), 1)
                                  .then();
-        return deadline.protect(cleanup).onErrorResume(error -> {
+        return cleanup.onErrorResume(error -> {
             merge(cleanupFailure, error);
             return Mono.empty();
         }).then(Mono.defer(() -> cleanupFailure.get() == null
@@ -108,9 +99,8 @@ final class R2dbcLargeObjectRow {
     }
 
     Mono<Void> discardAfterError(Throwable primary,
-                                 R2dbcCleanupDeadline deadline,
                                  Consumer<Throwable> cleanupFailureRecorder) {
-        return discardPending(deadline).onErrorResume(cleanup -> {
+        return discardPending().onErrorResume(cleanup -> {
             VirtualMachineError fatal = promoteVirtualMachineError(primary, cleanup);
             if (fatal != null) {
                 return Mono.error(fatal);

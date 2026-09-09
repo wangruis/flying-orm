@@ -2,8 +2,6 @@ package com.flying.orm.rdb.operator;
 
 import com.flying.orm.core.metadata.IndexMetadata;
 
-import java.util.Objects;
-
 /**
  * 同步索引定义 builder。
  *
@@ -17,24 +15,22 @@ import java.util.Objects;
 public final class SyncIndexBuilder {
 
     private final SyncCreateOrAlterTableBuilder table;
-    private final SyncDdlStructureState jdbcState;
-    private final IndexMetadata.Builder jdbcIndex;
+    private final IndexMetadata.Builder index;
 
-    SyncIndexBuilder(SyncDdlStructureState jdbcState, String name, SyncCreateOrAlterTableBuilder table) {
-        this.table = Objects.requireNonNull(table, "table builder must not be null");
-        this.jdbcState = Objects.requireNonNull(jdbcState, "sync DDL state must not be null");
-        this.jdbcIndex = IndexMetadata.builder(CreateOrAlterTableBuilder.requireText(name, "index name"));
+    SyncIndexBuilder(SyncCreateOrAlterTableBuilder table, String name) {
+        this.table = table;
+        this.index = IndexMetadata.builder(DdlStructureDraft.requireText(name, "index name"));
     }
 
     /** 标记为唯一索引。 */
     public SyncIndexBuilder unique() {
-        jdbcIndex.unique();
+        index.unique();
         return this;
     }
 
     /** 按调用顺序追加一个索引列。 */
     public SyncIndexBuilder column(String name) {
-        jdbcIndex.addColumn(CreateOrAlterTableBuilder.requireText(name, "index column"));
+        index.addColumn(DdlStructureDraft.requireText(name, "index column"));
         return this;
     }
 
@@ -49,7 +45,7 @@ public final class SyncIndexBuilder {
 
     /** 冻结当前索引描述并加入表级草稿。 */
     public SyncCreateOrAlterTableBuilder commit() {
-        jdbcState.addIndex(jdbcIndex.build());
+        table.draft().addIndex(index.build());
         return table;
     }
 }

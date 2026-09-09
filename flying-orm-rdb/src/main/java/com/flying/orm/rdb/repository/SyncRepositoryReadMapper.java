@@ -9,6 +9,7 @@ import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.form.SyncFormClient;
 import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.mapping.EntityQueryDefaults;
 import com.flying.orm.rdb.lock.LockingReadSpec;
 import com.flying.orm.rdb.lock.ReadLock;
 
@@ -42,26 +43,19 @@ final class SyncRepositoryReadMapper<T> {
     }
 
     List<T> select(ConditionGroup where, DataScope scope, SqlExecutionOptions options) {
-        return lifecycle.postLoad(client.select(querySpec(where, scope, options), entityType));
+        return lifecycle.postLoad(client.select(
+                EntityQueryDefaults.query(form, metadata, where, scope, options, client.defaultFieldScope()), entityType));
     }
 
     List<T> lockingRead(ConditionGroup where, ReadLock lock) {
-        QuerySpec query = querySpec(where, null, null);
+        QuerySpec query = EntityQueryDefaults.query(form, metadata, where, null, null, client.defaultFieldScope());
         return lifecycle.postLoad(client.lockingRead(
                 LockingReadSpec.of(query, Objects.requireNonNull(
                         lock, "repository read lock must not be null")), entityType));
     }
 
     PageResult<T> page(ConditionGroup where, PageQuery page, DataScope scope, SqlExecutionOptions options) {
-        return lifecycle.postLoad(client.page(querySpec(where, scope, options), page, entityType));
-    }
-
-    private QuerySpec querySpec(ConditionGroup where, DataScope scope, SqlExecutionOptions options) {
-        QuerySpec spec = RepositoryQueryDefaults.apply(
-                QuerySpec.of(form, RepositoryLogicDeletes.activeWhere(metadata, form, where)), metadata);
-        if (scope != null) {
-            spec = spec.withScope(scope);
-        }
-        return options == null ? spec : spec.withExecutionOptions(options);
+        return lifecycle.postLoad(client.page(
+                EntityQueryDefaults.query(form, metadata, where, scope, options, client.defaultFieldScope()), page, entityType));
     }
 }

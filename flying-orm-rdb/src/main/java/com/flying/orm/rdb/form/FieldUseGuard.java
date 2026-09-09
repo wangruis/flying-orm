@@ -16,11 +16,13 @@ import com.flying.orm.core.scope.FieldUseOrigin;
 import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.scope.FieldUseRequirements;
 import com.flying.orm.core.scope.FieldUseSnapshot;
+import com.flying.orm.core.scope.FieldVisibility;
 import com.flying.orm.core.scope.ScopeAccessException;
 import com.flying.orm.core.scope.ScopeErrorCode;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.form.spec.WriteSpec;
+import com.flying.orm.rdb.internal.mapping.RepositoryUpsertValues;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.dialect.DialectCapabilities;
 
@@ -37,7 +39,7 @@ import java.util.Objects;
  * @author wangr
  * @version v3.2
  */
-public final class FieldUseGuard {
+final class FieldUseGuard {
 
     private FieldUseGuard() {
     }
@@ -107,7 +109,7 @@ public final class FieldUseGuard {
                                                     List<String> sortFields,
                                                     FieldUseSnapshot snapshot) {
         for (String field : sortFields) {
-            if (snapshot.visibility(field) != com.flying.orm.core.scope.FieldVisibility.FULL) {
+            if (snapshot.visibility(field) != FieldVisibility.FULL) {
                 throw new ScopeAccessException(
                         ScopeErrorCode.FIELD_NOT_READABLE,
                         resource,
@@ -159,12 +161,18 @@ public final class FieldUseGuard {
         Map<String, Object> safeRow = Objects.requireNonNull(firstRow, "batch first row must not be null");
         DataScope safeScope = Objects.requireNonNull(scope, "batch data scope must not be null");
         FieldUseRequirements.Builder requirements = FieldUseRequirements.builder();
-        safeRow.keySet().forEach(field -> {
-            requirements.require(field, FieldUse.INSERT);
-            if (upsert) {
-                requirements.require(field, FieldUse.UPDATE);
-            }
-        });
+        RepositoryUpsertValues staged = upsert && safeRow instanceof RepositoryUpsertValues values
+                ? values : null;
+        Map<String, Object> inserts = staged == null ? safeRow : staged.insertValues();
+        inserts.keySet().forEach(field -> requirements.require(field, FieldUse.INSERT));
+        if (upsert) {
+            Map<String, Object> updates = staged == null ? safeRow : staged.updateValues();
+            updates.keySet().forEach(field -> {
+                if (UpsertFieldPlan.updateCandidate(safeForm, safeForm.field(field), staged != null)) {
+                    requirements.require(field, FieldUse.UPDATE);
+                }
+            });
+        }
         approve(safeForm.id(), requirements.build(), safeScope.fields(), policy, false);
     }
 
@@ -206,7 +214,7 @@ public final class FieldUseGuard {
                 outputFields, "keyset output fields must not be null"));
         FieldUseRequirements.Builder requirements = FieldUseRequirements.builder();
         safeOutputFields.forEach(field -> requirements.require(field, FieldUse.PROJECT));
-        KeysetCursorVisibilityGuard.collectRequirements(requirements, page);
+        collectKeysetCursorRequirements(requirements, page);
         collectCondition(businessWhere, FieldUse.FILTER, FieldUseOrigin.CALLER, requirements,
                          renderer.conditionRenderer().terms(), renderer.dialectCapabilities());
         QueryShapeBudget budget = new QueryShapeBudget(limits);
@@ -216,8 +224,39 @@ public final class FieldUseGuard {
         FieldUseSnapshot snapshot = approve(
                 safeSpec.form().id(), requirements.build(), scope.fields(), policy,
                 safeSpec.projections().isEmpty());
-        KeysetCursorVisibilityGuard.requireFull(safeSpec.form().id(), page, snapshot);
+        requireFullKeysetCursorVisibility(safeSpec.form().id(), page, snapshot);
         return new GovernedPlanEnvelope<>(plan, snapshot);
+    }
+
+    private static void collectKeysetCursorRequirements(
+            FieldUseRequirements.Builder requirements,
+            KeysetPageNormalizer.NormalizedKeysetPage page) {
+        for (int index = 0; index < page.sorts().size(); index++) {
+            String field = page.sorts().get(index).field();
+            // CursorPosition 直接发布排序值，因此 SORT 之外还要按 caller PROJECT 审批明文可见性。
+            requirements.require(field, FieldUse.PROJECT, FieldUseOrigin.CALLER);
+            requirements.require(
+                    field,
+                    FieldUse.SORT,
+                    index < page.callerSortCount()
+                            ? FieldUseOrigin.CALLER : FieldUseOrigin.INTERNAL_TIE_BREAKER);
+        }
+    }
+
+    private static void requireFullKeysetCursorVisibility(
+            String resource,
+            KeysetPageNormalizer.NormalizedKeysetPage page,
+            FieldUseSnapshot snapshot) {
+        for (var sort : page.sorts()) {
+            String field = sort.field();
+            if (snapshot.visibility(field) != FieldVisibility.FULL) {
+                throw new ScopeAccessException(
+                        ScopeErrorCode.FIELD_NOT_READABLE,
+                        resource,
+                        field,
+                        "keyset cursor field [" + field + "] requires FULL visibility");
+            }
+        }
     }
 
     static FieldUseSnapshot approveCollected(String resource,
@@ -234,18 +273,17 @@ public final class FieldUseGuard {
      * 类型化聚合的单次中央审批入口。planner 在验证字段/别名的同一遍遍历中给出计数，
      * 这里继续复用统一预算错误和字段拒绝语义，并在 SQL 生成后补记 bind 与文本长度。
      */
-    @com.flying.orm.rdb.internal.InternalApi
-    public static FieldUseSnapshot approveAggregate(String resource,
-                                                    FieldUseRequirements requirements,
-                                                    FieldScope scope,
-                                                    SqlRequest request,
-                                                    FieldUsePolicy policy,
-                                                    QueryShapeLimits limits,
-                                                    int projectionCount,
-                                                    int groupCount,
-                                                    int aggregateCount,
-                                                    int havingNodeCount,
-                                                    int sortCount) {
+    static FieldUseSnapshot approveAggregate(String resource,
+                                             FieldUseRequirements requirements,
+                                             FieldScope scope,
+                                             SqlRequest request,
+                                             FieldUsePolicy policy,
+                                             QueryShapeLimits limits,
+                                             int projectionCount,
+                                             int groupCount,
+                                             int aggregateCount,
+                                             int havingNodeCount,
+                                             int sortCount) {
         QueryShapeBudget budget = new QueryShapeBudget(limits);
         budget.addProjections(projectionCount);
         budget.addGroups(groupCount);
@@ -320,10 +358,9 @@ public final class FieldUseGuard {
     }
 
     /** 聚合/JOIN 等独立规划器在自己的既有遍历中复用同一条扩展治理规则。 */
-    @com.flying.orm.rdb.internal.InternalApi
-    public static void approveTermExtension(FormDataSqlRenderer renderer,
-                                            TermCondition term,
-                                            FieldUse use) {
+    static void approveTermExtension(FormDataSqlRenderer renderer,
+                                     TermCondition term,
+                                     FieldUse use) {
         FormDataSqlRenderer safeRenderer = Objects.requireNonNull(
                 renderer, "form data SQL renderer must not be null");
         GovernedTermGuard.require(

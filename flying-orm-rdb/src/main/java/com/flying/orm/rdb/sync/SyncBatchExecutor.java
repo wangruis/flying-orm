@@ -14,7 +14,9 @@ import java.util.Objects;
  * 同步批量执行契约。V2 的正式实现使用原生 JDBC，不能把 Publisher 包装成 Reactor 后再阻塞等待。
  *
  * <p>请求仍使用共享的 {@link BatchWriteRequest}，所以参数布局、行数策略、内存预算和结果模型与 R2DBC 一致。
- * 同步实现必须按背压有界消费输入，不能先把整批收进 List。</p>
+ * 同步实现必须按背压有界消费输入，不能先把整批收进 List。ATOMIC 非空批次只参与上层外部事务，
+ * 缺少事务时在业务 SQL 前抛出 IllegalStateException，空批次保留无工作结果。
+ * 仅显式 INDEPENDENT 允许分片局部事务，并拒绝混入外部事务。</p>
  *
  * @author wangr
  * @version v2.0.0
@@ -26,7 +28,7 @@ public interface SyncBatchExecutor {
         return JdbcBatchWriter.create(dataSource);
     }
 
-    /** 执行完整批次并返回提交、回滚、部分完成或未知结果。 */
+    /** 执行完整批次；ATOMIC 返回外部事务参与事实，INDEPENDENT 保留每片实际提交结果。 */
     BatchWriteResult writeBatch(BatchWriteRequest request);
 
     /** 执行批量并返回独立执行证据；旧实现必须显式拒绝，不能退化为 legacy 结果。 */
@@ -35,7 +37,7 @@ public interface SyncBatchExecutor {
         throw new UnsupportedOperationException("sync batch executor does not support execution evidence");
     }
 
-    /** 执行含侧索引维护的批量；不能控制同连接事务的自定义实现必须显式失败。 */
+    /** 执行含侧索引维护的批量；不能遵守同连接事务参与契约的自定义实现必须显式失败。 */
     default BatchWriteResult writeProtectedBatch(BatchWriteRequest request) {
         Objects.requireNonNull(request, "protected batch request must not be null");
         throw new UnsupportedOperationException("sync batch executor does not support protected batch writes");

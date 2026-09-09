@@ -12,6 +12,7 @@ import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.lock.OptimisticLockOptions;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -134,7 +135,7 @@ final class FormScopeSupport {
             return new PreparedBatchScope(safeScope, empty);
         }
         ProtectedFieldRuntime.PreparedQuery prepared = renderer.protection().prepareQuery(
-                form, safePhysicalForm, form, scopeWhere, safeScope);
+                form, safePhysicalForm, scopeWhere, safeScope, List.of());
         return new PreparedBatchScope(safeScope, prepared.where());
     }
 
@@ -152,7 +153,7 @@ final class FormScopeSupport {
         Map<String, Object> logicalValues = update.ownedValues();
         FormPreparedWrite write = protection.prepare(logicalValues);
         ProtectedFieldRuntime.PreparedQuery query = renderer.protection().prepareQuery(
-                form, safePhysicalForm, form, businessWhere, safeBatchScope.scope());
+                form, safePhysicalForm, businessWhere, safeBatchScope.scope(), List.of());
         ConditionGroup where = FormLogicDeletes.activeWhere(
                 form, combineScope(query.where(), safeBatchScope.where()));
         SqlRequest request = renderer.protection().update(write, where, update.lock());

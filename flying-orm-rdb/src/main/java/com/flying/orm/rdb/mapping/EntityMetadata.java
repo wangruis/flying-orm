@@ -39,6 +39,8 @@ public final class EntityMetadata<T> {
     private final RelationIdentity relationIdentity;
 
     private final List<EntityFieldMetadata> fields;
+    private final boolean enumConditionValues;
+    private final List<String> defaultProjection;
 
     private final Map<String, EntityFieldMetadata> fieldsByName;
     private final EntityFieldMetadata tenantField;
@@ -60,6 +62,11 @@ public final class EntityMetadata<T> {
         this.table = requireText(table, "entity table");
         this.relationIdentity = relationIdentity;
         this.fields = List.copyOf(fields);
+        this.enumConditionValues = this.fields.stream().anyMatch(field -> field.enumValueMember() != null
+                || field.enumStorage() != EntityEnumStorage.NONE);
+        this.defaultProjection = this.fields.stream().allMatch(EntityFieldMetadata::selectable)
+                ? null : this.fields.stream().filter(EntityFieldMetadata::selectable)
+                        .map(EntityFieldMetadata::columnName).toList();
         this.fieldsByName = index(this.fields);
         this.tenantField = tenantField == null ? null : field(tenantField);
         this.tenantStrategy = this.tenantField == null
@@ -119,6 +126,17 @@ public final class EntityMetadata<T> {
     /** @return 按实体声明顺序保存的不可修改字段列表 */
     public List<EntityFieldMetadata> fields() {
         return fields;
+    }
+
+    /** Internal condition assembly can skip value-plan lookup for ordinary entity models. */
+    @InternalApi
+    public boolean hasEnumConditionValues() {
+        return enumConditionValues;
+    }
+
+    /** null 表示所有字段均可默认查询；空列表表示没有可默认查询的字段，只在读取时拒绝。 */
+    List<String> defaultProjection() {
+        return defaultProjection;
     }
 
     /**

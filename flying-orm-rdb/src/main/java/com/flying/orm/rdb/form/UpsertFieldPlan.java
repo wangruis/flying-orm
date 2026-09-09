@@ -32,8 +32,19 @@ record UpsertFieldPlan(List<DynamicField> insertFields,
                                   DynamicForm physicalForm,
                                   List<DynamicField> availableFields,
                                   RepositoryUpsertValues stagedValues) {
+        return create(logicalForm, preparedLogicalValues, physicalForm, availableFields, stagedValues, false);
+    }
+
+    static UpsertFieldPlan create(DynamicForm logicalForm,
+                                  Map<String, Object> preparedLogicalValues,
+                                  DynamicForm physicalForm,
+                                  List<DynamicField> availableFields,
+                                  RepositoryUpsertValues stagedValues,
+                                  boolean scopedTarget) {
         DynamicForm logical = Objects.requireNonNull(logicalForm, "logical form must not be null");
-        requireTenantConflictIdentity(logical);
+        if (!scopedTarget) {
+            requireTenantConflictIdentity(logical);
+        }
         List<DynamicField> available = List.copyOf(availableFields);
         List<DynamicField> conflicts = physicalForm.fields().stream()
                                                         .filter(DynamicField::primaryKey)
@@ -42,7 +53,7 @@ record UpsertFieldPlan(List<DynamicField> insertFields,
             return new UpsertFieldPlan(
                     available,
                     conflicts,
-                    available.stream().filter(field -> !field.primaryKey()).toList(),
+                    available.stream().filter(field -> updateCandidate(logical, field, false)).toList(),
                     available);
         }
 
@@ -74,7 +85,7 @@ record UpsertFieldPlan(List<DynamicField> insertFields,
             if (inserts.contains(owner)) {
                 insertFields.add(field);
             }
-            if (!field.primaryKey() && updates.contains(owner)) {
+            if (updates.contains(owner) && updateCandidate(logical, field, true)) {
                 updateFields.add(field);
             }
         }
@@ -88,6 +99,14 @@ record UpsertFieldPlan(List<DynamicField> insertFields,
             }
         }
         return new UpsertFieldPlan(insertFields, conflicts, updateFields, parameters);
+    }
+
+    /** Shared logical exclusion rule for upsert SQL fields and caller field-use approval. */
+    static boolean updateCandidate(DynamicForm form, DynamicField field, boolean staged) {
+        return !field.primaryKey() && (!staged || form.tenant()
+                .map(tenant -> !form.field(tenant.fieldName()).normalizedName()
+                        .equals(field.normalizedName()))
+                .orElse(true));
     }
 
     private static void requireTenantConflictIdentity(DynamicForm form) {

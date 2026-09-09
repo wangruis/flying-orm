@@ -12,6 +12,7 @@ import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageResult;
 import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.scope.FieldScope;
 import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.scope.FieldUseSnapshot;
 import com.flying.orm.core.sql.render.SqlRenderer;
@@ -45,26 +46,38 @@ import java.util.Objects;
 /**
  * 动态表单同步门面。
  *
- * <p>V2 运行时直接使用原生 JDBC 同步执行器。这个类只负责同步表单的统一入口，查询、写入、批量和实体操作
- * 都下沉到运行时协作者；因此调用方不需要感知内部执行分工。</p>
+ * <p>同步入口直接装配原生 JDBC 执行器。查询、写入和批量仍由各自的内部所有者完成，客户端只负责
+ * 对外门面和不可变配置派生，不再经过只有一个实现的运行时转发层。</p>
  *
  * @author wangr
  * @version v2.0.0
  */
 public final class SyncFormClient {
 
-    /** 同步客户端的默认超时时间，供同步边界校验使用。 */
-    public static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
+    /** 同步客户端不设置 ORM 等待预算；保留零值作为兼容接口的明确语义。 */
+    public static final Duration DEFAULT_TIMEOUT = Duration.ZERO;
 
-    private final SyncFormRuntime runtime;
-    private final Duration timeout;
+    private final SyncSqlExecutor sqlExecutor;
+    private final SyncBatchExecutor batchExecutor;
+    private final FormConfiguration configuration;
+    private final SyncFormOperations operations;
+    private final NativeSyncFormBatchOperations batches;
     private final SqlRenderer entityRenderer;
 
-    private SyncFormClient(SyncFormRuntime runtime,
-                           Duration timeout,
+    private SyncFormClient(SyncSqlExecutor sqlExecutor,
+                           SyncBatchExecutor batchExecutor,
+                           FormConfiguration configuration,
                            SqlRenderer entityRenderer) {
-        this.runtime = Objects.requireNonNull(runtime, "sync form runtime must not be null");
-        this.timeout = SyncBlockingGuard.requirePositiveTimeout(timeout, "sync client timeout");
+        this.sqlExecutor = Objects.requireNonNull(sqlExecutor, "sync sql executor must not be null");
+        this.batchExecutor = Objects.requireNonNull(batchExecutor, "sync batch executor must not be null");
+        this.configuration = Objects.requireNonNull(configuration, "sync form configuration must not be null");
+        this.operations = new SyncFormOperations(
+                this.sqlExecutor, configuration.renderer(), configuration.resolver(), configuration.dataScope(),
+                configuration.executionOptions(), configuration.entityModels(), configuration.fieldUsePolicy(),
+                configuration.queryShapeLimits());
+        this.batches = new NativeSyncFormBatchOperations(
+                this.batchExecutor, configuration.renderer(), configuration.resolver(), configuration.dataScope(),
+                configuration.batchOptions(), configuration.fieldUsePolicy());
         this.entityRenderer = entityRenderer;
     }
 
@@ -82,7 +95,7 @@ public final class SyncFormClient {
                                         FormDataSqlRenderer renderer) {
         FormDataSqlRenderer safeRenderer = Objects.requireNonNull(
                 renderer, "form data sql renderer must not be null");
-        SyncFormConfiguration configuration = new SyncFormConfiguration(
+        FormConfiguration configuration = new FormConfiguration(
                 safeRenderer,
                 StructuredConditionResolvers.defaults(safeRenderer.valueCodecs()),
                 DataScope.none(),
@@ -97,24 +110,30 @@ public final class SyncFormClient {
     /** 包内运行时装配入口；对外使用 {@link #create(SyncSqlExecutor, SyncBatchExecutor, FormDataSqlRenderer)}。 */
     static SyncFormClient jdbc(SyncSqlExecutor sqlExecutor,
                                SyncBatchExecutor batchExecutor,
-                               SyncFormConfiguration configuration) {
-        return new SyncFormClient(new JdbcSyncFormRuntime(sqlExecutor, batchExecutor, configuration),
-                                  DEFAULT_TIMEOUT,
-                                  configuration.renderer().conditionRenderer());
+                               FormConfiguration configuration) {
+        FormConfiguration safeConfiguration = Objects.requireNonNull(
+                configuration, "sync form configuration must not be null");
+        return new SyncFormClient(sqlExecutor, batchExecutor, safeConfiguration,
+                                  safeConfiguration.renderer().conditionRenderer());
     }
 
-    public Duration timeout() { return timeout; }
+    /** @return 零值，表示 ORM 不设置同步监听器等待预算；时限由上层控制。 */
+    public Duration timeout() { return DEFAULT_TIMEOUT; }
 
     @InternalApi
-    public BatchWriteOptions defaultBatchWriteOptions() { return runtime.defaultBatchWriteOptions(); }
+    public BatchWriteOptions defaultBatchWriteOptions() { return configuration.batchOptions(); }
 
     @InternalApi
-    public EntityModelRegistry entityModels() { return runtime.entityModels(); }
+    public EntityModelRegistry entityModels() { return configuration.entityModels(); }
+
+    /** 实体默认投影复用客户端已冻结的字段范围；行级 Scope 仍由查询计划统一合并。 */
+    @InternalApi
+    public FieldScope defaultFieldScope() { return configuration.dataScope().fields(); }
 
     /** @return 当前线程正在参与的外部 JDBC 事务；没有外部事务时为空。 */
     @InternalApi
     public java.util.Optional<com.flying.orm.rdb.transaction.JdbcTransactionContext> currentTransaction() {
-        return runtime.currentTransaction();
+        return sqlExecutor.currentTransaction();
     }
 
     /** 原生 JDBC 实体 Lambda 入口，表名、字段和主键都来自统一实体元数据。 */
@@ -128,150 +147,154 @@ public final class SyncFormClient {
         return entityRenderer;
     }
 
-    public List<DynamicRow> select(QuerySpec spec) { return runtime.select(spec); }
+    public List<DynamicRow> select(QuerySpec spec) { return operations.select(spec); }
     /** DML operator 复用完整 Form 计划、保护改写和结果解码，但不重建客户端。 */
     @InternalApi
     public List<DynamicRow> selectGoverned(QuerySpec spec,
                                            FieldUsePolicy policy,
                                            QueryShapeLimits limits) {
-        return runtime.selectGoverned(spec, policy, limits);
+        return operations.selectGoverned(spec, policy, limits);
     }
     /** 在调用方已经开启的 JDBC 事务中执行受控锁定读取；本方法不结束事务。 */
     public List<DynamicRow> lockingRead(LockingReadSpec spec) {
-        return runtime.lockingRead(Objects.requireNonNull(
+        return operations.lockingRead(Objects.requireNonNull(
                 spec, "locking read spec must not be null"));
     }
     /** 执行锁定读取并复用当前实体映射。 */
     public <T> List<T> lockingRead(LockingReadSpec spec, Class<T> type) {
-        return runtime.lockingRead(
+        return operations.lockingRead(
                 Objects.requireNonNull(spec, "locking read spec must not be null"),
                 Objects.requireNonNull(type, "locking read result type must not be null"));
     }
     /** 不执行 SQL、不获取连接，返回与执行路径相同的字段用途审批快照。 */
-    public FieldUseSnapshot previewFieldUse(QuerySpec spec) { return runtime.previewFieldUse(spec); }
+    public FieldUseSnapshot previewFieldUse(QuerySpec spec) { return operations.previewFieldUse(spec); }
     /** JOIN 预览与执行复用同一中央审批函数，且不访问执行器。 */
-    public FieldUseSnapshot previewFieldUse(JoinQuerySpec spec) { return runtime.previewFieldUse(spec); }
+    public FieldUseSnapshot previewFieldUse(JoinQuerySpec spec) { return operations.previewFieldUse(spec); }
     /** 不执行 SQL、不获取连接，返回聚合执行将使用的字段用途审批快照。 */
-    public FieldUseSnapshot previewFieldUse(AggregateSpec spec) { return runtime.previewFieldUse(spec); }
+    public FieldUseSnapshot previewFieldUse(AggregateSpec spec) {
+        return operations.previewFieldUse(configuration, spec);
+    }
     /** 使用 JDBC/R2DBC 共用的计划和布局执行类型化聚合。 */
-    public List<AggregateRow> aggregate(AggregateSpec spec) { return runtime.aggregate(spec); }
+    public List<AggregateRow> aggregate(AggregateSpec spec) {
+        return operations.aggregate(configuration, spec);
+    }
     /** 执行轻量多表查询并使用同步客户端的默认执行保护。 */
-    public List<DynamicRow> selectJoin(JoinQuerySpec spec) { return runtime.selectJoin(spec, null); }
+    public List<DynamicRow> selectJoin(JoinQuerySpec spec) { return operations.selectJoin(spec, null); }
     /** 使用本次显式执行保护执行轻量多表查询。 */
     public List<DynamicRow> selectJoin(JoinQuerySpec spec, SqlExecutionOptions options) {
-        return runtime.selectJoin(spec, Objects.requireNonNull(options, "join execution options must not be null"));
+        return operations.selectJoin(spec, Objects.requireNonNull(options, "join execution options must not be null"));
     }
     /** JOIN 链式算子的内部逐行映射终端；避免先物化完整 DynamicRow 列表。 */
     @InternalApi
     public <T> List<T> selectJoinMapped(JoinQuerySpec spec, RowMapper<T> mapper) {
-        return runtime.selectJoin(
+        return operations.selectJoin(
                 Objects.requireNonNull(spec, "join query spec must not be null"), null,
                 Objects.requireNonNull(mapper, "join row mapper must not be null"));
     }
     /** 使用 JOIN AST 的同一 Scope/条件分别执行 count 与页数据查询。 */
     public PageResult<DynamicRow> pageJoin(JoinQuerySpec spec, PageQuery page) {
-        return runtime.pageJoin(spec, page, null);
+        return operations.pageJoin(spec, page, null);
     }
     /** 使用本次执行保护完成原生 JDBC JOIN 页码分页。 */
     public PageResult<DynamicRow> pageJoin(JoinQuerySpec spec,
                                            PageQuery page,
                                            SqlExecutionOptions options) {
-        return runtime.pageJoin(spec, page, Objects.requireNonNull(
+        return operations.pageJoin(spec, page, Objects.requireNonNull(
                 options, "join execution options must not be null"));
     }
-    public <T> List<T> select(QuerySpec spec, Class<T> type) { return runtime.select(spec, type); }
+    public <T> List<T> select(QuerySpec spec, Class<T> type) { return operations.select(spec, type); }
     /** 实体 Lambda 的内部零或一行终端；JDBC 只读取判定基数所需的两行。 */
     @InternalApi
-    public <T> T selectOne(QuerySpec spec, Class<T> type) { return runtime.selectOne(spec, type); }
-    public PageResult<DynamicRow> page(QuerySpec spec, PageQuery page) { return runtime.page(spec, page); }
+    public <T> T selectOne(QuerySpec spec, Class<T> type) { return operations.selectOne(spec, type); }
+    public PageResult<DynamicRow> page(QuerySpec spec, PageQuery page) { return operations.page(spec, page); }
     public <T> PageResult<T> page(QuerySpec spec, PageQuery page, Class<T> type) {
-        return runtime.page(spec, page, type);
+        return operations.page(spec, page, type);
     }
     public CursorPageResult<DynamicRow> cursorPage(QuerySpec spec, CursorPageQuery page) {
-        return runtime.cursorPage(spec, page);
+        return operations.cursorPage(spec, page);
     }
     public <T> CursorPageResult<T> cursorPage(QuerySpec spec, CursorPageQuery page, Class<T> type) {
-        return runtime.cursorPage(spec, page, type);
+        return operations.cursorPage(spec, page, type);
     }
     /** 执行 nullable、复合排序的稳定 keyset 分页，不执行 count SQL。 */
     public KeysetPageResult<DynamicRow> keysetPage(QuerySpec spec, KeysetPageQuery page) {
-        return runtime.keysetPage(spec, page);
+        return operations.keysetPage(spec, page);
     }
     /** 执行 keyset 分页并在隐藏游标列剥离后映射实体。 */
     public <T> KeysetPageResult<T> keysetPage(
             QuerySpec spec, KeysetPageQuery page, Class<T> type) {
-        return runtime.keysetPage(spec, page, type);
+        return operations.keysetPage(spec, page, type);
     }
     /** 在同一个外部事务中组合稳定 keyset 与受控锁，不额外执行 count。 */
     public KeysetPageResult<DynamicRow> lockingRead(
             LockingReadSpec spec, KeysetPageQuery page) {
-        return runtime.lockingRead(
+        return operations.lockingRead(
                 Objects.requireNonNull(spec, "locking read spec must not be null"),
                 Objects.requireNonNull(page, "keyset page query must not be null"));
     }
     /** 锁定 keyset 的类型化结果入口。 */
     public <T> KeysetPageResult<T> lockingRead(
             LockingReadSpec spec, KeysetPageQuery page, Class<T> type) {
-        return runtime.lockingRead(
+        return operations.lockingRead(
                 Objects.requireNonNull(spec, "locking read spec must not be null"),
                 Objects.requireNonNull(page, "keyset page query must not be null"),
                 Objects.requireNonNull(type, "locking keyset result type must not be null"));
     }
-    public long insert(WriteSpec spec) { return runtime.insert(spec); }
+    public long insert(WriteSpec spec) { return operations.insert(spec); }
 
     /** Repository 的数据库生成主键回填路径；普通动态表单 insert 继续只返回影响行数。 */
     @InternalApi
     public SqlWriteResult insertReturningKeys(WriteSpec spec) {
-        return runtime.insertReturningKeys(spec);
+        return operations.insertReturningKeys(spec);
     }
-    public long update(WriteSpec spec) { return runtime.update(spec); }
-    public long delete(WriteSpec spec) { return runtime.delete(spec); }
-    public long physicalDelete(WriteSpec spec) { return runtime.physicalDelete(spec); }
-    public BatchWriteResult writeBatch(BatchSpec spec) { return runtime.writeBatch(spec); }
+    public long update(WriteSpec spec) { return operations.update(spec); }
+    public long delete(WriteSpec spec) { return operations.delete(spec); }
+    public long physicalDelete(WriteSpec spec) { return operations.physicalDelete(spec); }
+    public BatchWriteResult writeBatch(BatchSpec spec) { return batches.writeBatch(spec); }
     public BatchExecutionEvidence writeBatchEvidence(BatchSpec spec) {
-        return runtime.writeBatchEvidence(spec);
+        return batches.writeBatchEvidence(spec);
     }
-    public List<BatchChunkResult> writeBatchChunks(BatchSpec spec) { return runtime.writeBatchChunks(spec); }
+    public List<BatchChunkResult> writeBatchChunks(BatchSpec spec) { return batches.writeBatchChunks(spec); }
 
     public SyncFormClient withStructuredConditionResolver(StructuredConditionResolver resolver) {
-        return configured(runtime.withResolver(resolver));
+        return configured(configuration.withResolver(resolver));
     }
 
     public SyncFormClient withDefaultExecutionOptions(SqlExecutionOptions options) {
-        return configured(runtime.withExecutionOptions(options));
+        return configured(configuration.withExecutionOptions(options));
     }
 
     public SyncFormClient withDefaultDataScope(DataScope scope) {
-        return configured(runtime.withDataScope(scope));
+        return configured(configuration.withDataScope(configuration.dataScope().and(scope)));
     }
 
     /** 返回绑定字段用途策略的不可变调用视图。 */
     public SyncFormClient withFieldUsePolicy(FieldUsePolicy policy) {
-        return configured(runtime.withFieldUsePolicy(
+        return configured(configuration.withFieldUsePolicy(
                 Objects.requireNonNull(policy, "field use policy must not be null")));
     }
 
     /** 返回绑定更窄查询形状预算的不可变调用视图。 */
     public SyncFormClient withQueryShapeLimits(QueryShapeLimits limits) {
-        return configured(runtime.withQueryShapeLimits(
+        return configured(configuration.withQueryShapeLimits(
                 Objects.requireNonNull(limits, "query shape limits must not be null")));
     }
 
     /** 设置没有显式 options 时采用的批量策略。 */
     public SyncFormClient withDefaultBatchWriteOptions(BatchWriteOptions options) {
-        return configured(runtime.withBatchOptions(
+        return configured(configuration.withBatchOptions(
                 Objects.requireNonNull(options, "batch write options must not be null")));
     }
 
     /** 为当前同步客户端绑定实例级、有界的实体映射缓存。 */
     @InternalApi
     public SyncFormClient withEntityModelRegistry(EntityModelRegistry entityModels) {
-        return configured(runtime.withEntityModels(
+        return configured(configuration.withEntityModels(
                 Objects.requireNonNull(entityModels, "entity model registry must not be null")));
     }
 
-    private SyncFormClient configured(SyncFormRuntime configuredRuntime) {
-        return new SyncFormClient(configuredRuntime, timeout, entityRenderer);
+    private SyncFormClient configured(FormConfiguration configured) {
+        return new SyncFormClient(sqlExecutor, batchExecutor, configured, entityRenderer);
     }
 
     List<DynamicRow> select(DynamicForm form, ConditionGroup where) {
@@ -305,7 +328,7 @@ public final class SyncFormClient {
     }
 
     BatchWriteResult insertBatch(DynamicForm form, List<Map<String, Object>> rows) {
-        return insertBatch(form, rows, runtime.defaultBatchWriteOptions());
+        return insertBatch(form, rows, configuration.batchOptions());
     }
 
     BatchWriteResult insertBatch(DynamicForm form,

@@ -38,7 +38,7 @@ public final class SqlTemplateEngine {
         Map<String, SqlTemplateRenderer.CompiledTemplate> compiled = new LinkedHashMap<>();
         for (SqlTemplateRegistry.Entry entry : safeRegistry.entries()) {
             compiled.put(SqlTemplateRegistry.normalize(entry.template().id()),
-                         SqlTemplateRenderer.compileRegistered(entry.template(), this.backend));
+                         SqlTemplateRenderer.compileReusable(entry.template(), this.backend));
         }
         this.compiledTemplates = Collections.unmodifiableMap(compiled);
     }
@@ -89,7 +89,8 @@ public final class SqlTemplateEngine {
                                            Map<String, ?> values,
                                            RdbDialect dialect,
                                            ValueCodecRegistry valueCodecs) {
-        return compileNative(sql, values, SqlTemplateRenderer.Backend.create(dialect, valueCodecs, false));
+        return prepareNative(sql, SqlTemplateRenderer.Backend.create(dialect, valueCodecs, false))
+                .render(values);
     }
 
     /** 同步 JDBC 使用同一安全扫描过程，但参数标记固定生成 {@code ?}。 */
@@ -98,14 +99,25 @@ public final class SqlTemplateEngine {
                                                Map<String, ?> values,
                                                RdbDialect dialect,
                                                ValueCodecRegistry valueCodecs) {
-        return compileNative(sql, values, SqlTemplateRenderer.Backend.create(dialect, valueCodecs, true));
+        return prepareNative(sql, SqlTemplateRenderer.Backend.create(dialect, valueCodecs, true))
+                .render(values);
     }
 
-    private static SqlRequest compileNative(String sql,
-                                            Map<String, ?> values,
-                                            SqlTemplateRenderer.Backend backend) {
-        SqlTemplate template = SqlTemplate.nativeStatement(sql);
-        return SqlTemplateRenderer.render(template, values, Map.of(), backend);
+    /**
+     * 原生 SQL 调用状态在创建时完成一次方言校验和占位符编译，重复执行时只绑定本次参数。
+     */
+    @InternalApi
+    public static PreparedNativeSql prepareNative(String sql,
+                                                  RdbDialect dialect,
+                                                  ValueCodecRegistry valueCodecs,
+                                                  boolean jdbcBindMarkers) {
+        return prepareNative(
+                sql, SqlTemplateRenderer.Backend.create(dialect, valueCodecs, jdbcBindMarkers));
+    }
+
+    private static PreparedNativeSql prepareNative(String sql, SqlTemplateRenderer.Backend backend) {
+        return new PreparedNativeSql(
+                SqlTemplateRenderer.compileReusable(SqlTemplate.nativeStatement(sql), backend));
     }
 
     private SqlTemplateRenderer.CompiledTemplate compiledTemplate(String templateId) {
@@ -124,5 +136,20 @@ public final class SqlTemplateEngine {
         this.backend = Objects.requireNonNull(backend, "SQL template backend must not be null");
         this.compiledTemplates = Collections.unmodifiableMap(Objects.requireNonNull(
                 compiledTemplates, "compiled SQL templates must not be null"));
+    }
+
+    /** 模块内部复用的原生 SQL 编译结果，不属于业务公开 API。 */
+    @InternalApi
+    public static final class PreparedNativeSql {
+        private final SqlTemplateRenderer.CompiledTemplate compiled;
+
+        private PreparedNativeSql(SqlTemplateRenderer.CompiledTemplate compiled) {
+            this.compiled = Objects.requireNonNull(compiled, "compiled native SQL must not be null");
+        }
+
+        /** 使用当前调用已经收集的参数生成不可变请求。 */
+        public SqlRequest render(Map<String, ?> values) {
+            return SqlTemplateRenderer.renderCompiled(compiled, values, Map.of(), false);
+        }
     }
 }

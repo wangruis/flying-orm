@@ -224,7 +224,7 @@ final class SqlExecutionLogFormatter {
     private static String maskSql(String sql, int maxLength) {
         StringBuilder masked = new StringBuilder(Math.min(sql.length(), maxLength));
         try {
-            SqlLexicalScanner.scan(sql, SqlLexicalScanner.genericRules(), false,
+            SqlLexicalScanner.scan(sql, SqlLexicalScanner.redactionRules(), false,
                     (kind, start, end) -> appendMaskedSqlSegment(masked, sql, kind, start, end, maxLength));
         } catch (IllegalArgumentException malformedSql) {
             return limitedValue("<invalid SQL>", maxLength);

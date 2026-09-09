@@ -64,11 +64,11 @@ final class SyncRepositoryBatchSupport<T> {
                                                    options.maxBufferedBytes());
     }
 
-    RepositoryBatchLifecyclePlan lifecyclePlan(SyncRepositoryBatchCoordinator.BatchKind kind,
-                                                boolean returnGeneratedKeys) {
+    boolean requiresLifecycleTracking(SyncRepositoryBatchCoordinator.BatchKind kind,
+                                      boolean returnGeneratedKeys) {
         EntityLifecyclePhase after = kind == SyncRepositoryBatchCoordinator.BatchKind.UPDATE
                 ? EntityLifecyclePhase.POST_UPDATE : EntityLifecyclePhase.POST_PERSIST;
-        return RepositoryBatchLifecyclePlan.select(lifecycle.hasWork(after), returnGeneratedKeys);
+        return lifecycle.hasWork(after) || returnGeneratedKeys;
     }
 
     void requireStableWriteLayout(SyncRepositoryBatchCoordinator.BatchKind kind) {

@@ -1,27 +1,19 @@
 package com.flying.orm.rdb.metadata;
 
-import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.sql.render.SqlRequest;
-import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
-import com.flying.orm.rdb.schema.SchemaSnapshot;
-import com.flying.orm.rdb.schema.SchemaSnapshotCoverage;
 import com.flying.orm.rdb.type.DatabaseTypes;
-import reactor.core.publisher.Mono;
 
 import java.util.List;
-import java.util.Objects;
 
 /**
- * MySQL 的动态表单元数据读取器，读取 information_schema 的列、主键、索引和外键信息。
- * catalog/schema 差异封装在参数化查询模板里，共享转换层只看到统一列别名。
- * 具体实现由 {@link ReactiveFormMetadataReaders} 在包内选择，避免业务绑定数据库字典 SQL。
+ * MySQL 的元数据查询定义。这里仅保存 INFORMATION_SCHEMA 的方言事实，
+ * 查询编排和结果组装统一由 {@link InformationSchemaFormMetadataReader} 负责。
  *
  * @author wangr
  * @date 2026-07-28
  * @version v1.0
  */
-final class MySqlReactiveFormMetadataReader implements ReactiveFormMetadataReader, ReactiveMetadataExecutorSource {
+final class MySqlMetadataQueries {
 
     private static final String OFFSET_TIME_MARKER = "[[flying-orm:v1:OFFSET_TIME]]";
     private static final String COMMENT_ESCAPE = "[[flying-orm:v1:COMMENT]]";
@@ -51,6 +43,7 @@ final class MySqlReactiveFormMetadataReader implements ReactiveFormMetadataReade
                            then c.COLUMN_TYPE
                        else c.DATA_TYPE
                    end as DATA_TYPE,
+                   c.COLUMN_TYPE as PHYSICAL_DATA_TYPE,
                    c.CHARACTER_MAXIMUM_LENGTH,
                    c.NUMERIC_PRECISION,
                    c.NUMERIC_SCALE,
@@ -73,7 +66,8 @@ final class MySqlReactiveFormMetadataReader implements ReactiveFormMetadataReade
                                   and lower(c.EXTRA) not like '%invisible%'
                                   and lower(c.EXTRA) not like '%storage%'
                                   and lower(c.EXTRA) not like '%column_format%'
-                                  and (lower(c.EXTRA) not like '%default_generated%'
+                                  and (c.COLUMN_DEFAULT is null
+                                       or lower(c.EXTRA) not like '%default_generated%'
                                        or ${SUPPORTED_DEFAULT_EXPRESSION})
                         then true else false end as COLUMN_REPRESENTABLE,
                    case
@@ -90,16 +84,11 @@ final class MySqlReactiveFormMetadataReader implements ReactiveFormMetadataReade
                    end as UNSUPPORTED_COLUMN_REASON,
                    c.COLUMN_DEFAULT as COLUMN_DEFAULT,
                    null as GENERATION_EXPRESSION,
-                   case when c.COLLATION_NAME <> table_options.TABLE_COLLATION
-                        then c.CHARACTER_SET_NAME else null end as COLUMN_CHARSET,
-                   case when c.COLLATION_NAME <> table_options.TABLE_COLLATION
-                        then c.COLLATION_NAME else null end as COLUMN_COLLATION,
+                   c.CHARACTER_SET_NAME as COLUMN_CHARSET,
+                   c.COLLATION_NAME as COLUMN_COLLATION,
                    case when lower(c.EXTRA) like '%auto_increment%' then true else false end as IS_IDENTITY,
                    case when pk.CONSTRAINT_NAME is null then false else true end as PRIMARY_KEY
             from information_schema.COLUMNS c
-            join information_schema.TABLES table_options
-              on table_options.TABLE_SCHEMA = c.TABLE_SCHEMA
-             and table_options.TABLE_NAME = c.TABLE_NAME
             left join (
                 select pk_kcu.TABLE_SCHEMA,
                        pk_kcu.TABLE_NAME,
@@ -216,9 +205,10 @@ final class MySqlReactiveFormMetadataReader implements ReactiveFormMetadataReade
     private static final String BASE_UNIQUE_SQL = """
             select tc.CONSTRAINT_NAME,
                    kcu.COLUMN_NAME,
+                   case when s.COLLATION = 'D' then 'DESC' else 'ASC' end as INDEX_DIRECTION,
                    case when s.COLUMN_NAME = kcu.COLUMN_NAME
                                   and s.SUB_PART is null
-                                  and s.COLLATION = 'A'
+                                  and s.COLLATION in ('A', 'D')
                                   and s.INDEX_TYPE = 'BTREE'
                                   and s.IS_VISIBLE = 'YES'
                                   and coalesce(s.INDEX_COMMENT, '') = ''
@@ -248,103 +238,34 @@ final class MySqlReactiveFormMetadataReader implements ReactiveFormMetadataReade
             where tc.CONSTRAINT_TYPE = 'CHECK' and tc.TABLE_NAME = ?
             """;
 
-    private final InformationSchemaFormMetadataReader delegate;
-
-    private MySqlReactiveFormMetadataReader(ReactiveSqlExecutor executor) {
-        this.delegate = new InformationSchemaFormMetadataReader(Objects.requireNonNull(executor,
-                                                                                       "reactive sql executor must not be null"),
-                                                                queries());
-    }
-
-    static MySqlReactiveFormMetadataReader create(ReactiveSqlExecutor executor) {
-        return new MySqlReactiveFormMetadataReader(executor);
+    private MySqlMetadataQueries() {
     }
 
     static InformationSchemaFormMetadataReader.Queries queries() {
         return InformationSchemaFormMetadataReader.Queries.complete(
-                MySqlReactiveFormMetadataReader::columnQuery,
-                MySqlReactiveFormMetadataReader::indexQuery,
-                MySqlReactiveFormMetadataReader::foreignKeyQuery,
-                MySqlReactiveFormMetadataReader::logicalType,
-                MySqlReactiveFormMetadataReader::tableQuery,
-                MySqlReactiveFormMetadataReader::primaryKeyQuery,
-                MySqlReactiveFormMetadataReader::uniqueConstraintQuery,
-                MySqlReactiveFormMetadataReader::checkConstraintQuery,
+                MySqlMetadataQueries::columnQuery,
+                MySqlMetadataQueries::indexQuery,
+                MySqlMetadataQueries::foreignKeyQuery,
+                MySqlMetadataQueries::logicalType,
+                MySqlMetadataQueries::tableQuery,
+                MySqlMetadataQueries::primaryKeyQuery,
+                MySqlMetadataQueries::uniqueConstraintQuery,
+                MySqlMetadataQueries::checkConstraintQuery,
                 InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL);
     }
 
-    @Override
-    public ReactiveSqlExecutor metadataExecutor() {
-        return delegate.metadataExecutor();
-    }
-
-    @Override
-    public SchemaSnapshotCoverage snapshotCoverage() {
-        return delegate.snapshotCoverage();
-    }
-
-    @Override
-    public Mono<DynamicForm> readForm(String formId, String table) {
-        return delegate.readForm(formId, table);
-    }
-
-    @Override
-    public Mono<DynamicForm> readForm(String formId, String schema, String table) {
-        return delegate.readForm(formId, schema, table);
-    }
-
-    @Override
-    public Mono<TableMetadata> readTable(String table) {
-        return delegate.readTable(table);
-    }
-
-    @Override
-    public Mono<TableMetadata> readTable(String schema, String table) {
-        return delegate.readTable(schema, table);
-    }
-
-    @Override
-    public Mono<SchemaSnapshot> readSnapshot(String table) {
-        return delegate.readSnapshot(table);
-    }
-
-    @Override
-    public Mono<SchemaSnapshot> readSnapshot(String schema, String table) {
-        return delegate.readSnapshot(schema, table);
-    }
-
     private static SqlRequest columnQuery(String schema, String table) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            return new SqlRequest(BASE_COLUMNS_SQL + " and c.TABLE_SCHEMA = DATABASE() order by c.ORDINAL_POSITION",
-                                  List.of(safeTable));
-        }
-        String sql = BASE_COLUMNS_SQL + " and c.TABLE_SCHEMA = ? order by c.ORDINAL_POSITION";
-        return new SqlRequest(sql, List.of(safeTable, schema.trim()));
+        return scopedQuery(BASE_COLUMNS_SQL, schema, table, "c", " order by c.ORDINAL_POSITION");
     }
 
     private static SqlRequest indexQuery(String schema, String table) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            return new SqlRequest(BASE_INDEXES_SQL
-                                          + " and s.TABLE_SCHEMA = DATABASE() order by s.INDEX_NAME, s.SEQ_IN_INDEX",
-                                  List.of(safeTable));
-        }
-        String sql = BASE_INDEXES_SQL + " and s.TABLE_SCHEMA = ? order by s.INDEX_NAME, s.SEQ_IN_INDEX";
-        return new SqlRequest(sql, List.of(safeTable, schema.trim()));
+        return scopedQuery(BASE_INDEXES_SQL, schema, table, "s",
+                           " order by s.INDEX_NAME, s.SEQ_IN_INDEX");
     }
 
     private static SqlRequest foreignKeyQuery(String schema, String table) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            return new SqlRequest(BASE_FOREIGN_KEYS_SQL
-                                          + " and kcu.TABLE_SCHEMA = DATABASE()"
-                                          + " order by kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION",
-                                  List.of(safeTable));
-        }
-        String sql = BASE_FOREIGN_KEYS_SQL
-                + " and kcu.TABLE_SCHEMA = ? order by kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION";
-        return new SqlRequest(sql, List.of(safeTable, schema.trim()));
+        return scopedQuery(BASE_FOREIGN_KEYS_SQL, schema, table, "kcu",
+                           " order by kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION");
     }
 
     private static SqlRequest tableQuery(String schema, String table) {

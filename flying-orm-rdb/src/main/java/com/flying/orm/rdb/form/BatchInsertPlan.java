@@ -25,7 +25,9 @@ record BatchInsertPlan(SqlStatementPlan statement,
                        List<DynamicField> layout,
                        BatchColumnLayout columnLayout,
                        Object[] firstParameters,
-                       List<Class<?>> parameterTypes) {
+                       List<Class<?>> parameterTypes,
+                       List<Object> scopeParameters,
+                       int scopeParameterIndex) {
 
     BatchInsertPlan {
         statement = Objects.requireNonNull(statement, "batch insert statement must not be null");
@@ -35,13 +37,31 @@ record BatchInsertPlan(SqlStatementPlan statement,
                 firstParameters, "batch first parameters must not be null");
         parameterTypes = List.copyOf(Objects.requireNonNull(parameterTypes,
                                                             "batch insert parameter types must not be null"));
-        if (layout.size() != parameterTypes.size() || layout.size() != firstParameters.length) {
+        scopeParameters = scopeParameters.isEmpty() ? List.of()
+                : java.util.Collections.unmodifiableList(new java.util.ArrayList<>(scopeParameters));
+        if (layout.size() + scopeParameters.size() != parameterTypes.size()
+                || parameterTypes.size() != firstParameters.length
+                || scopeParameterIndex < 0 || scopeParameterIndex > layout.size()) {
             throw new IllegalArgumentException("batch insert parameter type count must match layout size");
         }
     }
 
     Object[] parameters(Map<String, Object> row, long rowIndex) {
-        return columnLayout.parameters(row, rowIndex);
+        if (scopeParameters.isEmpty()) {
+            return columnLayout.parameters(row, rowIndex);
+        }
+        // 每行只分配最终参数数组。MySQL 把 Scope 放在 UPDATE-only 参数前，其余方言直接追加。
+        Object[] parameters = new Object[parameterTypes.size()];
+        columnLayout.writeParameters(row, rowIndex, parameters);
+        int tail = layout.size() - scopeParameterIndex;
+        if (tail > 0) {
+            System.arraycopy(parameters, scopeParameterIndex, parameters,
+                             scopeParameterIndex + scopeParameters.size(), tail);
+        }
+        for (int index = 0; index < scopeParameters.size(); index++) {
+            parameters[scopeParameterIndex + index] = scopeParameters.get(index);
+        }
+        return parameters;
     }
 
     String sql() {

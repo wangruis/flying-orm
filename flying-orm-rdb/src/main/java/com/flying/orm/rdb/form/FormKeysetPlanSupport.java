@@ -32,7 +32,7 @@ final class FormKeysetPlanSupport {
             KeysetPageQuery page) {
         QuerySpec safeSpec = Objects.requireNonNull(spec, "query spec must not be null");
         KeysetPageQuery safePage = requirePage(safeSpec, page);
-        return plan(planner, safeSpec, safePage,
+        return plan(planner, safeSpec, safePage, null, null,
                     FormReadPlanSupport.scopedRead(planner, safeSpec), safeSpec.sensitiveDisplayMode());
     }
 
@@ -46,7 +46,7 @@ final class FormKeysetPlanSupport {
         KeysetPageQuery safePage = requirePage(safeSpec, page);
         FormScopeSupport.GovernedRead governed = FormReadPlanSupport.governedRead(planner, safeSpec);
         FormOperationPlanner.PlannedKeysetPage plan = plan(
-                planner, safeSpec, safePage, governed.read(),
+                planner, safeSpec, safePage, null, null, governed.read(),
                 FieldUseGuard.effectiveDisplayMode(policy, safeSpec.sensitiveDisplayMode()));
         return FieldUseGuard.keyset(
                 plan, planner.renderer, safeSpec, governed.businessWhere(), plan.outputFields(),
@@ -64,7 +64,7 @@ final class FormKeysetPlanSupport {
         QuerySpec querySpec = safeSpec.query();
         KeysetPageQuery safePage = requirePage(
                 querySpec, Objects.requireNonNull(page, "keyset page query must not be null"));
-        FormOperationPlanner.PlannedKeysetPage query = planLocking(
+        FormOperationPlanner.PlannedKeysetPage query = plan(
                 planner, querySpec, safePage, dialect, safeSpec.lock(),
                 FormReadPlanSupport.scopedRead(planner, querySpec), querySpec.sensitiveDisplayMode());
         return new FormOperationPlanner.PlannedLockingKeysetRead(
@@ -86,7 +86,7 @@ final class FormKeysetPlanSupport {
         KeysetPageQuery safePage = requirePage(
                 querySpec, Objects.requireNonNull(page, "keyset page query must not be null"));
         FormScopeSupport.GovernedRead governed = FormReadPlanSupport.governedRead(planner, querySpec);
-        FormOperationPlanner.PlannedKeysetPage query = planLocking(
+        FormOperationPlanner.PlannedKeysetPage query = plan(
                 planner, querySpec, safePage, dialect, safeSpec.lock(), governed.read(),
                 FieldUseGuard.effectiveDisplayMode(policy, querySpec.sensitiveDisplayMode()));
         FormOperationPlanner.PlannedLockingKeysetRead locking =
@@ -102,31 +102,7 @@ final class FormKeysetPlanSupport {
             FormOperationPlanner planner,
             QuerySpec spec,
             KeysetPageQuery page,
-            ScopedRead read,
-            SensitiveDisplayMode displayMode) {
-        KeysetPageNormalizer.NormalizedKeysetPage normalized = KeysetPageNormalizer.normalize(
-                spec.form(), page);
-        FormQueryShapeGuard.requireReadableUnprotectedKeysetSorts(
-                spec.form(), read.form(), normalized, displayMode);
-        List<String> projections = FormQueryShapeGuard.readableProjections(spec, read.form());
-        List<String> outputFields = FormQueryShapeGuard.outputFields(projections, read.form());
-        HiddenProjectionLayout layout = HiddenProjectionLayout.of(outputFields, normalized);
-        requireNoProtectedContains(planner, spec, read);
-        ProtectedFieldRuntime.PreparedQuery query = planner.renderer.protection().prepareQuery(
-                spec.form(), read.form(), read.where(), read.scope());
-        query = FormReadPlanSupport.withProjection(query, projections);
-        SqlRequest request = planner.renderer.protection().selectKeyset(query, layout, normalized);
-        return new FormOperationPlanner.PlannedKeysetPage(
-                spec.form(), request, normalized, layout,
-                FormReadPlanSupport.executionOptions(planner, spec),
-                read.scope(), displayMode, outputFields);
-    }
-
-    private static FormOperationPlanner.PlannedKeysetPage planLocking(
-            FormOperationPlanner planner,
-            QuerySpec spec,
-            KeysetPageQuery page,
-            LockingReadDialect dialect,
+            LockingReadDialect lockingDialect,
             ReadLock lock,
             ScopedRead read,
             SensitiveDisplayMode displayMode) {
@@ -139,10 +115,11 @@ final class FormKeysetPlanSupport {
         HiddenProjectionLayout layout = HiddenProjectionLayout.of(outputFields, normalized);
         requireNoProtectedContains(planner, spec, read);
         ProtectedFieldRuntime.PreparedQuery query = planner.renderer.protection().prepareQuery(
-                spec.form(), read.form(), read.where(), read.scope());
-        query = FormReadPlanSupport.withProjection(query, projections);
-        SqlRequest request = planner.renderer.protection().selectKeysetLocking(
-                query, layout, normalized, dialect, lock);
+                spec.form(), read.where(), read.scope(), List.of());
+        SqlRequest request = lockingDialect == null
+                ? planner.renderer.protection().selectKeyset(query, layout, normalized)
+                : planner.renderer.protection().selectKeysetLocking(
+                        query, layout, normalized, lockingDialect, lock);
         return new FormOperationPlanner.PlannedKeysetPage(
                 spec.form(), request, normalized, layout,
                 FormReadPlanSupport.executionOptions(planner, spec),

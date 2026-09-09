@@ -30,7 +30,7 @@ public final class EntityDmlDeleteOperator<T> {
     }
 
     /** 添加严格等值条件；null 不会被静默忽略。 */
-    public EntityDmlDeleteOperator<T> where(EntityProperty<T, ?> property, Object value) { command.state().where().equal(property, value); return this; }
+    public EntityDmlDeleteOperator<T> where(EntityProperty<T, ?> property, Object value) { command.state().where().where(property, value); return this; }
     /** 继续追加严格 AND 等值条件。 */
     public EntityDmlDeleteOperator<T> and(EntityProperty<T, ?> property, Object value) { return where(property, value); }
     /** 使用已注册条件运算符追加 AND 条件。 */

@@ -1,27 +1,19 @@
 package com.flying.orm.rdb.metadata;
 
-import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.sql.render.SqlRequest;
-import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
-import com.flying.orm.rdb.schema.SchemaSnapshot;
-import com.flying.orm.rdb.schema.SchemaSnapshotCoverage;
 import com.flying.orm.rdb.type.DatabaseTypes;
-import reactor.core.publisher.Mono;
 
 import java.util.List;
-import java.util.Objects;
 
 /**
- * SQL Server 的动态表单元数据读取器，读取 INFORMATION_SCHEMA，并从扩展属性取列注释。
- * schema 条件和扩展属性关联都在本方言实现中收口，对上层仍返回统一只读元数据。
- * 具体实现由 {@link ReactiveFormMetadataReaders} 在包内选择，业务不直接依赖系统目录查询。
+ * SQL Server 的元数据查询定义。这里仅保存 INFORMATION_SCHEMA 和系统目录的方言事实，
+ * 查询编排和结果组装统一由 {@link InformationSchemaFormMetadataReader} 负责。
  *
  * @author wangr
  * @date 2026-07-28
  * @version v1.0
  */
-final class SqlServerReactiveFormMetadataReader implements ReactiveFormMetadataReader, ReactiveMetadataExecutorSource {
+final class SqlServerMetadataQueries {
 
     private static final String OFFSET_TIME_MARKER = "[[flying-orm:v1:OFFSET_TIME]]";
     private static final String COMMENT_ESCAPE = "[[flying-orm:v1:COMMENT]]";
@@ -32,18 +24,22 @@ final class SqlServerReactiveFormMetadataReader implements ReactiveFormMetadataR
                    case
                        when convert(varbinary(128), left(cast(ep.value as nvarchar(4000)),
                                                          len('${COMMENT_ESCAPE}')))
-                                = convert(varbinary(128), '${COMMENT_ESCAPE}')
+                                = convert(varbinary(128), N'${COMMENT_ESCAPE}')
                            then c.DATA_TYPE
                        when lower(c.DATA_TYPE) = 'varchar' and c.CHARACTER_MAXIMUM_LENGTH = 32
                             and convert(varbinary(128), left(cast(ep.value as nvarchar(4000)),
                                                              len('${OFFSET_TIME_MARKER}')))
-                                = convert(varbinary(128), '${OFFSET_TIME_MARKER}')
+                                = convert(varbinary(128), N'${OFFSET_TIME_MARKER}')
                            then 'OFFSET_TIME'
                        when lower(c.DATA_TYPE) in ('nvarchar', 'varchar')
                             and c.CHARACTER_MAXIMUM_LENGTH = -1
                            then lower(c.DATA_TYPE) + '(max)'
                        else c.DATA_TYPE
                    end as DATA_TYPE,
+                   case when lower(c.DATA_TYPE) in ('nvarchar', 'varchar', 'varbinary')
+                                  and c.CHARACTER_MAXIMUM_LENGTH = -1
+                        then lower(c.DATA_TYPE) + '(max)'
+                        else c.DATA_TYPE end as PHYSICAL_DATA_TYPE,
                    c.CHARACTER_MAXIMUM_LENGTH,
                    c.NUMERIC_PRECISION,
                    c.NUMERIC_SCALE,
@@ -52,18 +48,19 @@ final class SqlServerReactiveFormMetadataReader implements ReactiveFormMetadataR
                    case
                        when convert(varbinary(128), left(cast(ep.value as nvarchar(4000)),
                                                          len('${COMMENT_ESCAPE}')))
-                                = convert(varbinary(128), '${COMMENT_ESCAPE}')
+                                = convert(varbinary(128), N'${COMMENT_ESCAPE}')
                            then substring(cast(ep.value as nvarchar(4000)), len('${COMMENT_ESCAPE}') + 1, 4000)
                        when lower(c.DATA_TYPE) = 'varchar' and c.CHARACTER_MAXIMUM_LENGTH = 32
                             and convert(varbinary(128), left(cast(ep.value as nvarchar(4000)),
                                                              len('${OFFSET_TIME_MARKER}')))
-                                = convert(varbinary(128), '${OFFSET_TIME_MARKER}')
+                                = convert(varbinary(128), N'${OFFSET_TIME_MARKER}')
                            then nullif(substring(cast(ep.value as nvarchar(4000)),
                                                 len('${OFFSET_TIME_MARKER}') + 1, 4000), '')
                        else cast(ep.value as nvarchar(4000))
                    end as REMARKS,
                    c.IS_NULLABLE as NULLABLE,
                    dc.definition as COLUMN_DEFAULT,
+                   dc.name as DEFAULT_CONSTRAINT_NAME,
                    dc.definition as GENERATION_EXPRESSION,
                    try_convert(bigint, coalesce(idc.seed_value, generation_sequence.start_value))
                        as GENERATION_START,
@@ -74,8 +71,7 @@ final class SqlServerReactiveFormMetadataReader implements ReactiveFormMetadataR
                             then coalesce(generation_sequence.cache_size, 0)
                         else null end as GENERATION_CACHE,
                    null as COLUMN_CHARSET,
-                   case when c.COLLATION_NAME = convert(nvarchar(128), databasepropertyex(db_name(), 'Collation'))
-                        then null else c.COLLATION_NAME end as COLUMN_COLLATION,
+                   c.COLLATION_NAME as COLUMN_COLLATION,
                    cast(case when idc.column_id is null then 0 else 1 end as bit) as IS_IDENTITY,
                    cast(case when sc.is_computed = 0
                                   and sc.is_rowguidcol = 0
@@ -98,7 +94,7 @@ final class SqlServerReactiveFormMetadataReader implements ReactiveFormMetadataR
                                            and generation_sequence.is_cached = 1
                                            and try_convert(bigint, generation_sequence.start_value) is not null
                                            and try_convert(bigint, generation_sequence.increment) is not null))
-                                  and not (lower(c.DATA_TYPE) in ('varchar', 'varbinary')
+                                  and not (lower(c.DATA_TYPE) = 'varchar'
                                            and c.CHARACTER_MAXIMUM_LENGTH = -1)
                              then 1 else 0 end as bit) as COLUMN_REPRESENTABLE,
                    case
@@ -129,8 +125,6 @@ final class SqlServerReactiveFormMetadataReader implements ReactiveFormMetadataR
                            then 'sequence options exceed canonical range'
                        when lower(c.DATA_TYPE) = 'varchar' and c.CHARACTER_MAXIMUM_LENGTH = -1
                            then 'varchar(max) cannot be reconstructed exactly'
-                       when lower(c.DATA_TYPE) = 'varbinary' and c.CHARACTER_MAXIMUM_LENGTH = -1
-                           then 'varbinary(max) cannot be reconstructed exactly'
                        else null
                    end as UNSUPPORTED_COLUMN_REASON,
                    case when pk.CONSTRAINT_NAME is null then cast(0 as bit) else cast(1 as bit) end as PRIMARY_KEY
@@ -189,9 +183,11 @@ final class SqlServerReactiveFormMetadataReader implements ReactiveFormMetadataR
     private static final String BASE_INDEXES_SQL = """
             select i.name as INDEX_NAME,
                    c.name as COLUMN_NAME,
+                   i.has_filter as INDEX_FILTERED,
+                   i.filter_definition as INDEX_FILTER,
                    cast(case when i.is_unique = 1 then 1 else 0 end as bit) as UNIQUE_INDEX,
                    cast(case when i.type_desc = 'NONCLUSTERED'
-                                  and i.has_filter = 0
+                                  and (i.has_filter = 0 or i.is_unique = 1)
                                   and i.is_disabled = 0
                                   and i.is_hypothetical = 0
                                   and i.fill_factor = 0
@@ -369,75 +365,27 @@ final class SqlServerReactiveFormMetadataReader implements ReactiveFormMetadataR
             where t.name = ?
             """;
 
-    private final InformationSchemaFormMetadataReader delegate;
-
-    private SqlServerReactiveFormMetadataReader(ReactiveSqlExecutor executor) {
-        this.delegate = new InformationSchemaFormMetadataReader(Objects.requireNonNull(executor,
-                                                                                       "reactive sql executor must not be null"),
-                                                                                       queries());
-    }
-
-    static SqlServerReactiveFormMetadataReader create(ReactiveSqlExecutor executor) {
-        return new SqlServerReactiveFormMetadataReader(executor);
+    private SqlServerMetadataQueries() {
     }
 
     static InformationSchemaFormMetadataReader.Queries queries() {
         return InformationSchemaFormMetadataReader.Queries.complete(
-                SqlServerReactiveFormMetadataReader::columnQuery,
-                SqlServerReactiveFormMetadataReader::indexQuery,
-                SqlServerReactiveFormMetadataReader::foreignKeyQuery,
-                SqlServerReactiveFormMetadataReader::logicalType,
-                SqlServerReactiveFormMetadataReader::tableQuery,
-                SqlServerReactiveFormMetadataReader::primaryKeyQuery,
-                SqlServerReactiveFormMetadataReader::uniqueConstraintQuery,
-                SqlServerReactiveFormMetadataReader::checkConstraintQuery,
+                SqlServerMetadataQueries::columnQuery,
+                SqlServerMetadataQueries::indexQuery,
+                SqlServerMetadataQueries::foreignKeyQuery,
+                SqlServerMetadataQueries::logicalType,
+                SqlServerMetadataQueries::tableQuery,
+                SqlServerMetadataQueries::primaryKeyQuery,
+                SqlServerMetadataQueries::uniqueConstraintQuery,
+                SqlServerMetadataQueries::checkConstraintQuery,
                 InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER);
-    }
-
-    @Override
-    public ReactiveSqlExecutor metadataExecutor() {
-        return delegate.metadataExecutor();
-    }
-
-    @Override
-    public SchemaSnapshotCoverage snapshotCoverage() {
-        return delegate.snapshotCoverage();
-    }
-
-    @Override
-    public Mono<DynamicForm> readForm(String formId, String table) {
-        return delegate.readForm(formId, table);
-    }
-
-    @Override
-    public Mono<DynamicForm> readForm(String formId, String schema, String table) {
-        return delegate.readForm(formId, schema, table);
-    }
-
-    @Override
-    public Mono<TableMetadata> readTable(String table) {
-        return delegate.readTable(table);
-    }
-
-    @Override
-    public Mono<TableMetadata> readTable(String schema, String table) {
-        return delegate.readTable(schema, table);
-    }
-
-    @Override
-    public Mono<SchemaSnapshot> readSnapshot(String table) {
-        return delegate.readSnapshot(table);
-    }
-
-    @Override
-    public Mono<SchemaSnapshot> readSnapshot(String schema, String table) {
-        return delegate.readSnapshot(schema, table);
     }
 
     private static SqlRequest columnQuery(String schema, String table) {
         String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
         if (schema == null || schema.isBlank()) {
-            String sql = BASE_COLUMNS_SQL + " and t.object_id = object_id(?) order by c.ORDINAL_POSITION";
+            // 表名已经是一段身份；先引用再查 OBJECT_ID，避免字面点号再次被当成 schema 分隔符。
+            String sql = BASE_COLUMNS_SQL + " and t.object_id = object_id(quotename(?)) order by c.ORDINAL_POSITION";
             return new SqlRequest(sql, List.of(safeTable, safeTable));
         }
         String sql = BASE_COLUMNS_SQL + " and c.TABLE_SCHEMA = ? order by c.ORDINAL_POSITION";
@@ -447,7 +395,7 @@ final class SqlServerReactiveFormMetadataReader implements ReactiveFormMetadataR
     private static SqlRequest indexQuery(String schema, String table) {
         String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
         if (schema == null || schema.isBlank()) {
-            String sql = BASE_INDEXES_SQL + " and t.object_id = object_id(?) order by i.name, ic.key_ordinal";
+            String sql = BASE_INDEXES_SQL + " and t.object_id = object_id(quotename(?)) order by i.name, ic.key_ordinal";
             return new SqlRequest(sql, List.of(safeTable, safeTable));
         }
         String sql = BASE_INDEXES_SQL + " and s.name = ? order by i.name, ic.key_ordinal";
@@ -458,7 +406,7 @@ final class SqlServerReactiveFormMetadataReader implements ReactiveFormMetadataR
         String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
         if (schema == null || schema.isBlank()) {
             String sql = BASE_FOREIGN_KEYS_SQL
-                    + " and pt.object_id = object_id(?) order by fk.name, fkc.constraint_column_id";
+                    + " and pt.object_id = object_id(quotename(?)) order by fk.name, fkc.constraint_column_id";
             return new SqlRequest(sql, List.of(safeTable, safeTable));
         }
         String sql = BASE_FOREIGN_KEYS_SQL + " and ps.name = ? order by fk.name, fkc.constraint_column_id";
@@ -487,7 +435,7 @@ final class SqlServerReactiveFormMetadataReader implements ReactiveFormMetadataR
             String baseSql, String schema, String table, String orderBy) {
         String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
         if (schema == null || schema.isBlank()) {
-            return new SqlRequest(baseSql + " and t.object_id = object_id(?)" + orderBy,
+            return new SqlRequest(baseSql + " and t.object_id = object_id(quotename(?))" + orderBy,
                                   List.of(safeTable, safeTable));
         }
         return new SqlRequest(baseSql + " and s.name = ?" + orderBy,

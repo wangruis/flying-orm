@@ -10,6 +10,7 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.util.Objects;
 
 /** 查询开始时预计算的标量读取策略；逐单元格只执行值形态保护和目标 codec。 */
@@ -54,6 +55,9 @@ record FormScalarReadPlan(Class<?> targetType,
         // MySQL TIMESTAMP 按公开契约使用 UTC 会话并以 LocalDateTime 返回绝对时间。
         if (mysqlUtc && value instanceof LocalDateTime localDateTime) {
             return valueCodecs.read(localDateTime.toInstant(ZoneOffset.UTC), targetType);
+        }
+        if (mysqlUtc && value instanceof ZonedDateTime zonedDateTime) {
+            return valueCodecs.read(zonedDateTime.toInstant(), targetType);
         }
         if (numeric) {
             if (value instanceof Boolean) {

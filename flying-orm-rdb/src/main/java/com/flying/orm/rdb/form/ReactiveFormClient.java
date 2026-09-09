@@ -9,6 +9,7 @@ import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageResult;
 import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.scope.FieldScope;
 import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.scope.FieldUseSnapshot;
 import com.flying.orm.core.sql.render.SqlRenderer;
@@ -53,34 +54,22 @@ import java.util.Objects;
  */
 public final class ReactiveFormClient {
 
-    private final ReactiveFormOperationContext context;
+    private final ReactiveSqlExecutor executor;
+    private final FormConfiguration configuration;
     private final ReactiveFormOperations operations;
     private final FormDataSqlRenderer renderer;
     private final ReactiveFormResultSupport results;
-    private final EntityModelRegistry entityModels;
-    private final BatchWriteOptions defaultBatchWriteOptions;
 
     private ReactiveFormClient(ReactiveSqlExecutor executor, FormDataSqlRenderer renderer) {
-        this(new ReactiveFormOperationContext(executor,
-                                              renderer,
-                                              StructuredConditionResolver.defaults(Objects.requireNonNull(
-                                                      renderer, "form data sql renderer must not be null")
-                                                      .valueCodecs()),
-                                              DataScope.none(),
-                                              SqlExecutionOptions.safeDefaults(),
-                                              BatchWriteOptions.defaults(),
-                                              EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults()),
-                                              FieldUsePolicy.unrestricted(),
-                                              QueryShapeLimits.defaults()));
+        this(executor, defaults(renderer));
     }
 
-    private ReactiveFormClient(ReactiveFormOperationContext context) {
-        this.context = Objects.requireNonNull(context, "form operation context must not be null");
-        this.operations = new ReactiveFormOperations(context);
-        this.renderer = context.renderer();
+    private ReactiveFormClient(ReactiveSqlExecutor executor, FormConfiguration configuration) {
+        this.executor = Objects.requireNonNull(executor, "reactive sql executor must not be null");
+        this.configuration = Objects.requireNonNull(configuration, "form configuration must not be null");
+        this.operations = new ReactiveFormOperations(this.executor, configuration);
+        this.renderer = configuration.renderer();
         this.results = operations.results;
-        this.entityModels = context.entityModels();
-        this.defaultBatchWriteOptions = context.defaultBatchWriteOptions();
     }
 
     /** 创建动态表单响应式客户端。 */
@@ -90,36 +79,38 @@ public final class ReactiveFormClient {
 
     /** 为前端结构化条件替换线程安全的解析器。 */
     public ReactiveFormClient withStructuredConditionResolver(StructuredConditionResolver resolver) {
-        return new ReactiveFormClient(context.withResolver(resolver));
+        return configured(configuration.withResolver(resolver));
     }
 
     /** 设置没有显式 options 时使用的 SQL 执行保护。 */
     public ReactiveFormClient withDefaultExecutionOptions(SqlExecutionOptions options) {
-        return new ReactiveFormClient(context.withExecutionOptions(options));
+        SqlExecutionOptions safeOptions = Objects.requireNonNull(options, "sql execution options must not be null");
+        return new ReactiveFormClient(
+                executor.withDefaultExecutionOptions(safeOptions), configuration.withExecutionOptions(safeOptions));
     }
 
     /** 设置没有显式 options 时使用的批量策略。 */
     public ReactiveFormClient withDefaultBatchWriteOptions(BatchWriteOptions options) {
-        return new ReactiveFormClient(context.withBatchWriteOptions(
+        return configured(configuration.withBatchOptions(
                 Objects.requireNonNull(options, "batch write options must not be null")));
     }
 
     /** 在客户端默认范围上继续收窄。 */
     public ReactiveFormClient withDefaultDataScope(DataScope scope) {
-        DataScope combined = context.defaultDataScope().and(Objects.requireNonNull(scope,
-                                                                                   "data scope must not be null"));
-        return new ReactiveFormClient(context.withDataScope(combined));
+        DataScope combined = configuration.dataScope().and(Objects.requireNonNull(
+                scope, "data scope must not be null"));
+        return configured(configuration.withDataScope(combined));
     }
 
     /** 返回绑定字段用途策略的不可变调用视图。 */
     public ReactiveFormClient withFieldUsePolicy(FieldUsePolicy policy) {
-        return new ReactiveFormClient(context.withFieldUsePolicy(
+        return configured(configuration.withFieldUsePolicy(
                 Objects.requireNonNull(policy, "field use policy must not be null")));
     }
 
     /** 返回绑定更窄查询形状预算的不可变调用视图。 */
     public ReactiveFormClient withQueryShapeLimits(QueryShapeLimits limits) {
-        return new ReactiveFormClient(context.withQueryShapeLimits(
+        return configured(configuration.withQueryShapeLimits(
                 Objects.requireNonNull(limits, "query shape limits must not be null")));
     }
 
@@ -135,33 +126,39 @@ public final class ReactiveFormClient {
 
     /** 不执行 SQL、不获取连接，返回聚合执行将使用的字段用途审批快照。 */
     public FieldUseSnapshot previewFieldUse(AggregateSpec spec) {
-        return ReactiveFormAggregateOperations.preview(context, spec);
+        return operations.previewFieldUse(spec);
     }
 
     /** Repository 和容器集成读取批量默认策略时使用。 */
     @InternalApi
     public BatchWriteOptions defaultBatchWriteOptions() {
-        return defaultBatchWriteOptions;
+        return configuration.batchOptions();
     }
 
     /** 为当前客户端绑定实例级实体映射缓存。 */
     @InternalApi
     public ReactiveFormClient withEntityModelRegistry(EntityModelRegistry registry) {
-        return new ReactiveFormClient(context.withEntityModels(
+        return configured(configuration.withEntityModels(
                 Objects.requireNonNull(registry, "entity model registry must not be null")));
     }
 
     /** @return 当前客户端使用的实体映射注册表。 */
     @InternalApi
     public EntityModelRegistry entityModels() {
-        return entityModels;
+        return configuration.entityModels();
+    }
+
+    /** 实体默认投影复用客户端已冻结的字段范围；行级 Scope 仍由查询计划统一合并。 */
+    @InternalApi
+    public FieldScope defaultFieldScope() {
+        return configuration.dataScope().fields();
     }
 
     /** @return 当前订阅正在参与的外部事务；没有外部事务时为空。 */
     @InternalApi
     public Mono<com.flying.orm.rdb.transaction.R2dbcTransactionContext> currentTransaction() {
         return Mono.defer(() -> Objects.requireNonNull(
-                context.executor().currentTransaction(), "current transaction lookup must return a Mono"));
+                executor.currentTransaction(), "current transaction lookup must return a Mono"));
     }
 
     /** 为实体提供复用当前 Scope、执行保护和映射缓存的 Lambda DML 入口。 */
@@ -196,7 +193,7 @@ public final class ReactiveFormClient {
 
     /** 使用 JDBC/R2DBC 共用的计划和布局执行类型化聚合。 */
     public Flux<AggregateRow> aggregate(AggregateSpec spec) {
-        return ReactiveFormAggregateOperations.aggregate(context, spec);
+        return operations.aggregate(spec);
     }
 
     /** 执行查询规格并映射实体。 */
@@ -334,6 +331,20 @@ public final class ReactiveFormClient {
     /** 同包同步门面和实体入口复用这条已经装配好的内部操作链。 */
     ReactiveFormOperations operations() {
         return operations;
+    }
+
+    private ReactiveFormClient configured(FormConfiguration configured) {
+        return new ReactiveFormClient(executor, configured);
+    }
+
+    private static FormConfiguration defaults(FormDataSqlRenderer renderer) {
+        FormDataSqlRenderer safeRenderer = Objects.requireNonNull(
+                renderer, "form data sql renderer must not be null");
+        return new FormConfiguration(
+                safeRenderer, StructuredConditionResolver.defaults(safeRenderer.valueCodecs()), DataScope.none(),
+                SqlExecutionOptions.safeDefaults(), BatchWriteOptions.defaults(),
+                EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults()), FieldUsePolicy.unrestricted(),
+                QueryShapeLimits.defaults());
     }
 
 }

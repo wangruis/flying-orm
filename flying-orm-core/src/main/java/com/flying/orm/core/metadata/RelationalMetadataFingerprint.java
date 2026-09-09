@@ -41,8 +41,7 @@ public final class RelationalMetadataFingerprint {
         source.primaryKey().ifPresent(primaryKey -> encodeColumns(
                 encoder, "PRIMARY_KEY", primaryKey.name(), primaryKey.columns()));
 
-        encodeNamedColumns(encoder, "UNIQUE", source.uniqueConstraints(),
-                           UniqueConstraintDefinition::name, UniqueConstraintDefinition::columns);
+        encodeUniques(encoder, source.uniqueConstraints());
 
         List<IndexDefinition> indexes = sorted(source.indexes(), IndexDefinition::name);
         encoder.integer("INDEX_COUNT", indexes.size());
@@ -96,6 +95,10 @@ public final class RelationalMetadataFingerprint {
                .nullableText("COLUMN_CHARSET", column.charset())
                .nullableText("COLUMN_COLLATION", column.collation());
         encodeDefault(encoder, column.defaultValue());
+        // Unnamed defaults retain the existing encoding; observed names protect reviewed plans against drift.
+        if (column.defaultConstraintName() != null) {
+            encoder.text("COLUMN_DEFAULT_CONSTRAINT_NAME", column.defaultConstraintName());
+        }
     }
 
     private static void encodeDefault(StableEncoder encoder, ColumnDefault value) {
@@ -172,15 +175,15 @@ public final class RelationalMetadataFingerprint {
                .text(marker + "_TABLE", identity.table());
     }
 
-    private static <T> void encodeNamedColumns(StableEncoder encoder,
-                                                String marker,
-                                                List<T> values,
-                                                java.util.function.Function<T, String> name,
-                                                java.util.function.Function<T, List<String>> columns) {
-        List<T> ordered = sorted(values, name);
-        encoder.integer(marker + "_COUNT", ordered.size());
-        for (T value : ordered) {
-            encodeColumns(encoder, marker, name.apply(value), columns.apply(value));
+    private static void encodeUniques(StableEncoder encoder, List<UniqueConstraintDefinition> values) {
+        List<UniqueConstraintDefinition> ordered = sorted(values, UniqueConstraintDefinition::name);
+        encoder.integer("UNIQUE_COUNT", ordered.size());
+        for (UniqueConstraintDefinition value : ordered) {
+            encodeColumns(encoder, "UNIQUE", value.name(), value.columns());
+            // DEFAULT 保持既有编码字节；仅显式语义扩展才改变指纹。
+            if (value.nullPolicy() != UniqueNullPolicy.DEFAULT) {
+                encoder.text("UNIQUE_NULL_POLICY", value.nullPolicy().name());
+            }
         }
     }
 

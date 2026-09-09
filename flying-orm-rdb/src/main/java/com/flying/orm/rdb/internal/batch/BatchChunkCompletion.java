@@ -7,10 +7,11 @@ import org.reactivestreams.Publisher;
 import reactor.core.publisher.Mono;
 
 /**
- * 内建独立批次与 Repository 之间的分片终态通知。
+ * 内建批次与 Repository 之间的分片终态通知。
  *
  * <p>同步执行器释放租约后通知并处理 POST。响应式执行器在确认终态时通知，
- * 只记录已提交事实；释放租约后再订阅异步完成动作，不在事务连接上执行 POST。
+ * 只记录已提交事实；ATOMIC 必须等整批提交确认后才能通知各片，不能把中途执行成功当作提交。
+ * 释放租约后再执行 POST；INDEPENDENT 使用分片释放回调，ATOMIC 使用 Repository 的整批完成处理。
  * 外部事务继续使用 {@link BatchWriteCompletion} 原有完成合同。</p>
  *
  * @author wangr

@@ -4,25 +4,16 @@ import static com.flying.orm.core.internal.error.ThrowableGraph.addSuppressedIfA
 import static com.flying.orm.core.internal.error.ThrowableGraph.findVirtualMachineError;
 import static com.flying.orm.core.internal.error.ThrowableGraph.promoteVirtualMachineError;
 
-import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.observation.ResourceCleanupObservation;
 import com.flying.orm.rdb.observation.SqlExecutionObserver;
 import com.flying.orm.rdb.observation.SqlExecutionOperation;
 import reactor.core.publisher.Mono;
 
-import java.time.Duration;
 import java.util.Objects;
 import java.util.function.Function;
 
-/**
- * 只负责 R2DBC 连接租约结束后的 LOB 清理和连接归还，不参与 SQL 执行或事务控制。
- *
- * @author wangr
- * @date 2026-08-16
- * @version v2.0
- */
+/** Releases LOB locators and logical connection leases without owning time budgets. */
 final class R2dbcConnectionLeaseCleanup {
-
     private final SqlExecutionObserver observer;
 
     R2dbcConnectionLeaseCleanup(SqlExecutionObserver observer) {
@@ -31,94 +22,44 @@ final class R2dbcConnectionLeaseCleanup {
 
     Mono<Void> closeAfterResult(R2dbcConnectionLease lease,
                                 SqlExecutionOperation operation,
-                                SqlExecutionOptions options,
                                 boolean outcomeConfirmed) {
-        return closeAfterResultWithTimeout(lease, operation, outcomeConfirmed, options.cleanupTimeout());
+        R2dbcLargeObjectScope scope = lease.largeObjectsIfCreated();
+        if (lease.external()) {
+            return scope == null ? Mono.empty() : scope.complete();
+        }
+        if (scope == null) {
+            return outcomeConfirmed ? closeReusableConnection(lease, operation)
+                                    : closeOwnedConnection(lease, operation);
+        }
+        return completeLargeObjects(lease, error -> closeAfterCleanupFailure(
+                lease, operation, ResourceCleanupObservation.Phase.CONNECTION_CLOSE,
+                outcomeConfirmed, error))
+                .flatMap(cleaned -> cleaned
+                        ? outcomeConfirmed ? closeReusableConnection(lease, operation)
+                                           : closeOwnedConnection(lease, operation)
+                        : Mono.empty());
     }
 
-    Mono<Void> closeAfterResultWithTimeout(R2dbcConnectionLease lease,
-                                           SqlExecutionOperation operation,
-                                           boolean outcomeConfirmed,
-                                           Duration cleanupTimeout) {
-        R2dbcLargeObjectScope largeObjects = lease.largeObjectsIfCreated();
-        if (lease.external() && largeObjects == null) {
-            return Mono.empty();
-        }
-        if (!lease.external() && largeObjects == null && outcomeConfirmed) {
-            return closeReusableConnection(lease, operation);
-        }
-        return closeAfterResult(lease, operation, outcomeConfirmed,
-                                cleanupDeadline(lease, cleanupTimeout));
-    }
-
-    /**
-     * 已确认终态的自有连接按 LOB、调用方状态恢复、连接归还的顺序清理。
-     */
     Mono<Void> closeConfirmedOwnedAfterResult(R2dbcConnectionLease lease,
                                               SqlExecutionOperation operation,
-                                              Duration cleanupTimeout,
                                               Mono<Void> prepareForReturn) {
-        R2dbcLargeObjectScope largeObjects = lease.largeObjectsIfCreated();
-        if (largeObjects == null) {
-            return prepareAndCloseReusable(
-                    lease, operation, cleanupTimeout, prepareForReturn);
+        if (lease.largeObjectsIfCreated() == null) {
+            return prepareAndCloseReusable(lease, operation, prepareForReturn);
         }
-        R2dbcCleanupDeadline deadline = cleanupDeadline(lease, cleanupTimeout);
-        Mono<Boolean> cleanup = completeLargeObjects(
-                lease,
-                deadline,
-                error -> prepareThenCloseAfterFailure(
-                        lease, operation, error, deadline, prepareForReturn));
-        return cleanup.flatMap(reusable -> reusable
-                ? prepareAndCloseReusable(lease, operation, cleanupTimeout, prepareForReturn)
-                : Mono.empty());
+        return completeLargeObjects(lease, error -> prepareThenCloseAfterFailure(
+                lease, operation, error, prepareForReturn))
+                .flatMap(cleaned -> cleaned
+                        ? prepareAndCloseReusable(lease, operation, prepareForReturn)
+                        : Mono.empty());
     }
 
-    Mono<Void> closeAfterResult(R2dbcConnectionLease lease,
-                                SqlExecutionOperation operation,
-                                boolean outcomeConfirmed,
-                                R2dbcCleanupDeadline deadline) {
-        return closeResultWithDeadline(lease, operation, outcomeConfirmed,
-                                       shareCleanupDeadline(lease, deadline));
-    }
-
-    private Mono<Void> closeResultWithDeadline(R2dbcConnectionLease lease,
-                                               SqlExecutionOperation operation,
-                                               boolean outcomeConfirmed,
-                                               R2dbcCleanupDeadline deadline) {
-        R2dbcLargeObjectScope largeObjectScope = lease.largeObjectsIfCreated();
-        if (lease.external()) {
-            return largeObjectScope == null ? Mono.empty() : largeObjectScope.complete(deadline);
-        }
-        Mono<Boolean> largeObjects = completeLargeObjects(
-                lease,
-                deadline,
-                error -> closeAfterCleanupFailure(
-                        lease,
-                        operation,
-                        ResourceCleanupObservation.Phase.CONNECTION_CLOSE,
-                        outcomeConfirmed,
-                        error,
-                        deadline));
-        if (!outcomeConfirmed) {
-            return largeObjects.flatMap(reusable -> reusable
-                    ? closeOwnedConnection(lease, operation, deadline)
-                    : Mono.empty());
-        }
-        return largeObjects.flatMap(reusable -> reusable
-                ? closeReusableConnection(lease, operation)
-                : Mono.empty());
-    }
-
-    private Mono<Boolean> completeLargeObjects(
-            R2dbcConnectionLease lease,
-            R2dbcCleanupDeadline deadline,
-            Function<Throwable, Mono<Void>> closeAfterFailure) {
+    private Mono<Boolean> completeLargeObjects(R2dbcConnectionLease lease,
+                                               Function<Throwable, Mono<Void>> closeAfterFailure) {
         R2dbcLargeObjectScope largeObjects = lease.largeObjectsIfCreated();
         if (largeObjects == null) {
             return Mono.just(true);
         }
-        return largeObjects.complete(deadline).thenReturn(true)
+        return largeObjects.complete().thenReturn(true)
                 .onErrorResume(error -> closeAfterFailure.apply(error).thenReturn(false))
                 .flatMap(cleaned -> {
                     if (!cleaned) {
@@ -131,63 +72,48 @@ final class R2dbcConnectionLeaseCleanup {
                 });
     }
 
-    /** 查询取消后归还自有逻辑连接；写入或 DDL 取消的结果不确定，仍然保留该事实。 */
-    Mono<Void> cancelAfterResult(R2dbcConnectionLease lease,
-                                 SqlExecutionOperation operation,
-                                 SqlExecutionOptions options) {
-        R2dbcLargeObjectScope largeObjectScope = lease.largeObjects();
-        R2dbcCleanupDeadline deadline = largeObjectScope.cleanupDeadline(options.cleanupTimeout());
+    Mono<Void> cancelAfterResult(R2dbcConnectionLease lease, SqlExecutionOperation operation) {
+        R2dbcLargeObjectScope largeObjects = lease.largeObjects();
         if (lease.external()) {
-            return largeObjectScope.cancel(deadline);
+            return largeObjects.cancel();
         }
-        Mono<Boolean> largeObjects = largeObjectScope.cancel(deadline).thenReturn(true)
+        return largeObjects.cancel().thenReturn(true)
                 .onErrorResume(error -> closeAfterCleanupFailure(
                         lease, operation, ResourceCleanupObservation.Phase.CONNECTION_CLOSE,
-                        false, error, deadline).thenReturn(false));
-        return largeObjects.flatMap(cleaned -> {
-            if (!cleaned) {
-                return Mono.empty();
-            }
-            if (operation == SqlExecutionOperation.QUERY) {
-                return closeCancelledQuery(lease, operation, deadline);
-            }
-            return closeOwnedConnection(lease, operation, deadline);
-        });
+                        false, error).thenReturn(false))
+                .flatMap(cleaned -> {
+                    if (!cleaned) {
+                        return Mono.empty();
+                    }
+                    return operation == SqlExecutionOperation.QUERY
+                            ? closeCancelledQuery(lease, operation) : closeOwnedConnection(lease, operation);
+                });
     }
 
     Mono<Void> closeAfterError(R2dbcConnectionLease lease,
                                SqlExecutionOperation operation,
-                               SqlExecutionOptions options,
                                Throwable error) {
-        R2dbcCleanupDeadline deadline = cleanupDeadline(lease, options.cleanupTimeout());
-        R2dbcLargeObjectScope largeObjectScope = lease.largeObjectsIfCreated();
-        Mono<Void> largeObjectCleanup = largeObjectScope == null
-                ? Mono.empty()
-                : largeObjectScope.error(error, deadline)
-                        .onErrorResume(cleanupError -> {
-                            VirtualMachineError fatal = promoteVirtualMachineError(error, cleanupError);
-                            if (fatal == null) {
-                                return Mono.empty();
-                            }
-                            return closeAfterCleanupFailure(
-                                    lease, operation, ResourceCleanupObservation.Phase.CONNECTION_CLOSE,
-                                    false, fatal, deadline).then(Mono.error(fatal));
-                        });
-        return largeObjectCleanup.then(Mono.defer(() -> {
+        R2dbcLargeObjectScope scope = lease.largeObjectsIfCreated();
+        Mono<Void> cleanup = scope == null ? Mono.empty() : scope.error(error)
+                .onErrorResume(cleanupError -> {
+                    VirtualMachineError fatal = promoteVirtualMachineError(error, cleanupError);
+                    if (fatal == null) {
+                        return Mono.empty();
+                    }
+                    return closeAfterCleanupFailure(
+                            lease, operation, ResourceCleanupObservation.Phase.CONNECTION_CLOSE,
+                            false, fatal).then(Mono.error(fatal));
+                });
+        return cleanup.then(Mono.defer(() -> {
             if (lease.external()) {
                 return Mono.empty();
             }
-            Throwable cleanupFailure = largeObjectScope == null ? null : largeObjectScope.cleanupFailure();
-            if (cleanupFailure != null) {
-                return closeAfterCleanupFailure(
-                        lease,
-                        operation,
-                        ResourceCleanupObservation.Phase.CONNECTION_CLOSE,
-                        false,
-                        cleanupFailure,
-                        deadline);
-            }
-            return closeOwnedConnection(lease, operation, deadline);
+            Throwable cleanupFailure = scope == null ? null : scope.cleanupFailure();
+            return cleanupFailure == null
+                    ? closeOwnedConnection(lease, operation)
+                    : closeAfterCleanupFailure(
+                            lease, operation, ResourceCleanupObservation.Phase.CONNECTION_CLOSE,
+                            false, cleanupFailure);
         }));
     }
 
@@ -195,34 +121,20 @@ final class R2dbcConnectionLeaseCleanup {
                                         SqlExecutionOperation operation,
                                         ResourceCleanupObservation.Phase phase,
                                         boolean outcomeConfirmed,
-                                        Throwable primaryError,
-                                        R2dbcCleanupDeadline deadline) {
-        return closeCleanupFailureWithDeadline(
-                lease, operation, phase, outcomeConfirmed, primaryError,
-                shareCleanupDeadline(lease, deadline));
-    }
-
-    private Mono<Void> closeCleanupFailureWithDeadline(R2dbcConnectionLease lease,
-                                                       SqlExecutionOperation operation,
-                                                       ResourceCleanupObservation.Phase phase,
-                                                       boolean outcomeConfirmed,
-                                                       Throwable primaryError,
-                                                       R2dbcCleanupDeadline deadline) {
+                                        Throwable primaryError) {
         if (lease.external()) {
             return Mono.empty();
         }
-        Mono<Void> closePublisher = Mono.defer(() -> Mono.from(lease.connection().close()));
-        Mono<Void> closeAttempt = outcomeConfirmed ? closePublisher : deadline.protect(closePublisher);
-        return closeAttempt.onErrorResume(closeError -> {
-            VirtualMachineError fatal = promoteVirtualMachineError(primaryError, closeError);
-            if (fatal != null) {
-                observer.onResourceCleanup(new ResourceCleanupObservation(
-                        operation, phase, outcomeConfirmed, fatal));
-                return Mono.error(fatal);
-            }
-            addSuppressedIfAcyclic(primaryError, closeError);
-            return Mono.empty();
-        }).then(observeCloseFailure(operation, phase, outcomeConfirmed, primaryError));
+        return Mono.defer(() -> Mono.from(lease.connection().close()))
+                .onErrorResume(closeError -> {
+                    VirtualMachineError fatal = promoteVirtualMachineError(primaryError, closeError);
+                    if (fatal != null) {
+                        observeCleanup(operation, phase, outcomeConfirmed, fatal);
+                        return Mono.error(fatal);
+                    }
+                    addSuppressedIfAcyclic(primaryError, closeError);
+                    return Mono.empty();
+                }).then(observeCloseFailure(operation, phase, outcomeConfirmed, primaryError));
     }
 
     private Mono<Void> observeCloseFailure(SqlExecutionOperation operation,
@@ -232,65 +144,57 @@ final class R2dbcConnectionLeaseCleanup {
         return Mono.defer(() -> {
             VirtualMachineError fatal = findVirtualMachineError(primaryError);
             Throwable observationError = fatal == null ? primaryError : fatal;
-            observer.onResourceCleanup(new ResourceCleanupObservation(
-                    operation, phase, outcomeConfirmed, observationError));
+            observeCleanup(operation, phase, outcomeConfirmed, observationError);
             return fatal == null ? Mono.empty() : Mono.error(fatal);
         });
     }
 
     private Mono<Void> closeOwnedConnection(R2dbcConnectionLease lease,
-                                            SqlExecutionOperation operation,
-                                            R2dbcCleanupDeadline deadline) {
-        Mono<Void> closeAttempt = deadline.protect(Mono.defer(() ->
-                Mono.from(lease.connection().close())));
-        return closeAttempt.onErrorResume(error -> {
-            observer.onResourceCleanup(new ResourceCleanupObservation(
-                    operation, ResourceCleanupObservation.Phase.CONNECTION_CLOSE, false, error));
-            VirtualMachineError fatal = findVirtualMachineError(error);
-            return fatal == null ? Mono.empty() : Mono.error(fatal);
-        });
+                                            SqlExecutionOperation operation) {
+        return Mono.defer(() -> Mono.from(lease.connection().close()))
+                .onErrorResume(error -> {
+                    observeCleanup(operation, ResourceCleanupObservation.Phase.CONNECTION_CLOSE, false, error);
+                    VirtualMachineError fatal = findVirtualMachineError(error);
+                    return fatal == null ? Mono.empty() : Mono.error(fatal);
+                });
     }
 
     private Mono<Void> closeCancelledQuery(R2dbcConnectionLease lease,
-                                           SqlExecutionOperation operation,
-                                           R2dbcCleanupDeadline deadline) {
-        Mono<Void> close = deadline.protect(Mono.defer(() -> Mono.from(lease.connection().close())));
-        return close.onErrorResume(error -> observeCloseFailure(
-                operation, ResourceCleanupObservation.Phase.CONNECTION_CLOSE, false, error));
+                                           SqlExecutionOperation operation) {
+        return Mono.defer(() -> Mono.from(lease.connection().close()))
+                .onErrorResume(error -> observeCloseFailure(
+                        operation, ResourceCleanupObservation.Phase.CONNECTION_CLOSE, false, error));
+    }
+
+    /** 关闭观测时不创建事件及其脱敏异常；fatal 判断和连接清理仍由原调用链完成。 */
+    private void observeCleanup(SqlExecutionOperation operation,
+                                ResourceCleanupObservation.Phase phase,
+                                boolean outcomeConfirmed,
+                                Throwable error) {
+        if (observer.enabled()) {
+            observer.onResourceCleanup(new ResourceCleanupObservation(
+                    operation, phase, outcomeConfirmed, error));
+        }
     }
 
     private Mono<Void> prepareAndCloseReusable(R2dbcConnectionLease lease,
                                                SqlExecutionOperation operation,
-                                               Duration cleanupTimeout,
                                                Mono<Void> prepareForReturn) {
         return prepareForReturn.thenReturn(true)
                 .onErrorResume(error -> closeAfterCleanupFailure(
-                        lease,
-                        operation,
-                        ResourceCleanupObservation.Phase.CONNECTION_CLOSE,
-                        true,
-                        error,
-                        cleanupDeadline(lease, cleanupTimeout)).thenReturn(false))
-                .flatMap(prepared -> prepared
-                        ? closeReusableConnection(lease, operation)
-                        : Mono.empty());
+                        lease, operation, ResourceCleanupObservation.Phase.CONNECTION_CLOSE,
+                        true, error).thenReturn(false))
+                .flatMap(prepared -> prepared ? closeReusableConnection(lease, operation) : Mono.empty());
     }
 
     private Mono<Void> prepareThenCloseAfterFailure(R2dbcConnectionLease lease,
                                                     SqlExecutionOperation operation,
                                                     Throwable primaryError,
-                                                    R2dbcCleanupDeadline deadline,
                                                     Mono<Void> prepareForReturn) {
         return prepareForReturn.thenReturn(primaryError)
-                .onErrorResume(prepareError -> Mono.just(
-                        mergeCleanupFailures(primaryError, prepareError)))
+                .onErrorResume(prepareError -> Mono.just(mergeCleanupFailures(primaryError, prepareError)))
                 .flatMap(error -> closeAfterCleanupFailure(
-                        lease,
-                        operation,
-                        ResourceCleanupObservation.Phase.CONNECTION_CLOSE,
-                        true,
-                        error,
-                        deadline));
+                        lease, operation, ResourceCleanupObservation.Phase.CONNECTION_CLOSE, true, error));
     }
 
     private static Throwable mergeCleanupFailures(Throwable primaryError,
@@ -313,21 +217,5 @@ final class R2dbcConnectionLeaseCleanup {
                 .onErrorResume(closeError -> observeCloseFailure(
                         operation, ResourceCleanupObservation.Phase.CONNECTION_CLOSE,
                         true, closeError));
-    }
-
-    private static R2dbcCleanupDeadline cleanupDeadline(
-            R2dbcConnectionLease lease,
-            Duration timeout) {
-        R2dbcLargeObjectScope largeObjects = lease.largeObjectsIfCreated();
-        return largeObjects == null
-                ? R2dbcCleanupDeadline.start(timeout)
-                : largeObjects.cleanupDeadline(timeout);
-    }
-
-    private static R2dbcCleanupDeadline shareCleanupDeadline(
-            R2dbcConnectionLease lease,
-            R2dbcCleanupDeadline deadline) {
-        R2dbcLargeObjectScope largeObjects = lease.largeObjectsIfCreated();
-        return largeObjects == null ? deadline : largeObjects.shareCleanupDeadline(deadline);
     }
 }

@@ -1,6 +1,12 @@
 package com.flying.orm.rdb.internal.mapping;
 
 import com.flying.orm.core.type.DatabaseType;
+import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.ConditionNode;
+import com.flying.orm.core.condition.LogicalOperator;
+import com.flying.orm.core.condition.TermCondition;
+import com.flying.orm.core.condition.TermHandler;
+import com.flying.orm.core.condition.TermRegistry;
 import com.flying.orm.core.internal.error.ThrowableGraph;
 import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.mapping.EntityEnumStorage;
@@ -22,6 +28,8 @@ import java.lang.reflect.RecordComponent;
 import java.time.Instant;
 import java.time.OffsetDateTime;
 import java.util.Collections;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -29,6 +37,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.BiPredicate;
+import java.util.function.UnaryOperator;
 
 /**
  * 把实体拆成“数据库列名 -> Java 值”的有序 Map，供 Repository 写入动态表单。
@@ -46,14 +55,17 @@ public final class EntityValues<T> {
     private static final DatabaseType VARCHAR_TYPE = DatabaseType.of("VARCHAR");
 
     private final Map<String, ValueReader> readers;
+    private final Map<String, UnaryOperator<Object>> conditionEncoders;
 
     private final EntityMetadata<T> metadata;
     private final EntityFieldFiller fieldFiller;
 
     private EntityValues(Map<String, ValueReader> readers,
+                         Map<String, UnaryOperator<Object>> conditionEncoders,
                          EntityMetadata<T> metadata,
                          EntityFieldFiller fieldFiller) {
         this.readers = Collections.unmodifiableMap(new LinkedHashMap<>(readers));
+        this.conditionEncoders = Map.copyOf(conditionEncoders);
         this.metadata = Objects.requireNonNull(metadata, "entity metadata must not be null");
         this.fieldFiller = Objects.requireNonNull(fieldFiller, "entity field filler must not be null");
     }
@@ -86,6 +98,74 @@ public final class EntityValues<T> {
         return read(entity, EntityFieldFiller.Operation.UPDATE,
                     (field, value) -> field.updatable()
                             && EntityWriteValuePolicy.accepts(field.updateStrategy(), value));
+    }
+
+    /** Reuse the write plan's enum representation before the shared field/dialect condition encoding. */
+    @InternalApi
+    public ConditionGroup normalizeCondition(ConditionGroup where, TermRegistry terms) {
+        if (conditionEncoders.isEmpty()) {
+            return where;
+        }
+        Objects.requireNonNull(where, "where condition must not be null");
+        List<ConditionNode> children = where.children();
+        List<ConditionNode> normalized = null;
+        for (int index = 0; index < children.size(); index++) {
+            ConditionNode child = children.get(index);
+            ConditionNode next = child instanceof ConditionGroup group
+                    ? normalizeCondition(group, terms) : normalizeTerm((TermCondition) child, terms);
+            if (normalized == null && next != child) {
+                normalized = new ArrayList<>(children.size());
+                normalized.addAll(children.subList(0, index));
+            }
+            if (normalized != null) {
+                normalized.add(next);
+            }
+        }
+        if (normalized == null) {
+            return where;
+        }
+        ConditionGroup.Builder builder = where.operator() == LogicalOperator.AND
+                ? ConditionGroup.and(terms) : ConditionGroup.or(terms);
+        normalized.forEach(builder::add);
+        return builder.build();
+    }
+
+    private TermCondition normalizeTerm(TermCondition term, TermRegistry terms) {
+        EntityFieldMetadata field = metadata.findField(term.field()).orElse(null);
+        UnaryOperator<Object> encoder = field == null ? null : conditionEncoders.get(field.columnName());
+        if (encoder == null) {
+            return term;
+        }
+        TermHandler standard = TermRegistry.standard().find(term.operator()).orElse(null);
+        if (standard == null || terms.find(term.operator()).orElse(null) != standard) {
+            return term;
+        }
+        Object source = term.value();
+        Object encoded = switch (standard.shape()) {
+            case SCALAR -> source instanceof Enum<?> ? encoder.apply(source) : source;
+            case COLLECTION, RANGE -> encodeEnumElements(source, encoder);
+            default -> source;
+        };
+        return encoded == source ? term : TermCondition.of(term.field(), term.operator(), encoded);
+    }
+
+    private static Object encodeEnumElements(Object source, UnaryOperator<Object> encoder) {
+        if (!(source instanceof List<?> values)) {
+            return source;
+        }
+        List<Object> encoded = null;
+        for (int index = 0; index < values.size(); index++) {
+            Object value = values.get(index);
+            Object next = value instanceof Enum<?> ? encoder.apply(value) : value;
+            if (encoded == null && next != value) {
+                encoded = new ArrayList<>(values.size());
+                encoded.addAll(values.subList(0, index));
+            }
+            if (encoded != null) {
+                encoded.add(next);
+            }
+        }
+        return encoded == null ? source : encoded;
     }
 
     /**
@@ -208,6 +288,7 @@ public final class EntityValues<T> {
                                                     EntityFieldFiller fieldFiller,
                                                     Map<String, EntityTypeMappingRegistry.Mapping> customMappings) {
         Map<String, ValueReader> readers = new LinkedHashMap<>();
+        Map<String, UnaryOperator<Object>> conditionEncoders = new LinkedHashMap<>();
         for (RecordComponent component : type.getRecordComponents()) {
             // findField 同时支持列别名；反射成员只能按真实 Java 属性名选择持久化元数据。
             EntityFieldMetadata field = metadata.findField(component.getName()).orElse(null);
@@ -219,9 +300,9 @@ public final class EntityValues<T> {
             requireAccessible(accessor, "record accessor");
             // 这里的 key 必须是数据库列名。Repository 后面会拿它去找 DynamicForm 字段并渲染 SQL。
             readers.put(field.columnName(), stored(new MethodValueReader(accessor), field, component.getType(),
-                                                   customMappings.containsKey(field.name())));
+                                                   customMappings.containsKey(field.name()), conditionEncoders));
         }
-        return new EntityValues<>(readers, metadata, fieldFiller);
+        return new EntityValues<>(readers, conditionEncoders, metadata, fieldFiller);
     }
 
     private static <T> EntityValues<T> beanValues(Class<T> type,
@@ -230,6 +311,7 @@ public final class EntityValues<T> {
                                                   Map<String, EntityTypeMappingRegistry.Mapping> customMappings) {
         try {
             Map<String, ValueReader> readers = new LinkedHashMap<>();
+            Map<String, UnaryOperator<Object>> conditionEncoders = new LinkedHashMap<>();
             Set<String> readProperties = new HashSet<>();
             // getter 优先，允许实体自己提供计算或归一化后的持久值。
             for (PropertyDescriptor property : Introspector.getBeanInfo(type).getPropertyDescriptors()) {
@@ -243,7 +325,7 @@ public final class EntityValues<T> {
                     // Java 里叫 name，表里可能叫 user_name。写库时直接交出列名，调用方不用自己转。
                     readers.put(field.columnName(), stored(new MethodValueReader(readMethod), field,
                                                            readMethod.getReturnType(),
-                                                           customMappings.containsKey(field.name())));
+                                                           customMappings.containsKey(field.name()), conditionEncoders));
                     readProperties.add(field.name());
                 }
             }
@@ -256,10 +338,10 @@ public final class EntityValues<T> {
                     // 没有 getter 的字段也按同一套实体元数据走，避免 Bean 和 record 表现不一致。
                     readers.put(persistentField.columnName(),
                                 stored(new FieldValueReader(field), persistentField, field.getType(),
-                                       customMappings.containsKey(persistentField.name())));
+                                       customMappings.containsKey(persistentField.name()), conditionEncoders));
                 }
             }
-            return new EntityValues<>(readers, metadata, fieldFiller);
+            return new EntityValues<>(readers, conditionEncoders, metadata, fieldFiller);
         } catch (IntrospectionException error) {
             throw new MappingException("entity values cannot be created for " + type.getName(), error);
         }
@@ -289,33 +371,39 @@ public final class EntityValues<T> {
     private static ValueReader stored(ValueReader reader,
                                        EntityFieldMetadata field,
                                        Class<?> javaType,
-                                       boolean customMapping) {
-        ValueReader storedReader;
+                                       boolean customMapping,
+                                       Map<String, UnaryOperator<Object>> conditionEncoders) {
+        UnaryOperator<Object> enumEncoder;
         String enumMember = field.enumValueMember();
         if (enumMember != null) {
             EntityEnumValueCodec codec = EntityEnumValueCodec.create(javaType, enumMember);
-            storedReader = target -> codec.write(reader.read(target));
+            enumEncoder = codec::write;
         } else if (customMapping) {
             return reader;
         } else {
             EntityEnumStorage storage = field.enumStorage();
-            storedReader = storage == EntityEnumStorage.NONE
-                    ? reader
-                    : target -> {
-                        Object value = reader.read(target);
+            enumEncoder = storage == EntityEnumStorage.NONE
+                    ? null
+                    : value -> {
                         if (!(value instanceof Enum<?> enumValue)) {
                             return value;
                         }
                         return storage == EntityEnumStorage.ORDINAL ? enumValue.ordinal() : enumValue.name();
                     };
         }
+        if (enumEncoder != null) {
+            UnaryOperator<Object> storedEncoder = customMapping || !VARCHAR_TYPE.equals(field.databaseType())
+                    ? enumEncoder : value -> textBackedValue(enumEncoder.apply(value));
+            conditionEncoders.put(field.columnName(), storedEncoder);
+            return target -> storedEncoder.apply(reader.read(target));
+        }
         // @EnumValue 的映射针对声明成员；提取后同样必须保留其原始类型交给自定义 codec。
         if (customMapping || !VARCHAR_TYPE.equals(field.databaseType())) {
-            return storedReader;
+            return reader;
         }
         // 这些标准 Java 类型由实体模型明确落为跨方言 VARCHAR；Repository 自动生成的主键/乐观锁条件
         // 会直接复用本 Map，因此必须在这里统一成与普通写入相同的数据库文本形态。
-        return target -> textBackedValue(storedReader.read(target));
+        return target -> textBackedValue(reader.read(target));
     }
 
     private static Object textBackedValue(Object value) {

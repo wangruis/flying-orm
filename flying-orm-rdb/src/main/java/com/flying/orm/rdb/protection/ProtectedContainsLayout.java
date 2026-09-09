@@ -9,6 +9,8 @@ import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.rdb.internal.InternalApi;
 
 import java.util.List;
+import java.util.HashSet;
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -61,19 +63,21 @@ public record ProtectedContainsLayout(DynamicForm table,
                         safeForm.id() + "Contains", identity.withTable(tableName)))
                 .orElseGet(() -> DynamicForm.builder(safeForm.id() + "Contains", tableName));
         primaryKeys.forEach(field -> table.addField(ownerColumn(field)));
-        table.addField(DynamicField.of("field_tag", "VARCHAR").withLength(30).withNullable(false));
-        table.addField(DynamicField.of("token_hash", ProtectedFormLayout.HASH_TYPE).withNullable(false));
-
         List<String> ownerColumns = primaryKeys.stream().map(DynamicField::name).toList();
+        String fieldTag = fieldTagColumn(ownerColumns);
+        String tokenHash = tokenHashColumn(ownerColumns);
+        table.addField(DynamicField.of(fieldTag, "VARCHAR").withLength(30).withNullable(false));
+        table.addField(DynamicField.of(tokenHash, ProtectedFormLayout.HASH_TYPE).withNullable(false));
+
         IndexMetadata.Builder query = IndexMetadata.builder(
                 ProtectedColumnNames.containsQueryIndex(safeForm.id(), safeForm.table()))
-                                                   .addColumn("field_tag")
-                                                   .addColumn("token_hash");
+                                                   .addColumn(fieldTag)
+                                                   .addColumn(tokenHash);
         ownerColumns.forEach(query::addColumn);
         IndexMetadata.Builder unique = IndexMetadata.builder(
                 ProtectedColumnNames.containsUniqueIndex(safeForm.id(), safeForm.table())).unique();
         ownerColumns.forEach(unique::addColumn);
-        unique.addColumn("field_tag").addColumn("token_hash");
+        unique.addColumn(fieldTag).addColumn(tokenHash);
 
         ForeignKeyMetadata foreignKey = new ForeignKeyMetadata(
                 ProtectedColumnNames.containsForeignKey(safeForm.id(), safeForm.table()),
@@ -82,6 +86,26 @@ public record ProtectedContainsLayout(DynamicForm table,
                 ownerColumns);
         return Optional.of(new ProtectedContainsLayout(
                 table.build(), List.of(query.build(), unique.build()), List.of(foreignKey)));
+    }
+
+    /** 返回与 owner 主键不冲突的字段标签列；无冲突时保留既有物理名称。 */
+    public static String fieldTagColumn(List<String> ownerColumns) {
+        return protocolColumn(ownerColumns, "field_tag");
+    }
+
+    /** 返回与 owner 主键不冲突的令牌列；无冲突时保留既有物理名称。 */
+    public static String tokenHashColumn(List<String> ownerColumns) {
+        return protocolColumn(ownerColumns, "token_hash");
+    }
+
+    private static String protocolColumn(List<String> ownerColumns, String base) {
+        var occupied = new HashSet<String>();
+        ownerColumns.forEach(name -> occupied.add(name.toLowerCase(Locale.ROOT)));
+        String candidate = base;
+        for (int suffix = 1; occupied.contains(candidate); suffix++) {
+            candidate = base + "_" + suffix;
+        }
+        return candidate;
     }
 
     private static String containsTable(DynamicForm form) {

@@ -5,12 +5,15 @@ import com.flying.orm.core.internal.value.OwnedBindableValues;
 
 import com.flying.orm.core.condition.ConditionValueShape;
 import com.flying.orm.core.condition.TermCondition;
+import com.flying.orm.core.condition.TermExtensionDescriptor;
 
 import java.lang.reflect.Array;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
 import java.util.StringJoiner;
 
 /**
@@ -31,17 +34,23 @@ import java.util.StringJoiner;
  * @version v1.0
  */
 record RelationExistsTermHandler(String id,
-                                        String relationTable,
-                                        String relationAlias,
-                                        String relationKeyColumn,
-                                        String relationValueColumn,
-                                        boolean negated) implements SqlTermHandler {
+                                 String relationTable,
+                                 String relationAlias,
+                                 String relationKeyColumn,
+                                 String relationValueColumn,
+                                 boolean negated,
+                                 TermExtensionDescriptor extension) implements SqlTermHandler {
 
     private static final int MAX_COLLECTION_VALUES = 1_000;
 
     @Override
     public ConditionValueShape shape() {
         return ConditionValueShape.SCALAR_OR_COLLECTION;
+    }
+
+    @Override
+    public Optional<TermExtensionDescriptor> descriptor() {
+        return Optional.of(extension);
     }
 
     /**
@@ -53,6 +62,22 @@ record RelationExistsTermHandler(String id,
         relationAlias = requireIdentifierPart(relationAlias);
         relationKeyColumn = requireIdentifierPart(relationKeyColumn);
         relationValueColumn = requireIdentifierPart(relationValueColumn);
+        extension = Objects.requireNonNull(extension, "relation term descriptor must not be null");
+    }
+
+    private RelationExistsTermHandler(String id,
+                                      String relationTable,
+                                      String relationAlias,
+                                      String relationKeyColumn,
+                                      String relationValueColumn,
+                                      boolean negated) {
+        this(id,
+             relationTable,
+             relationAlias,
+             relationKeyColumn,
+             relationValueColumn,
+             negated,
+             TermExtensionDescriptor.filter(id, Set.of(), MAX_COLLECTION_VALUES, 1));
     }
 
     /**
@@ -118,7 +143,9 @@ record RelationExistsTermHandler(String id,
         TermCondition safeTerm = Objects.requireNonNull(term, "term condition must not be null");
         SqlRenderContext safeContext = Objects.requireNonNull(context, "sql render context must not be null");
         String alias = structureIdentifier(safeContext, relationAlias);
-        if (alias.equalsIgnoreCase(outerQualifier)) {
+        // 固定 SQL 别名可由调用链直接给出（target），结构引用则可能已带引号（"target"）。
+        // 二者都必须避让，否则子查询自己的同名别名会遮蔽真正的外层目标行。
+        if (alias.equalsIgnoreCase(outerQualifier) || relationAlias.equalsIgnoreCase(outerQualifier)) {
             alias = structureIdentifier(safeContext, relationAlias + "_relation");
         }
         String relationKey = alias + "." + structureIdentifier(safeContext, relationKeyColumn);

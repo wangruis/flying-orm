@@ -42,6 +42,10 @@ final class R2dbcIndependentBatchFlow {
             Flux<ChunkOutcome> outcomes = settledChunks(request, executor, acceptedRows::set)
                     .doOnNext(outcome -> remember(outcome, settled, stopFailures))
                     .onErrorMap(error -> {
+                        VirtualMachineError fatal = findVirtualMachineError(error);
+                        if (fatal != null) {
+                            return fatal;
+                        }
                         if (error instanceof BatchWriteException) {
                             return error;
                         }
@@ -55,7 +59,10 @@ final class R2dbcIndependentBatchFlow {
             return completeChunks(request, outcomes)
                     .then(Mono.defer(() -> stopFailures.isEmpty()
                             ? Mono.just(result(settled))
-                            : Mono.error(stoppedFailure(settled, stopFailures))));
+                            : Mono.error(stoppedFailure(
+                                    results.accountAcceptedRows(results.sortedChunks(settled),
+                                            acceptedRows.get(), stopFailures.getFirst()),
+                                    stopFailures))));
         });
     }
 
@@ -136,8 +143,12 @@ final class R2dbcIndependentBatchFlow {
     private Flux<ChunkOutcome> stoppedChunk(R2dbcBatchWriterChunks.BatchChunk chunk,
                                             Throwable error,
                                             Sinks.Empty<Void> stop) {
-        Throwable failure = wrapChunkFailure(chunk, error);
         stop.tryEmitEmpty();
+        VirtualMachineError fatal = findVirtualMachineError(error);
+        if (fatal != null) {
+            return Flux.error(fatal);
+        }
+        Throwable failure = wrapChunkFailure(chunk, error);
         return Flux.fromIterable(results.withGlobalFailure(List.of(), failure))
                 .map(result -> ChunkOutcome.stopped(result, failure));
     }
@@ -146,8 +157,14 @@ final class R2dbcIndependentBatchFlow {
         return BatchWriteResult.from(BatchWriteOptions.Mode.INDEPENDENT, results.sortedChunks(settled));
     }
 
-    private BatchWriteException stoppedFailure(List<BatchChunkResult> settled,
-                                                List<Throwable> failures) {
+    private Throwable stoppedFailure(List<BatchChunkResult> settled,
+                                      List<Throwable> failures) {
+        for (Throwable failure : failures) {
+            VirtualMachineError fatal = findVirtualMachineError(failure);
+            if (fatal != null) {
+                return fatal;
+            }
+        }
         BatchWriteException outcome = new BatchWriteException(
                 "independent batch stopped", failures.get(0), result(settled));
         for (int index = 1; index < failures.size(); index++) {

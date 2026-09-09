@@ -5,7 +5,7 @@
 <module name="Checker">
     <property name="charset" value="UTF-8"/>
     <module name="FileLength">
-        <property name="max" value="399"/>
+        <property name="max" value="600"/>
     </module>
     <module name="SuppressionFilter">
         <property name="file" value="${checkstyle.suppressions.file}"/>

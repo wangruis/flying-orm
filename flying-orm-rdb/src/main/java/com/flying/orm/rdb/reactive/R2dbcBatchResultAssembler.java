@@ -43,8 +43,8 @@ final class R2dbcBatchResultAssembler {
      * 给 INDEPENDENT 模式补上导致整批流程结束的最后一个结果。
      *
      * <p>已经完成的分片保留原结果；如果异常带有具体分片，就使用异常中的真实分片位置。
-     * 只有拿不到具体分片时，才根据已收集结果推算下一个分片位置。行数上限异常还要保留
-     * 它提供的溢出偏移，这样上层能知道输入从哪里被截断。</p>
+     * 只有拿不到具体分片时，才根据已收集结果推算下一个分片位置。未成片的已接收行由
+     * accountAcceptedRows 补记；被拒绝行的位置只保留在原异常中，不计入输入事实。</p>
      */
     List<BatchChunkResult> withGlobalFailure(List<BatchChunkResult> completed, Throwable error) {
         List<BatchChunkResult> results = new ArrayList<>(sortedChunks(completed));
@@ -77,51 +77,9 @@ final class R2dbcBatchResultAssembler {
                                     .mapToInt(BatchChunkResult::chunkIndex)
                                     .max()
                                     .orElse(-1) + 1;
-        if (error instanceof R2dbcBatchRowLimitExceededException rowLimit) {
-            results.add(BatchChunkResult.failed(nextChunkIndex,
-                                                rowLimit.exceededOffset(),
-                                                1,
-                                                rowLimit));
-        } else {
-            long nextOffset = R2dbcExecutionCounts.sum(results.stream()
-                                                               .mapToLong(BatchChunkResult::inputCount));
-            results.add(BatchChunkResult.failed(nextChunkIndex, nextOffset, 0, failureCause(error)));
-        }
-        return results;
-    }
-
-    /**
-     * 生成 ATOMIC 回滚后的明细。
-     *
-     * <p>已经执行成功但尚未提交的分片，在回滚成功后必须改成 ROLLED_BACK，不能继续
-     * 返回 COMMITTED。当前触发失败的分片仍保留具体失败或乐观锁冲突信息；如果失败发生
-     * 在分片生成阶段，则使用已完成分片数量作为下一个分片编号，保持原执行器的位置规则。</p>
-     */
-    List<BatchChunkResult> rolledBackChunks(List<BatchChunkResult> committed, Throwable error) {
-        List<BatchChunkResult> results = new ArrayList<>(rolledBackExecutedChunks(committed));
-        if (error instanceof R2dbcBatchChunkConflictFailure conflict) {
-            R2dbcBatchWriterChunks.BatchChunk chunk = conflict.chunk();
-            results.add(BatchChunkResult.conflicted(chunk.chunkIndex(),
-                                                    chunk.startOffset(),
-                                                    chunk.rows().size(),
-                                                    conflict.conflicts()));
-        } else if (error instanceof R2dbcBatchChunkWriteFailure failure
-                && !containsChunk(committed, failure.chunk())) {
-            R2dbcBatchWriterChunks.BatchChunk chunk = failure.chunk();
-            results.add(BatchChunkResult.failed(chunk.chunkIndex(),
-                                                chunk.startOffset(),
-                                                chunk.rows().size(),
-                                                failure.getCause()));
-        } else if (error instanceof R2dbcBatchRowLimitExceededException rowLimit) {
-            results.add(BatchChunkResult.failed(committed.size(),
-                                                rowLimit.exceededOffset(),
-                                                1,
-                                                rowLimit));
-        } else {
-            long nextOffset = R2dbcExecutionCounts.sum(committed.stream()
-                                                                   .mapToLong(BatchChunkResult::inputCount));
-            results.add(BatchChunkResult.failed(committed.size(), nextOffset, 0, failureCause(error)));
-        }
+        long nextOffset = R2dbcExecutionCounts.sum(results.stream()
+                .mapToLong(BatchChunkResult::inputCount));
+        results.add(BatchChunkResult.failed(nextChunkIndex, nextOffset, 0, failureCause(error)));
         return results;
     }
 

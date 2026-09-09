@@ -2,7 +2,6 @@ package com.flying.orm.core.sql.render;
 
 import com.flying.orm.core.internal.Names;
 
-import com.flying.orm.core.condition.TermHandler;
 import com.flying.orm.core.condition.TermRegistry;
 
 import java.util.ArrayList;
@@ -65,9 +64,7 @@ public interface SqlTermPackage {
         }
         TermRegistry.Builder terms = TermRegistry.builder();
         for (SqlTermHandler handler : copiedHandlers) {
-            terms.add(handler.descriptor()
-                             .<TermHandler>map(descriptor -> TermHandler.described(descriptor, handler.shape()))
-                             .orElseGet(() -> TermHandler.simple(handler.id(), handler.shape())));
+            terms.add(SqlTermRegistry.conditionTerm(handler, handler.shape(), handler.descriptor()));
         }
         return new SimpleSqlTermPackage(name, copiedHandlers, terms.build());
     }

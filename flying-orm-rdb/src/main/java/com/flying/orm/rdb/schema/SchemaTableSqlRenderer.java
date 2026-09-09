@@ -3,6 +3,8 @@ package com.flying.orm.rdb.schema;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.ColumnMetadata;
+import com.flying.orm.core.metadata.ColumnDefinition;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.ForeignKeyMetadata;
 import com.flying.orm.core.metadata.IndexMetadata;
 import com.flying.orm.core.metadata.ValueGeneration;
@@ -89,6 +91,48 @@ final class SchemaTableSqlRenderer {
 
     String columnDefinition(DynamicField field) {
         return columnDefinition(field, true);
+    }
+
+    static RelationalTableDefinition physicalColumns(SchemaSnapshot snapshot) {
+        if (snapshot == null) {
+            return null;
+        }
+        var unknown = snapshot.unknownAttributes();
+        if (snapshot.tableState() != SchemaSnapshot.State.PRESENT
+                || snapshot.columns().state() != SchemaSnapshot.State.PRESENT
+                || unknown.contains(SchemaSnapshot.UnknownAttribute.COLUMN_DEFAULT)
+                || unknown.contains(SchemaSnapshot.UnknownAttribute.COLUMN_GENERATION)
+                || unknown.contains(SchemaSnapshot.UnknownAttribute.COLUMN_CHARSET)
+                || unknown.contains(SchemaSnapshot.UnknownAttribute.COLUMN_COLLATION)) {
+            throw new IllegalStateException(
+                    "rewriting an existing column requires known physical column attributes");
+        }
+        return snapshot.knownDefinition();
+    }
+
+    String replacementColumnDefinition(DynamicField target, ColumnDefinition physical) {
+        if (!dialect.rewritesFullColumnDefinition()) {
+            return columnDefinition(target);
+        }
+        if (physical == null) {
+            throw new IllegalStateException(
+                    "rewriting an existing column requires complete physical column metadata");
+        }
+        ColumnDefinition.Builder replacement = ColumnDefinition.builder(target.name(), target.databaseType())
+                .nullable(target.nullable())
+                .length(target.length())
+                .comment(target.comment())
+                .defaultValue(physical.defaultValue())
+                .defaultConstraintName(physical.defaultConstraintName())
+                .generation(physical.generation())
+                .charset(physical.charset())
+                .collation(physical.collation());
+        if (target.databaseType().isTemporal()) {
+            replacement.temporalPrecision(target.precision());
+        } else {
+            replacement.precision(target.precision()).scale(target.scale());
+        }
+        return RelationalSchemaSqlRenderer.create(dialect).columnDefinition(replacement.build());
     }
 
     private String columnDefinition(DynamicField field, boolean inlinePrimaryKey) {
@@ -240,6 +284,14 @@ final class SchemaTableSqlRenderer {
                            String table,
                            com.flying.orm.core.metadata.ColumnMetadata column,
                            DynamicField target) {
+        addMissingComment(requests, table, column, target, null);
+    }
+
+    void addMissingComment(List<SqlRequest> requests,
+                           String table,
+                           ColumnMetadata column,
+                           DynamicField target,
+                           ColumnDefinition physical) {
         validateCommentChange(table, column, target);
         String previousComment = storageComment(column);
         String targetComment = storageComment(target);
@@ -261,7 +313,7 @@ final class SchemaTableSqlRenderer {
             requests.add(new SqlRequest(dialect.alterColumnTypeSql(table,
                                                                     target.name(),
                                                                     dataType(target),
-                                                                    columnDefinition(target)),
+                                                                    replacementColumnDefinition(target, physical)),
                                         List.of()));
         }
     }

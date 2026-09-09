@@ -20,33 +20,35 @@ import java.util.concurrent.locks.ReentrantLock;
  * @date 2026-08-08
  * @version v1.0
  */
-final class SyncBatchHeadState<T> {
+final class SyncBatchHeadState<T> implements Subscription {
 
-    final ReentrantLock lock = new ReentrantLock();
+    private final ReentrantLock lock = new ReentrantLock();
 
-    final Condition changed = lock.newCondition();
+    private final Condition changed = lock.newCondition();
 
-    Subscription upstream;
+    private Subscription upstream;
 
-    Subscriber<? super T> downstream;
+    private Subscriber<? super T> downstream;
 
-    boolean downstreamSubscribed;
+    private boolean downstreamSubscribed;
 
-    T first;
+    private T first;
 
-    Throwable failure;
+    private Throwable failure;
 
-    boolean firstReceived;
+    private boolean firstReceived;
 
-    boolean firstDelivered;
+    private boolean firstEmitting;
 
-    boolean completed;
+    private boolean firstDelivered;
 
-    boolean terminalDelivered;
+    private boolean completed;
 
-    boolean closed;
+    private boolean terminalDelivered;
 
-    long demand;
+    private boolean closed;
+
+    private long demand;
 
     boolean isEmpty() {
         lock.lock();
@@ -87,8 +89,84 @@ final class SyncBatchHeadState<T> {
             safeSubscriber.onError(new IllegalStateException("batch source supports only one execution"));
             return;
         }
-        safeSubscriber.onSubscribe(new SyncBatchHeadSubscription<>(this));
+        safeSubscriber.onSubscribe(this);
         signalTerminalAfterSubscribe(safeSubscriber);
+    }
+
+    @Override
+    public void request(long count) {
+        if (count <= 0L) {
+            signalInvalidDemand();
+            return;
+        }
+        T firstValue = null;
+        Subscriber<? super T> target;
+        Subscription requestUpstream = null;
+        long upstreamDemand = count;
+        Throwable terminalFailure;
+        boolean terminalComplete;
+        lock.lock();
+        try {
+            if (closed || terminalDelivered) {
+                return;
+            }
+            target = downstream;
+            long remaining = count;
+            if (!firstDelivered && !firstEmitting && firstReceived) {
+                firstEmitting = true;
+                firstValue = first;
+                remaining--;
+            }
+            terminalFailure = firstDelivered && completed ? failure : null;
+            terminalComplete = firstDelivered && completed && failure == null;
+            if (terminalFailure != null || terminalComplete) {
+                terminalDelivered = true;
+            }
+            if (!completed && remaining > 0L) {
+                demand = saturatedAdd(demand, remaining);
+                if (!firstEmitting) {
+                    requestUpstream = upstream;
+                }
+            }
+        } finally {
+            lock.unlock();
+        }
+        if (firstValue != null) {
+            target.onNext(firstValue);
+            lock.lock();
+            try {
+                firstEmitting = false;
+                firstDelivered = true;
+                // onNext 允许同步取消；取消后不能继续发送已缓存的终止信号或请求上游。
+                if (closed || terminalDelivered) {
+                    return;
+                }
+                // 回调返回前终态只登记；由首行回放者在这里认领唯一一次终态发送。
+                terminalFailure = completed ? failure : null;
+                terminalComplete = completed && failure == null;
+                if (completed) {
+                    terminalDelivered = true;
+                } else {
+                    // 首行在途期间的重入或并发 request 只累计需求，不能越过首行请求后续行。
+                    requestUpstream = upstream;
+                    upstreamDemand = demand;
+                }
+            } finally {
+                lock.unlock();
+            }
+        }
+        if (terminalFailure != null) {
+            target.onError(terminalFailure);
+        } else if (terminalComplete) {
+            target.onComplete();
+        } else if (requestUpstream != null && upstreamDemand > 0L) {
+            requestUpstream.request(upstreamDemand);
+        }
+    }
+
+    @Override
+    public void cancel() {
+        close();
     }
 
     void onSubscribe(Subscription subscription) {
@@ -228,6 +306,34 @@ final class SyncBatchHeadState<T> {
         } finally {
             lock.unlock();
         }
+    }
+
+    private void signalInvalidDemand() {
+        IllegalArgumentException error = new IllegalArgumentException("batch demand must be positive");
+        Subscriber<? super T> target;
+        Subscription cancel;
+        lock.lock();
+        try {
+            if (closed || terminalDelivered) {
+                return;
+            }
+            failure = error;
+            completed = true;
+            terminalDelivered = true;
+            closed = true;
+            target = downstream;
+            cancel = upstream;
+        } finally {
+            lock.unlock();
+        }
+        if (cancel != null) {
+            cancel.cancel();
+        }
+        target.onError(error);
+    }
+
+    private static long saturatedAdd(long left, long right) {
+        return Long.MAX_VALUE - left < right ? Long.MAX_VALUE : left + right;
     }
 
     private void signalTerminalAfterSubscribe(Subscriber<? super T> subscriber) {

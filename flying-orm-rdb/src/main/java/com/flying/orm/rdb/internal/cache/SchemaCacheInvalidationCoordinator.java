@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.internal.cache;
 
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.rdb.exception.RdbErrorKind;
 import com.flying.orm.rdb.exception.RdbException;
 import com.flying.orm.rdb.internal.InternalApi;
@@ -58,6 +59,19 @@ public final class SchemaCacheInvalidationCoordinator
         Object safeIdentity = Objects.requireNonNull(identity, "schema cache identity must not be null");
         Consumer<String> safeInvalidator = Objects.requireNonNull(
                 invalidator, "schema cache invalidator must not be null");
+        return withTarget(safeIdentity, consumerTarget(safeInvalidator));
+    }
+
+    /** 加入能够保留 schema/table 分段身份的失效器。 */
+    public SchemaCacheInvalidationCoordinator with(Object identity,
+                                                   MetadataCacheInvalidator invalidator) {
+        return withTarget(
+                Objects.requireNonNull(identity, "schema cache identity must not be null"),
+                Objects.requireNonNull(invalidator, "schema cache invalidator must not be null"));
+    }
+
+    private SchemaCacheInvalidationCoordinator withTarget(
+            Object safeIdentity, MetadataCacheInvalidator safeInvalidator) {
         for (Target target : targets) {
             if (target.identity() == safeIdentity) {
                 return this;
@@ -65,8 +79,24 @@ public final class SchemaCacheInvalidationCoordinator
         }
         List<Target> combined = new ArrayList<>(targets.size() + 1);
         combined.addAll(targets);
-        combined.add(new Target(safeIdentity, consumerTarget(safeInvalidator)));
+        combined.add(new Target(safeIdentity, safeInvalidator));
         return new SchemaCacheInvalidationCoordinator(combined);
+    }
+
+    /** 按规范关系身份失效；每个目标自行保留分段身份或执行安全的全量回退。 */
+    @Override
+    public void invalidate(RelationIdentity relation) {
+        RelationIdentity target = Objects.requireNonNull(
+                relation, "schema relation identity must not be null");
+        List<Throwable> failures = new ArrayList<>();
+        for (Target registered : targets) {
+            try {
+                registered.invalidator().invalidate(target);
+            } catch (RuntimeException | Error failure) {
+                record(failures, failure);
+            }
+        }
+        throwFailures(failures);
     }
 
     @Override
@@ -140,6 +170,14 @@ public final class SchemaCacheInvalidationCoordinator
             @Override
             public void invalidateAll() {
                 // 现有 Consumer<String> 公共契约没有全量失效能力。
+            }
+
+            @Override
+            public void invalidate(RelationIdentity relation) {
+                String table = relation.schema()
+                        .map(schema -> schema + "." + relation.table())
+                        .orElseGet(relation::table);
+                consumer.accept(table);
             }
         };
     }

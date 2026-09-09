@@ -6,11 +6,11 @@ import java.time.Duration;
 import java.util.Objects;
 
 /**
- * DDL 执行阶段的保护选项。SQL timeout 复用统一执行保护，approval 只负责确认不可自动恢复的风险。
+ * DDL 执行选项。执行与会话锁等待时限由上层管理，approval 只负责确认不可自动恢复的风险。
  *
- * @param sqlExecutionOptions 每条 DDL 的执行保护
+ * @param sqlExecutionOptions SQL 执行容量等选项，迁移执行 timeout 仅接受 ZERO
  * @param approval 可选的精确计划批准
- * @param lockTimeout 数据库会话等待表锁或元数据锁的最长时间，0 表示不开启会话保护
+ * @param lockTimeout 兼容参数，仅接受 ZERO；会话锁等待由上层管理
  * @author wangr
  * @date 2026-08-03
  * @version v1.0
@@ -31,26 +31,34 @@ public record SchemaMigrationExecutionOptions(SqlExecutionOptions sqlExecutionOp
         if (lockTimeout.isNegative()) {
             throw new IllegalArgumentException("schema lock timeout must not be negative");
         }
+        if (sqlExecutionOptions.timeout().compareTo(Duration.ZERO) > 0) {
+            throw new UnsupportedOperationException(
+                    "schema migration execution timeout must be managed by the caller");
+        }
+        if (!lockTimeout.isZero()) {
+            throw new UnsupportedOperationException(
+                    "schema session lock timeout must be managed by the caller");
+        }
     }
 
     /**
-     * 创建带执行和数据库锁等待上限且不携带危险计划批准的默认配置。
-     * DDL 允许比普通 SQL 更长的 60 秒执行时间，并最多等待数据库锁 10 秒；连接等待由上层连接池控制，
-     * 有回滚缺口的计划仍会在执行前被拒绝。
+     * 创建不携带治理预算和危险计划批准的默认配置。
+     * DDL 执行和数据库会话锁等待均为 ZERO；有回滚缺口的计划仍会在执行前被拒绝。
      *
      * @return 默认 DDL 执行配置
      */
     public static SchemaMigrationExecutionOptions defaults() {
-        SqlExecutionOptions ddlOptions = SqlExecutionOptions.safeDefaults()
-                                                           .withTimeout(Duration.ofSeconds(60));
-        return new SchemaMigrationExecutionOptions(ddlOptions, null, Duration.ofSeconds(10));
+        SqlExecutionOptions ddlOptions = SqlExecutionOptions.safeDefaults().withTimeout(Duration.ZERO);
+        return new SchemaMigrationExecutionOptions(ddlOptions, null, Duration.ZERO);
     }
 
     /**
-     * 给计划中的每一条 DDL 设置执行超时。超时保护沿用统一 SQL 执行模型，不会在结构模块里另造计时线程。
+     * 保留旧执行超时入口，但迁移时限由上层管理，仅接受 ZERO。
      *
-     * @param timeout 单条 DDL 允许执行的最长时间
+     * @param timeout 兼容执行预算，只能为 ZERO
      * @return 保留其他设置的新配置
+     * @throws UnsupportedOperationException timeout 为正
+     * @throws IllegalArgumentException timeout 为负
      */
     public SchemaMigrationExecutionOptions withTimeout(Duration timeout) {
         return new SchemaMigrationExecutionOptions(sqlExecutionOptions.withTimeout(timeout), approval, lockTimeout);
@@ -70,8 +78,10 @@ public record SchemaMigrationExecutionOptions(SqlExecutionOptions sqlExecutionOp
     }
 
     /**
-     * 限制数据库等待表锁或元数据锁的时间。这个配置要求执行器支持同连接 sequence，
-     * 因为设置、DDL 和恢复会话缺一不可。
+     * 保留旧会话锁等待入口，但会话治理由上层管理，仅接受 ZERO。
+     *
+     * @throws UnsupportedOperationException lockTimeout 为正
+     * @throws IllegalArgumentException lockTimeout 为负
      */
     public SchemaMigrationExecutionOptions withLockTimeout(Duration lockTimeout) {
         return new SchemaMigrationExecutionOptions(sqlExecutionOptions, approval, lockTimeout);

@@ -1,7 +1,6 @@
 package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.rdb.batch.BatchWriteOptions;
-import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.observation.ResourceCleanupObservation;
 import com.flying.orm.rdb.observation.SqlExecutionObserver;
 import com.flying.orm.rdb.observation.SqlExecutionOperation;
@@ -13,7 +12,6 @@ import io.r2dbc.spi.Connection;
 import io.r2dbc.spi.ConnectionFactory;
 import reactor.core.publisher.Mono;
 
-import java.time.Duration;
 import java.util.Objects;
 
 /**
@@ -42,46 +40,29 @@ final class R2dbcBatchConnectionLifecycle {
                                                               "transaction participant must not be null");
     }
 
-    Mono<R2dbcBatchConnectionHandle> acquire(BatchWriteOptions options) {
-        return acquire(options, SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT);
-    }
-
-    Mono<R2dbcBatchConnectionHandle> acquire(BatchWriteOptions options, Duration cleanupTimeout) {
-        BatchWriteOptions safeOptions = Objects.requireNonNull(options, "batch write options must not be null");
-        Duration safeCleanupTimeout = Objects.requireNonNull(cleanupTimeout,
-                                                              "cleanup timeout must not be null");
-        // 自定义事务参与者可能不是 Reactor Context 实现，所以不能假设入口校验和真正取连接时一定看到同一结果。
-        // 在使用外部连接前再做一次同样的限制，避免 INDEPENDENT 或回执恢复误入上层事务。
+    Mono<R2dbcBatchConnectionHandle> acquireExternal() {
         return currentTransaction()
-                .flatMap(transaction -> validateExternalOptions(safeOptions)
-                        .thenReturn(externalHandle(transaction, safeCleanupTimeout)))
-                .switchIfEmpty(acquireOwned(safeCleanupTimeout));
+                .map(this::externalHandle)
+                .switchIfEmpty(Mono.error(new IllegalStateException(
+                        "protected writes require an external transaction")));
     }
 
     Mono<R2dbcBatchConnectionHandle> acquire(
             BatchWriteOptions options,
             ReactiveTransactionSourceResolver.Resolution resolution) {
-        BatchWriteOptions safeOptions = Objects.requireNonNull(options, "batch write options must not be null");
-        ReactiveTransactionSourceResolver.Resolution safeResolution = Objects.requireNonNull(
-                resolution, "transaction resolution must not be null");
-        return safeResolution.transaction() == null
-                ? acquireOwned(SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT)
-                : validateExternalOptions(safeOptions).thenReturn(externalHandle(
-                        safeResolution.transaction(), SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT));
-    }
-
-    /** INDEPENDENT 需要自行提交分片，回执重放也会在业务写入前额外取连接；两者都不能绕过外部事务。 */
-    Mono<Void> validate(BatchWriteOptions options) {
-        BatchWriteOptions safeOptions = Objects.requireNonNull(options, "batch write options must not be null");
-        return currentTransaction().flatMap(ignored -> validateExternalOptions(safeOptions)).then();
+        if (resolution.transaction() != null) {
+            return Mono.just(externalHandle(resolution.transaction()));
+        }
+        if (options.mode() != BatchWriteOptions.Mode.INDEPENDENT) {
+            return Mono.error(new IllegalStateException(
+                    "non-empty ATOMIC batches require an external transaction"));
+        }
+        return acquireOwned();
     }
 
     Mono<Void> validate(BatchWriteOptions options,
                         ReactiveTransactionSourceResolver.Resolution resolution) {
-        BatchWriteOptions safeOptions = Objects.requireNonNull(options, "batch write options must not be null");
-        ReactiveTransactionSourceResolver.Resolution safeResolution = Objects.requireNonNull(
-                resolution, "transaction resolution must not be null");
-        return safeResolution.transaction() == null ? Mono.empty() : validateExternalOptions(safeOptions);
+        return resolution.transaction() == null ? Mono.empty() : validateExternalOptions(options);
     }
 
     Mono<ReactiveTransactionSourceResolver.Resolution> resolveTransaction() {
@@ -96,10 +77,6 @@ final class R2dbcBatchConnectionLifecycle {
         if (options.mode() == BatchWriteOptions.Mode.INDEPENDENT) {
             return Mono.error(new R2dbcTransactionParticipationException(
                     R2dbcTransactionParticipationException.Reason.INDEPENDENT_BATCH_NOT_ALLOWED));
-        }
-        if (options.recovery().mode() == BatchWriteOptions.RecoveryMode.RECEIPT) {
-            return Mono.error(new R2dbcTransactionParticipationException(
-                    R2dbcTransactionParticipationException.Reason.RECEIPT_RECOVERY_NOT_ALLOWED));
         }
         return Mono.empty();
     }
@@ -137,11 +114,9 @@ final class R2dbcBatchConnectionLifecycle {
         if (isExternal(resource)) {
             return Mono.empty();
         }
-        // 先标记已发出，外层截止时间取消当前订阅后不能再次提交回滚。
         return Mono.defer(() -> {
             resource.markRollingBack();
-            return resource.cleanupDeadline().protect(
-                            Mono.from(resource.connection().rollbackTransaction()))
+            return Mono.from(resource.connection().rollbackTransaction())
                     .doOnSuccess(ignored -> resource.markRolledBack());
         });
     }
@@ -150,17 +125,13 @@ final class R2dbcBatchConnectionLifecycle {
         return Objects.requireNonNull(resource, "batch connection must not be null").external();
     }
 
-    private R2dbcBatchConnectionHandle externalHandle(R2dbcTransactionContext transaction,
-                                                       Duration cleanupTimeout) {
-        R2dbcTransactionContext safeTransaction = Objects.requireNonNull(transaction,
-                                                                           "transaction context must not be null");
-        return new R2dbcBatchConnectionHandle(safeTransaction, cleanupTimeout);
+    private R2dbcBatchConnectionHandle externalHandle(R2dbcTransactionContext transaction) {
+        return new R2dbcBatchConnectionHandle(transaction);
     }
 
-    private Mono<R2dbcBatchConnectionHandle> acquireOwned(Duration cleanupTimeout) {
-        // 外部事务命中时不能提前触发备用连接池，尤其不能让 eager Publisher 偷跑一次连接获取。
+    private Mono<R2dbcBatchConnectionHandle> acquireOwned() {
         Mono<Connection> connection = Mono.defer(() -> Mono.from(connectionFactory.create()));
-        return connection.map(owned -> new R2dbcBatchConnectionHandle(owned, cleanupTimeout));
+        return connection.map(R2dbcBatchConnectionHandle::new);
     }
 
     Mono<Void> cancel(R2dbcBatchConnectionHandle resource, String modeName) {
@@ -177,9 +148,9 @@ final class R2dbcBatchConnectionLifecycle {
                 operation, "cleanup SQL operation must not be null");
         R2dbcLargeObjectScope largeObjects = safeResource.largeObjects();
         if (isExternal(safeResource)) {
-            return largeObjects.cancel(safeResource.cleanupDeadline());
+            return largeObjects.cancel();
         }
-        Mono<Boolean> largeObjectCleanup = largeObjects.cancel(safeResource.cleanupDeadline())
+        Mono<Boolean> largeObjectCleanup = largeObjects.cancel()
                 .thenReturn(true)
                 .onErrorResume(error -> closeUncertainConnection(
                         safeResource,
@@ -219,8 +190,8 @@ final class R2dbcBatchConnectionLifecycle {
             if (safeResource.largeObjectsIfCreated() == null) {
                 return Mono.empty();
             }
-            return leaseCleanup.closeAfterResultWithTimeout(
-                    safeResource, safeOperation, true, safeResource.cleanupTimeout());
+            return leaseCleanup.closeAfterResult(
+                    safeResource, safeOperation, true);
         }
         // defer 很重要：取消清理中的 rollback 真正结束后，才能读取最终状态。
         return Mono.defer(() -> {
@@ -230,17 +201,16 @@ final class R2dbcBatchConnectionLifecycle {
                         safeResource,
                         safeOperation,
                         ResourceCleanupObservation.Phase.CONNECTION_CLOSE,
-                        new IllegalStateException("batch connection outcome is not reusable: state=" + state));
+                        new IllegalStateException("batch transaction outcome is not confirmed: state=" + state));
             }
             return leaseCleanup.closeConfirmedOwnedAfterResult(
                     safeResource,
                     safeOperation,
-                    safeResource.cleanupTimeout(),
                     restoreAutoCommit(safeResource));
         });
     }
 
-    /** 只恢复 ORM 自己通过 beginTransaction 改变的连接状态。 */
+    /** Restore only the auto-commit state changed by the local chunk transaction. */
     private Mono<Void> restoreAutoCommit(R2dbcBatchConnectionHandle resource) {
         return Mono.defer(() -> resource.requiresAutoCommitRestore()
                 ? Mono.from(resource.connection().setAutoCommit(true))
@@ -252,6 +222,6 @@ final class R2dbcBatchConnectionLifecycle {
                                                  ResourceCleanupObservation.Phase phase,
                                                  Throwable cleanupError) {
         return leaseCleanup.closeAfterCleanupFailure(
-                resource, operation, phase, false, cleanupError, resource.cleanupDeadline());
+                resource, operation, phase, false, cleanupError);
     }
 }

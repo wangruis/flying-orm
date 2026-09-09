@@ -48,9 +48,9 @@ final class R2dbcBatchEvidenceCounts {
         record(count);
     }
 
-    synchronized void unknownAffectedRows() {
-        tracked = true;
-        known = false;
+    /** Records completed business rows without counting their affected rows twice. */
+    synchronized void completeBusinessRows(int rowCount) {
+        successfulRows = rowCount;
     }
 
     synchronized BatchAffectedRows affectedRows(long legacyAffectedRows) {

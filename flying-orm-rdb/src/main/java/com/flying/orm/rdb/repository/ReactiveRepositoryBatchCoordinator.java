@@ -104,8 +104,7 @@ final class ReactiveRepositoryBatchCoordinator<T> {
         return Mono.defer(() -> {
             BatchWriteOptions safeOptions = Objects.requireNonNull(options, "batch write options must not be null");
             boolean returnGeneratedKeys = generatedKeyInsert && ids.databaseGenerated();
-            RepositoryBatchLifecyclePlan plan = lifecyclePlan(after, returnGeneratedKeys);
-            if (!plan.tracked()) {
+            if (!requiresLifecycleTracking(after, returnGeneratedKeys)) {
                 return writer.apply(directRows(entities, mapper),
                                     BatchWriteCompletion.noop(), BatchGeneratedKeys.none());
             }
@@ -142,7 +141,7 @@ final class ReactiveRepositoryBatchCoordinator<T> {
         return Mono.defer(() -> {
             BatchWriteOptions safeOptions = Objects.requireNonNull(options, "batch write options must not be null");
             boolean returnGeneratedKeys = generatedKeyInsert && ids.databaseGenerated();
-            if (lifecyclePlan(after, returnGeneratedKeys).tracked()) {
+            if (requiresLifecycleTracking(after, returnGeneratedKeys)) {
                 return Mono.error(new UnsupportedOperationException(
                         "repository batch evidence cannot complete entity lifecycle or generated-key assignment"));
             }
@@ -177,8 +176,7 @@ final class ReactiveRepositoryBatchCoordinator<T> {
         return Flux.defer(() -> {
             BatchWriteOptions safeOptions = Objects.requireNonNull(options, "batch write options must not be null");
             boolean returnGeneratedKeys = generatedKeyInsert && ids.databaseGenerated();
-            RepositoryBatchLifecyclePlan plan = lifecyclePlan(after, returnGeneratedKeys);
-            if (!plan.tracked()) {
+            if (!requiresLifecycleTracking(after, returnGeneratedKeys)) {
                 return writer.apply(directRows(entities, mapper),
                                     BatchWriteCompletion.noop(), BatchGeneratedKeys.none());
             }
@@ -201,9 +199,9 @@ final class ReactiveRepositoryBatchCoordinator<T> {
         });
     }
 
-    private RepositoryBatchLifecyclePlan lifecyclePlan(EntityLifecyclePhase after,
-                                                        boolean returnGeneratedKeys) {
-        return RepositoryBatchLifecyclePlan.select(lifecycle.hasWork(after), returnGeneratedKeys);
+    private boolean requiresLifecycleTracking(EntityLifecyclePhase after,
+                                              boolean returnGeneratedKeys) {
+        return lifecycle.hasWork(after) || returnGeneratedKeys;
     }
 
     private static <T, R> Publisher<R> directRows(Publisher<T> entities, Function<T, R> mapper) {

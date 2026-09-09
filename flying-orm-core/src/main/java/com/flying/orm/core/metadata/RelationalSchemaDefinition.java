@@ -127,7 +127,7 @@ public final class RelationalSchemaDefinition {
             return true;
         }
         for (UniqueConstraintDefinition unique : table.uniqueConstraints()) {
-            if (unique.columns().equals(columns)) {
+            if (unique.nullPolicy() == UniqueNullPolicy.DEFAULT && unique.columns().equals(columns)) {
                 return true;
             }
         }

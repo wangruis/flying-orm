@@ -33,7 +33,8 @@ public final class SyncEntityDmlOperator<T> {
         this.client = Objects.requireNonNull(client, "sync form client must not be null");
         this.renderer = Objects.requireNonNull(renderer, "sql renderer must not be null");
         var metadata = client.entityModels().metadata(Objects.requireNonNull(type, "entity type must not be null"));
-        this.model = form == null ? new EntityDmlModel<>(metadata) : new EntityDmlModel<>(metadata, form);
+        this.model = new EntityDmlModel<>(metadata, form == null ? metadata.toDynamicForm() : form,
+                metadata.hasEnumConditionValues() ? client.entityModels().entityValues(type) : null);
     }
 
     /**
@@ -58,7 +59,8 @@ public final class SyncEntityDmlOperator<T> {
 
     /** @return 当前实体的新同步查询命令 */
     public SyncEntityDmlQueryOperator<T> query() {
-        return new SyncEntityDmlQueryOperator<>(client, new EntityQueryCommand<>(model.newState(renderer)));
+        return new SyncEntityDmlQueryOperator<>(client,
+                new EntityQueryCommand<>(model.newState(renderer), client.defaultFieldScope()));
     }
 
     /** @return 当前实体的新同步更新命令 */

@@ -31,7 +31,7 @@ public record JsonConditionValue(Kind kind, List<String> path, Object value) {
         if (kind != Kind.CONTAINS && path.isEmpty()) {
             throw new IllegalArgumentException("json condition path must not be empty");
         }
-        if (path.stream().anyMatch(segment -> segment == null || !JSON_KEY.matcher(segment).matches())) {
+        if (path.stream().anyMatch(segment -> !JSON_KEY.matcher(segment).matches())) {
             throw new IllegalArgumentException("json condition path contains an invalid segment");
         }
         if (kind == Kind.EXISTS) {

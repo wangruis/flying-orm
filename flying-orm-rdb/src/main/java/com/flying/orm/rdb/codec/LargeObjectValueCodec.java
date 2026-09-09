@@ -3,9 +3,7 @@ package com.flying.orm.rdb.codec;
 import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
-import com.flying.orm.rdb.execution.SqlExecutionTimeoutException;
 import com.flying.orm.rdb.execution.SqlLargeObjectLimitExceededException;
-import com.flying.orm.rdb.internal.DurationLimits;
 import io.r2dbc.spi.Blob;
 import io.r2dbc.spi.Clob;
 import reactor.core.publisher.Flux;
@@ -14,7 +12,6 @@ import reactor.core.publisher.Mono;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.util.Objects;
-import java.util.concurrent.TimeoutException;
 
 /**
  * BLOB/CLOB 的字段感知转换。普通 Java 值走同步快路径，R2DBC Blob/Clob 只通过响应式流读取，
@@ -143,6 +140,8 @@ public final class LargeObjectValueCodec {
     /**
      * 驱动返回 Blob/Clob 句柄时只订阅一次内容流并异步物化。大小上限按单个字段计算，0 表示不限。
      * 类型对不上时不会订阅内容流，而是 discard 这个句柄，把驱动资源还回去。
+     * 执行时限由上层生命周期管理；{@code options.timeout()} 必须为零，否则立即抛出
+     * {@link UnsupportedOperationException}。
      */
     public static Mono<Object> readReactive(Object value,
                                             String dataType,
@@ -155,6 +154,10 @@ public final class LargeObjectValueCodec {
                                             SqlExecutionOptions options) {
         SqlExecutionOptions safeOptions = Objects.requireNonNull(options,
                                                                  "sql execution options must not be null");
+        if (!safeOptions.timeout().isZero()) {
+            throw new UnsupportedOperationException(
+                    "large object read timeout must be managed by the upper-layer lifecycle");
+        }
         Mono<Object> decoded;
         if (value instanceof Blob blob) {
             if (!isBinaryDataType(dataType)) {
@@ -172,12 +175,7 @@ public final class LargeObjectValueCodec {
             // 已物化值只做同步转换和大小检查，不再发生驱动 I/O，也不为每个字段创建计时任务。
             return Mono.fromSupplier(() -> readMaterialized(value, dataType, safeOptions));
         }
-        if (safeOptions.timeout().isZero()) {
-            return decoded;
-        }
-        return decoded.timeout(DurationLimits.clamp(safeOptions.timeout()))
-                      .onErrorMap(TimeoutException.class,
-                                  error -> new SqlExecutionTimeoutException(safeOptions.timeout(), error));
+        return decoded;
     }
 
     private static Mono<byte[]> materialize(Blob blob, long maxBytes) {

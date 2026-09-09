@@ -2,8 +2,10 @@ package com.flying.orm.rdb.operator;
 
 import com.flying.orm.core.lambda.EntityProperty;
 import com.flying.orm.core.page.PageSort;
+import com.flying.orm.core.scope.FieldScope;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.rdb.form.spec.QuerySpec;
+import com.flying.orm.rdb.mapping.EntityQueryDefaults;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -20,13 +22,15 @@ import java.util.Objects;
 final class EntityQueryCommand<T> {
 
     private final EntityCommandState<T> state;
+    private final FieldScope defaultFields;
     private final List<PageSort> sorts = new ArrayList<>();
     private final List<String> projections = new ArrayList<>();
     private final List<String> groups = new ArrayList<>();
     private SensitiveDisplayMode displayMode = SensitiveDisplayMode.DECLARED;
 
-    EntityQueryCommand(EntityCommandState<T> state) {
+    EntityQueryCommand(EntityCommandState<T> state, FieldScope defaultFields) {
         this.state = Objects.requireNonNull(state, "entity command state must not be null");
+        this.defaultFields = defaultFields;
     }
 
     EntityCommandState<T> state() {
@@ -55,7 +59,7 @@ final class EntityQueryCommand<T> {
 
     QuerySpec entitySpec() {
         requireEntityResult();
-        return baseSpec();
+        return EntityQueryDefaults.applyProjection(baseSpec(), state.metadata(), defaultFields);
     }
 
     QuerySpec projectedSpec() {

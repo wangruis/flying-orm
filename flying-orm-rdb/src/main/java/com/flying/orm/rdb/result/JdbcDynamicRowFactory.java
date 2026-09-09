@@ -18,6 +18,7 @@ import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.SQLXML;
 import java.sql.Types;
+import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -41,13 +42,15 @@ public final class JdbcDynamicRowFactory {
     private final RowLayout layout;
     private final SqlExecutionOptions options;
     private final boolean[] limitedColumns;
+    private final boolean[] timeColumns;
 
     private JdbcDynamicRowFactory(ResultSet resultSet, RowLayout layout,
-                                  SqlExecutionOptions options, boolean[] limitedColumns) {
+                                  SqlExecutionOptions options, boolean[] limitedColumns, boolean[] timeColumns) {
         this.resultSet = resultSet;
         this.layout = layout;
         this.options = options;
         this.limitedColumns = limitedColumns;
+        this.timeColumns = timeColumns;
     }
 
     /**
@@ -61,20 +64,28 @@ public final class JdbcDynamicRowFactory {
         int columnCount = metadata.getColumnCount();
         List<String> names = new ArrayList<>(columnCount);
         boolean[] limited = null;
+        boolean[] times = null;
         boolean hasLimits = safeOptions.maxLargeObjectBytes() > 0 || safeOptions.maxLargeObjectChars() > 0;
         for (int index = 1; index <= columnCount; index++) {
             String label = metadata.getColumnLabel(index);
             names.add(label == null || label.isBlank() ? metadata.getColumnName(index) : label);
             // 驱动可能已经把 LOB 物化为 byte[]/String；类型只在结果布局建立时读取一次。
             // 明确的普通标量列不消耗 LOB 额度，未知类型则保留原来的保守大小边界。
-            if (hasLimits && limitMaterializedColumn(metadata.getColumnType(index))) {
+            int jdbcType = metadata.getColumnType(index);
+            if (jdbcType == Types.TIME) {
+                if (times == null) {
+                    times = new boolean[columnCount];
+                }
+                times[index - 1] = true;
+            }
+            if (hasLimits && limitMaterializedColumn(jdbcType)) {
                 if (limited == null) {
                     limited = new boolean[columnCount];
                 }
                 limited[index - 1] = true;
             }
         }
-        return new JdbcDynamicRowFactory(safeResultSet, RowLayout.of(names), safeOptions, limited);
+        return new JdbcDynamicRowFactory(safeResultSet, RowLayout.of(names), safeOptions, limited, times);
     }
 
     /**
@@ -83,7 +94,10 @@ public final class JdbcDynamicRowFactory {
     public DynamicRow readCurrentRow() throws SQLException {
         Object[] values = new Object[layout.size()];
         for (int index = 0; index < values.length; index++) {
-            values[index] = materialize(resultSet.getObject(index + 1),
+            // java.sql.Time drops fractional seconds; read TIME through its lossless JDBC carrier.
+            Object value = timeColumns != null && timeColumns[index]
+                    ? resultSet.getObject(index + 1, LocalTime.class) : resultSet.getObject(index + 1);
+            values[index] = materialize(value,
                     limitedColumns != null && limitedColumns[index]);
         }
         return DynamicRow.owned(layout, values);
@@ -130,7 +144,18 @@ public final class JdbcDynamicRowFactory {
 
     /** PostgreSQL 等 JDBC 驱动用临时 Array 句柄返回数组列，离开当前行前必须物化并释放。 */
     private static Object readArray(Array array) throws SQLException {
-        return materializeAndRelease(array::getArray, array::free);
+        return materializeAndRelease(() -> {
+            if (array.getBaseType() != Types.TIME) {
+                return array.getArray();
+            }
+            try (ResultSet elements = array.getResultSet()) {
+                List<LocalTime> values = new ArrayList<>();
+                while (elements.next()) {
+                    values.add(elements.getObject(2, LocalTime.class));
+                }
+                return values.toArray(LocalTime[]::new);
+            }
+        }, array::free);
     }
 
     private byte[] readBlob(Blob blob) throws SQLException {

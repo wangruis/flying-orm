@@ -231,30 +231,34 @@ final class FormProtectionSqlSupport {
             String markers = java.util.Collections.nCopies(owners.size() + 2, "?").stream()
                                            .collect(java.util.stream.Collectors.joining(", "));
             String tokenTable = support.identifier(layout.table());
+            String fieldTag = support.identifier(ProtectedContainsLayout.fieldTagColumn(owners));
+            String tokenHash = support.identifier(ProtectedContainsLayout.tokenHashColumn(owners));
             this.deleteSql = "delete from " + tokenTable + " where " + ownerPredicate
-                    + " and " + support.identifier("field_tag") + " = ?";
+                    + " and " + fieldTag + " = ?";
             this.insertSql = "insert into " + tokenTable + " (" + columns + ", "
-                    + support.identifier("field_tag") + ", " + support.identifier("token_hash")
+                    + fieldTag + ", " + tokenHash
                     + ") values (" + markers + ")";
         }
     }
 
+    /** 最终投影由查询规划直接传入；纯条件路径传空列表，不遍历无用业务字段。 */
     ProtectedFieldRuntime.PreparedQuery prepareQuery(DynamicForm form,
-                                                      DynamicForm visibleForm,
                                                       ConditionGroup where,
-                                                      DataScope scope) {
+                                                      DataScope scope,
+                                                      List<String> visibleFields) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        return prepareQuery(safeForm, protectedFields.physicalForm(safeForm), visibleForm, where, scope);
+        return prepareQuery(
+                safeForm, protectedFields.physicalForm(safeForm), where, scope, visibleFields);
     }
 
     ProtectedFieldRuntime.PreparedQuery prepareQuery(DynamicForm form,
                                                       DynamicForm physicalForm,
-                                                      DynamicForm visibleForm,
                                                       ConditionGroup where,
-                                                      DataScope scope) {
+                                                      DataScope scope,
+                                                      List<String> visibleFields) {
         return protectedFields.prepareQuery(
-                form, physicalForm, visibleForm, FormDataScopes.unwrapTrustedValues(form, where, scope),
-                scope, support.valueCodecs);
+                form, physicalForm, FormDataScopes.unwrapTrustedValues(physicalForm, where, scope),
+                scope, support.valueCodecs, visibleFields);
     }
 
     Optional<ProtectedFieldRuntime.PreparedContainsQuery> prepareContainsQuery(DynamicForm form,

@@ -1,27 +1,19 @@
 package com.flying.orm.rdb.metadata;
 
-import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.sql.render.SqlRequest;
-import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
-import com.flying.orm.rdb.schema.SchemaSnapshot;
-import com.flying.orm.rdb.schema.SchemaSnapshotCoverage;
 import com.flying.orm.rdb.type.DatabaseTypes;
-import reactor.core.publisher.Mono;
 
 import java.util.List;
-import java.util.Objects;
 
 /**
- * H2 的动态表单元数据读取器。它走 R2DBC 查询 INFORMATION_SCHEMA，不碰 JDBC 元数据。
- * 主要服务内嵌开发和测试环境，返回结构仍与生产方言使用同一套 DynamicForm/TableMetadata 模型。
- * 具体实现由 {@link ReactiveFormMetadataReaders} 在包内选择，业务只依赖元数据 reader 接口。
+ * H2 的元数据查询定义。这里仅保存 H2 INFORMATION_SCHEMA 的方言事实，
+ * 查询编排和结果组装统一由 {@link InformationSchemaFormMetadataReader} 负责。
  *
  * @author wangr
  * @date 2026-07-28
  * @version v1.0
  */
-final class H2ReactiveFormMetadataReader implements ReactiveFormMetadataReader, ReactiveMetadataExecutorSource {
+final class H2MetadataQueries {
 
     private static final String BASE_COLUMNS_SQL = """
             select lower(c.COLUMN_NAME) as COLUMN_NAME,
@@ -31,6 +23,7 @@ final class H2ReactiveFormMetadataReader implements ReactiveFormMetadataReader, 
                             and c.CHARACTER_MAXIMUM_LENGTH = 1000000000 then 'TEXT'
                        else c.DATA_TYPE
                    end as DATA_TYPE,
+                   c.DATA_TYPE as PHYSICAL_DATA_TYPE,
                    c.CHARACTER_MAXIMUM_LENGTH,
                    c.NUMERIC_PRECISION,
                    c.NUMERIC_SCALE,
@@ -198,6 +191,7 @@ final class H2ReactiveFormMetadataReader implements ReactiveFormMetadataReader, 
                 ) then ? else upper(?) end
             """;
 
+    // UNIQUE 和外键都可以复用显式索引；只隐藏约束生成的支撑索引，保留开发者声明的独立索引。
     private static final String BASE_INDEXES_SQL = """
             select lower(i.INDEX_NAME) as INDEX_NAME,
                    lower(ic.COLUMN_NAME) as COLUMN_NAME,
@@ -286,6 +280,7 @@ final class H2ReactiveFormMetadataReader implements ReactiveFormMetadataReader, 
                     and owned_constraint.INDEX_SCHEMA = i.INDEX_SCHEMA
                     and owned_constraint.INDEX_NAME = i.INDEX_NAME
                     and owned_constraint.CONSTRAINT_TYPE in ('PRIMARY KEY', 'UNIQUE', 'FOREIGN KEY')
+                    and i.IS_GENERATED
               )
             """;
 
@@ -386,108 +381,34 @@ final class H2ReactiveFormMetadataReader implements ReactiveFormMetadataReader, 
                   ) then ? else upper(?) end
             """;
 
-    private final InformationSchemaFormMetadataReader delegate;
-
-    private H2ReactiveFormMetadataReader(ReactiveSqlExecutor executor) {
-        this.delegate = new InformationSchemaFormMetadataReader(Objects.requireNonNull(executor,
-                                                                                      "reactive sql executor must not be null"),
-                                                                                      queries());
-    }
-
-    static H2ReactiveFormMetadataReader create(ReactiveSqlExecutor executor) {
-        return new H2ReactiveFormMetadataReader(executor);
+    private H2MetadataQueries() {
     }
 
     static InformationSchemaFormMetadataReader.Queries queries() {
         return InformationSchemaFormMetadataReader.Queries.complete(
-                H2ReactiveFormMetadataReader::columnQuery,
-                H2ReactiveFormMetadataReader::indexQuery,
-                H2ReactiveFormMetadataReader::foreignKeyQuery,
-                H2ReactiveFormMetadataReader::logicalType,
-                H2ReactiveFormMetadataReader::tableQuery,
-                H2ReactiveFormMetadataReader::primaryKeyQuery,
-                H2ReactiveFormMetadataReader::uniqueConstraintQuery,
-                H2ReactiveFormMetadataReader::checkConstraintQuery,
+                H2MetadataQueries::columnQuery,
+                H2MetadataQueries::indexQuery,
+                H2MetadataQueries::foreignKeyQuery,
+                H2MetadataQueries::logicalType,
+                H2MetadataQueries::tableQuery,
+                H2MetadataQueries::primaryKeyQuery,
+                H2MetadataQueries::uniqueConstraintQuery,
+                H2MetadataQueries::checkConstraintQuery,
                 InformationSchemaFormMetadataReader.SnapshotDialect.H2);
     }
 
-    @Override
-    public ReactiveSqlExecutor metadataExecutor() {
-        return delegate.metadataExecutor();
-    }
-
-    @Override
-    public SchemaSnapshotCoverage snapshotCoverage() {
-        return delegate.snapshotCoverage();
-    }
-
-    @Override
-    public Mono<DynamicForm> readForm(String formId, String table) {
-        return delegate.readForm(formId, table);
-    }
-
-    @Override
-    public Mono<DynamicForm> readForm(String formId, String schema, String table) {
-        return delegate.readForm(formId, schema, table);
-    }
-
-    @Override
-    public Mono<TableMetadata> readTable(String table) {
-        return delegate.readTable(table);
-    }
-
-    @Override
-    public Mono<TableMetadata> readTable(String schema, String table) {
-        return delegate.readTable(schema, table);
-    }
-
-    @Override
-    public Mono<SchemaSnapshot> readSnapshot(String table) {
-        return delegate.readSnapshot(table);
-    }
-
-    @Override
-    public Mono<SchemaSnapshot> readSnapshot(String schema, String table) {
-        return delegate.readSnapshot(schema, table);
-    }
-
     private static SqlRequest columnQuery(String schema, String table) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            String sql = BASE_COLUMNS_SQL
-                    + " and c.TABLE_SCHEMA = current_schema() order by c.ORDINAL_POSITION";
-            return new SqlRequest(sql, tableParameters(safeTable));
-        }
-        String sql = BASE_COLUMNS_SQL + " and c.TABLE_SCHEMA = " + schemaExpression()
-                + " order by c.ORDINAL_POSITION";
-        return new SqlRequest(sql, tableAndSchemaParameters(safeTable, schema));
+        return scopedQuery(BASE_COLUMNS_SQL, schema, table, "c", " order by c.ORDINAL_POSITION");
     }
 
     private static SqlRequest indexQuery(String schema, String table) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            String sql = BASE_INDEXES_SQL
-                    + " and i.TABLE_SCHEMA = current_schema()"
-                    + " order by i.INDEX_NAME, ic.ORDINAL_POSITION";
-            return new SqlRequest(sql, tableParameters(safeTable));
-        }
-        String sql = BASE_INDEXES_SQL + " and i.TABLE_SCHEMA = " + schemaExpression()
-                + " order by i.INDEX_NAME, ic.ORDINAL_POSITION";
-        return new SqlRequest(sql, tableAndSchemaParameters(safeTable, schema));
+        return scopedQuery(BASE_INDEXES_SQL, schema, table, "i",
+                           " order by i.INDEX_NAME, ic.ORDINAL_POSITION");
     }
 
     private static SqlRequest foreignKeyQuery(String schema, String table) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            String sql = BASE_FOREIGN_KEYS_SQL
-                    + " and tc.TABLE_SCHEMA = current_schema()"
-                    + " order by fk.CONSTRAINT_NAME, fk.ORDINAL_POSITION";
-            return new SqlRequest(sql, tableParameters(safeTable));
-        }
-        String sql = BASE_FOREIGN_KEYS_SQL
-                + " and tc.TABLE_SCHEMA = " + schemaExpression()
-                + " order by fk.CONSTRAINT_NAME, fk.ORDINAL_POSITION";
-        return new SqlRequest(sql, tableAndSchemaParameters(safeTable, schema));
+        return scopedQuery(BASE_FOREIGN_KEYS_SQL, schema, table, "tc",
+                           " order by fk.CONSTRAINT_NAME, fk.ORDINAL_POSITION");
     }
 
     private static SqlRequest tableQuery(String schema, String table) {

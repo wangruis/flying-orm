@@ -8,7 +8,6 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.TimeoutException;
 
 /** Executes a bounded, verified JDBC batch for protected side-index tokens. */
 final class JdbcProtectedSideIndexDml {
@@ -18,26 +17,10 @@ final class JdbcProtectedSideIndexDml {
     private JdbcProtectedSideIndexDml() {
     }
 
-    static void insertTokens(Connection connection,
-                             ProtectedWriteWork work,
-                             Map<String, Object> owner,
-                             ProtectedWriteWork.FieldTokens field,
-                             JdbcProtectedWriteDeadline deadline) throws SQLException {
-        int tokenCount = field.tokenCount();
-        for (int offset = 0; offset < tokenCount; offset += MAX_TOKEN_BATCH_SIZE) {
-            int limit = Math.min(tokenCount, offset + MAX_TOKEN_BATCH_SIZE);
-            try (PreparedStatement statement = connection.prepareStatement(work.insertSql())) {
-                JdbcStatementOptions.apply(statement, deadline.remainingOptions());
-                executeExactBatch(statement, work, owner, field, offset, limit);
-            }
-        }
-    }
-
     static void insertParameterSets(Connection connection,
                                     String sql,
-                                    List<List<Object>> parameterSets,
-                                    JdbcBatchSupport.BatchDeadline deadline)
-            throws SQLException, TimeoutException {
+                                    List<List<Object>> parameterSets)
+            throws SQLException {
         if (parameterSets.isEmpty()) {
             return;
         }
@@ -45,7 +28,6 @@ final class JdbcProtectedSideIndexDml {
             throw new IllegalArgumentException("protected side index token batch exceeds internal limit");
         }
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            applyTimeout(statement, deadline.remaining());
             for (List<Object> parameters : parameterSets) {
                 JdbcStatementControl.requireNotInterrupted(statement);
                 JdbcStatementBinder.bind(statement, parameters);
@@ -54,14 +36,12 @@ final class JdbcProtectedSideIndexDml {
             JdbcStatementControl.requireNotInterrupted(statement);
             requireExactCounts(statement.executeBatch(), parameterSets.size());
         }
-        deadline.remaining();
     }
 
     static void deleteParameterSets(Connection connection,
                                     String sql,
-                                    List<List<Object>> parameterSets,
-                                    JdbcBatchSupport.BatchDeadline deadline)
-            throws SQLException, TimeoutException {
+                                    List<List<Object>> parameterSets)
+            throws SQLException {
         if (parameterSets.isEmpty()) {
             return;
         }
@@ -71,7 +51,6 @@ final class JdbcProtectedSideIndexDml {
             throw new IllegalArgumentException("protected side index delete batch exceeds internal limit");
         }
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
-            applyTimeout(statement, deadline.remaining());
             for (List<Object> parameters : parameterSets) {
                 JdbcStatementControl.requireNotInterrupted(statement);
                 JdbcStatementBinder.bind(statement, parameters);
@@ -80,22 +59,18 @@ final class JdbcProtectedSideIndexDml {
             JdbcStatementControl.requireNotInterrupted(statement);
             requireDeleteCounts(statement.executeBatch(), parameterSets.size());
         }
-        deadline.remaining();
     }
 
     static void insertTokens(Connection connection,
                              ProtectedWriteWork work,
                              Map<String, Object> owner,
-                             ProtectedWriteWork.FieldTokens field,
-                             JdbcBatchSupport.BatchDeadline deadline) throws SQLException, TimeoutException {
+                             ProtectedWriteWork.FieldTokens field) throws SQLException {
         int tokenCount = field.tokenCount();
         for (int offset = 0; offset < tokenCount; offset += MAX_TOKEN_BATCH_SIZE) {
             int limit = Math.min(tokenCount, offset + MAX_TOKEN_BATCH_SIZE);
             try (PreparedStatement statement = connection.prepareStatement(work.insertSql())) {
-                applyTimeout(statement, deadline.remaining());
                 executeExactBatch(statement, work, owner, field, offset, limit);
             }
-            deadline.remaining();
         }
     }
 
@@ -139,12 +114,5 @@ final class JdbcProtectedSideIndexDml {
         }
     }
 
-    private static void applyTimeout(PreparedStatement statement, java.time.Duration remaining) throws SQLException {
-        if (remaining.isZero()) {
-            return;
-        }
-        long seconds = remaining.getSeconds();
-        long rounded = remaining.getNano() == 0 ? seconds : seconds + 1L;
-        statement.setQueryTimeout((int) Math.min(Integer.MAX_VALUE, Math.max(1L, rounded)));
-    }
+
 }

@@ -4,24 +4,315 @@ flying-orm 是一个为运行时动态表单而生、同时提供实体 Reposito
 
 项目坚持简单、易用、稳定、安全、开箱即用；在正确性和可维护性成立后，追求高性能、高并发、高吞吐和低延迟。
 
+## 4.0.0 概览
+
+本文与两份能力文档已同步 **2026-09-09 本轮职责调整**：整批外部事务管理，仅显式独立分片允许每片自有事务。旧超时、会话锁等待和回执恢复治理不再由 ORM 执行。**本轮修改尚未运行回归或质量门禁，也未安装或发布制品；下方历史验证记录不覆盖本轮改动。**
+
+- **单一编译内核**：DynamicForm、Repository、Schema 和 DatabaseOperator 共用字段、类型、Scope 与参数语义，最终生成 `SqlRequest`；JDBC/R2DBC 保留各自驱动执行方式。
+- **结构与类型闭环**：UUID 写入及空值绑定、DATE 回读、受控 Schema CHANGE/DROP、显式 DISTINCT 可空唯一，以及保护字段的物理列与回读验证。
+- **查询与写入边界**：同表自关联按来源隔离治理；关系条件可与加密精确过滤组合；批量 UPSERT 在 SQL 内约束已有冲突目标行的 Scope，不再仅靠拒绝整个带 Scope 请求兜底。
+- **内部表面积治理**：合并重复编排和无职责转发，保留正式能力；“轻量”指独立、按需启用、无框架容器依赖，不意味着代码行数或性能结论已有保证。
+
+常用客户端与规格对象的使用主路径不变，但不承诺从 3.3.0 无条件二进制兼容。内部公开类型收回、record 成分和批量配置构造方式的迁移说明见 [公共 API 与数据库认证](ADVANCED-CAPABILITIES.md#公共-api-与数据库认证)。
+
 ## 要求与边界
 
 - Java 21、Maven 3.9 或更高版本。
 - 上层应用提供 JDBC `DataSource`、R2DBC `ConnectionFactory` 或两者。
 - 上层应用选择并配置数据库驱动、连接池、凭据、路由和事务管理器；flying-orm 不实现连接池、数据源路由或事务管理器。
+- 非空 `ATOMIC` 整批及需要多语句一致性的普通保护写入必须参与上层外部事务；缺少前提时在业务 SQL 前明确拒绝，不降级为自动提交。仅显式 `INDEPENDENT` 分片允许每片自行开始、提交和失败回滚。
+- 执行、监听等待、清理时限及 Schema 会话锁等待由上层或基础设施管理。ORM 保留正常取消传播和资源释放；普通单条 JDBC Statement 的显式超时参数仍可透传给驱动。
 - 支持 PostgreSQL、MySQL、Oracle、SQL Server 和 H2 的已声明方言能力。静态 SQL/能力合同与真实数据库往返认证是两类证据，未运行实库门禁时不声称已认证。
 
 ## 添加依赖
 
 `flying-orm-rdb` 会传递引入 `flying-orm-core`。数据库驱动和连接池由上层应用单独声明。
+以下坐标对应当前 `4.0.0` 源码；正式发布前请先使用本地构建制品，不能把 POM 中的版本号当作 Maven Central 已可下载的证明。
 
 ```xml
 <dependency>
     <groupId>io.github.wangruis</groupId>
     <artifactId>flying-orm-rdb</artifactId>
-    <version>3.3.0</version>
+    <version>4.0.0</version>
 </dependency>
 ```
+
+## 上层接入示例
+
+下面两个例子使用 **Java 21、PostgreSQL、flying-orm 4.0.0**，共用一份 DynamicForm。数据库及账号由应用准备，ORM 不创建数据库或管理凭据。先确保当前源码的 4.0.0 制品已安装到应用使用的 Maven 仓库；不要仅凭版本号假设拿到了最新代码。
+
+示例选择 Spring Boot 4.1.1；普通 Java 不依赖 Spring。这里的 POM 是**使用方项目配置**，不要加进 flying-orm 自身的 POM。已有项目只合并需要的依赖，不要重复添加 parent 或整个 dependencies 块。
+
+### 两个例子共用的表模型
+
+保存为 `src/main/java/example/QuickstartModel.java`。这是唯一的示例表结构定义，建表与 CRUD 都复用它：
+
+```java
+package example;
+
+import com.flying.orm.core.form.DynamicField;
+import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.metadata.RelationIdentity;
+
+public final class QuickstartModel {
+    public static final DynamicForm USERS = DynamicForm.relationalBuilder(
+            "quickstartUsers", RelationIdentity.of(null, "public", "flying_orm_quickstart"))
+            .addField(DynamicField.primaryKey("id", "VARCHAR(64)"))
+            .addField(DynamicField.of("name", "VARCHAR(128)").withNullable(false))
+            .build();
+
+    private QuickstartModel() {
+    }
+}
+```
+
+示例访问前必须已创建该表。空的演示数据库可用下面普通 Java 程序的 `--init` 模式创建一次，不手写另一份建表 SQL。它不是启动时自动迁移方案：实体应用使用 `clients.entitySchemas()` 的审阅/同步链，普通请求不执行 DDL。
+
+### 例一：Spring Boot 最小接入
+
+使用 WebFlux + R2DBC，数据库访问不阻塞请求线程。Spring Boot 负责按 `spring.r2dbc.*` 创建连接工厂，flying-orm 只需要一个客户端 Bean；不需要 ORM 专属 starter、`@EnableFlyingOrm`、Mapper 扫描或 Spring Data Repository。Boot 4 的基础 R2DBC starter 与 Spring Data starter 分开，参见 [Spring Boot starter 对照](https://github.com/spring-projects/spring-boot/wiki/Spring-Boot-4.0-Migration-Guide#starters) 和 [R2DBC 配置](https://docs.spring.io/spring-boot/4.1/reference/data/sql.html#data.sql.r2dbc)。
+
+**1. 使用方 `pom.xml`：**
+
+```xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-starter-parent</artifactId>
+        <version>4.1.1</version>
+        <relativePath/>
+    </parent>
+    <groupId>example</groupId>
+    <artifactId>flying-orm-boot-demo</artifactId>
+    <version>1.0.0</version>
+    <properties>
+        <java.version>21</java.version>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>io.github.wangruis</groupId>
+            <artifactId>flying-orm-rdb</artifactId>
+            <version>4.0.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-webflux</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-r2dbc</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>r2dbc-postgresql</artifactId>
+            <scope>runtime</scope>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.springframework.boot</groupId>
+                <artifactId>spring-boot-maven-plugin</artifactId>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+Boot 管理 starter、驱动及共享依赖的版本；应用升级 Boot/BOM 后仍需验证解析出的依赖组合，不能把本例当作所有 Spring Boot 版本的兼容认证。
+
+**2. `src/main/resources/application.yml`：**
+
+```yaml
+spring:
+  r2dbc:
+    url: ${DB_R2DBC_URL:r2dbc:postgresql://localhost:5432/orm_demo}
+    username: ${DB_USER}
+    password: ${DB_PASSWORD}
+server:
+  address: 127.0.0.1
+```
+
+启动环境中提供 `DB_USER`、`DB_PASSWORD`，可用 `DB_R2DBC_URL` 覆盖示例地址。不要把生产密码写入源码或 URL；本地演示接口只监听回环地址，真实服务的认证与权限由应用补齐。
+
+**3. `src/main/java/example/BootDemoApplication.java`：**
+
+```java
+package example;
+
+import com.flying.orm.rdb.bootstrap.FlyingOrmClients;
+import io.r2dbc.spi.ConnectionFactory;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+
+@SpringBootApplication
+public class BootDemoApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(BootDemoApplication.class, args);
+    }
+
+    @Bean(destroyMethod = "close")
+    FlyingOrmClients flyingOrmClients(ConnectionFactory connectionFactory) {
+        return FlyingOrmClients.builder(connectionFactory).build();
+    }
+}
+```
+
+**4. `src/main/java/example/UserController.java`：**
+
+```java
+package example;
+
+import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.rdb.bootstrap.FlyingOrmClients;
+import com.flying.orm.rdb.form.ReactiveFormClient;
+import com.flying.orm.rdb.form.spec.QuerySpec;
+import com.flying.orm.rdb.form.spec.WriteSpec;
+import com.flying.orm.rdb.result.DynamicRow;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import java.util.Map;
+
+@RestController
+@RequestMapping("/demo/users")
+public class UserController {
+    private final ReactiveFormClient forms;
+
+    public UserController(FlyingOrmClients clients) {
+        this.forms = clients.forms();
+    }
+
+    @PostMapping("/{id}")
+    public Mono<Long> insert(@PathVariable("id") String id,
+                             @RequestParam("name") String name) {
+        return forms.insert(WriteSpec.insert(QuickstartModel.USERS,
+                Map.of("id", id, "name", name)));
+    }
+
+    @GetMapping("/{id}")
+    public Flux<DynamicRow> find(@PathVariable("id") String id) {
+        var where = ConditionGroup.and().where("id", "=", id).build();
+        return forms.select(QuerySpec.of(QuickstartModel.USERS, where));
+    }
+}
+```
+
+执行 `mvn spring-boot:run`，表已创建后可调用：
+
+```bash
+curl -X POST 'http://localhost:8080/demo/users/u-1001?name=Alice'
+curl 'http://localhost:8080/demo/users/u-1001'
+```
+
+首次 POST 返回影响行数 `1`，GET 返回匹配行；重复插入同一主键会报冲突，不是 UPSERT。WebFlux 负责订阅返回的 Publisher，业务方法不要手工 `subscribe()` 或 `block()`。客户端作为单例共享，由 Spring 关闭；连接池仍由 Spring/应用关闭。
+
+这份最小配置**不接入 Spring 外部事务**，也不提供跨请求原子性。仅添加 `@Transactional` 不会自动把 Spring 事务连接交给 flying-orm；需要应用适配 `R2dbcTransactionParticipant`（JDBC 对应 `JdbcTransactionParticipant`），连接、完成通知和事务终态仍由 Spring 管理。
+
+已有 Spring MVC/JDBC 应用也可只注册 `FlyingOrmClients.builder(dataSource).build()` 的 Bean，并调用 `syncForms()`；不要把 JDBC 同步入口放入 WebFlux 事件循环，也无需为 flying-orm 额外装配 R2DBC。
+
+### 例二：普通 Java 最小接入
+
+不用 Spring，直接提供 PostgreSQL JDBC 数据源；复用上面的 `QuickstartModel.java`。`PGSimpleDataSource` 不带连接池，适合说明最短接入路径；长期运行、高并发应用应传入自己维护的连接池并负责关闭，参见 [pgJDBC 数据源说明](https://jdbc.postgresql.org/documentation/datasource/)。
+
+**1. 使用方 `pom.xml`：**
+
+```xml
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <groupId>example</groupId>
+    <artifactId>flying-orm-java-demo</artifactId>
+    <version>1.0.0</version>
+    <properties>
+        <maven.compiler.release>21</maven.compiler.release>
+        <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    </properties>
+    <dependencies>
+        <dependency>
+            <groupId>io.github.wangruis</groupId>
+            <artifactId>flying-orm-rdb</artifactId>
+            <version>4.0.0</version>
+        </dependency>
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <version>42.7.13</version>
+        </dependency>
+    </dependencies>
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <version>3.14.1</version>
+            </plugin>
+        </plugins>
+    </build>
+</project>
+```
+
+这里代码直接使用 `PGSimpleDataSource`，因此 JDBC 驱动使用默认 compile scope，不能写成仅 runtime。驱动版本是示例固定值，升级由使用方核验。
+
+**2. `src/main/java/example/PlainJavaDemo.java`：**
+
+```java
+package example;
+
+import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.rdb.bootstrap.FlyingOrmClients;
+import com.flying.orm.rdb.form.spec.QuerySpec;
+import com.flying.orm.rdb.form.spec.WriteSpec;
+import org.postgresql.ds.PGSimpleDataSource;
+
+import java.util.Map;
+import java.util.UUID;
+
+public class PlainJavaDemo {
+    public static void main(String[] args) {
+        PGSimpleDataSource dataSource = new PGSimpleDataSource();
+        dataSource.setURL(System.getenv().getOrDefault("DB_JDBC_URL",
+                "jdbc:postgresql://localhost:5432/orm_demo"));
+        dataSource.setUser(System.getenv("DB_USER"));
+        dataSource.setPassword(System.getenv("DB_PASSWORD"));
+
+        try (FlyingOrmClients clients = FlyingOrmClients.builder(dataSource).build()) {
+            if (args.length == 1 && "--init".equals(args[0])) {
+                // 仅用于尚无示例表的演示库；重复建表会明确失败，不删表或覆盖数据。
+                clients.syncSchema().createTable(QuickstartModel.USERS);
+                return;
+            }
+
+            var forms = clients.syncForms();
+            String id = UUID.randomUUID().toString();
+            long inserted = forms.insert(WriteSpec.insert(QuickstartModel.USERS,
+                    Map.of("id", id, "name", "Alice")));
+            var where = ConditionGroup.and().where("id", "=", id).build();
+            var rows = forms.select(QuerySpec.of(QuickstartModel.USERS, where));
+            System.out.println("inserted=" + inserted + ", rows=" + rows);
+        }
+    }
+}
+```
+
+设置 `DB_USER`、`DB_PASSWORD`，需要时设置 `DB_JDBC_URL`。用 IDE 导入 Maven 项目：首次向该空演示库运行 `PlainJavaDemo.main` 时传入 `--init`，之后不带参数运行即可插入并查询；也可先执行 `mvn compile` 检查项目编译。两个示例连接同一数据库时，只需初始化一次。
+
+`try-with-resources` 释放 ORM 自身资源；`PGSimpleDataSource` 本身没有池可关，ORM 操作会归还/关闭自己获取的 JDBC 连接。若替换为连接池，应用应先关闭客户端，再关闭自己拥有的池。示例插入与查询是两个独立操作，不构成跨语句事务。
+
+这两个例子不更改 ORM 的依赖边界：Spring Boot、数据库驱动、连接池与事务适配只存在于使用方。加密密钥、Scope、Schema 自动同步等按需配置，不是基础 CRUD 的必填项。
+
+历史示例验证范围：上述四份 Java 文件曾用 Java 21 对本轮职责修改前的 ORM 编译输出及本地 Spring Boot 4.1.1 / Spring 7.0.9、pgJDBC 42.7.13 API 编译通过；当时检查了 POM XML 与文档链接。本轮没有重新验证示例。此前也未启动 Spring 上下文、解析运行完整示例依赖树或连接 PostgreSQL，不将历史编译通过等同于当前端到端接入认证。
 
 ## 五分钟上手
 
@@ -55,6 +346,9 @@ DynamicForm userForm = DynamicForm.builder("user", "app_user")
 
 `DynamicForm` 是不可变的运行时表模型。字段名、数据库类型、主键、租户、逻辑删除以及显式字段保护都从这里进入统一 SQL 管线。
 
+`RelationIdentity` 不从点号字符串猜测 catalog、schema 和 table。`RelationIdentity.table("accounts.v2")`
+表示表名本身含点号；需要限定关系时应使用 `RelationIdentity.of(catalog, schema, table)`。关系元数据读取、缓存键和失效路径会按三个身份段精确传递。
+
 实体中不对应数据库列的计算属性继续使用 `@TableField(exist = false)` 或 Java `transient`；flying-orm 不再发明一套重复注解。这些属性不进入读取、插入、更新、批量或 Schema 列计划；同时声明列或约束注解会被当作配置错误。
 
 实体也可以作为完整期望关系模型的唯一来源：`@TableName` / `@TableCatalog` 声明表身份，`@TableComment` 声明表注释，
@@ -62,7 +356,15 @@ DynamicForm userForm = DynamicForm.builder("user", "app_user")
 `@TableForeignKey`、`@TableCheck` 和 `@TablePartition` 声明受控关系结构；当前分区原语只支持 PostgreSQL 单列时间 `RANGE`。显式调用
 `EntitySchemaSynchronizer.synchronizeRelational(...)` 或响应式入口后，flying-orm 才会执行
 “注解编译 → Schema diff → 精确 SQL 审阅 → 前置条件复核 → DDL → 执行后回读验证”；普通 Repository/CRUD 不会自动进入这条冷路径。
-自动执行要求元数据读取器明确声明能够完整回读所有被比较的结构事实。内置 PostgreSQL、MySQL、Oracle、SQL Server 和 H2 读取器均提供完整关系快照，覆盖表与列、PK、UK、索引、FK、CHECK、默认值、生成方式及注释；第三方读取器若只声明部分 coverage，审阅阶段会返回人工步骤和零 SQL，不会先执行 DDL 再把未知事实误报为成功。
+自动执行要求元数据读取器明确声明能够完整回读所有被比较的结构事实。内置 PostgreSQL、MySQL、Oracle、SQL Server 和 H2 读取器在各自已声明且可表示的版本与结构范围内提供 complete coverage，覆盖表与列、PK、UK、索引、FK、CHECK、默认值、生成方式及注释；Oracle 12c 等部分回读配置保留明确缺口。内置或第三方读取器若只有部分 coverage，审阅阶段会返回人工步骤和零 SQL，不会先执行 DDL 再把未知事实误报为成功。
+
+Java `UUID` 实体属性统一编译为逻辑 `UUID`，默认采用 PostgreSQL/H2 原生 `UUID`、MySQL `CHAR(36)`、Oracle `VARCHAR2(36)`、SQL Server `UNIQUEIDENTIFIER`；写入、条件绑定和回读使用对应载体，显式文本 codec 的优先级不变。关系同步支持各内建方言已声明的受控 CHANGE/DROP 与显式 ABSENT 目标；不安全变更仍进入人工步骤，具体边界见 [Schema 能力](CAPABILITIES.md#schema-与元数据)。
+
+Oracle 外键替换可通过审核计划执行：`requiresWritesQuiesced()` 标明相关写入必须静止，
+`SchemaMigrationApproval.approveWithWritesQuiesced(plan, reason)` 显式确认后，执行冻结 DDL 并回读验证。
+新建且尚无写入者的数据库也满足该前提；ORM 不负责停写、补偿或集群协调，普通批准不会自动放行。
+
+需要“任一键为 NULL 可以共存、全部非空时唯一”时，可显式声明 `@TableUnique(nullPolicy = UniqueNullPolicy.DISTINCT, ...)` 并使用 relational Schema 入口。PG/MySQL 使用等价原生 UNIQUE，H2 显式指定 NULLS DISTINCT，SQL Server 使用受控唯一过滤索引，Oracle 使用受控 CASE 唯一索引；旧注解默认行为不变，不开放任意索引表达式。
 
 `@EncryptedField` 的密文列、EXACT/SUFFIX 搜索列和按需的 CONTAINS 辅助表由 ORM 从同一实体描述投影到最终物理关系，并与 CRUD、指纹、DDL、回读和差异共用一条链路。只有能够保持语义的唯一约束和等值索引才会投影；主键、外键、分区键、范围约束或不安全的复合保护索引会在 SQL 发送前明确拒绝。未启用保护的普通实体不增加 CRUD 热路径成本。
 
@@ -93,6 +395,8 @@ List<DynamicRow> selected = forms.select(QuerySpec.of(userForm, byId));
 
 ### 4. 批量写入
 
+下面的 `ATOMIC` 示例要求应用已通过现有事务参与接口接入外部事务，并在该事务内执行。前面的最小客户端装配没有自动提供这一前提；不能仅添加 `@Transactional` 或依赖 ORM 自行开事务。
+
 ```java
 BatchSpec batch = BatchSpec.insert(userForm, Flux.fromIterable(rows))
         .withOptions(BatchWriteOptions.atomic(500));
@@ -100,7 +404,9 @@ BatchSpec batch = BatchSpec.insert(userForm, Flux.fromIterable(rows))
 Mono<BatchWriteResult> result = forms.writeBatch(batch);
 ```
 
-批量输入按有界分片处理，不要求先把全部数据收集到内存。同步 FormClient 使用同一个 `BatchSpec`。
+批量输入按有界分片处理，不要求先把全部数据收集到内存。同步 FormClient 使用同一个 `BatchSpec`。有界切分输入不等于独立事务：`ATOMIC` 仍由一个上层事务覆盖整批；只有明确选择 `INDEPENDENT` 才允许每片自有事务和部分成功。缺少外部事务的非空 `ATOMIC` 会报 `IllegalStateException`，不会自动切换模式。
+
+`BatchSpec.upsert(...).withScope(...)` 支持范围内冲突更新：默认与显式 Scope 一并检查已有目标行，范围外更新明确失败。没有冲突的新行仍遵循 INSERT 规则；JDBC、R2DBC 和 Repository 共用同一计划。
 
 `maxBufferedBytes` 限制所有在途分片的输入估算重量；每片额度为总预算除以并发数，
 `maxRowBytes` 声明单行上限。请求下一行前会预留这份额度，剩余空间不足时先执行当前分片。
@@ -115,9 +421,9 @@ BatchWriteOptions options = BatchWriteOptions.atomic(500)
 
 `withMemoryLimits` 会重新计算默认单行上限，因此显式的 `withMaxRowBytes` 应放在它之后。
 单行上限越接近每片额度，分片可能越早结束；两者相等时每行单独成片，
-INDEPENDENT 的事务和回执边界也随之改变，应同时考虑结果分片数限制。
-本次新增 record 分量 `maxRowBytes`，直接调用规范构造器的代码需要补齐参数并重新编译。
-回执计划升级后，旧计划回执不能作为新计划自动重放；升级前应完成旧任务的恢复确认。
+INDEPENDENT 的每片事务边界也随之改变，应同时考虑结果分片数限制。
+`BatchWriteOptions` 的 record 分量包含 `maxRowBytes`；从不含该分量的旧版本迁移时，直接调用规范构造器的代码需要补齐参数并重新编译。优先使用上面的工厂方法和 `with...` 配置方法。
+幂等与事务结果恢复由上层处理。旧 `RECEIPT` 配置和 `resolveUnknown` 暂保留公开签名，但明确报不支持；ORM 不再自动回查或重放。上层应在迁移前处理存量任务及回执，不把兼容签名误当作原恢复能力仍在执行。
 
 需要区分“SQL 已执行”和“外部事务已提交”时，使用独立证据入口：
 
@@ -129,10 +435,10 @@ Mono<BatchExecutionEvidence> evidence = forms.writeBatchEvidence(batch);
 
 ## 正式能力导航
 
-下列能力属于 `3.3.0` 的公开能力；分组只用于阅读导航。
+下列能力属于 `4.0.0` 的公开能力；分组只用于阅读导航。
 
-- [常用正式能力](CAPABILITIES.md)：可空复合 keyset、来源隔离的受治理 JOIN、结构化条件、字段用途、查询预算、类型化聚合、批量执行证据、保护关系投影、Repository 和实体注解 Schema 闭环。
-- [专业正式能力](ADVANCED-CAPABILITIES.md)：DatabaseOperator、SQL 模板、受控原生 SQL、外部事务、锁定读取、超时、观测、缓存、方言、保护字段关系模型、PostgreSQL 分区父表和受治理扩展。
+- [常用正式能力](CAPABILITIES.md)：可空复合 keyset、来源隔离的受治理 JOIN（含同表自关联）、结构化条件、字段用途、查询预算、类型化聚合、批量执行证据、保护关系投影、Repository 和实体注解 Schema 闭环。
+- [专业正式能力](ADVANCED-CAPABILITIES.md)：DatabaseOperator、SQL 模板、受控原生 SQL、外部事务、锁定读取、上层时限接入边界、观测、缓存、方言、保护字段关系模型、PostgreSQL 分区父表和受治理扩展。
 
 ## 默认安全行为
 
@@ -144,9 +450,15 @@ Mono<BatchExecutionEvidence> evidence = forms.writeBatchEvidence(batch);
 
 ## 从源码构建
 
+以下命令在仓库根目录执行，使用应用环境配置的 Maven 和本地仓库，无需固定机器路径：
+
 ```bash
 mvn -pl flying-orm-core,flying-orm-rdb -am verify
 ```
+
+完整质量门禁使用 `mvn -Pquality -pl flying-orm-core,flying-orm-rdb -am verify`。构建验证不等于安装或发布；需要更新本地 Maven 制品时再执行相应的 `install`。
+
+历史记录：2026-09-09 本轮职责修改之前，本地安装后的质量门禁累计 2,281 项全部通过，零失败、零错误、零跳过；当时的 Checkstyle、SpotBugs、JaCoCo、发版依赖分析及专用 3.1.0 API 基线验证通过。**这些结果不覆盖现在的职责修改，不能作为当前源码已通过门禁或已安装的证明。** 本轮未运行回归、完整门禁、五库实测、性能基准或消费者兼容验证，详见 [验证范围](ADVANCED-CAPABILITIES.md#公共-api-与数据库认证)。
 
 ## License
 

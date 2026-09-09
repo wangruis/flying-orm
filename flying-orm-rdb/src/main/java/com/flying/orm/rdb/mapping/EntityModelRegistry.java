@@ -118,7 +118,23 @@ public final class EntityModelRegistry implements AutoCloseable {
                                               safeType, metadata, safeCodecs, customMappings));
     }
 
-    /** 仅供已知数据库原始值入口使用；已解码行和调用方 mapper 继续使用 rowMapper 的宽容语义。 */
+    /** Internal Form boundary: JSON fields already contain decoded values, including literal strings. */
+    @InternalApi
+    @SuppressWarnings("unchecked")
+    public <T> RowMapper<T> decodedRowMapper(Class<T> type, ValueCodecRegistry valueCodecs) {
+        Class<T> safeType = Objects.requireNonNull(type, "mapping type must not be null");
+        ValueCodecRegistry safeCodecs = Objects.requireNonNull(valueCodecs,
+                "value codec registry must not be null");
+        EntityMetadata<T> metadata = metadata(safeType);
+        EntitySchemaDescriptor<T> schema = registeredSchema(safeType);
+        Map<String, EntityTypeMappingRegistry.Mapping> customMappings = schema == null
+                ? Map.of() : schema.customFieldMappings();
+        return (MappingPlan<T>) model(new ModelKey(Kind.DECODED_ROW_MAPPING, safeType, safeCodecs),
+                ignored -> MappingPlan.createUncached(
+                        safeType, metadata, safeCodecs, customMappings, false, true));
+    }
+
+    /** 仅供已知数据库原始值入口使用；调用方 mapper 继续使用 rowMapper 的宽容语义。 */
     @InternalApi
     @SuppressWarnings("unchecked")
     public <T> RowMapper<T> rawRowMapper(Class<T> type, ValueCodecRegistry valueCodecs) {
@@ -387,6 +403,7 @@ public final class EntityModelRegistry implements AutoCloseable {
         VALUES,
         ROW_MAPPING,
         RAW_ROW_MAPPING,
+        DECODED_ROW_MAPPING,
         SCHEMA_DESCRIPTOR
     }
 }

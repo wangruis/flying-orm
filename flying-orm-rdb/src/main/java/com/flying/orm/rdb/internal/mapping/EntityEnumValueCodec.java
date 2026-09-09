@@ -5,6 +5,9 @@ import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.mapping.MappingException;
 
 import java.lang.reflect.Field;
+import java.math.BigDecimal;
+import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -55,7 +58,7 @@ public final class EntityEnumValueCodec {
                     throw new MappingException("@EnumValue must not be null: "
                                                        + safeType.getName() + "." + enumValue.name());
                 }
-                Enum<?> previous = values.putIfAbsent(databaseValue, enumValue);
+                Enum<?> previous = values.putIfAbsent(databaseIdentity(databaseValue, true), enumValue);
                 if (previous != null) {
                     throw new MappingException("duplicate @EnumValue in " + safeType.getName() + ": "
                                                        + previous.name() + " and " + enumValue.name());
@@ -95,11 +98,25 @@ public final class EntityEnumValueCodec {
         } catch (IllegalArgumentException error) {
             throw new MappingException("enum database value cannot be converted to " + valueType.getName(), error);
         }
-        Enum<?> result = constantsByValue.get(converted);
+        Enum<?> result = constantsByValue.get(databaseIdentity(converted, false));
         if (result == null) {
             throw new MappingException("unknown @EnumValue for " + enumType.getName());
         }
         return result;
+    }
+
+    /** 编译期冻结二进制键；查找期只临时借用只读行值，不复制 payload 或遍历枚举。 */
+    private static Object databaseIdentity(Object value, boolean snapshot) {
+        if (value instanceof BigDecimal decimal) {
+            return decimal.stripTrailingZeros();
+        }
+        if (value instanceof byte[] bytes) {
+            return ByteBuffer.wrap(snapshot ? bytes.clone() : bytes);
+        }
+        if (value instanceof Byte[] bytes) {
+            return Arrays.asList(snapshot ? bytes.clone() : bytes);
+        }
+        return value;
     }
 
     private static String requireText(String value, String name) {

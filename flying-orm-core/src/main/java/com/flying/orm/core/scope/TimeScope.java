@@ -43,13 +43,13 @@ public record TimeScope(String field,
     /** @return 与构造入参和上一次读取隔离的开始边界 */
     @Override
     public Object start() {
-        return BindableValueSnapshots.immutableValue(start);
+        return BindableValueSnapshots.logicalValue(start);
     }
 
     /** @return 与构造入参和上一次读取隔离的结束边界 */
     @Override
     public Object end() {
-        return BindableValueSnapshots.immutableValue(end);
+        return BindableValueSnapshots.logicalValue(end);
     }
 
     /**
@@ -171,6 +171,6 @@ public record TimeScope(String field,
                                                                value,
                                                                ConditionValuePolicy.REJECT_EMPTY)
                                                     .value();
-        return BindableValueSnapshots.immutableValue(normalized);
+        return BindableValueSnapshots.logicalValue(normalized);
     }
 }

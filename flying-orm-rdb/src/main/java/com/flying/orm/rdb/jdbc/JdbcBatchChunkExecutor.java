@@ -3,6 +3,7 @@ package com.flying.orm.rdb.jdbc;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.batch.BatchChunkResult;
 import com.flying.orm.rdb.batch.BatchExecutionState;
+import com.flying.orm.rdb.batch.BatchOptimisticLockException;
 import com.flying.orm.rdb.batch.BatchRowConflict;
 import com.flying.orm.rdb.batch.BatchRowCountPolicy;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
@@ -12,18 +13,19 @@ import com.flying.orm.rdb.execution.ProtectedBatchRows;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.result.DynamicRow;
+import com.flying.orm.rdb.result.JdbcDynamicRowFactory;
 
 import java.sql.BatchUpdateException;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
-import java.util.concurrent.TimeoutException;
 
 /**
  * 在已经选定的 JDBC 连接和事务边界内执行一个批量分片。
@@ -40,9 +42,8 @@ final class JdbcBatchChunkExecutor {
                              BatchWriteRequest request,
                              int chunkIndex,
                              long startOffset,
-                             List<ProtectedBatchRows.RowView> rows,
-                             JdbcBatchSupport.BatchDeadline deadline) throws SQLException, TimeoutException {
-        return execute(connection, request, chunkIndex, startOffset, rows, deadline, null);
+                             List<ProtectedBatchRows.RowView> rows) throws SQLException {
+        return execute(connection, request, chunkIndex, startOffset, rows, null);
     }
 
     /** evidence 入口才创建逐片计数收集器；legacy 调用继续以 null 直接穿过同一执行逻辑。 */
@@ -51,18 +52,17 @@ final class JdbcBatchChunkExecutor {
             BatchWriteRequest request,
             int chunkIndex,
             long startOffset,
-            List<ProtectedBatchRows.RowView> rows,
-            JdbcBatchSupport.BatchDeadline deadline) {
+            List<ProtectedBatchRows.RowView> rows) {
         JdbcBatchEvidenceSupport.Counts evidence = new JdbcBatchEvidenceSupport.Counts(startOffset, rows.size());
         try {
             BatchChunkResult result = execute(
-                    connection, request, chunkIndex, startOffset, rows, deadline, evidence);
+                    connection, request, chunkIndex, startOffset, rows, evidence);
             if (result.status() == BatchChunkResult.Status.COMMITTED) {
                 return new JdbcBatchEvidenceSupport.Outcome(
                         evidence.fact(chunkIndex, BatchExecutionState.SUCCESS, null), null,
                         evidence.databaseWorkAttempted());
             }
-            IllegalStateException conflict = new IllegalStateException("batch row count conflict");
+            BatchOptimisticLockException conflict = new BatchOptimisticLockException(result.conflicts());
             return new JdbcBatchEvidenceSupport.Outcome(
                     evidence.fact(chunkIndex, BatchExecutionState.FAILED, conflict), conflict,
                     evidence.databaseWorkAttempted());
@@ -71,7 +71,7 @@ final class JdbcBatchChunkExecutor {
                     evidence.fact(chunkIndex,
                             JdbcBatchEvidenceSupport.failureState(partial, evidence.hasSuccess()), partial), partial,
                     evidence.databaseWorkAttempted());
-        } catch (SQLException | RuntimeException | TimeoutException failure) {
+        } catch (SQLException | RuntimeException failure) {
             BatchExecutionState state = JdbcBatchEvidenceSupport.failureState(failure, evidence.hasSuccess());
             evidence.unknownAffectedRows();
             return new JdbcBatchEvidenceSupport.Outcome(
@@ -85,8 +85,7 @@ final class JdbcBatchChunkExecutor {
                                      int chunkIndex,
                                      long startOffset,
                                      List<ProtectedBatchRows.RowView> rows,
-                                     JdbcBatchSupport.BatchDeadline deadline,
-                                     JdbcBatchEvidenceSupport.Counts evidence) throws SQLException, TimeoutException {
+                                     JdbcBatchEvidenceSupport.Counts evidence) throws SQLException {
         Connection safeConnection = Objects.requireNonNull(connection, "jdbc batch connection must not be null");
         BatchWriteRequest safeRequest = Objects.requireNonNull(request, "batch write request must not be null");
         // rows 是批量读取器刚生成的私有分片，执行期间不会再修改；不复制可以省下一份分片引用数组。
@@ -95,38 +94,32 @@ final class JdbcBatchChunkExecutor {
         if (safeRows.isEmpty()) {
             throw new IllegalArgumentException("jdbc batch chunk must not be empty");
         }
-        deadline.remaining();
         JdbcProtectedBatchSideIndex.Prepared protectedRows = protectedSideIndex.prepare(
-                safeConnection, safeRequest, safeRows, deadline, evidence);
+                safeConnection, safeRequest, safeRows, evidence);
         if (safeRequest.generatedKeys().required()) {
             return executeReturningGeneratedKeys(safeConnection, safeRequest, chunkIndex, startOffset,
-                                                 safeRows, deadline, protectedRows, evidence);
+                                                 safeRows, protectedRows, evidence);
         }
         if (hasOwnerRestrictedUpdates(protectedRows)) {
             BatchChunkResult result = executeOwnerRestrictedUpdates(
-                    safeConnection, safeRequest, chunkIndex, startOffset, safeRows, deadline, protectedRows,
+                    safeConnection, safeRequest, chunkIndex, startOffset, safeRows, protectedRows,
                     evidence);
-            protectedSideIndex.complete(safeConnection, protectedRows, result, deadline);
-            deadline.remaining();
+            protectedSideIndex.complete(safeConnection, protectedRows, result);
             return result;
         }
         BatchChunkResult result;
         try (PreparedStatement statement = safeConnection.prepareStatement(safeRequest.sql())) {
-            applyTimeout(statement, deadline.remaining());
             for (ProtectedBatchRows.RowView rowView : safeRows) {
                 JdbcStatementBinder.bindOwned(statement, rowView);
                 statement.addBatch();
-                deadline.remaining();
             }
-            deadline.remaining();
             JdbcStatementControl.requireNotInterrupted(statement);
             markDatabaseWorkAttempted(evidence);
             int[] counts = JdbcBatchEvidenceSupport.executeBusinessBatch(
                     statement, evidence, startOffset, safeRows.size());
             result = result(safeRequest, chunkIndex, startOffset, safeRows.size(), counts, evidence);
         }
-        protectedSideIndex.complete(safeConnection, protectedRows, result, deadline);
-        deadline.remaining();
+        protectedSideIndex.complete(safeConnection, protectedRows, result);
         return result;
     }
 
@@ -140,55 +133,96 @@ final class JdbcBatchChunkExecutor {
                                                                     int chunkIndex,
                                                                     long startOffset,
                                                                      List<ProtectedBatchRows.RowView> rows,
-                                                                     JdbcBatchSupport.BatchDeadline deadline,
                                                                      JdbcProtectedBatchSideIndex.Prepared protectedRows,
                                                                      JdbcBatchEvidenceSupport.Counts evidence)
-            throws SQLException, TimeoutException {
+            throws SQLException {
         long affectedRows = 0L;
         List<BatchRowConflict> conflicts = new ArrayList<>();
         JdbcProtectedBatchSideIndex.GeneratedTokenBatch generatedTokens =
                 JdbcProtectedBatchSideIndex.generatedTokenBatch(
-                        connection, protectedRows, deadline);
+                        connection, protectedRows);
         // 显式告诉驱动只返回主键列。PostgreSQL 等驱动在 RETURN_GENERATED_KEYS 下可能返回整行，
         // 指定列名既少传无关数据，也让 MySQL、PostgreSQL、H2 的回填结果保持同一形状。
         try (PreparedStatement statement = connection.prepareStatement(
                 request.sql(), new String[]{request.generatedKeys().columnName()})) {
             for (int index = 0; index < rows.size(); index++) {
                 JdbcStatementBinder.bindOwned(statement, rows.get(index));
-                // 逐行回填会在一个分片内多次执行 SQL。每次执行前重新算剩余时间，
-                // 这样前一行的绑定、驱动调用或回填回调耗时都会计入整批 timeout。
-                applyTimeout(statement, deadline.remaining());
                 JdbcStatementControl.requireNotInterrupted(statement);
                 markDatabaseWorkAttempted(evidence);
                 long count = executeUpdate(statement);
                 record(evidence, startOffset + index, count);
                 JdbcStatementControl.requireNotInterrupted(statement);
-                DynamicRow generatedKey = JdbcBatchGeneratedKeyReader.readOne(
+                DynamicRow generatedKey = readGeneratedKey(
                         statement.getGeneratedKeys(), request.generatedKeys().columnName(), SqlExecutionOptions.safeDefaults());
-                // 回调故意放在下一行 SQL 之前。异常会直接冒泡，让已有事务边界回滚本分片或整批。
+                // 回调放在下一行 SQL 之前，异常交给外部事务拥有者或 INDEPENDENT 分片边界处理。
                 request.generatedKeys().accept(startOffset + index, generatedKey);
                 if (generatedTokens != null) {
                     generatedTokens.add(
                             protectedRows.rows().get(index), count, generatedKey);
                 } else if (!protectedRows.rows().isEmpty()) {
                     JdbcProtectedBatchSideIndex.completeGeneratedRow(
-                            connection, protectedRows.rows().get(index), count, generatedKey, deadline);
+                            connection, protectedRows.rows().get(index), count, generatedKey);
                 }
                 collectRowCount(request, startOffset + index, count, conflicts);
                 if (count > 0L) {
                     affectedRows = addExact(affectedRows, count);
                 }
-                // 回调可能做实体主键回填，不能让它绕开批量任务的统一截止时间。
-                deadline.remaining();
             }
         }
         if (generatedTokens != null) {
             generatedTokens.flush();
         }
-        deadline.remaining();
         return conflicts.isEmpty()
                 ? BatchChunkResult.committed(chunkIndex, startOffset, rows.size(), affectedRows)
                 : BatchChunkResult.conflicted(chunkIndex, startOffset, rows.size(), conflicts);
+    }
+
+    /**
+     * 批量主键回填必须在回调前拒绝少键、多键和空键；当前行处理完即关闭结果集，
+     * 不把驱动游标带到下一个输入项。
+     */
+    private static DynamicRow readGeneratedKey(ResultSet resultSet,
+                                               String expectedColumn,
+                                               SqlExecutionOptions options) throws SQLException {
+        if (resultSet == null) {
+            throw new SQLException("jdbc driver did not return generated keys", "HY000");
+        }
+        try (ResultSet keys = resultSet) {
+            if (!keys.next()) {
+                throw new SQLException("jdbc driver did not return generated key", "HY000");
+            }
+            DynamicRow row = JdbcDynamicRowFactory.from(keys, options).readCurrentRow();
+            requireNonNullGeneratedKey(row, expectedColumn);
+            if (keys.next()) {
+                throw new SQLException("jdbc driver returned more than one generated key for one batch row", "HY000");
+            }
+            return row;
+        }
+    }
+
+    private static void requireNonNullGeneratedKey(DynamicRow row, String expectedColumn) throws SQLException {
+        DynamicRow safeRow = Objects.requireNonNull(row, "jdbc generated key row must not be null");
+        String expected = normalizeGeneratedKeyColumn(expectedColumn);
+        Object value = null;
+        int matches = 0;
+        for (int index = 0; index < safeRow.columnCount(); index++) {
+            if (normalizeGeneratedKeyColumn(safeRow.columnName(index)).equals(expected)) {
+                value = safeRow.value(index);
+                matches++;
+            }
+        }
+        if (matches == 0 && safeRow.columnCount() == 1) {
+            value = safeRow.value(0);
+            matches = 1;
+        }
+        if (matches != 1 || value == null) {
+            throw new SQLException("jdbc driver returned an invalid generated key", "HY000");
+        }
+    }
+
+    private static String normalizeGeneratedKeyColumn(String column) {
+        return Objects.requireNonNull(column, "generated key column must not be null")
+                      .toLowerCase(Locale.ROOT);
     }
 
     /**
@@ -201,9 +235,8 @@ final class JdbcBatchChunkExecutor {
             int chunkIndex,
             long startOffset,
             List<ProtectedBatchRows.RowView> rows,
-            JdbcBatchSupport.BatchDeadline deadline,
             JdbcProtectedBatchSideIndex.Prepared protectedRows,
-            JdbcBatchEvidenceSupport.Counts evidence) throws SQLException, TimeoutException {
+            JdbcBatchEvidenceSupport.Counts evidence) throws SQLException {
         long affectedRows = 0L;
         List<BatchRowConflict> conflicts = new ArrayList<>();
         SqlRequest[] updates = new SqlRequest[rows.size()];
@@ -239,7 +272,7 @@ final class JdbcBatchChunkExecutor {
                 limit++;
             }
             affectedRows = addExact(affectedRows, executeOwnerRestrictedBatch(
-                    connection, request, startOffset, updates, index, limit, deadline, conflicts, evidence));
+                    connection, request, startOffset, updates, index, limit, conflicts, evidence));
             index = limit;
         }
         return conflicts.isEmpty()
@@ -254,25 +287,19 @@ final class JdbcBatchChunkExecutor {
             SqlRequest[] updates,
             int offset,
             int limit,
-            JdbcBatchSupport.BatchDeadline deadline,
             List<BatchRowConflict> conflicts,
-            JdbcBatchEvidenceSupport.Counts evidence) throws SQLException, TimeoutException {
+            JdbcBatchEvidenceSupport.Counts evidence) throws SQLException {
         SqlRequest first = updates[offset];
-        deadline.remaining();
         try (PreparedStatement statement = connection.prepareStatement(first.sql())) {
-            applyTimeout(statement, deadline.remaining());
             for (int index = offset; index < limit; index++) {
                 JdbcStatementBinder.bind(statement, updates[index].parameters());
                 statement.addBatch();
-                deadline.remaining();
             }
-            applyTimeout(statement, deadline.remaining());
             JdbcStatementControl.requireNotInterrupted(statement);
             markDatabaseWorkAttempted(evidence);
             int[] counts = JdbcBatchEvidenceSupport.executeBusinessBatch(
                     statement, evidence, startOffset + offset, limit - offset);
             JdbcStatementControl.requireNotInterrupted(statement);
-            deadline.remaining();
             if (counts == null || counts.length != limit - offset) {
                 throw new SQLException("jdbc driver returned incomplete batch update counts", "HY000");
             }
@@ -377,17 +404,5 @@ final class JdbcBatchChunkExecutor {
         }
     }
 
-    private static void applyTimeout(PreparedStatement statement, Duration remaining) throws SQLException {
-        if (remaining.isZero()) {
-            return;
-        }
-        long seconds = remaining.getSeconds();
-        if (seconds >= Integer.MAX_VALUE) {
-            statement.setQueryTimeout(Integer.MAX_VALUE);
-            return;
-        }
-        long roundedSeconds = remaining.getNano() == 0 ? seconds : seconds + 1L;
-        statement.setQueryTimeout((int) Math.max(1L, roundedSeconds));
-    }
 
 }

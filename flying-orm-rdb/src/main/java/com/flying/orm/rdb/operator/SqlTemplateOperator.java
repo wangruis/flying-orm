@@ -138,7 +138,7 @@ public final class SqlTemplateOperator {
                     parameterProvider.parameters(state.templateId(), state.serverParameters()),
                     "SQL template parameter provider returned null Publisher");
             return Mono.from(supplied)
-                       .switchIfEmpty(Mono.error(new IllegalArgumentException(
+                       .switchIfEmpty(Mono.error(() -> new IllegalArgumentException(
                                "SQL template server parameter provider returned no values")))
                        .map(serverValues -> state.render(snapshot, serverValues));
         });

@@ -89,7 +89,9 @@ final class StructuredConditionValueNormalizer {
     private Object normalizeScalar(Object value, DynamicField field, String path) {
         Class<?> targetType = targetType(field);
         try {
-            return targetType == null ? valueCodecs.write(value) : valueCodecs.read(value, targetType);
+            Object codecInput = StructuredConditionValueSnapshots.snapshot(value);
+            return targetType == null
+                    ? valueCodecs.write(codecInput) : valueCodecs.read(codecInput, targetType);
         } catch (RuntimeException failure) {
             throw valueConversionFailed(field, path, failure);
         }

@@ -84,12 +84,12 @@ final class JdbcBatchEvidenceSupport {
                 failedOffsets.set(relativeOffset);
                 return;
             }
-            successfulOffsets.set(relativeOffset);
             if (count == Statement.SUCCESS_NO_INFO || count < 0L) {
                 affectedRowsKnown = false;
             } else {
                 affectedRows = JdbcBatchChunkExecutor.addExact(affectedRows, count);
             }
+            successfulOffsets.set(relativeOffset);
         }
 
         void record(BatchUpdateException failure, long executionStartOffset, int executionInputCount) {
@@ -109,7 +109,10 @@ final class JdbcBatchEvidenceSupport {
         }
 
         void unknownAffectedRows() {
-            affectedRowsKnown = false;
+            // Later failures do not erase fully reported business counts.
+            if (successfulOffsets.cardinality() < inputCount) {
+                affectedRowsKnown = false;
+            }
         }
 
         void markDatabaseWorkAttempted() {

@@ -22,15 +22,15 @@ public enum SchemaMigrationFailureCode {
     APPROVAL_REQUIRED,
     /** 计划包含没有通用安全 SQL 的动作，只能按结构化步骤人工处理。 */
     MANUAL_ACTION_REQUIRED,
-    /** 当前执行器不具备迁移选项要求的同连接能力。 */
+    /** 兼容失败码：当前执行器缺少调用方所需的执行能力。 */
     EXECUTOR_CAPABILITY_REQUIRED,
     /** 当前 DDL 会隐式提交、需要脱离事务执行，或方言事务能力尚未确认。 */
     DDL_TRANSACTION_NOT_SUPPORTED,
-    /** 会话参数恢复失败，连接关闭后才会由连接池决定是否继续复用。 */
+    /** 执行器或资源所有者报告清理失败；不表示 Schema 自行治理会话。 */
     CLEANUP_FAILED,
     /** 建连失败、连接中断或连接已经不可用。 */
     CONNECTION_FAILURE,
-    /** 单条 DDL 超过调用方设置的执行时限。 */
+    /** 驱动或上层执行上下文报告执行超时。 */
     TIMEOUT,
     /** 数据库检测到死锁并终止本次迁移。 */
     DEADLOCK,

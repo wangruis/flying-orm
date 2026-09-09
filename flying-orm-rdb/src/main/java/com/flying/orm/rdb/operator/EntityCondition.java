@@ -1,17 +1,21 @@
 package com.flying.orm.rdb.operator;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.TermRegistry;
 import com.flying.orm.core.lambda.EntityProperty;
+import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.mapping.EntityMetadata;
 import com.flying.orm.rdb.internal.mapping.EntityPropertyResolver;
+import com.flying.orm.rdb.internal.mapping.EntityValues;
 import com.flying.orm.rdb.protection.ProtectedConditions;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Consumer;
 
 /**
- * 为实体 Lambda DML 提供嵌套条件组 DSL。实例只在一次构建回调内有效，字段会先解析为实体元数据中的列名，
- * 值仍进入统一条件归一化和参数绑定链路。调用方不能通过本类型注入 SQL 片段。
+ * 为实体 Lambda DML 统一保存根条件和嵌套条件组。根实例只服务一次命令构建，嵌套实例只在对应回调内有效；
+ * 字段会先解析为实体元数据中的列名，值仍进入统一条件归一化和参数绑定链路。调用方不能通过本类型注入 SQL 片段。
  *
  * @param <T> 实体类型
  * @author wangr
@@ -22,10 +26,28 @@ public final class EntityCondition<T> {
 
     private final EntityMetadata<T> metadata;
     private final ConditionGroup.Builder builder;
+    private final EntityValues<T> entityValues;
+    private final TermRegistry terms;
 
     EntityCondition(EntityMetadata<T> metadata, ConditionGroup.Builder builder) {
+        this(metadata, builder, null, TermRegistry.empty());
+    }
+
+    private EntityCondition(EntityMetadata<T> metadata, ConditionGroup.Builder builder,
+                            EntityValues<T> entityValues, TermRegistry terms) {
         this.metadata = Objects.requireNonNull(metadata, "entity metadata must not be null");
         this.builder = Objects.requireNonNull(builder, "condition builder must not be null");
+        this.entityValues = entityValues;
+        this.terms = terms;
+    }
+
+    EntityCondition(EntityMetadata<T> metadata, SqlRenderer renderer) {
+        this(metadata, Objects.requireNonNull(renderer, "sql renderer must not be null").conditions());
+    }
+
+    EntityCondition(EntityMetadata<T> metadata, SqlRenderer renderer, EntityValues<T> entityValues) {
+        this(metadata, Objects.requireNonNull(renderer, "sql renderer must not be null").conditions(),
+                entityValues, renderer.terms());
     }
 
     /** 添加严格等值条件。 */
@@ -47,6 +69,10 @@ public final class EntityCondition<T> {
     /** 添加 IN 集合条件。 */
     public EntityCondition<T> in(EntityProperty<T, ?> property, Iterable<?> values) {
         return term(property, "in", values);
+    }
+
+    EntityCondition<T> notIn(EntityProperty<T, ?> property, Iterable<?> values) {
+        return term(property, "not-in", values);
     }
 
     /** 添加闭区间 BETWEEN 条件。 */
@@ -83,7 +109,22 @@ public final class EntityCondition<T> {
         return this;
     }
 
-    private String column(EntityProperty<T, ?> property) {
+    void or(Consumer<EntityCondition<T>> consumer) {
+        Objects.requireNonNull(consumer, "entity OR condition must not be null");
+        builder.or(nested -> consumer.accept(new EntityCondition<>(metadata, nested, entityValues, terms)));
+    }
+
+    void andGroup(Consumer<EntityCondition<T>> consumer) {
+        Objects.requireNonNull(consumer, "entity AND condition must not be null");
+        builder.and(nested -> consumer.accept(new EntityCondition<>(metadata, nested, entityValues, terms)));
+    }
+
+    String column(EntityProperty<T, ?> property) {
         return EntityPropertyResolver.column(metadata, property);
+    }
+
+    ConditionGroup build() {
+        ConditionGroup where = builder.build();
+        return entityValues == null ? where : entityValues.normalizeCondition(where, terms);
     }
 }

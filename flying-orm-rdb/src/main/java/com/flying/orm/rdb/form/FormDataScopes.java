@@ -29,20 +29,24 @@ final class FormDataScopes {
                         .orElse(safeWhere);
     }
 
-    /** 无加密且没有有效 Scope 条件时，不扫描已拥有的业务条件值。 */
+    /** 只在接管字段校验的 schema 中存在字段时消费标记；普通无 Scope 路径不扫描条件值。 */
     static ConditionGroup unwrapTrustedValues(DynamicForm form, ConditionGroup where, DataScope scope) {
         return form.protections().encryptedFields().isEmpty() && scope.condition().isEmpty()
-                ? where : unwrapTrustedValues(where);
+                ? where : unwrapTrustedValues(where, form);
     }
 
     /** 在完整物理表单接管校验前，只移除本类创建的可信值标记。 */
     static ConditionGroup unwrapTrustedValues(ConditionGroup group) {
+        return unwrapTrustedValues(group, null);
+    }
+
+    private static ConditionGroup unwrapTrustedValues(ConditionGroup group, DynamicForm form) {
         ConditionGroup safeGroup = Objects.requireNonNull(group, "condition group must not be null");
         List<ConditionNode> children = safeGroup.children();
         List<ConditionNode> unwrapped = null;
         for (int index = 0; index < children.size(); index++) {
             ConditionNode child = children.get(index);
-            ConditionNode next = unwrapTrustedValue(child);
+            ConditionNode next = unwrapTrustedValue(child, form);
             if (unwrapped == null && next != child) {
                 unwrapped = new ArrayList<>(children.size());
                 unwrapped.addAll(children.subList(0, index));
@@ -60,13 +64,14 @@ final class FormDataScopes {
         return builder.build();
     }
 
-    private static ConditionNode unwrapTrustedValue(ConditionNode child) {
+    private static ConditionNode unwrapTrustedValue(ConditionNode child, DynamicForm form) {
         if (child instanceof ConditionGroup nested) {
-            return unwrapTrustedValues(nested);
+            return unwrapTrustedValues(nested, form);
         }
         TermCondition term = (TermCondition) child;
         Object value = term.value();
         return value instanceof TrustedScopeValue trusted
+                && (form == null || form.findField(term.field()).isPresent())
                 ? TermCondition.of(term.identity(), term.operator(), trusted.value())
                 : term;
     }

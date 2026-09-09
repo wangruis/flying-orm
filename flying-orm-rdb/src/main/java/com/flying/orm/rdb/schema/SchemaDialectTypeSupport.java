@@ -98,6 +98,10 @@ final class SchemaDialectTypeSupport {
         return mapping.render(value, length, precision, scale);
     }
 
+    String physicalDataType(String value, Integer length, Integer precision, Integer scale) {
+        return mapping.renderPhysical(value, length, precision, scale);
+    }
+
     boolean sameDataType(String left, String right) {
         return comparison.same(left, right);
     }
@@ -117,6 +121,14 @@ final class SchemaDialectTypeSupport {
 
     static boolean safeWideningDataType(String current, String target) {
         return SchemaTypeComparison.safeWidening(current, target);
+    }
+
+    static String sqlServerCollation(String value) {
+        String name = SqlIdentifiers.requireIdentifier(value, "collation name");
+        if (name.indexOf('.') >= 0) {
+            throw new IllegalArgumentException("collation name must be a plain identifier");
+        }
+        return name;
     }
 
     static String requireText(String value, String fieldName) {

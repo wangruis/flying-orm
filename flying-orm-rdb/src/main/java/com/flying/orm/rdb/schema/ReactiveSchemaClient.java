@@ -10,12 +10,12 @@ import com.flying.orm.rdb.dialect.DatabaseDescriptor;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.internal.cache.SchemaCacheInvalidationCoordinator;
+import com.flying.orm.rdb.metadata.MetadataCacheInvalidator;
 import com.flying.orm.rdb.metadata.ReactiveFormMetadataReader;
 import com.flying.orm.rdb.protection.ProtectedContainsLayout;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import reactor.core.publisher.Mono;
 
-import java.time.Duration;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
@@ -39,12 +39,9 @@ import java.util.function.Consumer;
  */
 public final class ReactiveSchemaClient {
 
-    /**
-     * 通用响应式执行器不承诺多条 SQL 复用同一连接，因此默认不能启用会话级锁等待设置。
-     * 调用方显式配置非零锁等待后，执行链会要求同连接执行器并在缺少该能力时安全失败。
-     */
+    /** 执行和会话锁等待时限由上层管理，Schema 默认不设置治理预算。 */
     private static final SchemaMigrationExecutionOptions DEFAULT_EXECUTION_OPTIONS =
-            SchemaMigrationExecutionOptions.defaults().withLockTimeout(Duration.ZERO);
+            SchemaMigrationExecutionOptions.defaults();
 
     private final ReactiveSqlExecutor executor;
     private final FormSchemaSqlRenderer renderer;
@@ -72,9 +69,9 @@ public final class ReactiveSchemaClient {
         this.ddlTransactionSupport = Objects.requireNonNull(
                 ddlTransactionSupport, "DDL transaction support must not be null");
         this.metadataInvalidator = SchemaCacheInvalidationCoordinator.from(metadataInvalidator);
-        this.planner = new SchemaMigrationPlanner(renderer);
+        this.planner = this.renderer.migrationPlanner();
         this.migrationExecutor = new SchemaMigrationExecutor(
-                executor, renderer, migrationObserver, ddlTransactionSupport);
+                executor, migrationObserver, ddlTransactionSupport);
     }
 
     /** 使用显式 Schema 渲染器创建客户端。 */
@@ -256,18 +253,18 @@ public final class ReactiveSchemaClient {
                                                        SchemaMigrationExecutionOptions options) {
         ReviewedSchemaPlan safePlan = Objects.requireNonNull(
                 reviewedPlan, "reviewed schema plan must not be null");
+        safePlan.requireExecutionDialect(relationalDialect);
         ReactiveFormMetadataReader safeReader = Objects.requireNonNull(
                 metadataReader, "reactive form metadata reader must not be null");
-        RelationIdentity relation = safePlan.desiredTable()
+        RelationIdentity relation = safePlan.targetIdentity()
                 .orElseThrow(() -> new IllegalArgumentException(
-                        "reviewed schema plan must contain a desired verification table"))
-                .identity();
-        Consumer<String> invalidator = invalidatorFor(safeReader);
+                        "reviewed schema plan must contain a verification target"));
+        SchemaCacheInvalidationCoordinator invalidator = invalidatorFor(safeReader);
         return migrationExecutor.executeReviewed(
                 safePlan,
                 () -> readSnapshot(safeReader, relation),
                 safeReader::snapshotCoverage,
-                () -> invalidator.accept(qualifiedName(relation)),
+                () -> invalidator.invalidate(relation),
                 options);
     }
 
@@ -283,6 +280,24 @@ public final class ReactiveSchemaClient {
                 metadataReader, "reactive form metadata reader must not be null");
         return Mono.defer(() -> readSnapshot(safeReader, safeDesired.identity()))
                 .map(actual -> reviewer.review(database, safeDesired, actual, safeReader.snapshotCoverage(), mode));
+    }
+
+    /**
+     * 订阅后直读一次当前结构，并审核调用方明确提出的关系删除目标。删除始终使用精确兼容模式，
+     * 不会从缺少实体或表定义推断删除。
+     */
+    public Mono<ReviewedSchemaPlan> reviewRelationalAbsent(
+            DatabaseDescriptor database,
+            RelationIdentity target,
+            ReactiveFormMetadataReader metadataReader) {
+        RelationalSchemaPlanReviewer reviewer = relationalReviewer();
+        RelationIdentity safeTarget = Objects.requireNonNull(
+                target, "absent relational target identity must not be null");
+        ReactiveFormMetadataReader safeReader = Objects.requireNonNull(
+                metadataReader, "reactive form metadata reader must not be null");
+        return Mono.defer(() -> readSnapshot(safeReader, safeTarget))
+                .map(actual -> reviewer.reviewAbsent(
+                        database, safeTarget, actual, safeReader.snapshotCoverage()));
     }
 
     /** 使用客户端默认的逐条 SQL 执行保护。 */
@@ -332,9 +347,12 @@ public final class ReactiveSchemaClient {
     }
 
     /** 自动迁移把参与规划的 reader 按身份加入统一失效协调点。 */
-    private Consumer<String> invalidatorFor(ReactiveFormMetadataReader reader) {
+    private SchemaCacheInvalidationCoordinator invalidatorFor(ReactiveFormMetadataReader reader) {
         ReactiveFormMetadataReader safeReader = Objects.requireNonNull(
                 reader, "reactive form metadata reader must not be null");
+        if (safeReader instanceof MetadataCacheInvalidator invalidator) {
+            return metadataInvalidator.with(safeReader, invalidator);
+        }
         return metadataInvalidator.with(safeReader, safeReader::invalidate);
     }
 
@@ -356,14 +374,7 @@ public final class ReactiveSchemaClient {
             return Mono.error(new UnsupportedOperationException(
                     "catalog-qualified schema snapshots are not supported by the reactive reader"));
         }
-        return relation.schema().isPresent()
-                ? reader.readSnapshot(relation.schema().orElseThrow(), relation.table())
-                : reader.readSnapshot(relation.table());
-    }
-
-    private static String qualifiedName(RelationIdentity relation) {
-        return relation.schema().map(schema -> schema + "." + relation.table())
-                .orElseGet(relation::table);
+        return reader.readSnapshot(relation);
     }
 
     private static List<String> metadataTables(SchemaMigrationPlan plan) {

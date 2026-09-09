@@ -34,20 +34,19 @@ class ReactiveFormOperationSupport {
     final QueryShapeLimits queryShapeLimits;
     final boolean governed;
 
-    private final ReactiveFormOperationContext context;
+    final FormConfiguration configuration;
 
-    ReactiveFormOperationSupport(ReactiveFormOperationContext context) {
-        this.context = Objects.requireNonNull(context, "form operation context must not be null");
-        this.executor = context.executor();
-        this.renderer = context.renderer();
-        this.defaultExecutionOptions = context.defaultExecutionOptions();
-        this.defaultBatchWriteOptions = context.defaultBatchWriteOptions();
-        this.entityModels = context.entityModels();
-        this.fieldUsePolicy = context.fieldUsePolicy();
-        this.queryShapeLimits = context.queryShapeLimits();
+    ReactiveFormOperationSupport(ReactiveSqlExecutor executor, FormConfiguration configuration) {
+        this.executor = Objects.requireNonNull(executor, "reactive sql executor must not be null");
+        this.configuration = Objects.requireNonNull(configuration, "form configuration must not be null");
+        this.renderer = configuration.renderer();
+        this.defaultExecutionOptions = configuration.executionOptions();
+        this.defaultBatchWriteOptions = configuration.batchOptions();
+        this.entityModels = configuration.entityModels();
+        this.fieldUsePolicy = configuration.fieldUsePolicy();
+        this.queryShapeLimits = configuration.queryShapeLimits();
         this.governed = FieldUseGuard.governed(fieldUsePolicy, queryShapeLimits);
-        this.scopes = new FormScopeSupport(renderer, context.structuredConditionResolver(),
-                                           context.defaultDataScope());
+        this.scopes = new FormScopeSupport(renderer, configuration.resolver(), configuration.dataScope());
         this.planner = new FormOperationPlanner(renderer, scopes, defaultExecutionOptions);
         this.results = new ReactiveFormResultSupport(executor, renderer, entityModels, defaultExecutionOptions);
         this.containsResults = new ProtectedContainsResultSupport(renderer);
@@ -62,7 +61,7 @@ class ReactiveFormOperationSupport {
     ReactiveFormOperationSupport(ReactiveFormOperationSupport source) {
         ReactiveFormOperationSupport shared = Objects.requireNonNull(source,
                                                                       "shared form runtime must not be null");
-        this.context = shared.context;
+        this.configuration = shared.configuration;
         this.executor = shared.executor;
         this.renderer = shared.renderer;
         this.defaultExecutionOptions = shared.defaultExecutionOptions;
@@ -75,10 +74,6 @@ class ReactiveFormOperationSupport {
         this.fieldUsePolicy = shared.fieldUsePolicy;
         this.queryShapeLimits = shared.queryShapeLimits;
         this.governed = shared.governed;
-    }
-
-    final ReactiveFormOperationContext context() {
-        return context;
     }
 
 }

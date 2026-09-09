@@ -7,7 +7,7 @@
 
     <groupId>io.github.wangruis</groupId>
     <artifactId>flying-orm</artifactId>
-    <version>3.3.0</version>
+    <version>4.0.0</version>
     <packaging>pom</packaging>
 
     <name>flying-orm</name>
@@ -45,7 +45,7 @@
         <connection>scm:git:https://github.com/wangruis/flying-orm.git</connection>
         <developerConnection>scm:git:ssh://git@github.com/wangruis/flying-orm.git</developerConnection>
         <url>https://github.com/wangruis/flying-orm</url>
-        <tag>v3.3.0</tag>
+        <tag>v4.0.0</tag>
     </scm>
 
     <modules>
@@ -61,7 +61,7 @@
         <r2dbc.spi.version>1.0.0.RELEASE</r2dbc.spi.version>
         <reactor.version>3.8.6</reactor.version>
         <caffeine.version>3.2.4</caffeine.version>
-        <jackson.version>3.1.5</jackson.version>
+        <jackson.version>3.1.6</jackson.version>
         <reactive-streams.version>1.0.4</reactive-streams.version>
         <maven.enforcer.version>3.6.3</maven.enforcer.version>
         <maven.source.version>3.4.0</maven.source.version>
@@ -381,7 +381,7 @@
                             <publishingServerId>central</publishingServerId>
                             <autoPublish>false</autoPublish>
                             <waitUntil>validated</waitUntil>
-                            <deploymentName>flying-orm 3.3.0</deploymentName>
+                            <deploymentName>flying-orm 4.0.0</deploymentName>
                         </configuration>
                     </plugin>
                 </plugins>

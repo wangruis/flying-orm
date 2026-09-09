@@ -36,9 +36,9 @@ import java.util.Objects;
  * 再按原参数顺序绑定。每次订阅独占自己的连接和局部计数器；执行器本身只保存线程安全或只读依赖，
  * 可以作为单例共享。</p>
  *
- * <p>连接排队和获取超时由上层连接池治理；连接可用后，执行保护限制整次 SQL 执行、返回行数、结果内存和 LOB。
- * 普通批量更新走一个 Statement，
- * 带 ATOMIC/INDEPENDENT、回执恢复和乐观锁语义的批量请求交给 {@link R2dbcBatchWriter}。</p>
+ * <p>执行和清理时限由上层拥有；本执行器保留返回行数、结果内存和 LOB 容量保护。
+ * ATOMIC 批次只参与外部事务，INDEPENDENT 批次可以拥有各片局部事务。
+ * 回执幂等和事务恢复不由 ORM 执行。</p>
  *
  * @author wangr
  * @date 2026-07-21
@@ -57,7 +57,6 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
     private final R2dbcSequenceExecutor sequenceExecutor;
     private final R2dbcGeneratedKeyWriter generatedKeyWriter;
     private final R2dbcBatchWriter batchWriter;
-    private final R2dbcBatchRecoveryResolver recoveryResolver;
     private final SqlExecutionObserver observer;
     private final BatchExecutionObserver batchObserver;
     private final ReactiveSqlExecutionObservationSupport observationSupport;
@@ -98,12 +97,9 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
                                                            this.transactionParticipant);
         this.sequenceExecutor = new R2dbcSequenceExecutor(executionSession, observationSupport);
         this.generatedKeyWriter = new R2dbcGeneratedKeyWriter(executionSession);
-        BatchReceiptStore receiptStore = new BatchReceiptStore(
-                connectionFactory, bindMarkers, observer);
         this.batchWriter = new R2dbcBatchWriter(
-                connectionFactory, receiptStore, bindMarkers, observer, batchObserver,
+                connectionFactory, bindMarkers, observer, batchObserver,
                 this.transactionParticipant);
-        this.recoveryResolver = new R2dbcBatchRecoveryResolver(receiptStore, observationSupport);
     }
     /**
      * 创建 R2DBC SQL 执行器。
@@ -176,9 +172,8 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
      */
     @Override
     public R2dbcSqlExecutor withDefaultExecutionOptions(SqlExecutionOptions options) {
-        return copy(observer,
-                    batchObserver,
-                    Objects.requireNonNull(options, "sql execution options must not be null"));
+        return copy(observer, batchObserver,
+                    ReactiveSqlExecutionProtection.requireSupportedOptions(options));
     }
 
     /** 批量硬上限只保存在批量入口，不给普通 SQL 增加转发装饰器。 */
@@ -210,8 +205,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
     @Override
     public Flux<DynamicRow> query(SqlRequest request, SqlExecutionOptions options) {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
-        SqlExecutionOptions safeOptions = Objects.requireNonNull(
-                options, "sql execution options must not be null");
+        SqlExecutionOptions safeOptions = ReactiveSqlExecutionProtection.requireSupportedOptions(options);
         List<Object> executionParameters = R2dbcExecutionSession.snapshotExecutionParameters(safeRequest);
         // usingWhen 把连接生命周期绑到订阅上；完成、失败或取消都会触发异步 close。
         Flux<DynamicRow> source = executionSession.withPreparedStatement(
@@ -236,14 +230,13 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
     @Override
     public Mono<Long> rowsUpdated(SqlRequest request, SqlExecutionOptions options) {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
-        SqlExecutionOptions safeOptions = Objects.requireNonNull(
-                options, "sql execution options must not be null");
+        SqlExecutionOptions safeOptions = ReactiveSqlExecutionProtection.requireSupportedOptions(options);
         List<Object> executionParameters = R2dbcExecutionSession.snapshotExecutionParameters(safeRequest);
         Mono<Long> source = executionSession.withPreparedStatementResource(
                 safeRequest, executionParameters, safeOptions, SqlExecutionOperation.UPDATE,
-                (statement, ignored) -> executionSession.protectMono(Flux.from(statement.execute())
+                (statement, ignored) -> Flux.from(statement.execute())
                         .flatMap(Result::getRowsUpdated)
-                        .reduce(0L, R2dbcExecutionCounts::add), safeOptions))
+                        .reduce(0L, R2dbcExecutionCounts::add))
                 .onErrorMap(ReactiveSqlExecutionProtection::translate);
         return observationSupport.observeMono(SqlExecutionOperation.UPDATE,
                                                safeRequest,
@@ -263,8 +256,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
                                                     SqlExecutionOptions options,
                                                     String generatedKeyColumn) {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
-        SqlExecutionOptions safeOptions = Objects.requireNonNull(
-                options, "sql execution options must not be null");
+        SqlExecutionOptions safeOptions = ReactiveSqlExecutionProtection.requireSupportedOptions(options);
         List<Object> executionParameters = R2dbcExecutionSession.snapshotExecutionParameters(safeRequest);
         Mono<SqlWriteResult> source = generatedKeyWriter.write(
                 safeRequest, executionParameters, safeOptions, generatedKeyColumn)
@@ -287,8 +279,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
     @Override
     public Mono<SqlWriteResult> atomicProtectedWrite(ProtectedWriteWork work, SqlExecutionOptions options) {
         ProtectedWriteWork safeWork = Objects.requireNonNull(work, "protected write work must not be null");
-        SqlExecutionOptions safeOptions = Objects.requireNonNull(
-                options, "sql execution options must not be null");
+        SqlExecutionOptions safeOptions = ReactiveSqlExecutionProtection.requireSupportedOptions(options);
         Mono<SqlWriteResult> source = new R2dbcProtectedWriteExecutor(new R2dbcBatchConnectionLifecycle(
                 connectionFactory, observer, transactionParticipant), executionSession, bindMarkers)
                 .execute(safeWork, safeOptions);
@@ -310,8 +301,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
                                                                 SqlExecutionOptions options) {
         SqlExecutionSequence safeSequence = Objects.requireNonNull(sequence,
                                                                     "SQL execution sequence must not be null");
-        SqlExecutionOptions safeOptions = Objects.requireNonNull(options,
-                                                                  "sql execution options must not be null");
+        SqlExecutionOptions safeOptions = ReactiveSqlExecutionProtection.requireSupportedOptions(options);
         return sequenceExecutor.execute(safeSequence, safeOptions)
                                .onErrorMap(ReactiveSqlExecutionProtection::translate);
     }
@@ -325,7 +315,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
                     safeRequest,
                     batchWriter.resolveTransaction(),
                     resolution -> batchWriter.write(safeRequest, resolution)
-                            .onErrorMap(ReactiveSqlExecutionProtection::translate));
+                            .onErrorMap(ReactiveSqlExecutionProtection::translateBatchFailure));
         });
     }
 
@@ -342,7 +332,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
             batchMemoryLimits.check(safeRequest.options());
             return batchWriter.resolveTransaction()
                     .flatMap(resolution -> batchWriter.writeEvidence(safeRequest, resolution))
-                    .onErrorMap(ReactiveSqlExecutionProtection::translate);
+                    .onErrorMap(ReactiveSqlExecutionProtection::translateBatchFailure);
         });
     }
 
@@ -360,7 +350,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
                     safeRequest,
                     batchWriter.resolveTransaction(),
                     resolution -> batchWriter.writeChunks(safeRequest, resolution)
-                            .onErrorMap(ReactiveSqlExecutionProtection::translate));
+                            .onErrorMap(ReactiveSqlExecutionProtection::translateBatchFailure));
         });
     }
 
@@ -371,6 +361,8 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
 
     @Override
     public Mono<BatchResolution> resolveUnknown(BatchChunkResult.RecoveryToken token) {
-        return recoveryResolver.resolveUnknown(token);
+        Objects.requireNonNull(token, "batch recovery token must not be null");
+        return Mono.error(new UnsupportedOperationException(
+                "batch recovery must be controlled by the caller"));
     }
 }

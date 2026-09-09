@@ -55,7 +55,7 @@ public final class ConditionExecutionViews {
                                                  List<ConditionNode> children,
                                                  Function<TermCondition, Object> ownedValueReader) {
         StableEncoder shape = StableDigest.sha256(SHAPE_DOMAIN);
-        List<Object> parameters = new ArrayList<>();
+        ArrayList<Object> parameters = new ArrayList<>();
         Mask mask = new Mask();
         appendGroup(shape, Objects.requireNonNull(operator, "logical operator must not be null"),
                     Objects.requireNonNull(children, "condition children must not be null"), parameters,

@@ -62,13 +62,19 @@ record BatchColumnLayout(DynamicForm form,
     }
 
     Object[] parameters(Map<String, Object> row, long rowIndex) {
+        Object[] parameters = new Object[fields.size()];
+        writeParameters(row, rowIndex, parameters);
+        return parameters;
+    }
+
+    /** 调用方拥有目标数组；先填业务参数，再按既定 SQL 布局插入批次共用的 Scope 参数。 */
+    void writeParameters(Map<String, Object> row, long rowIndex, Object[] parameters) {
         Map<String, Object> safeRow = Objects.requireNonNull(row, "batch insert row must not be null");
         if (safeRow.size() != fields.size()) {
             throw new IllegalArgumentException("batch insert row [" + rowIndex + "] fields must match the first row");
         }
 
         // seen 数组避免每行构建临时 Set，同时能发现规范化后重复的字段名。
-        Object[] parameters = new Object[fields.size()];
         boolean[] seen = new boolean[fields.size()];
         int seenCount = 0;
         for (Map.Entry<String, Object> entry : safeRow.entrySet()) {
@@ -93,7 +99,6 @@ record BatchColumnLayout(DynamicForm form,
         if (seenCount != fields.size()) {
             throw new IllegalArgumentException("batch insert row [" + rowIndex + "] fields must match the first row");
         }
-        return parameters;
     }
 
     /**

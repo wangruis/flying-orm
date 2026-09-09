@@ -9,6 +9,7 @@ import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Objects;
+import java.util.UUID;
 
 /**
  * Converts scalar form values at the database-driver boundary.
@@ -72,6 +73,10 @@ public final class DialectScalarValueCodec {
             return value;
         }
         Object encoded = codecs.write(value);
+
+        if (logicalType == LogicalType.UUID && targetType == String.class && encoded instanceof UUID uuid) {
+            return uuid.toString();
+        }
 
         if (logicalType == LogicalType.BOOLEAN) {
             Boolean bool = codecs.read(encoded, Boolean.class);

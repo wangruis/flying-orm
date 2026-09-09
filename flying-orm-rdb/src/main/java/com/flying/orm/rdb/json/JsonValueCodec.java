@@ -3,10 +3,13 @@ package com.flying.orm.rdb.json;
 import com.flying.orm.core.codec.ValueCodecDescriptor;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.core.type.LogicalType;
+import com.flying.orm.rdb.internal.InternalApi;
 import tools.jackson.core.JacksonException;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectReader;
+import tools.jackson.databind.cfg.JsonNodeFeature;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.lang.invoke.MethodHandle;
@@ -42,6 +45,10 @@ public final class JsonValueCodec {
     private static final String ORACLE_JSON_VALUE = "oracle.sql.json.OracleJsonValue";
 
     private static final ObjectMapper MAPPER = createMapper();
+
+    // 写入校验保留十进制数值；公开读取仍沿用 Mapper 的默认数值类型。
+    private static final ObjectReader WRITE_JSON_READER =
+            MAPPER.reader().with(JsonNodeFeature.USE_BIG_DECIMAL_FOR_FLOATS);
 
     private static final TypeReference<LinkedHashMap<String, Object>> MAP_TYPE = new TypeReference<>() {
     };
@@ -105,10 +112,10 @@ public final class JsonValueCodec {
         }
         try {
             if (value instanceof CharSequence text) {
-                return MAPPER.writeValueAsString(MAPPER.readTree(text.toString()));
+                return MAPPER.writeValueAsString(WRITE_JSON_READER.readTree(text.toString()));
             }
             if (value instanceof byte[] bytes) {
-                return MAPPER.writeValueAsString(MAPPER.readTree(bytes));
+                return MAPPER.writeValueAsString(WRITE_JSON_READER.readTree(bytes));
             }
             return MAPPER.writeValueAsString(value);
         } catch (JacksonException error) {
@@ -155,8 +162,12 @@ public final class JsonValueCodec {
         if (value == null || (safeType.isInstance(value) && !isOracleJsonValue(value))) {
             return value;
         }
-        String json = jsonText(value);
         try {
+            if (!isOracleJsonValue(value)
+                    && (value instanceof Map<?, ?> || value instanceof Collection<?> || value instanceof JsonNode)) {
+                return MAPPER.convertValue(value, safeType);
+            }
+            String json = jsonText(value);
             if (JsonNode.class.isAssignableFrom(safeType)) {
                 return MAPPER.readTree(json);
             }
@@ -187,6 +198,20 @@ public final class JsonValueCodec {
             return MAPPER.readValue(jsonText(value), Object.class);
         } catch (JacksonException error) {
             throw new IllegalArgumentException("json value cannot be decoded", error);
+        }
+    }
+
+    /** Converts a Form-decoded JSON value without interpreting string values as JSON source text. */
+    @InternalApi
+    public static Object readDecoded(Object value, Class<?> targetType) {
+        Class<?> safeType = Objects.requireNonNull(targetType, "json target type must not be null");
+        if (value == null || safeType.isInstance(value)) {
+            return value;
+        }
+        try {
+            return MAPPER.convertValue(value, safeType);
+        } catch (JacksonException error) {
+            throw new IllegalArgumentException("json value cannot be converted to " + safeType.getName(), error);
         }
     }
 

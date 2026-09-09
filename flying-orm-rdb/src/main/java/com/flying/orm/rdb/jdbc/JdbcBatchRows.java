@@ -1,6 +1,5 @@
 package com.flying.orm.rdb.jdbc;
 
-import com.flying.orm.rdb.internal.DurationLimits;
 import static com.flying.orm.core.internal.error.ThrowableGraph.addSuppressedIfAcyclic;
 import static com.flying.orm.core.internal.error.ThrowableGraph.findVirtualMachineError;
 
@@ -10,7 +9,6 @@ import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
 
-import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.locks.Condition;
@@ -49,14 +47,12 @@ final class JdbcBatchRows implements Subscriber<Object[]>, AutoCloseable {
     }
 
     /**
-     * 领取下一行；返回 {@code null} 代表上游正常结束。ATOMIC 可传入整批剩余时间，把持有事务连接时的
-     * 输入等待纳入事务时限；INDEPENDENT 在形成分片时传 0，避免 ORM 重复治理上游生产和连接池排队。
+     * 领取输入边界已经解码的自有行及其估算重量；null 表示上游正常结束。
+     * 输入等待保持可中断，生产和等待时限由上层负责，不在 ORM 中计算截止点。
      */
-    /** Returns the decoded owned row and estimate captured at the subscriber boundary. */
-    ProtectedBatchRows.RowView nextRowView(Duration remaining)
+    ProtectedBatchRows.RowView nextRowView()
             throws InterruptedException, TimeoutException {
         startIfNeeded();
-        long remainingNanos = remaining.isZero() ? Long.MAX_VALUE : DurationLimits.nanos(remaining);
         while (true) {
             Subscription demand = null;
             lock.lockInterruptibly();
@@ -76,7 +72,7 @@ final class JdbcBatchRows implements Subscriber<Object[]>, AutoCloseable {
                     requested = true;
                     demand = subscription;
                 } else {
-                    remainingNanos = awaitChange(remainingNanos);
+                    changed.await();
                 }
             } finally {
                 lock.unlock();
@@ -207,20 +203,9 @@ final class JdbcBatchRows implements Subscriber<Object[]>, AutoCloseable {
         }
     }
 
-    private long awaitChange(long remainingNanos) throws InterruptedException, TimeoutException {
-        if (remainingNanos == Long.MAX_VALUE) {
-            changed.await();
-            return Long.MAX_VALUE;
-        }
-        if (remainingNanos <= 0L || (remainingNanos = changed.awaitNanos(remainingNanos)) <= 0L) {
-            throw new TimeoutException("jdbc batch input timed out");
-        }
-        return remainingNanos;
-    }
-
     private static RuntimeException rethrow(Throwable error)
             throws InterruptedException, TimeoutException {
-        // 上游 Error 也是原始失败事实；交给外层事务边界完成 rollback 后再决定如何公开，不能在通道层降级成普通异常。
+        // 上游 Error 保持原始失败事实，由实际事务拥有者处理，不在通道层降级为普通异常。
         if (error instanceof Error fatal) {
             throw fatal;
         }

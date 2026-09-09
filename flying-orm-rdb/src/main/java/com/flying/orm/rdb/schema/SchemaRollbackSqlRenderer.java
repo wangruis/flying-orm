@@ -2,6 +2,7 @@ package com.flying.orm.rdb.schema;
 
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.metadata.ColumnMetadata;
+import com.flying.orm.core.metadata.ColumnDefinition;
 import com.flying.orm.core.metadata.IndexMetadata;
 import com.flying.orm.core.sql.render.SqlRequest;
 
@@ -35,21 +36,31 @@ final class SchemaRollbackSqlRenderer {
     }
 
     SqlRequest rollbackColumnType(String table, String currentColumn, ColumnMetadata column) {
+        return rollbackColumnType(table, currentColumn, column, null);
+    }
+
+    SqlRequest rollbackColumnType(String table, String currentColumn, ColumnMetadata column,
+                                  ColumnDefinition physical) {
         DynamicField field = toField(column, currentColumn);
         return new SqlRequest(dialect.alterColumnTypeSql(table,
                                                          currentColumn,
                                                          tables.dataType(field),
-                                                         tables.columnDefinition(field)),
+                                                         tables.replacementColumnDefinition(field, physical)),
                               List.of());
     }
 
     /** 按迁移前的完整字段定义恢复 nullable，MySQL 因此不会在回滚时丢掉注释或生成值属性。 */
     SqlRequest rollbackColumnNullability(String table, String currentColumn, ColumnMetadata column) {
+        return rollbackColumnNullability(table, currentColumn, column, null);
+    }
+
+    SqlRequest rollbackColumnNullability(String table, String currentColumn, ColumnMetadata column,
+                                         ColumnDefinition physical) {
         DynamicField field = toField(column, currentColumn);
         return new SqlRequest(dialect.alterColumnNullabilitySql(table,
                                                                  currentColumn,
                                                                  tables.dataType(field),
-                                                                 tables.columnDefinition(field),
+                                                                 tables.replacementColumnDefinition(field, physical),
                                                                  column.nullable()),
                               List.of());
     }

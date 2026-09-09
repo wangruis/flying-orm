@@ -23,9 +23,9 @@ record MetadataQueryProfile(InformationSchemaFormMetadataReader.Queries queries,
     static MetadataQueryProfile resolve(RdbDialect dialect) {
         RdbDialect safeDialect = Objects.requireNonNull(dialect, "rdb dialect must not be null");
         return switch (safeDialect.name()) {
-            case "h2" -> complete(H2ReactiveFormMetadataReader.queries());
-            case "mysql" -> complete(MySqlReactiveFormMetadataReader.queries());
-            case "postgresql" -> complete(PostgreSqlReactiveFormMetadataReader.queries());
+            case "h2" -> complete(H2MetadataQueries.queries());
+            case "mysql" -> complete(MySqlMetadataQueries.queries());
+            case "postgresql" -> complete(PostgreSqlMetadataQueries.queries());
             case "oracle" -> oracle(safeDialect.version());
             case "sqlserver" -> sqlServer(safeDialect.version());
             default -> null;
@@ -40,11 +40,11 @@ record MetadataQueryProfile(InformationSchemaFormMetadataReader.Queries queries,
             observed.remove(SchemaSnapshotCoverage.Fact.COLUMN_GENERATION);
             observed.remove(SchemaSnapshotCoverage.Fact.COLUMN_COLLATION);
             return new MetadataQueryProfile(
-                    OracleReactiveFormMetadataReader.queries12c(),
+                    OracleMetadataQueries.queries12c(),
                     SchemaSnapshotCoverage.of(observed));
         }
         if ("19c".equals(version) || "21c".equals(version) || "23ai".equals(version)) {
-            return complete(OracleReactiveFormMetadataReader.queries());
+            return complete(OracleMetadataQueries.queries());
         }
         throw unsupportedVersion("oracle", version);
     }
@@ -52,7 +52,7 @@ record MetadataQueryProfile(InformationSchemaFormMetadataReader.Queries queries,
     private static MetadataQueryProfile sqlServer(String version) {
         if ("2012".equals(version) || "2016".equals(version)
                 || "2019".equals(version) || "2022".equals(version)) {
-            return complete(SqlServerReactiveFormMetadataReader.queries());
+            return complete(SqlServerMetadataQueries.queries());
         }
         throw unsupportedVersion("sqlserver", version);
     }

@@ -52,6 +52,7 @@ public final class ReactiveFormRepository<T> {
     private final DynamicForm boundForm;
     private final Class<T> entityType;
     private final EntityValues<T> entityValues;
+    private final ReactiveEntityListener<T> listener;
     private final ReactiveRepositoryEntityWriter<T> entityWriter;
     private final ReactiveRepositoryBatchOperations<T> batchOperations;
     private final ReactiveRepositoryReadMapper<T> readMapper;
@@ -65,6 +66,7 @@ public final class ReactiveFormRepository<T> {
         this.boundForm = Objects.requireNonNull(form, "repository form must not be null");
         this.entityType = Objects.requireNonNull(type, "repository type must not be null");
         this.entityValues = Objects.requireNonNull(entityValues, "repository entity values must not be null");
+        this.listener = listener;
         EntityMetadata<T> metadata = client.entityModels().metadata(entityType);
         this.form = RepositoryLogicDeletes.bind(metadata, boundForm);
         RepositoryEntityIdSupport<T> ids = RepositoryEntityIdSupport.create(
@@ -97,10 +99,11 @@ public final class ReactiveFormRepository<T> {
 
     /** 返回一个使用相同映射、客户端和安全配置，但追加了生命周期监听器的新 Repository。 */
     public ReactiveFormRepository<T> withListener(ReactiveEntityListener<T> listener) {
+        ReactiveEntityListener<T> additional = Objects.requireNonNull(
+                listener, "entity lifecycle listener must not be null");
         return new ReactiveFormRepository<>(client, boundForm, entityType,
-                                            entityValues,
-                                            Objects.requireNonNull(listener,
-                                                                   "entity lifecycle listener must not be null"));
+                entityValues,
+                this.listener == null ? additional : ReactiveEntityListener.compose(this.listener, additional));
     }
 
     /** @return 当前实体的 Lambda 查询命令 */
@@ -153,24 +156,28 @@ public final class ReactiveFormRepository<T> {
         return batchOperations.updateChunks(entities, scope, options);
     }
 
-    public Mono<Long> update(T entity, ConditionGroup where) { return entityWriter.update(entity, where); }
+    public Mono<Long> update(T entity, ConditionGroup where) { return entityWriter.update(entity, conditions(where)); }
 
-    public Mono<Long> delete(ConditionGroup where) { return entityWriter.delete(where); }
-    public Mono<Long> delete(T entity, ConditionGroup where) { return entityWriter.delete(entity, where); }
+    public Mono<Long> delete(ConditionGroup where) { return entityWriter.delete(conditions(where)); }
+    public Mono<Long> delete(T entity, ConditionGroup where) { return entityWriter.delete(entity, conditions(where)); }
 
-    public Mono<Long> physicalDelete(ConditionGroup where) { return entityWriter.physicalDelete(where); }
+    public Mono<Long> physicalDelete(ConditionGroup where) { return entityWriter.physicalDelete(conditions(where)); }
 
-    public Flux<T> select(ConditionGroup where) { return readMapper.select(where, null, null); }
+    public Flux<T> select(ConditionGroup where) { return readMapper.select(conditions(where), null, null); }
     /** 在订阅时确认调用方 R2DBC 事务，再按受控锁读取当前实体。 */
     public Flux<T> lockingRead(ConditionGroup where, ReadLock lock) {
-        return readMapper.lockingRead(where, lock);
+        return readMapper.lockingRead(conditions(where), lock);
     }
     /** 在当前 Repository 绑定的表单上执行类型化聚合。 */
     public Flux<AggregateRow> aggregate(AggregateSpec spec) {
         return client.aggregate(requireRepositoryAggregate(spec));
     }
     public Mono<PageResult<T>> page(ConditionGroup where, PageQuery page) {
-        return readMapper.page(where, page, null, null);
+        return readMapper.page(conditions(where), page, null, null);
+    }
+
+    private ConditionGroup conditions(ConditionGroup where) {
+        return entityValues.normalizeCondition(where, client.entityRenderer().terms());
     }
 
     private AggregateSpec requireRepositoryAggregate(AggregateSpec spec) {

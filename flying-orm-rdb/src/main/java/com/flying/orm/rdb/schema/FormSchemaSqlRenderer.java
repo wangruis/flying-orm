@@ -11,7 +11,6 @@ import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.protection.ProtectedFormLayout;
 import com.flying.orm.rdb.protection.ProtectedContainsLayout;
 
-import java.time.Duration;
 import java.util.List;
 import java.util.Objects;
 
@@ -68,14 +67,14 @@ public final class FormSchemaSqlRenderer {
         return tables;
     }
 
+    /** 两种客户端直接复用渲染器拥有的无状态迁移规划器。 */
+    SchemaMigrationPlanner migrationPlanner() {
+        return migrations;
+    }
+
     /** 包内审核器复用方言的在线索引改写规则。 */
     SqlRequest preferOnline(SqlRequest request) {
         return dialect.preferOnline(request);
-    }
-
-    /** 包内结构客户端生成锁等待保护，setup/work/cleanup 仍由客户端放在同一连接执行。 */
-    SchemaDdlSessionGuard lockTimeoutGuard(Duration timeout) {
-        return dialect.lockTimeoutGuard(timeout);
     }
 
     /** 生成建表 SQL，必要的序列和字段注释会按原来的顺序附在请求列表中。 */

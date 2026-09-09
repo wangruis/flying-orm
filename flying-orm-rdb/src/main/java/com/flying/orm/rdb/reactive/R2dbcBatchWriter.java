@@ -1,5 +1,7 @@
 package com.flying.orm.rdb.reactive;
 
+import static com.flying.orm.core.internal.error.ThrowableGraph.findVirtualMachineError;
+
 import com.flying.orm.rdb.batch.BatchChunkResult;
 import com.flying.orm.rdb.batch.BatchChunkExecutionFact;
 import com.flying.orm.rdb.batch.BatchCommitFact;
@@ -29,9 +31,9 @@ import java.util.concurrent.atomic.AtomicReference;
  * R2DBC 批量写入的内部稳定门面。
  *
  * <p>门面只负责检查请求模式并选择 ATOMIC 或 INDEPENDENT 协调器。分片、参数绑定、连接清理、事务状态、
- * 结果拼装和回执身份各自只有一份实现，避免两种模式在安全边界上逐渐产生不同语义。</p>
+ * 结果拼装各自只有一份实现，避免两种模式在安全边界上逐渐产生不同语义。</p>
  *
- * <p>本对象和内部协作者都不保存请求级状态，可以被多个订阅并发复用。每次订阅的截止时间、分片列表、
+ * <p>本对象和内部协作者都不保存请求级状态，可以被多个订阅并发复用。每次订阅的分片列表、
  * 事务状态和结果集合都在 Reactor 链内部创建。</p>
  *
  * @author wangr
@@ -47,21 +49,20 @@ final class R2dbcBatchWriter {
     private final R2dbcBindMarkers bindMarkers;
     private final BatchExecutionObserver evidenceObserver;
 
-    R2dbcBatchWriter(ConnectionFactory connectionFactory, BatchReceiptStore receiptStore,
+    R2dbcBatchWriter(ConnectionFactory connectionFactory,
                       R2dbcBindMarkers bindMarkers, SqlExecutionObserver cleanupObserver,
                       BatchExecutionObserver batchObserver,
                       R2dbcTransactionParticipant transactionParticipant) {
         this.bindMarkers = Objects.requireNonNull(bindMarkers, "r2dbc bind markers must not be null");
         this.evidenceObserver = Objects.requireNonNull(batchObserver, "batch execution observer must not be null");
         this.chunks = new R2dbcBatchWriterChunks(this.bindMarkers);
-        R2dbcBatchReceiptSupport receipts = new R2dbcBatchReceiptSupport();
         this.connections = new R2dbcBatchConnectionLifecycle(connectionFactory, cleanupObserver, transactionParticipant);
         R2dbcBatchResultAssembler results = new R2dbcBatchResultAssembler();
         R2dbcExternalBatchCompletion externalCompletion = new R2dbcExternalBatchCompletion(results, batchObserver);
         this.atomicWriter = new R2dbcAtomicBatchWriter(
-                this.chunks, receiptStore, receipts, connections, results, externalCompletion);
+                this.chunks, connections, results, externalCompletion);
         this.independentWriter = new R2dbcIndependentBatchWriter(
-                this.chunks, receiptStore, receipts, connections, results);
+                this.chunks, connections, results);
     }
 
     Mono<ReactiveTransactionSourceResolver.Resolution> resolveTransaction() {
@@ -104,10 +105,6 @@ final class R2dbcBatchWriter {
             return Mono.error(new UnsupportedOperationException(
                     "r2dbc batch evidence currently requires ATOMIC mode"));
         }
-        if (safeRequest.options().recovery().mode() != BatchWriteOptions.RecoveryMode.NONE) {
-            return Mono.error(new UnsupportedOperationException(
-                    "r2dbc batch evidence does not support receipt recovery"));
-        }
         return Mono.defer(() -> {
             String transportSql = bindMarkers.adapt(safeRequest);
             EvidenceContext context = new EvidenceContext();
@@ -126,7 +123,8 @@ final class R2dbcBatchWriter {
                         }
                         return Flux.usingWhen(
                                 connections.acquire(safeRequest.options(), safeResolution)
-                                        .onErrorMap(failure -> failure instanceof Error ? failure : context.failure(
+                                        .onErrorMap(failure -> failure instanceof Error || failure instanceof IllegalStateException
+                                                ? failure : context.failure(
                                                 "r2dbc batch connection acquisition failed",
                                                 failure, BatchCommitFact.NOT_APPLICABLE,
                                                 R2dbcBatchEvidenceFailure.failureState(failure))),
@@ -141,7 +139,7 @@ final class R2dbcBatchWriter {
                                 resource -> connections.cancel(resource, "atomic evidence")
                                         .then(Mono.fromRunnable(() -> context.publish(
                                                 cancellationEvidence(resource, context), evidenceObserver))))
-                                // usingWhen 只会在错误清理完成后发布原始失败；此时才能读取确定的回滚终态。
+                                // usingWhen 在清理完成后发布原始失败；这里只记录外部事务参与事实。
                                 .onErrorMap(PendingEvidenceFailure.class, failure -> context.failure(
                                         failure.evidenceMessage,
                                         failure.getCause(),
@@ -172,9 +170,7 @@ final class R2dbcBatchWriter {
             Flux<R2dbcBatchWriterChunks.BatchChunk> chunkFlux,
             String transportSql,
             EvidenceContext context) {
-        R2dbcBatchDeadline deadline = R2dbcBatchDeadline.start(request.options().timeout());
-        Mono<BatchExecutionEvidence> execution = connections.begin(resource)
-                .thenMany(chunkFlux.concatMap(chunk -> Mono.defer(() -> {
+        Mono<BatchExecutionEvidence> execution = chunkFlux.concatMap(chunk -> Mono.defer(() -> {
                     R2dbcBatchEvidenceCounts counts = new R2dbcBatchEvidenceCounts();
                     EvidenceContext.ActiveChunk active = new EvidenceContext.ActiveChunk(chunk, counts);
                     context.activeChunk.set(active);
@@ -189,63 +185,50 @@ final class R2dbcBatchWriter {
                                 context.add(failure.fact());
                                 context.activeChunk.compareAndSet(active, null);
                             });
-                }), 0))
+                }), 0)
                 .then(Mono.defer(() -> finishEvidence(resource, context)));
-        return deadline.protect(execution)
+        return execution
                 .onErrorMap(TimeoutException.class, failure -> new PendingEvidenceFailure(
                         "r2dbc batch evidence timed out",
                         failure,
                         BatchExecutionState.TIMED_OUT))
-                .onErrorMap(failure -> failure instanceof BatchExecutionEvidenceException
-                        || failure instanceof PendingEvidenceFailure
-                        ? failure
-                        : new PendingEvidenceFailure(
-                                "r2dbc batch evidence execution failed",
-                                failure instanceof R2dbcBatchEvidenceFailure
-                                        ? failure.getCause() : failure,
-                                failure instanceof R2dbcBatchEvidenceFailure evidenceFailure
-                                        ? evidenceFailure.fact().state()
-                                        : R2dbcBatchEvidenceFailure.failureState(failure)));
+                .onErrorMap(failure -> {
+                    VirtualMachineError fatal = findVirtualMachineError(failure);
+                    if (fatal != null) {
+                        // 保持致命错误信号原样传播，同时让 usingWhen 继续完成事务清理。
+                        return fatal;
+                    }
+                    return failure instanceof BatchExecutionEvidenceException
+                            || failure instanceof PendingEvidenceFailure
+                            ? failure
+                            : new PendingEvidenceFailure(
+                                    "r2dbc batch evidence execution failed",
+                                    failure instanceof R2dbcBatchEvidenceFailure
+                                            ? failure.getCause() : failure,
+                                    failure instanceof R2dbcBatchEvidenceFailure evidenceFailure
+                                            ? evidenceFailure.fact().state()
+                                            : R2dbcBatchEvidenceFailure.failureState(failure));
+                });
     }
 
     private Mono<BatchExecutionEvidence> finishEvidence(
             R2dbcBatchConnectionHandle resource,
             EvidenceContext context) {
-        BatchCommitFact commitFact = connections.isExternal(resource)
-                ? BatchCommitFact.PENDING_EXTERNAL : BatchCommitFact.COMMITTED;
-        Mono<Void> commit = connections.isExternal(resource)
-                ? Mono.empty() : connections.commit(resource);
-        return commit.thenReturn(context.success(commitFact));
+        context.sqlExecutionCompleted.set(true);
+        return Mono.just(context.success(BatchCommitFact.PENDING_EXTERNAL));
     }
 
     private BatchCommitFact failureCommitFact(
             R2dbcBatchConnectionHandle resource,
             EvidenceContext context) {
-        if (connections.isExternal(resource)) {
-            return context.databaseWorkAttempted()
-                    ? BatchCommitFact.PENDING_EXTERNAL : BatchCommitFact.NOT_APPLICABLE;
-        }
-        return switch (resource.state()) {
-            case COMMITTED -> BatchCommitFact.COMMITTED;
-            case ROLLED_BACK -> BatchCommitFact.ROLLED_BACK;
-            default -> BatchCommitFact.UNKNOWN;
-        };
+        return context.databaseWorkAttempted()
+                ? BatchCommitFact.PENDING_EXTERNAL : BatchCommitFact.NOT_APPLICABLE;
     }
 
     private BatchExecutionEvidence cancellationEvidence(
             R2dbcBatchConnectionHandle resource,
             EvidenceContext context) {
-        BatchCommitFact commitFact;
-        if (connections.isExternal(resource)) {
-            commitFact = context.databaseWorkAttempted()
-                    ? BatchCommitFact.PENDING_EXTERNAL : BatchCommitFact.NOT_APPLICABLE;
-        } else {
-            commitFact = switch (resource.state()) {
-                case COMMITTED -> BatchCommitFact.COMMITTED;
-                case ROLLED_BACK -> BatchCommitFact.ROLLED_BACK;
-                default -> BatchCommitFact.UNKNOWN;
-            };
-        }
+        BatchCommitFact commitFact = failureCommitFact(resource, context);
         return context.evidence(
                 commitFact,
                 BatchExecutionState.CANCELLED,
@@ -253,7 +236,7 @@ final class R2dbcBatchWriter {
     }
 
     /**
-     * 错误清理前只保存失败上下文，不提前冻结事务事实。usingWhen 完成回滚/关闭后，外层再生成公开 evidence。
+     * 错误清理前保存失败上下文；资源收尾完成后生成公开 evidence，不裁定外部事务终态。
      */
     private static final class PendingEvidenceFailure extends RuntimeException {
 
@@ -278,6 +261,7 @@ final class R2dbcBatchWriter {
                 new AtomicReference<>();
         private final AtomicBoolean resourceAcquired = new AtomicBoolean();
         private final AtomicBoolean databaseWorkAttempted = new AtomicBoolean();
+        private final AtomicBoolean sqlExecutionCompleted = new AtomicBoolean();
         private final AtomicBoolean published = new AtomicBoolean();
         private volatile R2dbcBatchConnectionHandle resource;
 
@@ -311,11 +295,15 @@ final class R2dbcBatchWriter {
                     snapshotFacts(null, null));
         }
 
-        private BatchExecutionEvidenceException failure(
+        private Throwable failure(
                 String message,
                 Throwable failure,
                 BatchCommitFact commitFact,
                 BatchExecutionState state) {
+            VirtualMachineError fatal = findVirtualMachineError(failure);
+            if (fatal != null) {
+                return fatal;
+            }
             return new BatchExecutionEvidenceException(
                     message,
                     failure,
@@ -327,8 +315,11 @@ final class R2dbcBatchWriter {
                 BatchExecutionState terminalState,
                 Throwable failure) {
             List<BatchChunkExecutionFact> snapshot = snapshotFacts(terminalState, failure);
-            BatchExecutionState state = terminalState;
-            if (terminalState != BatchExecutionState.SUCCESS
+            boolean completed = sqlExecutionCompleted.get();
+            BatchExecutionState state = completed
+                    ? BatchExecutionState.SUCCESS : terminalState;
+            if (!completed
+                    && terminalState != BatchExecutionState.SUCCESS
                     && snapshot.stream().anyMatch(fact -> fact.state() == BatchExecutionState.SUCCESS
                             || fact.successfulCount() > 0)) {
                 state = BatchExecutionState.PARTIAL;

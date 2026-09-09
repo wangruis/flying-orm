@@ -121,6 +121,17 @@ public final class JdbcFormMetadataReader implements MetadataCacheInvalidator {
         return loadSnapshot(MetadataCacheKey.table(schema, table));
     }
 
+    /** 关系型入口保留 catalog/schema/table 的原始分段，不再解析表名中的点号。 */
+    public SchemaSnapshot readSnapshot(RelationIdentity relation) {
+        RelationIdentity target = Objects.requireNonNull(
+                relation, "schema relation identity must not be null");
+        if (target.catalog().isPresent()) {
+            throw new UnsupportedOperationException(
+                    "catalog-qualified schema snapshots are not supported by the JDBC reader");
+        }
+        return loadSnapshot(MetadataCacheKey.table(target), target);
+    }
+
     private TableMetadata readTable(MetadataCacheKey key) {
         boolean externalTransactionActive = externalTransactionActive();
         if (externalTransactionActive) {
@@ -143,13 +154,20 @@ public final class JdbcFormMetadataReader implements MetadataCacheInvalidator {
         DynamicForm form = loadForm(formKey);
         List<DynamicRow> indexes = query(queries.indexQuery(), key.schema(), key.table());
         List<DynamicRow> foreignKeys = query(queries.foreignKeyQuery(), key.schema(), key.table());
-        return FormMetadataRowConverter.toTableMetadata(displayTable, form, indexes, foreignKeys);
+        List<DynamicRow> uniqueConstraints = queries.snapshotDialect()
+                == InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL
+                ? query(queries.uniqueConstraintQuery(), key.schema(), key.table()) : List.of();
+        return FormMetadataRowConverter.toTableMetadata(
+                displayTable, form, indexes, foreignKeys, uniqueConstraints, queries.snapshotDialect());
     }
 
     private SchemaSnapshot loadSnapshot(MetadataCacheKey key) {
+        return loadSnapshot(key, RelationIdentity.of(null, key.schema(), key.table()));
+    }
+
+    private SchemaSnapshot loadSnapshot(MetadataCacheKey key, RelationIdentity identity) {
         String displayTable = displayTable(key.schema(), key.table());
         List<DynamicRow> columns = query(queries.columnQuery(), key.schema(), key.table());
-        RelationIdentity identity = RelationIdentity.of(null, key.schema(), key.table());
         if (queries.completeSnapshotQueries()) {
             List<DynamicRow> tableRows = query(queries.tableQuery(), key.schema(), key.table());
             List<DynamicRow> primaryKey = query(queries.primaryKeyQuery(), key.schema(), key.table());
@@ -168,6 +186,7 @@ public final class JdbcFormMetadataReader implements MetadataCacheInvalidator {
                     foreignKeys,
                     checks,
                     queries.typeMapper(),
+                    queries.snapshotTypeMapper(),
                     queries.snapshotDialect());
         }
         List<DynamicRow> indexes = query(queries.indexQuery(), key.schema(), key.table());
@@ -198,6 +217,19 @@ public final class JdbcFormMetadataReader implements MetadataCacheInvalidator {
     }
 
     @Override
+    public void invalidate(RelationIdentity relation) {
+        RelationIdentity target = Objects.requireNonNull(
+                relation, "metadata cache relation must not be null");
+        if (target.catalog().isPresent()) {
+            invalidateAll();
+            return;
+        }
+        MetadataCacheKey key = MetadataCacheKey.table(target);
+        removeMatching(key.schema(), key.table());
+        dependentInvalidator.invalidate(target);
+    }
+
+    @Override
     public void invalidateAll() {
         metadata.invalidateAll();
         dependentInvalidator.invalidateAll();
@@ -208,7 +240,8 @@ public final class JdbcFormMetadataReader implements MetadataCacheInvalidator {
     }
 
     private static boolean sameTable(MetadataCacheKey key, String schema, String table) {
-        return key.table().equals(table) && (schema == null || Objects.equals(key.schema(), schema));
+        return key.table().equals(table)
+                && (schema == null || key.schema() == null || Objects.equals(key.schema(), schema));
     }
 
     private List<DynamicRow> query(InformationSchemaFormMetadataReader.Query query,

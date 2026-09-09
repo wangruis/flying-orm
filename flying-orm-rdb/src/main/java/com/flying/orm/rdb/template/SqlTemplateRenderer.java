@@ -169,16 +169,19 @@ final class SqlTemplateRenderer {
         return compile(template, backend, false);
     }
 
-    static CompiledTemplate compileRegistered(SqlTemplate template, Backend backend) {
+    static CompiledTemplate compileReusable(SqlTemplate template, Backend backend) {
         return compile(template, backend, true);
     }
 
     private static CompiledTemplate compile(SqlTemplate template,
                                              Backend backend,
-                                             boolean registered) {
+                                             boolean reusable) {
         SqlTemplate safeTemplate = Objects.requireNonNull(template, "SQL template must not be null");
         Backend safeBackend = Objects.requireNonNull(backend, "SQL template backend must not be null");
-        String source = SqlStatements.requireSingle(safeTemplate.sql(), safeBackend.dialect());
+        boolean reusableStatement = reusable && safeTemplate.identifierSlots().isEmpty();
+        // 静态模板由最终 SqlStatementCompiler 完成唯一一次方言边界校验；动态标识符模板仍先校验模板正文。
+        String source = reusableStatement
+                ? safeTemplate.sql() : SqlStatements.requireSingle(safeTemplate.sql(), safeBackend.dialect());
         List<Segment> segments = new ArrayList<>();
         Set<String> valueSlots = new LinkedHashSet<>();
         Set<String> identifierSlots = new LinkedHashSet<>();
@@ -226,7 +229,7 @@ final class SqlTemplateRenderer {
             throw new IllegalArgumentException("registered identifier slots are not all used by SQL template");
         }
         List<Segment> compiledSegments = List.copyOf(segments);
-        SqlStatementPlan statement = registered && identifierSlots.isEmpty()
+        SqlStatementPlan statement = reusableStatement
                 ? compileStaticStatement(compiledSegments, safeBackend)
                 : null;
         return new CompiledTemplate(safeTemplate,

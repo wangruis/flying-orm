@@ -189,7 +189,9 @@ final class ReactiveFormBatchInsertOperations extends ReactiveFormOperationSuppo
         BatchGeneratedKeys safeGeneratedKeys = Objects.requireNonNull(
                 generatedKeys, "batch generated keys must not be null");
         Flux<Map<String, Object>> source = Flux.from(Objects.requireNonNull(rows, "batch rows must not be null"));
-        return source.switchOnFirst((signal, replay) -> {
+        return Mono.defer(() -> {
+            DataScope scope = scopes.effectiveScope(requestedScope);
+            return source.switchOnFirst((signal, replay) -> {
                 if (signal.isOnError()) {
                     return Mono.error(Objects.requireNonNull(signal.getThrowable()));
                 }
@@ -197,7 +199,6 @@ final class ReactiveFormBatchInsertOperations extends ReactiveFormOperationSuppo
                     return Mono.just(emptyResult.apply(safeOptions.mode()));
                 }
                 Map<String, Object> sourceFirstRow = signal.get();
-                DataScope scope = scopes.effectiveScope(requestedScope);
                 FieldUseGuard.approveBatchInsert(
                         safeForm, sourceFirstRow, scope, upsert, fieldUsePolicy);
                 Map<String, Object> firstValues = scopes.prepareWriteValues(safeForm, sourceFirstRow, scope);
@@ -215,7 +216,9 @@ final class ReactiveFormBatchInsertOperations extends ReactiveFormOperationSuppo
                     BatchInsertPlan plan = upsert
                             ? renderer.batchRenderer.upsertPlan(
                                     safeForm, firstValues, firstWrite.physicalForm(),
-                                    firstWrite.values(), sourceFirstRow)
+                                    firstWrite.values(), sourceFirstRow,
+                                    scope.condition().isEmpty() ? null
+                                            : scopes.prepareBatchScope(safeForm, physicalForm, scope).where())
                             : renderer.batchRenderer.insertPlan(firstWrite.physicalForm(), firstWrite.values());
                     Flux<Object[]> parameters = cpuReplay.index().map(indexed -> {
                         Map<String, Object> logical = indexed.getT1() == 0
@@ -234,6 +237,7 @@ final class ReactiveFormBatchInsertOperations extends ReactiveFormOperationSuppo
                             ? protectedWriter.apply(request) : writer.apply(request);
                 });
             }).single();
+        });
     }
 
     /**
@@ -283,7 +287,9 @@ final class ReactiveFormBatchInsertOperations extends ReactiveFormOperationSuppo
             return Flux.error(new IllegalArgumentException("batch chunks require independent mode"));
         }
         Flux<Map<String, Object>> source = Flux.from(Objects.requireNonNull(rows, "batch rows must not be null"));
-        return source.switchOnFirst((signal, replay) -> {
+        return Flux.defer(() -> {
+            DataScope scope = scopes.effectiveScope(requestedScope);
+            return source.switchOnFirst((signal, replay) -> {
                 if (signal.isOnError()) {
                     return Flux.error(Objects.requireNonNull(signal.getThrowable()));
                 }
@@ -291,7 +297,6 @@ final class ReactiveFormBatchInsertOperations extends ReactiveFormOperationSuppo
                     return Flux.empty();
                 }
                 Map<String, Object> sourceFirstRow = signal.get();
-                DataScope scope = scopes.effectiveScope(requestedScope);
                 FieldUseGuard.approveBatchInsert(
                         safeForm, sourceFirstRow, scope, upsert, fieldUsePolicy);
                 Map<String, Object> firstValues = scopes.prepareWriteValues(safeForm, sourceFirstRow, scope);
@@ -309,7 +314,9 @@ final class ReactiveFormBatchInsertOperations extends ReactiveFormOperationSuppo
                     BatchInsertPlan plan = upsert
                             ? renderer.batchRenderer.upsertPlan(
                                     safeForm, firstValues, firstWrite.physicalForm(),
-                                    firstWrite.values(), sourceFirstRow)
+                                    firstWrite.values(), sourceFirstRow,
+                                    scope.condition().isEmpty() ? null
+                                            : scopes.prepareBatchScope(safeForm, physicalForm, scope).where())
                             : renderer.batchRenderer.insertPlan(firstWrite.physicalForm(), firstWrite.values());
                     Flux<Object[]> parameters = cpuReplay.index().map(indexed -> {
                         Map<String, Object> logical = indexed.getT1() == 0
@@ -328,6 +335,7 @@ final class ReactiveFormBatchInsertOperations extends ReactiveFormOperationSuppo
                             ? executor.writeProtectedBatchChunks(request) : executor.writeBatchChunks(request);
                 });
             });
+        });
     }
 
     /**

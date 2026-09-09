@@ -4,19 +4,15 @@ import static com.flying.orm.core.internal.error.ThrowableGraph.findVirtualMachi
 
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
-import com.flying.orm.rdb.internal.DurationLimits;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.CancellationException;
-import java.util.concurrent.TimeoutException;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * 顺序执行参数化数据迁移。任一步失败后，只对已经成功的步骤按相反顺序执行补偿 SQL。
@@ -33,7 +29,7 @@ public final class ReactiveDataMigration {
 
     private final ReactiveSqlExecutor executor;
 
-    /** null 表示沿用 executor 的默认保护；只有显式 create 重载才会覆盖。 */
+    /** null 表示沿用 executor 的默认执行选项；只有显式 create 重载才会覆盖。 */
     private final SqlExecutionOptions options;
 
     private ReactiveDataMigration(ReactiveSqlExecutor executor) {
@@ -69,6 +65,10 @@ public final class ReactiveDataMigration {
                                    return progress;
                                }))
                                .onErrorResume(failure -> {
+                                   VirtualMachineError fatal = findVirtualMachineError(failure);
+                                   if (fatal != null) {
+                                       return Mono.error(fatal);
+                                   }
                                    progress.failure = failure;
                                    return Mono.just(progress);
                                }),
@@ -97,7 +97,6 @@ public final class ReactiveDataMigration {
 
     private Mono<DataMigrationResult> rollback(DataMigrationPlan plan,
                                                List<DataMigrationStepResult> results) {
-        AtomicInteger activeIndex = new AtomicInteger(-1);
         List<Integer> indexes = new ArrayList<>();
         for (int index = 0; index < results.size(); index++) {
             indexes.add(index);
@@ -105,7 +104,6 @@ public final class ReactiveDataMigration {
         Collections.reverse(indexes);
         return Flux.fromIterable(indexes)
                    .concatMap(index -> {
-                       activeIndex.set(index);
                        DataMigrationStep step = plan.steps().get(index);
                        return rowsUpdated(step.rollback())
                                       .doOnNext(rows -> results.set(index, results.get(index).rolledBack(rows)))
@@ -124,31 +122,7 @@ public final class ReactiveDataMigration {
                                plan.id(),
                                rollbackFailed ? DataMigrationStatus.ROLLBACK_FAILED : DataMigrationStatus.ROLLED_BACK,
                                results);
-                   }))
-                   .transform(rollback -> withCleanupTimeout(rollback, plan, results, activeIndex));
-    }
-
-    private Mono<DataMigrationResult> withCleanupTimeout(Mono<DataMigrationResult> rollback,
-                                                         DataMigrationPlan plan,
-                                                         List<DataMigrationStepResult> results,
-                                                         AtomicInteger activeIndex) {
-        Duration timeout = options == null
-                ? SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT
-                : options.cleanupTimeout();
-        if (timeout.isZero()) {
-            return rollback;
-        }
-        return rollback.timeout(DurationLimits.clamp(timeout))
-                       .onErrorResume(TimeoutException.class, failure -> {
-                           int index = activeIndex.get();
-                           if (index >= 0 && index < results.size()
-                                   && results.get(index).rollbackFailure() == null) {
-                               results.set(index, results.get(index).rollbackFailed(failure));
-                           }
-                           return Mono.just(new DataMigrationResult(plan.id(),
-                                                                     DataMigrationStatus.ROLLBACK_FAILED,
-                                                                     results));
-                       });
+                   }));
     }
 
     /** 没有单次覆盖时走无 options 契约，让执行器自己应用已经装好的统一默认值。 */

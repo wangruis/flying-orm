@@ -47,17 +47,16 @@ public final class QuerySpec {
                       StructuredConditionInput structuredInput,
                       StructuredConditionPolicy structuredPolicy,
                       SensitiveDisplayMode sensitiveDisplayMode) {
-        this.form = Objects.requireNonNull(form, "query form must not be null");
-        this.where = Objects.requireNonNull(where, "query where must not be null");
-        this.scope = Objects.requireNonNull(scope, "query data scope must not be null");
-        this.projections = copyTextList(projections, "query projections");
-        this.groups = copyTextList(groups, "query groups");
-        this.sorts = List.copyOf(Objects.requireNonNull(sorts, "query sorts must not be null"));
+        this.form = form;
+        this.where = where;
+        this.scope = scope;
+        this.projections = projections;
+        this.groups = groups;
+        this.sorts = sorts;
         this.executionOptions = executionOptions;
         this.structuredInput = structuredInput;
         this.structuredPolicy = structuredPolicy;
-        this.sensitiveDisplayMode = Objects.requireNonNull(
-                sensitiveDisplayMode, "sensitive display mode must not be null");
+        this.sensitiveDisplayMode = sensitiveDisplayMode;
     }
 
     /**
@@ -68,8 +67,10 @@ public final class QuerySpec {
      * @return 查询规格
      */
     public static QuerySpec of(DynamicForm form, ConditionGroup where) {
-        return new QuerySpec(form, where, DataScope.none(), List.of(), List.of(), List.of(), null, null, null,
-                             SensitiveDisplayMode.DECLARED);
+        DynamicForm safeForm = Objects.requireNonNull(form, "query form must not be null");
+        ConditionGroup safeWhere = Objects.requireNonNull(where, "query where must not be null");
+        return new QuerySpec(safeForm, safeWhere, DataScope.none(), List.of(), List.of(), List.of(),
+                             null, null, null, SensitiveDisplayMode.DECLARED);
     }
 
     /**
@@ -80,8 +81,11 @@ public final class QuerySpec {
      * @return 使用默认结构限制策略的查询规格
      */
     public static QuerySpec structured(DynamicForm form, StructuredConditionInput input) {
-        return new QuerySpec(form, ConditionGroup.and().build(), DataScope.none(), List.of(), List.of(), List.of(),
-                             null, Objects.requireNonNull(input, "structured condition input must not be null"),
+        StructuredConditionInput safeInput = Objects.requireNonNull(
+                input, "structured condition input must not be null");
+        DynamicForm safeForm = Objects.requireNonNull(form, "query form must not be null");
+        return new QuerySpec(safeForm, ConditionGroup.and().build(), DataScope.none(),
+                             List.of(), List.of(), List.of(), null, safeInput,
                              StructuredConditionPolicy.defaults(), SensitiveDisplayMode.DECLARED);
     }
 
@@ -142,7 +146,8 @@ public final class QuerySpec {
      * @return 新查询规格
      */
     public QuerySpec withScope(DataScope scope) {
-        return new QuerySpec(form, where, scope, projections, groups, sorts, executionOptions,
+        return new QuerySpec(form, where, Objects.requireNonNull(scope, "query data scope must not be null"),
+                             projections, groups, sorts, executionOptions,
                              structuredInput, structuredPolicy, sensitiveDisplayMode);
     }
 
@@ -158,7 +163,8 @@ public final class QuerySpec {
         if (safeProjections.isEmpty()) {
             throw new IllegalArgumentException("projected query must select at least one field");
         }
-        return new QuerySpec(form, where, scope, safeProjections, groups, sorts, executionOptions,
+        List<String> safeGroups = copyTextList(groups, "query groups");
+        return new QuerySpec(form, where, scope, safeProjections, safeGroups, sorts, executionOptions,
                              structuredInput, structuredPolicy, sensitiveDisplayMode);
     }
 
@@ -169,7 +175,9 @@ public final class QuerySpec {
      * @return 新查询规格
      */
     public QuerySpec withSorts(List<PageSort> sorts) {
-        return new QuerySpec(form, where, scope, projections, groups, sorts, executionOptions,
+        List<PageSort> safeSorts = List.copyOf(
+                Objects.requireNonNull(sorts, "query sorts must not be null"));
+        return new QuerySpec(form, where, scope, projections, groups, safeSorts, executionOptions,
                              structuredInput, structuredPolicy, sensitiveDisplayMode);
     }
 
@@ -221,14 +229,15 @@ public final class QuerySpec {
 
     private QuerySpec withSensitiveDisplayMode(SensitiveDisplayMode mode) {
         return new QuerySpec(form, where, scope, projections, groups, sorts, executionOptions,
-                             structuredInput, structuredPolicy,
-                             Objects.requireNonNull(mode, "sensitive display mode must not be null"));
+                             structuredInput, structuredPolicy, mode);
     }
 
     private static List<String> copyTextList(List<String> values, String name) {
         List<String> copied = List.copyOf(Objects.requireNonNull(values, name + " must not be null"));
-        if (copied.stream().anyMatch(value -> value == null || value.isBlank())) {
-            throw new IllegalArgumentException(name + " must not contain blank values");
+        for (String value : copied) {
+            if (value.isBlank()) {
+                throw new IllegalArgumentException(name + " must not contain blank values");
+            }
         }
         return copied;
     }

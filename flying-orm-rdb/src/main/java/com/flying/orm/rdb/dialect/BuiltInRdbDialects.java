@@ -16,6 +16,7 @@ final class BuiltInRdbDialects {
         return RdbDialect.builtIn(
                 "h2",
                 SchemaDialect.builder()
+                        .mapType("UUID", "UUID")
                         .mapType("TIMESTAMPTZ", "TIMESTAMP WITH TIME ZONE")
                         .mapType("OFFSET_TIME", "TIME WITH TIME ZONE")
                         .mapType("NCLOB", "CLOB")
@@ -64,12 +65,12 @@ final class BuiltInRdbDialects {
                         .mapType("DATE", "DATE")
                         .mapType("TIME", "TIME")
                         .mapType("OFFSET_TIME", "VARCHAR(32)")
+                        .mapType("UUID", "CHAR(36)")
                         .inlineColumnComment()
                         .mysqlTableComment()
                         .dropIndexOnTable()
                         .generatedValues(SchemaDialect.GeneratedValueStyle.MYSQL)
                         .operationDependentOnlineDdl()
-                        .mysqlLockTimeout()
                         .build(),
                 PaginationDialect.limitOffset(),
                 UpsertDialect.mysql(),
@@ -106,12 +107,12 @@ final class BuiltInRdbDialects {
                         .mapType("DATE", "DATE")
                         .mapType("TIME", "TIME")
                         .mapType("OFFSET_TIME", "TIME WITH TIME ZONE")
+                        .mapType("UUID", "UUID")
                         .mapType("VECTOR", "VECTOR")
                         .commentOnColumn()
                         .commentOnTable()
                         .generatedValues(SchemaDialect.GeneratedValueStyle.POSTGRESQL)
                         .concurrentIndexOnlineDdl()
-                        .postgresqlLockTimeout()
                         .build(),
                 PaginationDialect.limitOffset(),
                 UpsertDialect.postgresql(),
@@ -158,12 +159,12 @@ final class BuiltInRdbDialects {
                         .mapType("DATE", "DATE")
                         .mapType("TIME", "VARCHAR2(16)")
                         .mapType("OFFSET_TIME", "VARCHAR2(32)")
+                        .mapType("UUID", "VARCHAR2(36)")
                         .commentOnColumn()
                         .commentOnTable()
                         .generatedValues(SchemaDialect.GeneratedValueStyle.ORACLE)
                         .oracleColumnChanges()
                         .licenseOrEditionDependentOnlineDdl()
-                        .oracleLockTimeout()
                         .build(),
                 PaginationDialect.offsetFetch(),
                 UpsertDialect.oracle(),
@@ -203,6 +204,7 @@ final class BuiltInRdbDialects {
                         .mapType("DATE", "DATE")
                         .mapType("TIME", "TIME")
                         .mapType("OFFSET_TIME", "VARCHAR(32)")
+                        .mapType("UUID", "UNIQUEIDENTIFIER")
                         .sqlServerExtendedPropertyComment()
                         .sqlServerExtendedPropertyTableComment()
                         .dropIndexOnTable()
@@ -210,7 +212,6 @@ final class BuiltInRdbDialects {
                         .generatedValues(SchemaDialect.GeneratedValueStyle.SQL_SERVER)
                         .sqlServerColumnChanges()
                         .licenseOrEditionDependentOnlineDdl()
-                        .sqlServerLockTimeout()
                         .build(),
                 PaginationDialect.sqlServerOffsetFetch(),
                 UpsertDialect.sqlServer(),

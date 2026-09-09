@@ -18,36 +18,30 @@ import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 import static com.flying.orm.rdb.schema.JdbcSchemaExecutionSupport.addExact;
-import static com.flying.orm.rdb.schema.JdbcSchemaExecutionSupport.directVirtualMachineError;
 import static com.flying.orm.rdb.schema.JdbcSchemaExecutionSupport.rejection;
-import static com.flying.orm.rdb.schema.JdbcSchemaExecutionSupport.rethrow;
-import static com.flying.orm.rdb.schema.JdbcSchemaExecutionSupport.suppress;
 
 /**
  * Schema 的同步 JDBC 执行编排。
  *
- * <p>这里不把 JDBC 调用包装成 Reactor。锁超时时，setup、work、cleanup 连续交给同一个外部事务连接；
- * 没有这种能力就在第一条 SQL 前拒绝，不把多个连接冒充为同一会话。</p>
+ * <p>这里不把 JDBC 调用包装成 Reactor，也不设置或恢复会话锁等待参数。
+ * 执行时限和会话治理由上层负责，Schema 只执行计划 SQL 并报告实际结果。</p>
  *
  * <p>元数据失效会尝试全部目标。DDL 成功而失效失败时报告缓存一致性失败；两者都失败时，数据库失败保持
  * primary，失效失败作为 suppressed 保留。</p>
  */
 final class JdbcSchemaMigrationExecutor {
     private final SyncSqlExecutor executor;
-    private final FormSchemaSqlRenderer renderer;
     private final SchemaMigrationObserver observer;
     private final SchemaDdlTransactionSupport ddlTransactionSupport;
     private final JdbcTransactionParticipant transactionParticipant;
     private final Consumer<String> metadataInvalidator;
 
     JdbcSchemaMigrationExecutor(SyncSqlExecutor executor,
-                                FormSchemaSqlRenderer renderer,
                                 SchemaMigrationObserver observer,
                                 SchemaDdlTransactionSupport ddlTransactionSupport,
                                 JdbcTransactionParticipant transactionParticipant,
                                 Consumer<String> metadataInvalidator) {
         this.executor = Objects.requireNonNull(executor, "sync sql executor must not be null");
-        this.renderer = Objects.requireNonNull(renderer, "form schema SQL renderer must not be null");
         this.observer = SchemaMigrationObservers.safe(observer);
         this.ddlTransactionSupport = Objects.requireNonNull(ddlTransactionSupport,
                                                             "DDL transaction support must not be null");
@@ -109,7 +103,7 @@ final class JdbcSchemaMigrationExecutor {
             MySqlSchemaCommentSupport.validate(executor, requests, safeOptions.sqlExecutionOptions(), planFingerprint);
             long rows = requests.isEmpty()
                     ? 0L
-                    : executeReviewedRequests(requests, safeOptions, state, planFingerprint);
+                    : executeReviewedRequests(requests, safeOptions, state);
             SchemaMigrationResult result = new SchemaMigrationResult(safePlan.migration(), rows, state.steps);
             observe(state, safePlan, planFingerprint, result, startedAt, SqlExecutionStatus.SUCCESS, null);
             return result;
@@ -146,7 +140,7 @@ final class JdbcSchemaMigrationExecutor {
                 .map(step -> step.request().orElseThrow(() -> new IllegalStateException(
                         "reviewed schema execution contains a non-executable step")))
                 .toList();
-        List<String> tables = List.of(plan.desiredTable().orElseThrow().identity().table());
+        List<String> tables = List.of(plan.targetIdentity().orElseThrow().table());
         Consumer<String> tableInvalidator = ignored -> invalidator.run();
         JdbcSchemaExecutionState state = new JdbcSchemaExecutionState();
         Throwable primaryFailure = null;
@@ -155,7 +149,7 @@ final class JdbcSchemaMigrationExecutor {
         guardExternalTransaction(requests, false, tables, tableInvalidator, plan.fingerprint(), state);
         MySqlSchemaCommentSupport.validate(executor, requests, options.sqlExecutionOptions(), plan.fingerprint());
         try {
-            executeReviewedRequests(requests, options, state, plan.fingerprint());
+            executeReviewedRequests(requests, options, state);
             attempt = state.transactionCompletionRegistered
                     ? VerifiedSchemaPlanExecutor.externalTransactionAttempt(steps, state.steps)
                     : VerifiedSchemaPlanExecutor.successfulAttempt(steps, state.steps);
@@ -191,102 +185,9 @@ final class JdbcSchemaMigrationExecutor {
     }
     private long executeReviewedRequests(List<SqlRequest> requests,
                                          SchemaMigrationExecutionOptions options,
-                                         JdbcSchemaExecutionState state,
-                                         String planFingerprint) {
-        if (!options.hasLockTimeout()) {
-            state.started = true;
-            return executeWork(requests, options.sqlExecutionOptions(), state);
-        }
-        if (transactionParticipant.currentTransaction().isEmpty()) {
-            throw new SchemaMigrationRejectedException(
-                    SchemaMigrationFailureCode.EXECUTOR_CAPABILITY_REQUIRED,
-                    planFingerprint,
-                    "JDBC DDL lock timeout requires one externally managed transaction connection");
-        }
+                                         JdbcSchemaExecutionState state) {
         state.started = true;
-        SchemaDdlSessionGuard guard = renderer.lockTimeoutGuard(options.lockTimeout());
-        return executeSession(guard, requests, options.sqlExecutionOptions(), state);
-    }
-    private long executeSession(SchemaDdlSessionGuard guard,
-                                List<SqlRequest> requests,
-                                SqlExecutionOptions options,
-                                JdbcSchemaExecutionState state) {
-        Throwable primaryFailure = null;
-        long rows = 0L;
-        state.phase = SqlExecutionPhase.SETUP;
-        try {
-            executePhase(guard.setup(), options, state);
-            state.phase = SqlExecutionPhase.WORK;
-            rows = executeWork(requests, options, state);
-        } catch (RuntimeException error) {
-            primaryFailure = sequenceFailure(state, error);
-        } catch (Error error) {
-            primaryFailure = error;
-        }
-        state.phase = SqlExecutionPhase.CLEANUP;
-        try {
-            executePhase(guard.cleanup(), options.withTimeout(options.cleanupTimeout()), state);
-        } catch (RuntimeException cleanupFailure) {
-            SqlExecutionSequenceException sequenceFailure = sequenceFailure(state, cleanupFailure);
-            VirtualMachineError primaryFatal = directVirtualMachineError(primaryFailure);
-            if (primaryFatal != null) {
-                suppress(primaryFatal, sequenceFailure);
-                throw primaryFatal;
-            }
-            VirtualMachineError cleanupFatal = directVirtualMachineError(sequenceFailure);
-            if (cleanupFatal != null) {
-                suppress(cleanupFatal, primaryFailure);
-                throw cleanupFatal;
-            }
-            if (primaryFailure != null) {
-                suppress(primaryFailure, sequenceFailure);
-                rethrow(primaryFailure);
-            }
-            throw sequenceFailure;
-        } catch (Error cleanupFailure) {
-            VirtualMachineError primaryFatal = directVirtualMachineError(primaryFailure);
-            if (primaryFatal != null) {
-                suppress(primaryFatal, cleanupFailure);
-                throw primaryFatal;
-            }
-            VirtualMachineError cleanupFatal = directVirtualMachineError(cleanupFailure);
-            if (cleanupFatal != null) {
-                suppress(cleanupFatal, primaryFailure);
-                throw cleanupFatal;
-            }
-            if (primaryFailure != null) {
-                suppress(primaryFailure, cleanupFailure);
-                rethrow(primaryFailure);
-            }
-            throw cleanupFailure;
-        }
-        if (primaryFailure != null) {
-            rethrow(primaryFailure);
-        }
-        return rows;
-    }
-
-    private static SqlExecutionSequenceException sequenceFailure(JdbcSchemaExecutionState state,
-                                                                  RuntimeException failure) {
-        if (failure instanceof SqlExecutionSequenceException sequenceFailure) {
-            return sequenceFailure;
-        }
-        int stepIndex = state.phase == SqlExecutionPhase.WORK
-                ? Math.max(0, state.failedStepIndex)
-                : 0;
-        return new SqlExecutionSequenceException(state.phase, stepIndex, state.steps, failure);
-    }
-
-    private void executePhase(List<SqlRequest> requests,
-                              SqlExecutionOptions options,
-                              JdbcSchemaExecutionState state) {
-        for (int index = 0; index < requests.size(); index++) {
-            try {
-                executor.rowsUpdated(requests.get(index), options);
-            } catch (RuntimeException failure) {
-                throw new SqlExecutionSequenceException(state.phase, index, state.steps, failure);
-            }
-        }
+        return executeWork(requests, options.sqlExecutionOptions(), state);
     }
 
     private long executeWork(List<SqlRequest> requests,

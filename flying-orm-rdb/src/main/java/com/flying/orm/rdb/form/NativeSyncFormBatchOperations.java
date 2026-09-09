@@ -52,13 +52,14 @@ final class NativeSyncFormBatchOperations {
     BatchWriteResult writeBatch(BatchSpec spec) {
         BatchSpec safeSpec = Objects.requireNonNull(spec, "batch spec must not be null");
         BatchWriteOptions options = safeSpec.options().orElse(defaultOptions);
-        try (SyncBatchHead<Object> rows = open(safeSpec)) {
+        DataScope scope = scopes.effectiveScope(safeSpec.scope());
+        try (SyncBatchHead<Object> rows = open(safeSpec, options)) {
             if (rows.isEmpty()) {
                 return BatchWriteResult.empty(options.mode());
             }
             FormProtectedBatchRows.BatchLayout protectionLayout =
                     FormProtectedBatchRows.layout(safeSpec.form(), options);
-            BatchWriteRequest request = request(safeSpec, rows, options, protectionLayout);
+            BatchWriteRequest request = request(safeSpec, rows, options, protectionLayout, scope);
             return protectionLayout.contains() != null
                     ? executor.writeProtectedBatch(request) : executor.writeBatch(request);
         }
@@ -67,14 +68,15 @@ final class NativeSyncFormBatchOperations {
     BatchExecutionEvidence writeBatchEvidence(BatchSpec spec) {
         BatchSpec safeSpec = Objects.requireNonNull(spec, "batch spec must not be null");
         BatchWriteOptions options = safeSpec.options().orElse(defaultOptions);
-        try (SyncBatchHead<Object> rows = open(safeSpec)) {
+        DataScope scope = scopes.effectiveScope(safeSpec.scope());
+        try (SyncBatchHead<Object> rows = open(safeSpec, options)) {
             if (rows.isEmpty()) {
                 return BatchExecutionEvidence.of(
                         options.mode(), BatchExecutionState.SUCCESS, BatchCommitFact.NOT_APPLICABLE, List.of());
             }
             FormProtectedBatchRows.BatchLayout protectionLayout =
                     FormProtectedBatchRows.layout(safeSpec.form(), options);
-            BatchWriteRequest request = request(safeSpec, rows, options, protectionLayout);
+            BatchWriteRequest request = request(safeSpec, rows, options, protectionLayout, scope);
             return protectionLayout.contains() != null
                     ? executor.writeProtectedBatchEvidence(request) : executor.writeBatchEvidence(request);
         }
@@ -86,13 +88,14 @@ final class NativeSyncFormBatchOperations {
         if (options.mode() != BatchWriteOptions.Mode.INDEPENDENT) {
             throw new IllegalArgumentException("batch chunks require independent mode");
         }
-        try (SyncBatchHead<Object> rows = open(safeSpec)) {
+        DataScope scope = scopes.effectiveScope(safeSpec.scope());
+        try (SyncBatchHead<Object> rows = open(safeSpec, options)) {
             if (rows.isEmpty()) {
                 return List.of();
             }
             FormProtectedBatchRows.BatchLayout protectionLayout =
                     FormProtectedBatchRows.layout(safeSpec.form(), options);
-            BatchWriteRequest request = request(safeSpec, rows, options, protectionLayout);
+            BatchWriteRequest request = request(safeSpec, rows, options, protectionLayout, scope);
             return protectionLayout.contains() != null
                     ? executor.writeProtectedBatchChunks(request) : executor.writeBatchChunks(request);
         }
@@ -101,11 +104,12 @@ final class NativeSyncFormBatchOperations {
     private BatchWriteRequest request(BatchSpec spec,
                                       SyncBatchHead<Object> rows,
                                       BatchWriteOptions options,
-                                      FormProtectedBatchRows.BatchLayout protectionLayout) {
+                                      FormProtectedBatchRows.BatchLayout protectionLayout,
+                                      DataScope scope) {
         return switch (spec.operation()) {
-            case INSERT -> insertRequest(spec, rows, options, false, protectionLayout);
-            case UPSERT -> insertRequest(spec, rows, options, true, protectionLayout);
-            case UPDATE -> updateRequest(spec, rows, options, protectionLayout);
+            case INSERT -> insertRequest(spec, rows, options, false, protectionLayout, scope);
+            case UPSERT -> insertRequest(spec, rows, options, true, protectionLayout, scope);
+            case UPDATE -> updateRequest(spec, rows, options, protectionLayout, scope);
         };
     }
 
@@ -113,9 +117,9 @@ final class NativeSyncFormBatchOperations {
                                             SyncBatchHead<Object> rows,
                                             BatchWriteOptions options,
                                             boolean upsert,
-                                            FormProtectedBatchRows.BatchLayout protectionLayout) {
+                                            FormProtectedBatchRows.BatchLayout protectionLayout,
+                                            DataScope scope) {
         DynamicForm form = spec.form();
-        DataScope scope = scopes.effectiveScope(spec.scope());
         Map<String, Object> sourceFirstRow = requireMap(rows.first());
         FieldUseGuard.approveBatchInsert(form, sourceFirstRow, scope, upsert, fieldUsePolicy);
         Map<String, Object> firstValues = scopes.prepareWriteValues(form, sourceFirstRow, scope);
@@ -125,7 +129,9 @@ final class NativeSyncFormBatchOperations {
         FormPreparedWrite first = protection.prepare(firstValues);
         BatchInsertPlan plan = upsert
                 ? renderer.batchRenderer.upsertPlan(
-                        form, firstValues, first.physicalForm(), first.values(), sourceFirstRow)
+                        form, firstValues, first.physicalForm(), first.values(), sourceFirstRow,
+                        scope.condition().isEmpty() ? null
+                                : scopes.prepareBatchScope(form, physicalForm, scope).where())
                 : renderer.batchRenderer.insertPlan(first.physicalForm(), first.values());
         Publisher<Object[]> parameters = BatchPublishers.mapIndexed(rows, (row, index) -> {
             Map<String, Object> logical = index == 0L
@@ -150,9 +156,9 @@ final class NativeSyncFormBatchOperations {
     private BatchWriteRequest updateRequest(BatchSpec spec,
                                             SyncBatchHead<Object> rows,
                                             BatchWriteOptions options,
-                                            FormProtectedBatchRows.BatchLayout protectionLayout) {
+                                            FormProtectedBatchRows.BatchLayout protectionLayout,
+                                            DataScope scope) {
         DynamicForm form = spec.form();
-        DataScope scope = scopes.effectiveScope(spec.scope());
         BatchOptimisticUpdate sourceFirst = requireUpdate(rows.first());
         FieldUseGuard.approveBatchUpdate(renderer, form, sourceFirst, scope, fieldUsePolicy);
         DynamicForm physicalForm = renderer.protection().physicalForm(form);
@@ -196,7 +202,10 @@ final class NativeSyncFormBatchOperations {
     }
 
     @SuppressWarnings("unchecked")
-    private static SyncBatchHead<Object> open(BatchSpec spec) {
+    private static SyncBatchHead<Object> open(BatchSpec spec, BatchWriteOptions options) {
+        if (options.recovery().mode() == BatchWriteOptions.RecoveryMode.RECEIPT) {
+            throw new UnsupportedOperationException("batch receipt recovery is supported only by the R2DBC executor");
+        }
         try {
             return SyncBatchHead.open((Publisher<Object>) spec.rows(), Duration.ZERO);
         } catch (InterruptedException error) {

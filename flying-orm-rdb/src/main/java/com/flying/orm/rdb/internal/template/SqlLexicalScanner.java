@@ -18,12 +18,14 @@ import java.util.Objects;
 @InternalApi
 public final class SqlLexicalScanner {
 
-    private static final Rules GENERIC = new Rules(false, true, true, true, true, true, true, true, true, true);
+    private static final Rules GENERIC = new Rules(false, true, true, true, true, true, true, true, false, true);
     private static final Rules PORTABLE = new Rules(false, false, false, true, true, true, true, true, true, true);
+    private static final Rules REDACTION = new Rules(false, false, true, true, false, true, true, true, true, true);
     private static final Rules MYSQL = new Rules(true, true, false, true, false, false, false, false, true, true);
     private static final Rules POSTGRESQL = new Rules(false, false, true, false, false, true, false, true, false, false);
     private static final Rules SQL_SERVER = new Rules(false, false, true, false, true, false, false, false, false, false);
     private static final Rules ORACLE = new Rules(false, false, false, false, false, false, true, false, false, false);
+    private static final Rules H2 = new Rules(false, false, false, true, false, true, false, false, false, false);
     private static final Rules OTHER = new Rules(false, false, false, true, false, false, false, false, false, false);
     private static final SegmentKind[] KINDS = SegmentKind.values();
 
@@ -40,6 +42,11 @@ public final class SqlLexicalScanner {
         return PORTABLE;
     }
 
+    /** 无方言日志保守识别字面量，不让方括号或井号遮蔽其中的敏感文本。 */
+    public static Rules redactionRules() {
+        return REDACTION;
+    }
+
     /** 根据方言名或驱动产品名创建不可变扫描规则。 */
     public static Rules rulesFor(String dialectName) {
         return switch (DatabaseProduct.detect(dialectName)) {
@@ -47,7 +54,8 @@ public final class SqlLexicalScanner {
             case POSTGRESQL -> POSTGRESQL;
             case SQL_SERVER -> SQL_SERVER;
             case ORACLE -> ORACLE;
-            case H2, UNKNOWN -> OTHER;
+            case H2 -> H2;
+            case UNKNOWN -> OTHER;
         };
     }
 
@@ -119,7 +127,9 @@ public final class SqlLexicalScanner {
                 return segment(SegmentKind.ORACLE_QUOTED, end);
             }
         }
-        if (rules.dollarQuotes && current == '$') {
+        if (rules.dollarQuotes && current == '$'
+                && (rules != H2 || next == '$'
+                    && (offset == 0 || Character.isWhitespace(sql.charAt(offset - 1))))) {
             int end = dollarQuoteEnd(sql, offset);
             if (end >= 0) {
                 return segment(SegmentKind.DOLLAR_QUOTED, end);

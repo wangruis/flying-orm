@@ -10,12 +10,9 @@ import com.flying.orm.rdb.batch.BatchExecutionState;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.execution.ProtectedBatchRows;
-import com.flying.orm.rdb.observation.SqlTransactionSource;
 import com.flying.orm.rdb.transaction.JdbcTransactionContext;
 
 import java.sql.Connection;
-import java.sql.SQLException;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -25,10 +22,9 @@ import static com.flying.orm.rdb.jdbc.JdbcBatchSupport.readChunk;
 import static com.flying.orm.rdb.jdbc.JdbcBatchSupport.restoreInterrupt;
 import static com.flying.orm.rdb.jdbc.JdbcBatchSupport.rethrowTryWithResourcesVirtualMachineError;
 import static com.flying.orm.rdb.jdbc.JdbcBatchSupport.rethrowVirtualMachineError;
-import static com.flying.orm.rdb.jdbc.JdbcBatchSupport.rollbackAfterFailure;
 
 /**
- * JDBC ATOMIC evidence 的连接归属、提交事实和逐片证据编排。
+ * JDBC ATOMIC evidence 的外部事务参与和逐片执行证据编排，不决定事务终态。
  */
 final class JdbcBatchEvidenceExecutor {
 
@@ -57,28 +53,25 @@ final class JdbcBatchEvidenceExecutor {
         try {
             JdbcBatchRows rows = new JdbcBatchRows(
                     request.rows(), request.parameterCount(), request.options().maxRowBytes());
-            List<ProtectedBatchRows.RowView> firstChunk = null;
             try {
                 if (transaction == null) {
                     JdbcBatchSupport.ChunkReadProgress progress = new JdbcBatchSupport.ChunkReadProgress();
                     try {
-                        firstChunk = readChunk(rows, request, 0L, 0,
-                                JdbcBatchSupport.BatchDeadline.start(Duration.ZERO), progress);
-                        firstInputCount = firstChunk.size();
+                        firstInputCount = readChunk(rows, request, 0L, 0, progress).size();
                     } catch (RuntimeException | InterruptedException | TimeoutException failure) {
                         restoreInterrupt(failure);
                         throw evidenceFailure("jdbc batch input failed", failure,
                                 BatchCommitFact.NOT_APPLICABLE,
                                 List.of(failedEvidence(0, 0L, progress.acceptedRows(), failure)));
                     }
+                    if (firstInputCount > 0) {
+                        throw new IllegalStateException("non-empty ATOMIC batch evidence requires an external jdbc transaction");
+                    }
+                } else {
+                    acquired = JdbcConnectionProvider.JdbcConnectionLease.external(transaction);
                 }
-                if (transaction != null || firstInputCount > 0) {
-                    acquired = transaction == null
-                            ? connections.acquireOwned()
-                            : JdbcConnectionProvider.JdbcConnectionLease.external(transaction);
-                }
-            } catch (SQLException | RuntimeException | Error failure) {
-                // 首片已经订阅输入，连接获取失败时也必须归还这份输入所有权。
+            } catch (RuntimeException | Error failure) {
+                // 前置拒绝也必须取消已订阅输入，不借用或创建自有连接。
                 try (rows) {
                     throw failure;
                 }
@@ -93,18 +86,15 @@ final class JdbcBatchEvidenceExecutor {
                 }
             }
             try (JdbcConnectionProvider.JdbcConnectionLease lease = acquired; rows) {
-                JdbcBatchSupport.BatchDeadline deadline = JdbcBatchSupport.BatchDeadline.start(
-                        request.options().timeout());
-                if (lease.transactionSource() == SqlTransactionSource.EXTERNAL) {
-                    return executeExternal(
-                            lease.connection(), request, rows, firstChunk, facts, deadline);
-                }
-                return executeOwned(lease, request, rows, firstChunk, facts, deadline);
+                return executeExternal(lease.connection(), request, rows, facts);
             }
         } catch (BatchExecutionEvidenceException failure) {
             rethrowTryWithResourcesVirtualMachineError(failure);
             throw failure;
-        } catch (SQLException | RuntimeException failure) {
+        } catch (IllegalStateException failure) {
+            rethrowTryWithResourcesVirtualMachineError(failure);
+            throw failure;
+        } catch (Exception failure) {
             rethrowTryWithResourcesVirtualMachineError(failure);
             if (facts.isEmpty()) {
                 facts.add(failedEvidence(0, 0L, firstInputCount, failure));
@@ -122,11 +112,9 @@ final class JdbcBatchEvidenceExecutor {
             Connection connection,
             BatchWriteRequest request,
             JdbcBatchRows rows,
-            List<ProtectedBatchRows.RowView> firstChunk,
-            List<BatchChunkExecutionFact> facts,
-            JdbcBatchSupport.BatchDeadline deadline) {
+            List<BatchChunkExecutionFact> facts) {
         try {
-            consume(connection, request, rows, firstChunk, facts, deadline);
+            consume(connection, request, rows, facts);
             return BatchExecutionEvidence.of(
                     BatchWriteOptions.Mode.ATOMIC,
                     BatchExecutionState.SUCCESS,
@@ -140,103 +128,37 @@ final class JdbcBatchEvidenceExecutor {
         }
     }
 
-    private BatchExecutionEvidence executeOwned(
-            JdbcConnectionProvider.JdbcConnectionLease lease,
-            BatchWriteRequest request,
-            JdbcBatchRows rows,
-            List<ProtectedBatchRows.RowView> firstChunk,
-            List<BatchChunkExecutionFact> facts,
-            JdbcBatchSupport.BatchDeadline deadline) {
-        Connection connection = lease.connection();
-        boolean commitAttempted = false;
-        try {
-            if (connection.getAutoCommit()) {
-                connection.setAutoCommit(false);
-            }
-            consume(connection, request, rows, firstChunk, facts, deadline);
-            deadline.remaining();
-            JdbcStatementControl.requireNotInterrupted();
-            commitAttempted = true;
-            connection.commit();
-            lease.markTransactionOutcomeConfirmed();
-            return BatchExecutionEvidence.of(
-                    BatchWriteOptions.Mode.ATOMIC,
-                    BatchExecutionState.SUCCESS,
-                    BatchCommitFact.COMMITTED,
-                    facts);
-        } catch (EvidenceExecutionFailure failure) {
-            throw ownedFailure(connection, lease, failure.getCause(), facts);
-        } catch (SQLException | RuntimeException | TimeoutException failure) {
-            restoreInterrupt(failure);
-            if (commitAttempted) {
-                rethrowVirtualMachineError(failure);
-                throw evidenceFailure("jdbc batch commit outcome is unknown", failure,
-                        BatchCommitFact.UNKNOWN, facts);
-            }
-            if (facts.isEmpty()) {
-                facts.add(failedEvidence(0, 0L, firstChunk == null ? 0 : firstChunk.size(), failure));
-            }
-            throw ownedFailure(connection, lease, failure, facts);
-        }
-    }
-
-    private static BatchExecutionEvidenceException ownedFailure(
-            Connection connection,
-            JdbcConnectionProvider.JdbcConnectionLease lease,
-            Throwable failure,
-            List<BatchChunkExecutionFact> facts) {
-        JdbcBatchSupport.RollbackOutcome rollback = rollbackAfterFailure(connection, failure);
-        if (rollback.confirmed()) {
-            lease.markTransactionOutcomeConfirmedWithPrimaryFailure();
-        } else if (rollback.cleanupFatal() != null) {
-            throw rollback.cleanupFatal();
-        }
-        return evidenceFailure("jdbc batch execution failed", failure,
-                rollback.confirmed() ? BatchCommitFact.ROLLED_BACK : BatchCommitFact.UNKNOWN,
-                facts);
-    }
-
     private void consume(
             Connection connection,
             BatchWriteRequest request,
             JdbcBatchRows rows,
-            List<ProtectedBatchRows.RowView> chunk,
-            List<BatchChunkExecutionFact> facts,
-            JdbcBatchSupport.BatchDeadline deadline) {
+            List<BatchChunkExecutionFact> facts) {
         long offset = 0L;
         int chunkIndex = 0;
-        boolean prefetched = chunk != null;
         boolean databaseWorkAttempted = false;
         JdbcBatchSupport.ChunkReadProgress readProgress = new JdbcBatchSupport.ChunkReadProgress();
         while (true) {
-            if (chunk == null) {
-                try {
-                    chunk = readChunk(rows, request, offset, chunkIndex, deadline, readProgress);
-                } catch (RuntimeException | InterruptedException | TimeoutException failure) {
-                    restoreInterrupt(failure);
-                    facts.add(failedEvidence(
-                            chunkIndex, offset, readProgress.acceptedRows(), failure));
-                    throw new EvidenceExecutionFailure(failure, databaseWorkAttempted);
-                }
+            List<ProtectedBatchRows.RowView> chunk;
+            try {
+                chunk = readChunk(rows, request, offset, chunkIndex, readProgress);
+            } catch (RuntimeException | InterruptedException | TimeoutException failure) {
+                restoreInterrupt(failure);
+                facts.add(failedEvidence(
+                        chunkIndex, offset, readProgress.acceptedRows(), failure));
+                throw new EvidenceExecutionFailure(failure, databaseWorkAttempted);
             }
             if (chunk.isEmpty()) {
                 return;
             }
             JdbcBatchEvidenceSupport.Outcome outcome = chunks.executeBatchEvidence(
-                    connection, request, chunkIndex, offset, chunk, deadline);
+                    connection, request, chunkIndex, offset, chunk);
             databaseWorkAttempted |= outcome.databaseWorkAttempted();
             facts.add(outcome.fact());
             if (!outcome.successful()) {
-                throw new EvidenceExecutionFailure(
-                        outcome.failure(), databaseWorkAttempted);
+                throw new EvidenceExecutionFailure(outcome.failure(), databaseWorkAttempted);
             }
             offset += chunk.size();
             chunkIndex++;
-            if (prefetched) {
-                chunk.clear();
-                prefetched = false;
-            }
-            chunk = null;
         }
     }
 

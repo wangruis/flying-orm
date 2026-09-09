@@ -1,27 +1,19 @@
 package com.flying.orm.rdb.metadata;
 
-import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.sql.render.SqlRequest;
-import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
-import com.flying.orm.rdb.schema.SchemaSnapshot;
-import com.flying.orm.rdb.schema.SchemaSnapshotCoverage;
 import com.flying.orm.rdb.type.DatabaseTypes;
-import reactor.core.publisher.Mono;
 
 import java.util.List;
-import java.util.Objects;
 
 /**
- * Oracle 的动态表单元数据读取器，读取数据字典中的普通表字段、主键、索引、外键和列注释。
- * 数据字典中的物理 owner、表名按精确大小写匹配；Oracle 类型等差异留在查询模板和类型映射中。
- * 具体实现由 {@link ReactiveFormMetadataReaders} 在包内选择，业务不直接依赖数据字典 SQL。
+ * Oracle 的元数据查询定义。这里仅保存数据字典查询及版本差异，
+ * 查询编排和结果组装统一由 {@link InformationSchemaFormMetadataReader} 负责。
  *
  * @author wangr
  * @date 2026-07-28
  * @version v1.0
  */
-final class OracleReactiveFormMetadataReader implements ReactiveFormMetadataReader, ReactiveMetadataExecutorSource {
+final class OracleMetadataQueries {
 
     private static final String TIME_MARKER = "[[flying-orm:v1:TIME]]";
     private static final String OFFSET_TIME_MARKER = "[[flying-orm:v1:OFFSET_TIME]]";
@@ -60,7 +52,9 @@ final class OracleReactiveFormMetadataReader implements ReactiveFormMetadataRead
                            then 'BOOLEAN'
                        else c.DATA_TYPE
                    end as DATA_TYPE,
-                   c.CHAR_LENGTH as CHARACTER_MAXIMUM_LENGTH,
+                   c.DATA_TYPE as PHYSICAL_DATA_TYPE,
+                   case when c.DATA_TYPE = 'RAW' then c.DATA_LENGTH
+                        else c.CHAR_LENGTH end as CHARACTER_MAXIMUM_LENGTH,
                    c.DATA_PRECISION as NUMERIC_PRECISION,
                    c.DATA_SCALE as NUMERIC_SCALE,
                    case when c.DATA_TYPE like 'TIMESTAMP%' then c.DATA_SCALE end as TEMPORAL_PRECISION,
@@ -214,13 +208,21 @@ final class OracleReactiveFormMetadataReader implements ReactiveFormMetadataRead
               and not (
                   c.HIDDEN_COLUMN = 'YES'
                   and c.VIRTUAL_COLUMN = 'YES'
+                  and c.USER_GENERATED = 'NO'
                   and exists (
                       select 1
                       from ALL_IND_COLUMNS hidden_index_column
                       where hidden_index_column.TABLE_OWNER = c.OWNER
                         and hidden_index_column.TABLE_NAME = c.TABLE_NAME
                         and hidden_index_column.COLUMN_NAME = c.COLUMN_NAME
-                        and hidden_index_column.DESCEND = 'DESC'
+                        and (hidden_index_column.DESCEND = 'DESC' or exists (
+                            select 1 from ALL_IND_EXPRESSIONS hidden_index_expression
+                            where hidden_index_expression.INDEX_OWNER = hidden_index_column.INDEX_OWNER
+                              and hidden_index_expression.INDEX_NAME = hidden_index_column.INDEX_NAME
+                              and hidden_index_expression.TABLE_OWNER = hidden_index_column.TABLE_OWNER
+                              and hidden_index_expression.TABLE_NAME = hidden_index_column.TABLE_NAME
+                              and hidden_index_expression.COLUMN_POSITION = hidden_index_column.COLUMN_POSITION
+                        ))
                   )
               )
             """.replace("${TIME_MARKER}", TIME_MARKER)
@@ -250,6 +252,7 @@ final class OracleReactiveFormMetadataReader implements ReactiveFormMetadataRead
                               and i.VISIBILITY = 'VISIBLE'
                               and i.STATUS = 'VALID'
                               and i.INDEX_TYPE in ('NORMAL', 'FUNCTION-BASED NORMAL')
+                              and (i.INDEX_TYPE = 'NORMAL' or i.FUNCIDX_STATUS = 'ENABLED')
                               and i.COMPRESSION = 'DISABLED'
                               and ic.DESCEND in ('ASC', 'DESC')
                         then 'true' else 'false' end as INDEX_REPRESENTABLE,
@@ -259,6 +262,9 @@ final class OracleReactiveFormMetadataReader implements ReactiveFormMetadataRead
                        when i.VISIBILITY <> 'VISIBLE' then 'invisible index'
                        when i.STATUS <> 'VALID' then 'index is not valid'
                        when i.INDEX_TYPE not in ('NORMAL', 'FUNCTION-BASED NORMAL') then 'non-normal index'
+                       when i.INDEX_TYPE = 'FUNCTION-BASED NORMAL'
+                            and nvl(i.FUNCIDX_STATUS, 'DISABLED') <> 'ENABLED'
+                           then 'function-based index is disabled'
                        when i.COMPRESSION <> 'DISABLED' then 'compressed index'
                        when ic.DESCEND not in ('ASC', 'DESC') then 'unsupported key direction'
                        else 'function-based key part'
@@ -353,13 +359,23 @@ final class OracleReactiveFormMetadataReader implements ReactiveFormMetadataRead
                                     and hidden_column.HIDDEN_COLUMN = 'YES'
                                     and not (
                                         hidden_column.VIRTUAL_COLUMN = 'YES'
+                                        and hidden_column.USER_GENERATED = 'NO'
                                         and exists (
                                             select 1
                                             from ALL_IND_COLUMNS hidden_index_column
                                             where hidden_index_column.TABLE_OWNER = hidden_column.OWNER
                                               and hidden_index_column.TABLE_NAME = hidden_column.TABLE_NAME
                                               and hidden_index_column.COLUMN_NAME = hidden_column.COLUMN_NAME
-                                              and hidden_index_column.DESCEND = 'DESC'
+                                              and (hidden_index_column.DESCEND = 'DESC' or exists (
+                                                  select 1 from ALL_IND_EXPRESSIONS hidden_index_expression
+                                                  where hidden_index_expression.INDEX_OWNER
+                                                          = hidden_index_column.INDEX_OWNER
+                                                    and hidden_index_expression.INDEX_NAME = hidden_index_column.INDEX_NAME
+                                                    and hidden_index_expression.TABLE_OWNER
+                                                          = hidden_index_column.TABLE_OWNER
+                                                    and hidden_index_expression.TABLE_NAME = hidden_index_column.TABLE_NAME
+                                                    and hidden_index_expression.COLUMN_POSITION = hidden_index_column.COLUMN_POSITION
+                                              ))
                                         )
                                     ))
                         then 'true' else 'false' end as TABLE_REPRESENTABLE
@@ -454,81 +470,29 @@ final class OracleReactiveFormMetadataReader implements ReactiveFormMetadataRead
                 """.replace("__CONSTRAINT_TYPE__", constraintType);
     }
 
-    private final InformationSchemaFormMetadataReader delegate;
-
-    private OracleReactiveFormMetadataReader(ReactiveSqlExecutor executor) {
-        this.delegate = new InformationSchemaFormMetadataReader(Objects.requireNonNull(
-                executor, "reactive sql executor must not be null"), queries());
-    }
-
-    static OracleReactiveFormMetadataReader create(ReactiveSqlExecutor executor) {
-        return new OracleReactiveFormMetadataReader(executor);
+    private OracleMetadataQueries() {
     }
 
     static InformationSchemaFormMetadataReader.Queries queries() {
-        return InformationSchemaFormMetadataReader.Queries.complete(
-                OracleReactiveFormMetadataReader::columnQuery,
-                OracleReactiveFormMetadataReader::indexQuery,
-                OracleReactiveFormMetadataReader::foreignKeyQuery,
-                OracleReactiveFormMetadataReader::logicalType,
-                OracleReactiveFormMetadataReader::tableQuery,
-                OracleReactiveFormMetadataReader::primaryKeyQuery,
-                OracleReactiveFormMetadataReader::uniqueConstraintQuery,
-                OracleReactiveFormMetadataReader::checkConstraintQuery,
-                InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE);
+        return queries(OracleMetadataQueries::columnQuery);
     }
 
     static InformationSchemaFormMetadataReader.Queries queries12c() {
+        return queries(OracleMetadataQueries::columnQuery12c);
+    }
+
+    private static InformationSchemaFormMetadataReader.Queries queries(
+            InformationSchemaFormMetadataReader.Query columnQuery) {
         return InformationSchemaFormMetadataReader.Queries.complete(
-                OracleReactiveFormMetadataReader::columnQuery12c,
-                OracleReactiveFormMetadataReader::indexQuery,
-                OracleReactiveFormMetadataReader::foreignKeyQuery,
-                OracleReactiveFormMetadataReader::logicalType,
-                OracleReactiveFormMetadataReader::tableQuery,
-                OracleReactiveFormMetadataReader::primaryKeyQuery,
-                OracleReactiveFormMetadataReader::uniqueConstraintQuery,
-                OracleReactiveFormMetadataReader::checkConstraintQuery,
+                columnQuery,
+                OracleMetadataQueries::indexQuery,
+                OracleMetadataQueries::foreignKeyQuery,
+                OracleMetadataQueries::logicalType,
+                OracleMetadataQueries::tableQuery,
+                OracleMetadataQueries::primaryKeyQuery,
+                OracleMetadataQueries::uniqueConstraintQuery,
+                OracleMetadataQueries::checkConstraintQuery,
                 InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE);
-    }
-
-    @Override
-    public ReactiveSqlExecutor metadataExecutor() {
-        return delegate.metadataExecutor();
-    }
-
-    @Override
-    public SchemaSnapshotCoverage snapshotCoverage() {
-        return delegate.snapshotCoverage();
-    }
-
-    @Override
-    public Mono<DynamicForm> readForm(String formId, String table) {
-        return delegate.readForm(formId, table);
-    }
-
-    @Override
-    public Mono<DynamicForm> readForm(String formId, String schema, String table) {
-        return delegate.readForm(formId, schema, table);
-    }
-
-    @Override
-    public Mono<TableMetadata> readTable(String table) {
-        return delegate.readTable(table);
-    }
-
-    @Override
-    public Mono<TableMetadata> readTable(String schema, String table) {
-        return delegate.readTable(schema, table);
-    }
-
-    @Override
-    public Mono<SchemaSnapshot> readSnapshot(String table) {
-        return delegate.readSnapshot(table);
-    }
-
-    @Override
-    public Mono<SchemaSnapshot> readSnapshot(String schema, String table) {
-        return delegate.readSnapshot(schema, table);
     }
 
     private static SqlRequest columnQuery(String schema, String table) {
@@ -552,31 +516,13 @@ final class OracleReactiveFormMetadataReader implements ReactiveFormMetadataRead
     }
 
     private static SqlRequest indexQuery(String schema, String table) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            String sql = BASE_INDEXES_SQL
-                    + " and i.TABLE_OWNER = sys_context('USERENV', 'CURRENT_SCHEMA')"
-                    + " order by i.INDEX_NAME, ic.COLUMN_POSITION";
-            return new SqlRequest(sql, tableParameters(safeTable));
-        }
-        String sql = BASE_INDEXES_SQL
-                + " and i.TABLE_OWNER = " + ownerExpression()
-                + " order by i.INDEX_NAME, ic.COLUMN_POSITION";
-        return new SqlRequest(sql, tableAndOwnerParameters(safeTable, schema));
+        return completeQuery(BASE_INDEXES_SQL, "i.TABLE_OWNER", schema, table,
+                             " order by i.INDEX_NAME, ic.COLUMN_POSITION");
     }
 
     private static SqlRequest foreignKeyQuery(String schema, String table) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            String sql = BASE_FOREIGN_KEYS_SQL
-                    + " and ac.OWNER = sys_context('USERENV', 'CURRENT_SCHEMA')"
-                    + " order by ac.CONSTRAINT_NAME, acc.POSITION";
-            return new SqlRequest(sql, tableParameters(safeTable));
-        }
-        String sql = BASE_FOREIGN_KEYS_SQL
-                + " and ac.OWNER = " + ownerExpression()
-                + " order by ac.CONSTRAINT_NAME, acc.POSITION";
-        return new SqlRequest(sql, tableAndOwnerParameters(safeTable, schema));
+        return completeQuery(BASE_FOREIGN_KEYS_SQL, "ac.OWNER", schema, table,
+                             " order by ac.CONSTRAINT_NAME, acc.POSITION");
     }
 
     private static SqlRequest tableQuery(String schema, String table) {

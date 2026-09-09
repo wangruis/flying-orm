@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.core.metadata.ColumnDefinition;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.core.type.LogicalType;
@@ -32,6 +33,33 @@ final class SchemaColumnCommentCodec {
         }
         String marker = ORACLE_SEQUENCE_MARKER_PREFIX + safeGeneration.sequenceName() + "]]";
         return storageComment == null ? marker : marker + storageComment;
+    }
+
+    /** Missing logical facts cannot certify a marker-capable physical column as ordinary text. */
+    static boolean logicalTypeChangeRequiresReview(SchemaDialect dialect,
+                                                   ColumnDefinition actualColumn,
+                                                   DatabaseType actualType,
+                                                   DatabaseType desiredType) {
+        if (dialect == null) {
+            return false;
+        }
+        String desiredMarker = encodeLogicalType(dialect.generatedValueStyle(), desiredType, null);
+        if (actualType != null) {
+            return !Objects.equals(encodeLogicalType(dialect.generatedValueStyle(), actualType, null), desiredMarker);
+        }
+        if (desiredMarker != null) {
+            return true;
+        }
+        SchemaDialect.GeneratedValueStyle style = dialect.generatedValueStyle();
+        if (style != SchemaDialect.GeneratedValueStyle.ORACLE
+                && style != SchemaDialect.GeneratedValueStyle.MYSQL
+                && style != SchemaDialect.GeneratedValueStyle.SQL_SERVER) {
+            return false;
+        }
+        String physicalType = SchemaDefinitionEquality.actualColumnType(dialect, actualColumn);
+        return dialect.sameDataType(physicalType, dialect.dataType("OFFSET_TIME"))
+                || style == SchemaDialect.GeneratedValueStyle.ORACLE
+                    && dialect.sameDataType(physicalType, dialect.dataType("TIME"));
     }
 
     private static String encodeLogicalType(SchemaDialect.GeneratedValueStyle style,

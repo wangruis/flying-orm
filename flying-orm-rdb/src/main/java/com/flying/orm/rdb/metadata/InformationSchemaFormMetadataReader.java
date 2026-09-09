@@ -12,6 +12,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
+import java.util.Locale;
 import java.util.EnumSet;
 import java.util.Objects;
 import java.util.function.Function;
@@ -30,23 +31,23 @@ final class InformationSchemaFormMetadataReader
     private final SchemaSnapshotCoverage coverage;
 
     InformationSchemaFormMetadataReader(ReactiveSqlExecutor executor,
-                                        ColumnQuery columnQuery,
-                                        Function<String, String> typeMapper) {
+                                         Query columnQuery,
+                                         Function<String, String> typeMapper) {
         this(executor, new Queries(columnQuery, null, null, typeMapper));
     }
 
     InformationSchemaFormMetadataReader(ReactiveSqlExecutor executor,
-                                        ColumnQuery columnQuery,
-                                        IndexQuery indexQuery,
-                                        Function<String, String> typeMapper) {
+                                         Query columnQuery,
+                                         Query indexQuery,
+                                         Function<String, String> typeMapper) {
         this(executor, new Queries(columnQuery, indexQuery, null, typeMapper));
     }
 
     InformationSchemaFormMetadataReader(ReactiveSqlExecutor executor,
-                                        ColumnQuery columnQuery,
-                                        IndexQuery indexQuery,
-                                        ForeignKeyQuery foreignKeyQuery,
-                                        Function<String, String> typeMapper) {
+                                         Query columnQuery,
+                                         Query indexQuery,
+                                         Query foreignKeyQuery,
+                                         Function<String, String> typeMapper) {
         this(executor, new Queries(columnQuery, indexQuery, foreignKeyQuery, typeMapper));
     }
 
@@ -124,6 +125,19 @@ final class InformationSchemaFormMetadataReader
         return readSnapshot(schema, table, schema + "." + table);
     }
 
+    @Override
+    public Mono<SchemaSnapshot> readSnapshot(RelationIdentity relation) {
+        RelationIdentity target = Objects.requireNonNull(
+                relation, "schema relation identity must not be null");
+        if (target.catalog().isPresent()) {
+            return Mono.error(new UnsupportedOperationException(
+                    "catalog-qualified schema snapshots are not supported by the reactive reader"));
+        }
+        String schema = target.schema().orElse(null);
+        String displayTable = schema == null ? target.table() : schema + "." + target.table();
+        return readSnapshot(schema, target.table(), displayTable, target);
+    }
+
     private Mono<DynamicForm> readForm(String formId, String schema, String table, String displayTable) {
         return executor.query(queries.columnQuery().create(schema, table))
                        .collectList()
@@ -135,13 +149,24 @@ final class InformationSchemaFormMetadataReader
         return readForm(displayTable, schema, table, displayTable)
                 .flatMap(form -> readRows(queries.indexQuery(), schema, table)
                         .flatMap(indexes -> readRows(queries.foreignKeyQuery(), schema, table)
-                                .map(foreignKeys -> FormMetadataRowConverter.toTableMetadata(
-                                        displayTable, form, indexes, foreignKeys))));
+                                .flatMap(foreignKeys -> readRows(
+                                        queries.snapshotDialect() == SnapshotDialect.MYSQL
+                                                ? queries.uniqueConstraintQuery() : null, schema, table)
+                                        .map(uniqueConstraints -> FormMetadataRowConverter.toTableMetadata(
+                                                displayTable, form, indexes, foreignKeys,
+                                                uniqueConstraints, queries.snapshotDialect())))));
     }
 
     private Mono<SchemaSnapshot> readSnapshot(String schema, String table, String displayTable) {
+        return readSnapshot(
+                schema, table, displayTable, RelationIdentity.of(null, schema, table));
+    }
+
+    private Mono<SchemaSnapshot> readSnapshot(String schema,
+                                              String table,
+                                              String displayTable,
+                                              RelationIdentity identity) {
         Mono<List<DynamicRow>> columns = executor.query(queries.columnQuery().create(schema, table)).collectList();
-        RelationIdentity identity = RelationIdentity.of(null, schema, table);
         if (queries.completeSnapshotQueries()) {
             return Flux.concat(
                             columns,
@@ -156,7 +181,7 @@ final class InformationSchemaFormMetadataReader
                             identity,
                             result.get(0), result.get(1), result.get(2), result.get(3),
                             result.get(4), result.get(5), result.get(6),
-                            queries.typeMapper(), queries.snapshotDialect()));
+                            queries.typeMapper(), queries.snapshotTypeMapper(), queries.snapshotDialect()));
         }
         return Flux.concat(
                         columns,
@@ -189,27 +214,6 @@ final class InformationSchemaFormMetadataReader
         SqlRequest create(String schema, String table);
     }
 
-    interface ColumnQuery extends Query {
-    }
-
-    interface IndexQuery extends Query {
-    }
-
-    interface ForeignKeyQuery extends Query {
-    }
-
-    interface TableQuery extends Query {
-    }
-
-    interface PrimaryKeyQuery extends Query {
-    }
-
-    interface UniqueConstraintQuery extends Query {
-    }
-
-    interface CheckConstraintQuery extends Query {
-    }
-
     enum SnapshotDialect {
         LEGACY,
         POSTGRESQL,
@@ -219,27 +223,29 @@ final class InformationSchemaFormMetadataReader
         SQL_SERVER
     }
 
-    record Queries(ColumnQuery columnQuery,
-                   IndexQuery indexQuery,
-                   ForeignKeyQuery foreignKeyQuery,
+    record Queries(Query columnQuery,
+                   Query indexQuery,
+                   Query foreignKeyQuery,
                    Function<String, String> typeMapper,
-                   TableQuery tableQuery,
-                   PrimaryKeyQuery primaryKeyQuery,
-                   UniqueConstraintQuery uniqueConstraintQuery,
-                   CheckConstraintQuery checkConstraintQuery,
+                   Function<String, String> snapshotTypeMapper,
+                   Query tableQuery,
+                   Query primaryKeyQuery,
+                   Query uniqueConstraintQuery,
+                   Query checkConstraintQuery,
                    SnapshotDialect snapshotDialect) {
 
-        Queries(ColumnQuery columnQuery,
-                IndexQuery indexQuery,
-                ForeignKeyQuery foreignKeyQuery,
+        Queries(Query columnQuery,
+                Query indexQuery,
+                Query foreignKeyQuery,
                 Function<String, String> typeMapper) {
-            this(columnQuery, indexQuery, foreignKeyQuery, typeMapper,
+            this(columnQuery, indexQuery, foreignKeyQuery, typeMapper, typeMapper,
                  null, null, null, null, SnapshotDialect.LEGACY);
         }
 
         Queries {
             Objects.requireNonNull(columnQuery, "column query must not be null");
             Objects.requireNonNull(typeMapper, "type mapper must not be null");
+            Objects.requireNonNull(snapshotTypeMapper, "snapshot type mapper must not be null");
             Objects.requireNonNull(snapshotDialect, "snapshot dialect must not be null");
             if (snapshotDialect != SnapshotDialect.LEGACY && !hasAllSnapshotQueries(
                     tableQuery, primaryKeyQuery, uniqueConstraintQuery, indexQuery,
@@ -249,19 +255,39 @@ final class InformationSchemaFormMetadataReader
             }
         }
 
-        static Queries complete(ColumnQuery columnQuery,
-                                IndexQuery indexQuery,
-                                ForeignKeyQuery foreignKeyQuery,
+        static Queries complete(Query columnQuery,
+                                Query indexQuery,
+                                Query foreignKeyQuery,
                                 Function<String, String> typeMapper,
-                                TableQuery tableQuery,
-                                PrimaryKeyQuery primaryKeyQuery,
-                                UniqueConstraintQuery uniqueConstraintQuery,
-                                CheckConstraintQuery checkConstraintQuery,
+                                Query tableQuery,
+                                Query primaryKeyQuery,
+                                Query uniqueConstraintQuery,
+                                Query checkConstraintQuery,
+                                SnapshotDialect snapshotDialect) {
+            return complete(columnQuery, indexQuery, foreignKeyQuery, typeMapper,
+                            Queries::physicalType,
+                            tableQuery, primaryKeyQuery, uniqueConstraintQuery,
+                            checkConstraintQuery, snapshotDialect);
+        }
+
+        private static String physicalType(String type) {
+            return requireText(type, "physical data type").replaceAll("\\s+", " ").toUpperCase(Locale.ROOT);
+        }
+
+        static Queries complete(Query columnQuery,
+                                Query indexQuery,
+                                Query foreignKeyQuery,
+                                Function<String, String> typeMapper,
+                                Function<String, String> snapshotTypeMapper,
+                                Query tableQuery,
+                                Query primaryKeyQuery,
+                                Query uniqueConstraintQuery,
+                                Query checkConstraintQuery,
                                 SnapshotDialect snapshotDialect) {
             if (snapshotDialect == SnapshotDialect.LEGACY) {
                 throw new IllegalArgumentException("complete schema metadata requires a concrete dialect");
             }
-            return new Queries(columnQuery, indexQuery, foreignKeyQuery, typeMapper,
+            return new Queries(columnQuery, indexQuery, foreignKeyQuery, typeMapper, snapshotTypeMapper,
                                tableQuery, primaryKeyQuery, uniqueConstraintQuery,
                                checkConstraintQuery, snapshotDialect);
         }
@@ -270,12 +296,12 @@ final class InformationSchemaFormMetadataReader
             return snapshotDialect != SnapshotDialect.LEGACY;
         }
 
-        private static boolean hasAllSnapshotQueries(TableQuery tableQuery,
-                                                     PrimaryKeyQuery primaryKeyQuery,
-                                                     UniqueConstraintQuery uniqueConstraintQuery,
-                                                     IndexQuery indexQuery,
-                                                     ForeignKeyQuery foreignKeyQuery,
-                                                     CheckConstraintQuery checkConstraintQuery) {
+        private static boolean hasAllSnapshotQueries(Query tableQuery,
+                                                     Query primaryKeyQuery,
+                                                     Query uniqueConstraintQuery,
+                                                     Query indexQuery,
+                                                     Query foreignKeyQuery,
+                                                     Query checkConstraintQuery) {
             return tableQuery != null
                     && primaryKeyQuery != null
                     && uniqueConstraintQuery != null

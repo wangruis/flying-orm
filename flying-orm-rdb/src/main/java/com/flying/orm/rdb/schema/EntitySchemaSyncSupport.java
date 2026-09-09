@@ -1,5 +1,9 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.core.metadata.ColumnDefinition;
+import com.flying.orm.core.metadata.IndexDefinition;
+import com.flying.orm.core.metadata.PrimaryKeyDefinition;
+import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
 import com.flying.orm.rdb.mapping.EntityMetadata;
 import com.flying.orm.rdb.mapping.EntitySchemaDescriptor;
@@ -58,6 +62,84 @@ final class EntitySchemaSyncSupport {
                     "entity schema synchronization contains changes the current migration engine cannot execute",
                     report);
         }
+    }
+
+    /** 父候选键仍被另一张实际表引用时，整批在第一条 SQL 前关闭。 */
+    static void rejectReferencedCandidateKeyChanges(EntitySchemaSyncMode mode,
+                                                     List<SchemaSnapshot> snapshots,
+                                                     List<ReviewedSchemaPlan> plans,
+                                                     SchemaDialect dialect) {
+        if (mode == EntitySchemaSyncMode.VALIDATE) {
+            return;
+        }
+        for (ReviewedSchemaPlan plan : plans) {
+            for (SchemaPlanStep step : plan.steps()) {
+                if (!step.executable()) {
+                    continue;
+                }
+                SchemaOperation operation = step.operation();
+                boolean physicalActualTypes = snapshots.stream()
+                        .filter(snapshot -> snapshot.identity().equals(operation.relation()))
+                        .findFirst()
+                        .map(SchemaSnapshot::physicalColumnTypes)
+                        .orElse(true);
+                for (SchemaSnapshot snapshot : snapshots) {
+                    if (snapshot.identity().equals(operation.relation())
+                            || snapshot.foreignKeys().state() != SchemaSnapshot.State.PRESENT) {
+                        continue;
+                    }
+                    boolean blocked = snapshot.foreignKeys().value().stream()
+                            .filter(foreignKey -> foreignKey.reference().equals(operation.relation()))
+                            .anyMatch(foreignKey -> invalidatesReference(
+                                    operation, foreignKey.referenceColumns(), dialect, physicalActualTypes));
+                    if (blocked) {
+                        throw new EntityRelationalSchemaSyncException(
+                                "entity relational schema synchronization changes a candidate key "
+                                        + "that is still referenced by another table",
+                                new EntityRelationalSchemaSyncReport(mode, plans, List.of()));
+                    }
+                }
+            }
+        }
+    }
+
+    private static boolean invalidatesReference(SchemaOperation operation,
+                                                List<String> referenceColumns,
+                                                SchemaDialect dialect,
+                                                boolean physicalActualTypes) {
+        return switch (operation.kind()) {
+            case CHANGE_PRIMARY_KEY, DROP_PRIMARY_KEY ->
+                    SchemaDefinitionEquality.sameCandidateKeyColumns(
+                            referenceColumns,
+                            ((PrimaryKeyDefinition) operation.actual()).columns(),
+                            dialect);
+            case CHANGE_UNIQUE, DROP_UNIQUE ->
+                    SchemaDefinitionEquality.sameCandidateKeyColumns(
+                            referenceColumns,
+                            ((UniqueConstraintDefinition) operation.actual()).columns(),
+                            dialect);
+            case CHANGE_INDEX, DROP_INDEX -> {
+                IndexDefinition index = (IndexDefinition) operation.actual();
+                yield index.unique() && SchemaDefinitionEquality.sameCandidateKeyColumns(
+                        referenceColumns,
+                        index.keys().stream().map(key -> key.column()).toList(),
+                        dialect);
+            }
+            case CHANGE_COLUMN -> referenceColumns.contains(
+                    ((ColumnDefinition) operation.actual()).name())
+                    && changesPhysicalType((ColumnDefinition) operation.actual(),
+                            (ColumnDefinition) operation.desired(), dialect, physicalActualTypes);
+            case DROP_COLUMN -> referenceColumns.contains(
+                    ((ColumnDefinition) operation.actual()).name());
+            default -> false;
+        };
+    }
+
+    private static boolean changesPhysicalType(ColumnDefinition actual,
+                                               ColumnDefinition desired,
+                                               SchemaDialect dialect,
+                                               boolean physicalActualTypes) {
+        return !SchemaDefinitionEquality.sameColumnType(actual, desired, dialect, physicalActualTypes);
     }
 
     static Map<String, SchemaMigrationApproval> normalizedApprovals(

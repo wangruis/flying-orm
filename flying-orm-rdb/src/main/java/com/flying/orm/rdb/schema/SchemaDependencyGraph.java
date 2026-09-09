@@ -24,7 +24,7 @@ import java.util.TreeSet;
  * @date 2026-09-03
  * @version v3.2
  */
-public final class SchemaDependencyGraph {
+final class SchemaDependencyGraph {
 
     private static final Comparator<RelationIdentity> IDENTITY_ORDER =
             SchemaDependencyGraph::compareIdentity;

@@ -6,8 +6,18 @@ import com.flying.orm.core.internal.hash.StableDigest;
 import com.flying.orm.core.internal.hash.StableEncoder;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.rdb.json.JsonValueCodec;
+import tools.jackson.databind.JsonNode;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
+import java.time.OffsetDateTime;
+import java.time.OffsetTime;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
@@ -15,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.UUID;
 
 /**
  * 实体 Java 类型、规范数据库类型和字段 codec 的只读绑定表。
@@ -32,8 +43,7 @@ public final class EntityTypeMappingRegistry {
 
     private static final ValueCodec STANDARD_CODEC = new StandardCodecAdapter();
     private static final ValueCodec JSON_CODEC = new JsonCodecAdapter();
-    private static final List<Mapping> STANDARD_MAPPINGS =
-            EntityStandardTypeMappings.mappings(STANDARD_CODEC, JSON_CODEC);
+    private static final List<Mapping> STANDARD_MAPPINGS = standardMappings();
     private static final EntityTypeMappingRegistry STANDARD =
             new EntityTypeMappingRegistry(STANDARD_MAPPINGS, List.of());
 
@@ -131,6 +141,41 @@ public final class EntityTypeMappingRegistry {
             combined = combined.withFirst(extensions.get(index));
         }
         return combined;
+    }
+
+    /** 内置映射及 codec 身份只在注册表初始化时创建一次。 */
+    private static List<Mapping> standardMappings() {
+        List<Mapping> mappings = new ArrayList<>(22);
+        addStandardMapping(mappings, "JSON", Map.class, JSON_CODEC);
+        addStandardMapping(mappings, "JSON", Collection.class, JSON_CODEC);
+        addStandardMapping(mappings, "JSON", JsonNode.class, JSON_CODEC);
+        addStandardMapping(mappings, "VARCHAR", String.class, STANDARD_CODEC);
+        addStandardMapping(mappings, "BIGINT", Long.class, STANDARD_CODEC);
+        addStandardMapping(mappings, "INTEGER", Integer.class, STANDARD_CODEC);
+        addStandardMapping(mappings, "INTEGER", Short.class, STANDARD_CODEC);
+        addStandardMapping(mappings, "INTEGER", Byte.class, STANDARD_CODEC);
+        addStandardMapping(mappings, "BOOLEAN", Boolean.class, STANDARD_CODEC);
+        addStandardMapping(mappings, "DECIMAL", BigDecimal.class, STANDARD_CODEC);
+        addStandardMapping(mappings, "DECIMAL", BigInteger.class, STANDARD_CODEC);
+        addStandardMapping(mappings, "DECIMAL", Double.class, STANDARD_CODEC);
+        addStandardMapping(mappings, "DECIMAL", Float.class, STANDARD_CODEC);
+        addStandardMapping(mappings, "TIMESTAMP", LocalDateTime.class, STANDARD_CODEC);
+        addStandardMapping(mappings, "TIMESTAMPTZ", Instant.class, STANDARD_CODEC);
+        addStandardMapping(mappings, "TIMESTAMPTZ", OffsetDateTime.class, STANDARD_CODEC);
+        addStandardMapping(mappings, "DATE", LocalDate.class, STANDARD_CODEC);
+        addStandardMapping(mappings, "TIME", LocalTime.class, STANDARD_CODEC);
+        addStandardMapping(mappings, "OFFSET_TIME", OffsetTime.class, STANDARD_CODEC);
+        addStandardMapping(mappings, "UUID", UUID.class, STANDARD_CODEC);
+        addStandardMapping(mappings, "BINARY", byte[].class, STANDARD_CODEC);
+        addStandardMapping(mappings, "BINARY", Byte[].class, STANDARD_CODEC);
+        return List.copyOf(mappings);
+    }
+
+    private static void addStandardMapping(List<Mapping> mappings,
+                                           String id,
+                                           Class<?> javaType,
+                                           ValueCodec codec) {
+        mappings.add(new Mapping(id, javaType, DatabaseType.of(id), codec));
     }
 
     private static Map<String, List<Mapping>> indexById(List<Mapping> mappings) {

@@ -59,7 +59,7 @@ final class FormResultDecoder {
      * 查出来却走了另一套转换规则。
      */
     <T> RowMapper<T> rowMapper(Class<T> type, String nullMessage) {
-        return entityModels.rowMapper(Objects.requireNonNull(type, nullMessage), renderer.valueCodecs());
+        return entityModels.decodedRowMapper(Objects.requireNonNull(type, nullMessage), renderer.valueCodecs());
     }
 
     /**

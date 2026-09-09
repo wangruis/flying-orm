@@ -1,5 +1,7 @@
 package com.flying.orm.core.annotation;
 
+import com.flying.orm.core.metadata.UniqueNullPolicy;
+
 import java.lang.annotation.ElementType;
 import java.lang.annotation.Inherited;
 import java.lang.annotation.Repeatable;
@@ -35,6 +37,9 @@ public @interface TableUnique {
      * 参与唯一约束的实体属性，数组顺序就是约束列顺序。
      */
     String[] properties();
+
+    /** NULL 参与唯一性判断的规则；默认沿用数据库普通唯一约束语义。 */
+    UniqueNullPolicy nullPolicy() default UniqueNullPolicy.DEFAULT;
 
     /**
      * Java 编译器保存多项 {@link TableUnique} 声明时使用的容器。

@@ -10,6 +10,7 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.OffsetTime;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.List;
@@ -51,7 +52,7 @@ public sealed interface CheckPredicate permits CheckPredicate.Comparison,
     }
 
     static CheckPredicate in(String column, Collection<?> values) {
-        return new In(column, values == null ? null : List.copyOf(values));
+        return new In(column, values);
     }
 
     static CheckPredicate isNull(String column) {
@@ -102,12 +103,25 @@ public sealed interface CheckPredicate permits CheckPredicate.Comparison,
     record In(String column, List<Object> values) implements CheckPredicate {
 
         public In(String column, Collection<?> values) {
-            this(column, normalizeValues(values));
+            this(column, literalInput(values));
         }
 
         public In {
             column = requireColumnName(column);
             values = normalizeValues(values);
+        }
+
+        @SuppressWarnings("unchecked")
+        private static List<Object> literalInput(Collection<?> values) {
+            if (values == null) {
+                throw new IllegalArgumentException("check predicate values must not be null");
+            }
+            if (values instanceof List<?> list) {
+                // 这里只临时读取调用方列表；canonical 构造器会立即生成最终只读快照。
+                return (List<Object>) list;
+            }
+            // 非 List Collection 可能具有特殊遍历语义，先取得一次稳定输入再做字面量规范化。
+            return new ArrayList<>(values);
         }
     }
 

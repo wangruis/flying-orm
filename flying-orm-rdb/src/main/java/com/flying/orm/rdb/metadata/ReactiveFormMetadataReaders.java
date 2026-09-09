@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.metadata;
 
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.dialect.RdbDialect;
@@ -149,6 +150,11 @@ public final class ReactiveFormMetadataReaders {
         }
 
         @Override
+        public Mono<SchemaSnapshot> readSnapshot(RelationIdentity relation) {
+            return contextual(() -> delegate.readSnapshot(relation));
+        }
+
+        @Override
         public void invalidate(String table) {
             delegate.invalidate(table);
         }
@@ -156,6 +162,11 @@ public final class ReactiveFormMetadataReaders {
         @Override
         public void invalidate(String schema, String table) {
             delegate.invalidate(schema, table);
+        }
+
+        @Override
+        public void invalidate(RelationIdentity relation) {
+            delegate.invalidate(relation);
         }
 
         @Override

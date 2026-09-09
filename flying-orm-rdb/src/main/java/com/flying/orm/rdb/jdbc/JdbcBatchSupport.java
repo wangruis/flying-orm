@@ -10,12 +10,10 @@ import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchWriteResult;
 import com.flying.orm.rdb.execution.ProtectedBatchRows;
-import com.flying.orm.rdb.internal.DurationLimits;
 import com.flying.orm.rdb.internal.plan.SqlExecutionStatements;
 
 import java.sql.Connection;
 import java.sql.SQLException;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -27,21 +25,41 @@ final class JdbcBatchSupport {
     private JdbcBatchSupport() {
     }
 
-    /** 回执恢复是当前 R2DBC 执行能力；JDBC 必须在订阅输入和获取连接前拒绝，不能执行到一半才降级。 */
+    /** 回执恢复由上层治理；JDBC 入口在订阅输入和获取连接前明确拒绝，不在执行中降级。 */
     static BatchWriteRequest requireSupportedRequest(BatchWriteRequest request) {
         BatchWriteRequest safeRequest = Objects.requireNonNull(request, "batch write request must not be null");
         if (safeRequest.options().recovery().mode() != BatchWriteOptions.RecoveryMode.NONE) {
-            throw new UnsupportedOperationException("batch receipt recovery is supported only by the R2DBC executor");
+            throw new UnsupportedOperationException("batch receipt recovery must be managed by the caller");
         }
         SqlExecutionStatements.canonical(safeRequest.statement(), "");
         return safeRequest;
+    }
+
+    /** 外部事务缺失时先读取有界首片，仅用于区分空输入，不获取连接或开启事务。 */
+    static List<ProtectedBatchRows.RowView> readFirstChunk(
+            JdbcBatchRows rows,
+            BatchWriteRequest request) {
+        ChunkReadProgress progress = new ChunkReadProgress();
+        try {
+            return readChunk(rows, request, 0L, 0, progress);
+        } catch (RuntimeException | Error | InterruptedException | TimeoutException error) {
+            restoreInterrupt(error);
+            rethrowVirtualMachineError(error);
+            throw failure("jdbc atomic batch input failed", error,
+                    failedBeforeTransaction(error, progress.acceptedRows()));
+        }
+    }
+
+    static BatchWriteResult failedBeforeTransaction(Throwable error, int inputCount) {
+        return BatchWriteResult.from(
+                BatchWriteOptions.Mode.ATOMIC,
+                List.of(BatchChunkResult.failed(0, 0L, inputCount, error)));
     }
 
     static List<ProtectedBatchRows.RowView> readChunk(JdbcBatchRows rows,
                                                       BatchWriteRequest request,
                                                       long offset,
                                                       int chunkIndex,
-                                                      BatchDeadline deadline,
                                                       ChunkReadProgress progress) throws InterruptedException, TimeoutException {
         ChunkReadProgress safeProgress = Objects.requireNonNull(progress, "chunk read progress must not be null");
         safeProgress.reset();
@@ -51,7 +69,7 @@ final class JdbcBatchSupport {
         long bytes = 0L;
         // 未知下一行在 onNext 转移所有权之前，必须先留出其声明的单行上限。
         while (result.size() < options.chunkSize() && bytes <= maxBytesBeforeNextRow) {
-            ProtectedBatchRows.RowView rowView = rows.nextRowView(deadline.remaining());
+            ProtectedBatchRows.RowView rowView = rows.nextRowView();
             if (rowView == null) {
                 break;
             }
@@ -119,11 +137,6 @@ final class JdbcBatchSupport {
                 chunk.inputCount())).toList();
     }
 
-    static List<BatchChunkResult> rolledBackForAtomic(List<BatchChunkResult> chunks) {
-        return chunks.stream().map(chunk -> chunk.status() == BatchChunkResult.Status.COMMITTED
-                ? BatchChunkResult.rolledBack(chunk.chunkIndex(), chunk.startOffset(), chunk.inputCount()) : chunk).toList();
-    }
-
     /** 回滚自身失败后不能再猜事务结果，整批已经接收的分片都按 UNKNOWN 返回。 */
     static List<BatchChunkResult> unknown(List<BatchChunkResult> chunks, Throwable error) {
         if (chunks.isEmpty()) {
@@ -137,27 +150,6 @@ final class JdbcBatchSupport {
         List<BatchChunkResult> result = new ArrayList<>(chunks);
         result.add(last);
         return result;
-    }
-
-    static BatchWriteException unknownAfterCommitFailure(Throwable error,
-                                                          BatchWriteRequest request,
-                                                          List<BatchChunkResult> chunks) {
-        // 空批次也已发出 commit；回执丢失时必须保留一个零行 UNKNOWN，不能让空列表按全称汇总成 COMMITTED。
-        List<BatchChunkResult> unknown = chunks.isEmpty()
-                ? List.of(BatchChunkResult.unknown(0, 0L, 0, error))
-                : chunks.stream().map(chunk -> BatchChunkResult.unknown(
-                        chunk.chunkIndex(), chunk.startOffset(), chunk.inputCount(), error)).toList();
-        return failure("jdbc batch commit outcome is unknown", error,
-                       BatchWriteResult.from(request.options().mode(), unknown));
-    }
-
-    static RollbackOutcome rollbackAfterFailure(Connection connection, Throwable error) {
-        try {
-            connection.rollback();
-            return RollbackOutcome.succeeded();
-        } catch (SQLException | RuntimeException | Error rollbackFailure) {
-            return RollbackOutcome.failed(error, rollbackFailure);
-        }
     }
 
     static RollbackOutcome rollbackQuietly(Connection connection) {
@@ -230,30 +222,5 @@ final class JdbcBatchSupport {
         }
     }
 
-    /** 统一计算整批剩余时间，读取上游、绑定参数和提交事务共享同一个截止点。 */
-    record BatchDeadline(long expiresAt) {
-        static BatchDeadline start(Duration timeout) {
-            if (timeout.isZero()) {
-                return new BatchDeadline(Long.MAX_VALUE);
-            }
-            long timeoutNanos = DurationLimits.nanos(timeout);
-            if (timeoutNanos == Long.MAX_VALUE) {
-                return new BatchDeadline(Long.MAX_VALUE);
-            }
-            long startedAt = System.nanoTime();
-            return new BatchDeadline(DurationLimits.addSaturated(startedAt, timeoutNanos));
-        }
 
-        Duration remaining() throws TimeoutException {
-            if (expiresAt == Long.MAX_VALUE) {
-                return Duration.ZERO;
-            }
-            long nanos = expiresAt - System.nanoTime();
-            if (nanos <= 0L) {
-                throw new TimeoutException("jdbc batch timed out");
-            }
-            return Duration.ofNanos(nanos);
-        }
-
-    }
 }

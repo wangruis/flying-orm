@@ -27,12 +27,21 @@ public final class DatabaseType {
     private static final String INTERVAL_PRECISION = "\\(\\d+\\)";
     private static final String SIMPLE_NAME = "[a-z_][a-z0-9_]*(?:\\.[a-z_][a-z0-9_]*)?";
     private static final String MULTI_WORD_NAME =
-            "(?:double precision|character varying|national character varying|bit varying|long raw)";
+            "(?:double precision|character varying|national character varying|bit varying|long raw"
+                    + "|binary large object|character large object)";
     private static final String TIME_ZONE_NAME =
             "time(?:stamp)?(?:" + ARGUMENTS + ")? (?:with(?: local)?|without) time zone";
+    private static final String INTERVAL_SECOND = "second(?:" + INTERVAL_PRECISION + ")?";
+    private static final String INTERVAL_FIELDS =
+            "(?:year(?:" + INTERVAL_PRECISION + ")?(?: to month)?"
+                    + "|month"
+                    + "|day(?:" + INTERVAL_PRECISION + ")?(?: to (?:hour|minute|"
+                    + INTERVAL_SECOND + "))?"
+                    + "|hour(?: to (?:minute|" + INTERVAL_SECOND + "))?"
+                    + "|minute(?: to " + INTERVAL_SECOND + ")?"
+                    + "|" + INTERVAL_SECOND + ")";
     private static final String INTERVAL_NAME =
-            "interval (?:year(?:" + INTERVAL_PRECISION + ")? to month"
-                    + "|day(?:" + INTERVAL_PRECISION + ")? to second(?:" + INTERVAL_PRECISION + ")?)";
+            "(?:pg_catalog\\.)?interval(?:" + INTERVAL_PRECISION + "| " + INTERVAL_FIELDS + ")?";
     private static final Pattern SAFE_DECLARATION = Pattern.compile(
             "(?:" + TIME_ZONE_NAME
                     + "|" + INTERVAL_NAME
@@ -234,7 +243,9 @@ public final class DatabaseType {
     }
 
     private static LogicalType logicalType(String baseName) {
-        return switch (baseName) {
+        String logicalName = baseName.startsWith("PG_CATALOG.")
+                ? baseName.substring("PG_CATALOG.".length()) : baseName;
+        return switch (logicalName) {
             case "TINYINT", "SMALLINT", "INT2", "MEDIUMINT", "SMALLSERIAL", "SERIAL2" ->
                     LogicalType.SMALL_INTEGER;
             case "INT", "INTEGER", "INT4", "SERIAL", "SERIAL4" -> LogicalType.INTEGER;
@@ -245,10 +256,10 @@ public final class DatabaseType {
             case "BOOL", "BOOLEAN" -> LogicalType.BOOLEAN;
             case "CHAR", "CHARACTER", "CHARACTER VARYING", "NATIONAL CHARACTER VARYING", "VARCHAR",
                     "VARCHAR2", "NCHAR", "NVARCHAR", "NVARCHAR2", "TEXT", "TINYTEXT", "MEDIUMTEXT",
-                    "LONGTEXT", "CLOB", "NCLOB", "BPCHAR", "NTEXT" -> LogicalType.TEXT;
+                    "LONGTEXT", "CLOB", "NCLOB", "BPCHAR", "NTEXT", "CHARACTER LARGE OBJECT" -> LogicalType.TEXT;
             case "BINARY", "VARBINARY", "LONGVARBINARY", "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB",
                     "MYSQL_BINARY", "MYSQL_BLOB", "BYTEA", "RAW", "LONG RAW", "IMAGE",
-                    "PROTECTED_BINARY", "PROTECTED_HASH" ->
+                    "PROTECTED_BINARY", "PROTECTED_HASH", "BINARY LARGE OBJECT" ->
                     LogicalType.BINARY;
             case "DATE" -> LogicalType.DATE;
             case "TIME", "TIME WITHOUT TIME ZONE" -> LogicalType.TIME;
@@ -261,7 +272,8 @@ public final class DatabaseType {
             case "UUID", "UNIQUEIDENTIFIER" -> LogicalType.UUID;
             case "XML", "SQLXML" -> LogicalType.XML;
             case "VECTOR" -> LogicalType.VECTOR;
-            default -> baseName.startsWith("INTERVAL ") ? LogicalType.INTERVAL : LogicalType.OTHER;
+            default -> "INTERVAL".equals(logicalName) || logicalName.startsWith("INTERVAL ")
+                    ? LogicalType.INTERVAL : LogicalType.OTHER;
         };
     }
 

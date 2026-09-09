@@ -6,7 +6,7 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * 条件 AST 在构造时固定的结构摘要和扁平参数源。
+ * 条件 AST 按需生成的结构摘要和扁平参数源。
  *
  * @author wangr
  * @version v3.1
@@ -19,12 +19,12 @@ public final class ConditionExecutionView {
     private final boolean cacheable;
 
     ConditionExecutionView(String shapeDigest,
-                           List<Object> parameterSources,
+                           ArrayList<Object> ownedParameterSources,
                            long requiredStandardTermMask,
                            boolean cacheable) {
         this.shapeDigest = Objects.requireNonNull(shapeDigest, "condition shape digest must not be null");
-        this.parameterSources = Collections.unmodifiableList(new ArrayList<>(Objects.requireNonNull(
-                parameterSources, "condition parameter sources must not be null")));
+        this.parameterSources = Collections.unmodifiableList(Objects.requireNonNull(
+                ownedParameterSources, "condition parameter sources must not be null"));
         this.requiredStandardTermMask = requiredStandardTermMask;
         this.cacheable = cacheable;
     }

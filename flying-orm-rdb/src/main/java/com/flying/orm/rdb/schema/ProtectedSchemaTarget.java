@@ -7,7 +7,7 @@ import com.flying.orm.core.metadata.ForeignKeyMetadata;
 import com.flying.orm.core.metadata.IndexMetadata;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.rdb.protection.ProtectedFormLayout;
-import com.flying.orm.rdb.protection.ProtectedIndexProjection;
+import com.flying.orm.rdb.protection.ProtectedRelationalSchemaProjector;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -60,7 +60,7 @@ record ProtectedSchemaTarget(DynamicForm form,
             merged.put(name, index);
         });
         for (IndexMetadata index : safeIndexes) {
-            List<String> projectedColumns = ProtectedIndexProjection.columns(
+            List<String> projectedColumns = ProtectedRelationalSchemaProjector.projectIndexColumns(
                     safeLogical, index.columns(), index.unique());
             IndexMetadata projected = project(index, projectedColumns);
             if (index.unique()) {

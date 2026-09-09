@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.condition.StructuredConditionPolicy;
 import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.field.FieldIdentity;
@@ -8,8 +9,13 @@ import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.scope.FieldScope;
 import com.flying.orm.core.scope.FieldUse;
+import com.flying.orm.core.scope.FieldUsePolicy;
+import com.flying.orm.core.scope.FieldUseRequirements;
+import com.flying.orm.core.scope.FieldUseSnapshot;
 import com.flying.orm.core.sql.render.SqlFragment;
+import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
@@ -17,6 +23,7 @@ import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 import com.flying.orm.rdb.result.DynamicRow;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Function;
@@ -78,7 +85,7 @@ public final class FormAggregateReadSupport {
 
     private PreparedRead prepare(QuerySpec spec, ScopedRead read) {
         ProtectedFieldRuntime.PreparedQuery prepared = renderer.protection().prepareQuery(
-                spec.form(), read.form(), read.where(), read.scope());
+                spec.form(), read.where(), read.scope(), List.of());
         return new PreparedRead(
                 spec.form(), read.form(), prepared.physicalForm(), prepared.where(), read.scope());
     }
@@ -111,6 +118,24 @@ public final class FormAggregateReadSupport {
     /** 只在显式 governed 聚合遍历中审批扩展 term；默认聚合不调用。 */
     public void approveTermExtension(TermCondition term, FieldUse use) {
         FieldUseGuard.approveTermExtension(renderer, term, use);
+    }
+
+    /** 聚合包只经这个窄桥复用 form 包内的字段用途和查询形状审批。 */
+    @InternalApi
+    public FieldUseSnapshot approveAggregate(String resource,
+                                             FieldUseRequirements requirements,
+                                             FieldScope scope,
+                                             SqlRequest request,
+                                             FieldUsePolicy policy,
+                                             QueryShapeLimits limits,
+                                             int projectionCount,
+                                             int groupCount,
+                                             int aggregateCount,
+                                             int havingNodeCount,
+                                             int sortCount) {
+        return FieldUseGuard.approveAggregate(
+                resource, requirements, scope, request, policy, limits,
+                projectionCount, groupCount, aggregateCount, havingNodeCount, sortCount);
     }
 
     /** HAVING 字段先按结果布局校验和编码，再映射到 planner 已声明的安全 SQL 表达式。 */

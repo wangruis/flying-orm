@@ -115,7 +115,7 @@ final class SyncRepositoryBatchCoordinator<T> {
         BatchWriteOptions safeOptions = requireOptions(options);
         support.requireStableWriteLayout(kind);
         boolean returnGeneratedKeys = support.returnsGeneratedKeys(kind);
-        if (!support.lifecyclePlan(kind, returnGeneratedKeys).tracked()) {
+        if (!support.requiresLifecycleTracking(kind, returnGeneratedKeys)) {
             try {
                 return client.writeBatch(spec(support.directRows(entities, kind), safeOptions, scope, kind,
                                                   BatchWriteCompletion.noop(), BatchGeneratedKeys.none()));
@@ -143,7 +143,7 @@ final class SyncRepositoryBatchCoordinator<T> {
         BatchWriteOptions safeOptions = requireOptions(options);
         support.requireStableWriteLayout(kind);
         boolean returnGeneratedKeys = support.returnsGeneratedKeys(kind);
-        if (support.lifecyclePlan(kind, returnGeneratedKeys).tracked()) {
+        if (support.requiresLifecycleTracking(kind, returnGeneratedKeys)) {
             throw new UnsupportedOperationException(
                     "repository batch evidence cannot complete entity lifecycle or generated-key assignment");
         }
@@ -165,7 +165,7 @@ final class SyncRepositoryBatchCoordinator<T> {
         }
         support.requireStableWriteLayout(kind);
         boolean returnGeneratedKeys = support.returnsGeneratedKeys(kind);
-        if (!support.lifecyclePlan(kind, returnGeneratedKeys).tracked()) {
+        if (!support.requiresLifecycleTracking(kind, returnGeneratedKeys)) {
             try {
                 return client.writeBatchChunks(spec(support.directRows(entities, kind), safeOptions, scope, kind,
                                                         BatchWriteCompletion.noop(), BatchGeneratedKeys.none()));

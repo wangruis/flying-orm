@@ -170,6 +170,14 @@ final class SchemaDialectGenerationSupport {
     private void requireGeneratedType(String databaseType) {
         DatabaseType type = DatabaseType.of(databaseType).requireSafe("generated column data type");
         String base = type.baseName();
+        if (style == SchemaDialect.GeneratedValueStyle.POSTGRESQL) {
+            base = switch (type.canonical()) {
+                case "pg_catalog.int2" -> "SMALLINT";
+                case "pg_catalog.int4" -> "INTEGER";
+                case "pg_catalog.int8" -> "BIGINT";
+                default -> base;
+            };
+        }
         boolean supported = switch (style) {
             case POSTGRESQL, H2 -> switch (base) {
                 case "SMALLINT", "INTEGER", "BIGINT", "INT2", "INT4", "INT8" -> true;

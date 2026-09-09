@@ -3,6 +3,7 @@ package com.flying.orm.rdb.schema;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.RelationalSchemaDefinition;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
+import com.flying.orm.core.metadata.UniqueNullPolicy;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.IndexMetadata;
 import com.flying.orm.rdb.dialect.DatabaseDescriptor;
@@ -174,7 +175,7 @@ public final class EntitySchemaSynchronizer {
             return EntitySchemaSyncReport.off();
         }
         requireJdbc();
-        List<EntitySchemaTarget> targets = EntitySchemaSyncSupport.targets(models, entityTypes);
+        List<EntitySchemaTarget> targets = legacyTargets(entityTypes);
         if (safeMode != EntitySchemaSyncMode.FULL_UPDATE) {
             List<SchemaMigrationPlan> plans = targets.stream().map(this::planJdbc).toList();
             if (safeMode == EntitySchemaSyncMode.VALIDATE) {
@@ -211,7 +212,7 @@ public final class EntitySchemaSynchronizer {
                 return Mono.just(EntitySchemaSyncReport.off());
             }
             requireReactive();
-            List<EntitySchemaTarget> targets = EntitySchemaSyncSupport.targets(models, entityTypes);
+            List<EntitySchemaTarget> targets = legacyTargets(entityTypes);
             if (safeMode == EntitySchemaSyncMode.FULL_UPDATE) {
                 return Flux.fromIterable(targets)
                            .concatMap(this::reviewReactive)
@@ -353,7 +354,10 @@ public final class EntitySchemaSynchronizer {
             plans.add(reviewer.review(database, batch.targets().get(index),
                     snapshots.get(index), coverage, compatibilityMode(mode), sequences));
         }
-        return List.copyOf(plans);
+        List<ReviewedSchemaPlan> reviewed = List.copyOf(plans);
+        EntitySchemaSyncSupport.rejectReferencedCandidateKeyChanges(
+                mode, snapshots, reviewed, reviewer.schemaDialect());
+        return reviewed;
     }
 
     private SchemaExecutionReport executeRelationalJdbc(
@@ -397,13 +401,11 @@ public final class EntitySchemaSynchronizer {
                 EntitySchemaSyncSupport.normalizedApprovals(approvals);
         if (mode == EntitySchemaSyncMode.FULL_UPDATE) {
             for (ReviewedSchemaPlan plan : plans) {
-                if (plan.risk() == SchemaMigrationRiskLevel.LOW) {
-                    continue;
-                }
                 SchemaMigrationApproval approval = approvalFor(plan, normalized);
-                if (approval == null || !plan.fingerprint().equals(approval.planFingerprint())) {
+                if (!plan.acceptsApproval(approval)) {
                     throw new EntityRelationalSchemaSyncException(
-                            "entity relational schema plan requires an exact approval", report);
+                            "entity relational schema plan requires an exact approval and its execution prerequisites",
+                            report);
                 }
             }
         }
@@ -480,6 +482,19 @@ public final class EntitySchemaSynchronizer {
                                              legacyIndexes(target),
                                              List.of(), reactiveMetadata,
                                              FULL_OPTIONS, SchemaMigrationReviewPolicy.preferOnline());
+    }
+
+    private List<EntitySchemaTarget> legacyTargets(Collection<Class<?>> entityTypes) {
+        List<EntitySchemaTarget> targets = EntitySchemaSyncSupport.targets(models, entityTypes);
+        for (EntitySchemaTarget target : targets) {
+            for (var unique : target.descriptor().table().uniqueConstraints()) {
+                if (unique.nullPolicy() != UniqueNullPolicy.DEFAULT) {
+                    throw new UnsupportedOperationException(
+                            "explicit unique NULL policy requires relational schema synchronization");
+                }
+            }
+        }
+        return targets;
     }
 
     private static List<IndexMetadata> legacyIndexes(EntitySchemaTarget target) {

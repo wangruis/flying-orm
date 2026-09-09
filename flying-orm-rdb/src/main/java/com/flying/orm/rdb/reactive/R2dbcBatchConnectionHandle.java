@@ -1,10 +1,8 @@
 package com.flying.orm.rdb.reactive;
 
-import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.transaction.R2dbcTransactionContext;
 import io.r2dbc.spi.Connection;
 
-import java.time.Duration;
 import java.util.Objects;
 
 /**
@@ -26,10 +24,6 @@ final class R2dbcBatchConnectionHandle implements R2dbcConnectionLease {
 
     private volatile R2dbcLargeObjectScope largeObjects;
 
-    private volatile R2dbcCleanupDeadline cleanupDeadline;
-
-    private final Duration cleanupTimeout;
-
     private volatile BatchTransactionState state = BatchTransactionState.NEW;
 
     /** ORM 开始事务前的连接状态；只恢复本次 beginTransaction 改变的 auto-commit。 */
@@ -43,24 +37,13 @@ final class R2dbcBatchConnectionHandle implements R2dbcConnectionLease {
      * @param connection 当前批量操作独占的 R2DBC 连接
      */
     R2dbcBatchConnectionHandle(Connection connection) {
-        this(connection, SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT);
-    }
-
-    R2dbcBatchConnectionHandle(Connection connection, Duration cleanupTimeout) {
         this.connection = Objects.requireNonNull(connection, "batch connection must not be null");
         this.externalTransaction = null;
-        this.cleanupTimeout = Objects.requireNonNull(cleanupTimeout, "cleanup timeout must not be null");
     }
 
-    /** 创建外部事务连接句柄，连接、路由身份和完成通知在一次订阅内保持一致。 */
     R2dbcBatchConnectionHandle(R2dbcTransactionContext transaction) {
-        this(transaction, SqlExecutionOptions.DEFAULT_CLEANUP_TIMEOUT);
-    }
-
-    R2dbcBatchConnectionHandle(R2dbcTransactionContext transaction, Duration cleanupTimeout) {
         this.externalTransaction = Objects.requireNonNull(transaction, "transaction context must not be null");
         this.connection = externalTransaction.connection();
-        this.cleanupTimeout = Objects.requireNonNull(cleanupTimeout, "cleanup timeout must not be null");
     }
 
     /** 返回当前批量操作持有的连接。 */
@@ -93,9 +76,6 @@ final class R2dbcBatchConnectionHandle implements R2dbcConnectionLease {
         synchronized (this) {
             if (largeObjects == null) {
                 R2dbcLargeObjectScope created = new R2dbcLargeObjectScope();
-                if (cleanupDeadline != null) {
-                    created.shareCleanupDeadline(cleanupDeadline);
-                }
                 largeObjects = created;
             }
             return largeObjects;
@@ -105,27 +85,6 @@ final class R2dbcBatchConnectionHandle implements R2dbcConnectionLease {
     @Override
     public R2dbcLargeObjectScope largeObjectsIfCreated() {
         return largeObjects;
-    }
-
-    /** @return 当前连接从首次清理动作开始共用的绝对清理截止时间 */
-    R2dbcCleanupDeadline cleanupDeadline() {
-        R2dbcCleanupDeadline current = cleanupDeadline;
-        if (current != null) {
-            return current;
-        }
-        synchronized (this) {
-            if (cleanupDeadline == null) {
-                cleanupDeadline = largeObjects == null
-                        ? R2dbcCleanupDeadline.start(cleanupTimeout)
-                        : largeObjects.cleanupDeadline(cleanupTimeout);
-            }
-            return cleanupDeadline;
-        }
-    }
-
-    /** @return 仅在真正需要截止时间的清理分支使用的配置值 */
-    Duration cleanupTimeout() {
-        return cleanupTimeout;
     }
 
     /** 返回最新可见的事务状态。 */

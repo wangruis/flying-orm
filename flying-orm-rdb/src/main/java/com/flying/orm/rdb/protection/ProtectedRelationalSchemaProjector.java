@@ -15,6 +15,8 @@ import com.flying.orm.core.metadata.RelationalSchemaDefinition;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 import com.flying.orm.core.metadata.ValueGeneration;
+import com.flying.orm.core.protection.EncryptedFieldDefinition;
+import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.rdb.internal.InternalApi;
 
@@ -62,6 +64,43 @@ public final class ProtectedRelationalSchemaProjector {
                 .map(layout -> projectContains(layout, owner))
                 .ifPresent(schema::addTable);
         return schema.build();
+    }
+
+    /**
+     * 把可等价表达的单列 EXACT 索引投影到稳定哈希列，普通索引原样返回。
+     *
+     * <p>唯一索引还必须与 CRUD 的稳定令牌声明一致，避免密钥轮换期间接受重复业务值。
+     * 这是 legacy 与完整关系 Schema 共用的物理关系规则，不是业务代码的索引改写入口。</p>
+     */
+    @InternalApi
+    public static List<String> projectIndexColumns(
+            DynamicForm logicalForm,
+            List<String> columns,
+            boolean unique) {
+        DynamicForm form = Objects.requireNonNull(logicalForm, "logical form must not be null");
+        List<String> safeColumns = List.copyOf(Objects.requireNonNull(
+                columns, "index columns must not be null"));
+        List<String> protectedColumns = new ArrayList<>(1);
+        for (String column : safeColumns) {
+            if (form.protections().encrypted(column).isPresent()) {
+                protectedColumns.add(column);
+            }
+        }
+        if (protectedColumns.isEmpty()) {
+            return safeColumns;
+        }
+        if (safeColumns.size() != 1) {
+            throw new IllegalArgumentException("composite index must not reference an encrypted field");
+        }
+        String column = protectedColumns.getFirst();
+        EncryptedFieldDefinition definition = form.protections().encrypted(column).orElseThrow();
+        if (!definition.searchModes().contains(EncryptedSearchMode.EXACT)) {
+            throw new IllegalArgumentException("index on an encrypted field requires exact search");
+        }
+        if (unique && !form.field(column).unique()) {
+            throw new IllegalArgumentException("unique encrypted index requires a unique logical field");
+        }
+        return List.of(ProtectedFormLayout.exactColumn(form, column));
     }
 
     private static RelationalTableDefinition projectOwner(
@@ -119,16 +158,16 @@ public final class ProtectedRelationalSchemaProjector {
     private static UniqueConstraintDefinition projectUnique(
             DynamicForm form,
             UniqueConstraintDefinition unique) {
-        List<String> projected = ProtectedIndexProjection.columns(form, unique.columns(), true);
+        List<String> projected = projectIndexColumns(form, unique.columns(), true);
         if (projected.equals(unique.columns())) {
             return unique;
         }
-        return UniqueConstraintDefinition.of(unique.name(), projected.getFirst());
+        return new UniqueConstraintDefinition(unique.name(), projected, unique.nullPolicy());
     }
 
     private static IndexDefinition projectIndex(DynamicForm form, IndexDefinition index) {
         List<String> columns = index.keys().stream().map(IndexKeyPart::column).toList();
-        List<String> projected = ProtectedIndexProjection.columns(form, columns, index.unique());
+        List<String> projected = projectIndexColumns(form, columns, index.unique());
         if (projected.equals(columns)) {
             return index;
         }

@@ -5,10 +5,10 @@ import java.util.Objects;
 import java.util.regex.Pattern;
 
 /**
- * BatchWriteOptions 把批量大小、提交方式和恢复策略放在一起，默认选择整批原子提交。
+ * 批量大小、事务参与方式和兼容恢复配置。默认 ATOMIC 只参与上层外部事务。
  *
- * <p>{@link RecoveryMode#RECEIPT} 是当前 R2DBC 批量执行器的恢复能力。JDBC 批量仍支持
- * {@link Mode#ATOMIC} 和 {@link Mode#INDEPENDENT}，但会在订阅输入 Publisher 和获取连接前拒绝回执恢复配置。</p>
+ * <p>只有显式 {@link Mode#INDEPENDENT} 模式允许 ORM 拥有分片局部事务。
+ * 批量总时限、回执幂等和事务恢复由上层治理；正时限及 {@link RecoveryMode#RECEIPT} 配置明确拒绝。</p>
  *
  * @param mode        提交方式
  * @param chunkSize   每个分片最多包含多少行
@@ -17,8 +17,8 @@ import java.util.regex.Pattern;
  * @param maxBufferedBytes 全部在途分片允许持有的输入估算重量上限，不是 JVM 堆占用上限
  * @param maxRowBytes 单行输入估算重量上限；每片在请求下一行前预留此额度
  * @param maxResultChunks 聚合结果允许保留的分片明细数
- * @param timeout     连接可用后，每个自有批量事务执行 SQL 和提交的兜底时限；0 表示不限制
- * @param recovery    提交结果不确定时使用的恢复策略
+ * @param timeout     兼容字段，仅支持 0；正数抛出 UnsupportedOperationException
+ * @param recovery    兼容恢复字段，仅支持 NONE 和零确认时限
  * @author wangr
  * @date 2026-07-31
  * @version v1.0
@@ -38,7 +38,7 @@ public record BatchWriteOptions(Mode mode,
     public static final long DEFAULT_MAX_ROWS = 100_000L;
     public static final long DEFAULT_MAX_BUFFERED_BYTES = 32L * 1024 * 1024;
     public static final int DEFAULT_MAX_RESULT_CHUNKS = 4_096;
-    /** 默认不叠加 ORM 总超时；自有原子事务仍保证提交或回滚终态。 */
+    /** ORM 不拥有批量总时限，保留零值兼容默认配置。 */
     public static final Duration DEFAULT_TIMEOUT = Duration.ZERO;
     /**
      * 检查配置，错误参数在拿数据库连接前就直接报出来。
@@ -67,11 +67,14 @@ public record BatchWriteOptions(Mode mode,
             throw new IllegalArgumentException("batch max result chunks must be greater than zero");
         }
         timeout = requireNonNegative(timeout, "batch timeout");
+        if (!timeout.isZero()) {
+            throw new UnsupportedOperationException("batch timeout must be managed by the caller");
+        }
         recovery = Objects.requireNonNull(recovery, "batch recovery must not be null");
     }
 
     /**
-     * 返回默认配置，等价于每 500 行一个分片并整批原子提交。
+     * 返回默认配置，每 500 行一个分片，整批只参与上层外部事务。
      *
      * @return 默认配置
      */
@@ -80,7 +83,7 @@ public record BatchWriteOptions(Mode mode,
     }
 
     /**
-     * 创建整批原子提交配置。
+     * 创建整批外部事务参与配置；非空输入要求上层已经提供事务。
      *
      * @param chunkSize 每个分片最多包含多少行
      * @return 原子提交配置
@@ -202,12 +205,11 @@ public record BatchWriteOptions(Mode mode,
     }
 
     /**
-     * 返回带批量事务 SQL 兜底时限的新配置。连接排队仍完全服从上层连接池；
-     * {@code INDEPENDENT} 模式下每个自有分片事务分别计时。JDBC 会在进入提交前检查同一截止点，
-     * 但标准 JDBC 没有单独限制 {@code Connection.commit()} 阻塞时长的 API，提交调用本身仍受驱动和网络配置约束。
+     * 保留旧时限配置签名；ORM 不再拥有批量总时限。
      *
-     * @param timeout 连接可用后的事务执行时限，0 表示不限制
-     * @return 新配置
+     * @param timeout 仅支持 0，执行时限由上层和驱动治理
+     * @return 零时限的新配置
+     * @throws UnsupportedOperationException 配置正时限时
      */
     public BatchWriteOptions withTimeout(Duration timeout) {
         return new BatchWriteOptions(mode,
@@ -222,40 +224,26 @@ public record BatchWriteOptions(Mode mode,
     }
 
     /**
-     * 使用默认回执表开启 UNKNOWN 恢复。
-     *
-     * <p>该恢复模式当前由 R2DBC 批量执行器提供；JDBC 批量会在执行前明确拒绝。</p>
+     * 保留旧回执恢复入口；回执幂等和事务恢复必须由上层实现。
      *
      * @param operationId 稳定且唯一的操作编号
-     * @return 新配置
+     * @return 不返回配置
+     * @throws UnsupportedOperationException ORM 不再提供回执恢复
      */
     public BatchWriteOptions withReceipt(String operationId) {
-        return withReceipt(operationId, Duration.ofSeconds(3));
+        throw new UnsupportedOperationException("batch receipt recovery must be managed by the caller");
     }
 
     /**
-     * 使用默认回执表开启 UNKNOWN 恢复，并指定主动确认等待时间。
+     * 保留旧回执恢复入口，不将确认时限静默转换为其他预算。
      *
-     * <p>该恢复模式当前由 R2DBC 批量执行器提供；JDBC 批量会在执行前明确拒绝。</p>
-     *
-     * @param operationId    稳定且唯一的操作编号
-     * @param confirmTimeout 确认连接可用后，回执查询最多执行多久
-     * @return 新配置
+     * @param operationId 稳定且唯一的操作编号
+     * @param confirmTimeout 原回执确认时限
+     * @return 不返回配置
+     * @throws UnsupportedOperationException ORM 不再提供回执恢复
      */
     public BatchWriteOptions withReceipt(String operationId, Duration confirmTimeout) {
-        Recovery configured = new Recovery(RecoveryMode.RECEIPT,
-                                           operationId,
-                                           Recovery.DEFAULT_RECEIPT_TABLE,
-                                           confirmTimeout);
-        return new BatchWriteOptions(mode,
-                                     chunkSize,
-                                     concurrency,
-                                     maxRows,
-                                     maxBufferedBytes,
-                                     maxRowBytes,
-                                     maxResultChunks,
-                                     timeout,
-                                     configured);
+        throw new UnsupportedOperationException("batch receipt recovery must be managed by the caller");
     }
 
     private static long defaultMaxRowBytes(int chunkSize, int concurrency, long maxBufferedBytes) {
@@ -273,7 +261,7 @@ public record BatchWriteOptions(Mode mode,
 
     /** 批量提交方式。 */
     public enum Mode {
-        /** 整批共用一个事务，任一分片失败就全部回滚。 */
+        /** 整批参与上层外部事务；提交和回滚均由上层决定，非空输入缺事务时拒绝。 */
         ATOMIC,
         /** 每个分片使用自己的事务，允许部分成功。 */
         INDEPENDENT
@@ -283,7 +271,7 @@ public record BatchWriteOptions(Mode mode,
     public enum RecoveryMode {
         /** 不写框架回执，由业务自行确认。 */
         NONE,
-        /** 在同一事务中写回执，用于确认和幂等重放。 */
+        /** 兼容枚举值；配置该模式时明确拒绝，由上层治理回执和恢复。 */
         RECEIPT
     }
 
@@ -293,7 +281,7 @@ public record BatchWriteOptions(Mode mode,
      * @param mode           恢复方式
      * @param operationId    调用方提供的稳定操作编号
      * @param receiptTable   回执表名
-     * @param confirmTimeout 确认连接可用后，回执查询最多执行多久
+     * @param confirmTimeout 兼容字段，仅支持 0；正数明确拒绝
      */
     public record Recovery(RecoveryMode mode,
                            String operationId,
@@ -325,8 +313,8 @@ public record BatchWriteOptions(Mode mode,
             operationId = Objects.requireNonNull(operationId, "batch operation id must not be null");
             receiptTable = requireReceiptTable(receiptTable);
             confirmTimeout = requireNonNegative(confirmTimeout, "batch confirm timeout");
-            if (mode == RecoveryMode.RECEIPT && operationId.isBlank()) {
-                throw new IllegalArgumentException("batch operation id must not be blank");
+            if (mode == RecoveryMode.RECEIPT || !confirmTimeout.isZero()) {
+                throw new UnsupportedOperationException("batch receipt recovery must be managed by the caller");
             }
             if (operationId.length() > MAX_OPERATION_ID_LENGTH) {
                 throw new IllegalArgumentException(

@@ -24,7 +24,7 @@ import java.util.Set;
  * @date 2026-09-03
  * @version v3.2
  */
-public final class SchemaStronglyConnectedComponents {
+final class SchemaStronglyConnectedComponents {
 
     private final List<List<RelationalTableDefinition>> components;
     private final List<RelationalTableDefinition> dependencyOrder;

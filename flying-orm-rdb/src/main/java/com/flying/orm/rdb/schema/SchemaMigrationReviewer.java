@@ -2,7 +2,8 @@ package com.flying.orm.rdb.schema;
 
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.metadata.ColumnMetadata;
-import com.flying.orm.core.metadata.IndexMetadata;
+import com.flying.orm.core.metadata.ColumnDefinition;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.DialectCapabilities;
@@ -10,11 +11,9 @@ import com.flying.orm.rdb.dialect.DialectCapabilities;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 
 /**
  * 给结构迁移补上反向计划和在线 DDL 审核。
@@ -26,7 +25,7 @@ import java.util.Set;
  * @date 2026-08-09
  * @version v1.0
  */
-public final class SchemaMigrationReviewer {
+final class SchemaMigrationReviewer {
 
     private final FormSchemaSqlRenderer renderer;
     private final SchemaRollbackSqlRenderer rollbackRenderer;
@@ -58,12 +57,20 @@ public final class SchemaMigrationReviewer {
     public ReviewedSchemaMigrationPlan review(TableMetadata current,
                                               SchemaMigrationPlan migration,
                                               SchemaMigrationReviewPolicy policy) {
+        return review(current, migration, policy, null);
+    }
+
+    ReviewedSchemaMigrationPlan review(TableMetadata current,
+                                        SchemaMigrationPlan migration,
+                                        SchemaMigrationReviewPolicy policy,
+                                        SchemaSnapshot snapshot) {
+        RelationalTableDefinition physical = SchemaTableSqlRenderer.physicalColumns(snapshot);
         TableMetadata safeCurrent = Objects.requireNonNull(current, "current table metadata must not be null");
         SchemaMigrationPlan safeMigration = Objects.requireNonNull(migration, "migration plan must not be null");
         SchemaMigrationReviewPolicy safePolicy = Objects.requireNonNull(policy,
                                                                         "migration review policy must not be null");
         SchemaRollbackPlan baseRollback = safeMigration.tableExists()
-                ? rollbackExisting(safeCurrent, safeMigration, safePolicy.columnRenames())
+                ? rollbackExisting(safeCurrent, safeMigration, safePolicy.columnRenames(), physical)
                 : rollbackCreated(safeMigration);
         List<SqlRequest> rollbackRequests = new ArrayList<>();
         List<String> additionalTables = new ArrayList<>(safeMigration.additionalCreatedTables());
@@ -118,13 +125,15 @@ public final class SchemaMigrationReviewer {
 
     private SchemaRollbackPlan rollbackExisting(TableMetadata current,
                                                 SchemaMigrationPlan migration,
-                                                Map<String, String> renames) {
+                                                Map<String, String> renames,
+                                                RelationalTableDefinition physical) {
         List<SqlRequest> rollback = new ArrayList<>();
+        List<SqlRequest> indexRestores = new ArrayList<>();
         List<SchemaRollbackGap> gaps = new ArrayList<>();
         String table = migration.target().table();
 
-        // 正向最后做索引，因此回滚先处理索引，避免列回退时仍被新索引引用。
-        rollbackIndexes(current, migration, table, rollback, gaps);
+        // 正向最后做索引。回滚先删除正向新增或重建的索引，原索引要等列结构和列名恢复后再创建。
+        rollbackIndexes(current, migration, table, renames, rollback, indexRestores, gaps);
 
         Map<String, DynamicField> targetsByCurrentName = new HashMap<>();
         for (DynamicField target : migration.target().fields()) {
@@ -138,6 +147,7 @@ public final class SchemaMigrationReviewer {
             String targetName = renameTarget(renames, source.name());
             String currentName = targetName == null ? source.name() : targetName;
             DynamicField target = targetsByCurrentName.get(source.name());
+            ColumnDefinition physicalColumn = physical == null ? null : physical.column(source.name());
             if (target == null) {
                 if (!skipped(migration, SkippedSchemaChange.Kind.DROP_COLUMN, source.name())) {
                     rollback.add(renderer.rollbackAddColumn(table, source));
@@ -157,7 +167,7 @@ public final class SchemaMigrationReviewer {
                                                    source.name(),
                                                    "primary key rollback needs constraint and foreign key review"));
                 } else if (source.nullable() != target.nullable()) {
-                    rollback.add(rollbackRenderer.rollbackColumnNullability(table, currentName, source));
+                    rollback.add(rollbackRenderer.rollbackColumnNullability(table, currentName, source, physicalColumn));
                     if (!source.nullable() && target.nullable()) {
                         gaps.add(new SchemaRollbackGap(
                                 SchemaRollbackGap.Kind.DATA_CANNOT_BE_RESTORED,
@@ -165,16 +175,16 @@ public final class SchemaMigrationReviewer {
                                 "rows written as null after relaxing the constraint must be repaired before rollback"));
                     }
                 } else {
-                    rollback.add(renderer.rollbackColumnType(table, currentName, source));
+                    rollback.add(rollbackRenderer.rollbackColumnType(table, currentName, source, physicalColumn));
                 }
             }
-            if (target != null && hasColumnCommentChange(migration, table, source, target)) {
+            if (target != null && hasColumnCommentChange(migration, table, source, target, physicalColumn)) {
                 var commentRollback = rollbackRenderer.rollbackColumnComment(table, currentName, source, target);
                 if (commentRollback.isPresent()) {
                     rollback.add(commentRollback.orElseThrow());
                 } else if (renderer.dialect().inlineColumnComment()
                         && renderer.dialect().rewritesFullColumnDefinition()) {
-                    rollback.add(renderer.rollbackColumnType(table, currentName, source));
+                    rollback.add(rollbackRenderer.rollbackColumnType(table, currentName, source, physicalColumn));
                 }
             }
         }
@@ -218,6 +228,7 @@ public final class SchemaMigrationReviewer {
         Collections.reverse(reversedRenames);
         reversedRenames.forEach(rename -> rollback.add(renderer.rollbackRenameColumn(
                 table, rename.getValue(), rename.getKey())));
+        rollback.addAll(indexRestores);
         if (!migration.targetForeignKeys().isEmpty()) {
             gaps.add(new SchemaRollbackGap(SchemaRollbackGap.Kind.FOREIGN_KEY_REQUIRES_REVIEW,
                                            table,
@@ -229,63 +240,26 @@ public final class SchemaMigrationReviewer {
     private void rollbackIndexes(TableMetadata current,
                                  SchemaMigrationPlan migration,
                                  String table,
+                                 Map<String, String> renames,
                                  List<SqlRequest> rollback,
+                                 List<SqlRequest> indexRestores,
                                  List<SchemaRollbackGap> gaps) {
-        List<IndexMetadata> target = migration.targetIndexes();
-        List<IndexMetadata> generatedIndexes = migration.target().toTableMetadata().indexes();
-        Set<String> targetIndexNames = new HashSet<>();
-        target.forEach(index -> targetIndexNames.add(index.normalizedName()));
-        Set<String> targetPhysicalIndexNames = new HashSet<>();
-        target.forEach(index -> targetPhysicalIndexNames.add(index.name()));
-        Set<String> ambiguousTargetIndexNames = SchemaMigrationSupport.ambiguousFoldedNames(
-                target.stream().map(IndexMetadata::name).toList());
-        Set<String> consumedLegacyIndexNames = new HashSet<>();
-        Set<String> matchedCurrentIndexNames = new HashSet<>();
-        for (IndexMetadata index : target) {
-            IndexMetadata source = SchemaMigrationSupport.exactIndex(current, index.name());
-            if (source == null && !ambiguousTargetIndexNames.contains(index.normalizedName())) {
-                source = current.findIndex(index.name()).orElse(null);
-            }
+        SchemaIndexPlanner.forEachChange(current, migration.target(), migration.targetIndexes(), (source, index) -> {
             if (source == null) {
-                IndexMetadata legacy = SchemaMigrationSupport.findLegacyGeneratedUniqueIndex(
-                        current.indexes(),
-                        generatedIndexes,
-                        index,
-                        targetIndexNames,
-                        consumedLegacyIndexNames);
-                if (legacy != null) {
-                    consumedLegacyIndexNames.add(legacy.normalizedName());
-                    continue;
-                }
                 rollback.add(renderer.rollbackDropIndex(table, index));
-            } else if (!sameIndex(source, index)
+            } else if (!SchemaIndexPlanner.sameIndex(source, index, renames)
                     && !skipped(migration, SkippedSchemaChange.Kind.CHANGE_INDEX, index.name())) {
-                matchedCurrentIndexNames.add(source.name());
                 rollback.add(renderer.rollbackDropIndex(table, index));
-                rollback.add(renderer.rollbackCreateIndex(table, source));
-            } else {
-                matchedCurrentIndexNames.add(source.name());
+                indexRestores.add(renderer.rollbackCreateIndex(table, source));
             }
-        }
-        for (IndexMetadata index : current.indexes()) {
-            boolean retained = consumedLegacyIndexNames.contains(index.normalizedName())
-                    || matchedCurrentIndexNames.contains(index.name())
-                    || targetPhysicalIndexNames.contains(index.name());
-            if (!retained) {
-                if (!skipped(migration, SkippedSchemaChange.Kind.DROP_INDEX, index.name())) {
-                    rollback.add(renderer.rollbackCreateIndex(table, index));
-                    gaps.add(new SchemaRollbackGap(SchemaRollbackGap.Kind.INDEX_REQUIRES_REVIEW,
-                                                   index.name(),
-                                                   "recreating a large index may need an online index tool or maintenance window"));
-                }
+        }, index -> {
+            if (!skipped(migration, SkippedSchemaChange.Kind.DROP_INDEX, index.name())) {
+                indexRestores.add(renderer.rollbackCreateIndex(table, index));
+                gaps.add(new SchemaRollbackGap(SchemaRollbackGap.Kind.INDEX_REQUIRES_REVIEW,
+                                               index.name(),
+                                               "recreating a large index may need an online index tool or maintenance window"));
             }
-        }
-    }
-
-    private static boolean sameIndex(IndexMetadata source, IndexMetadata target) {
-        return source.name().equals(target.name())
-                && source.unique() == target.unique()
-                && source.columns().equals(target.columns());
+        });
     }
 
     private static boolean skipped(SchemaMigrationPlan migration,
@@ -303,7 +277,8 @@ public final class SchemaMigrationReviewer {
     private boolean hasColumnCommentChange(SchemaMigrationPlan migration,
                                            String table,
                                            ColumnMetadata source,
-                                           DynamicField target) {
+                                           DynamicField target,
+                                           ColumnDefinition physical) {
         String sourceComment = renderer.tableRenderer().storageComment(source);
         String targetComment = renderer.tableRenderer().storageComment(target);
         if (Objects.equals(sourceComment, targetComment)) {
@@ -319,7 +294,7 @@ public final class SchemaMigrationReviewer {
             expected = renderer.dialect().alterColumnTypeSql(table,
                                                              target.name(),
                                                              renderer.tableRenderer().dataType(target),
-                                                             renderer.tableRenderer().columnDefinition(target));
+                                                             renderer.tableRenderer().replacementColumnDefinition(target, physical));
         }
         String expectedSql = expected;
         return expectedSql != null && migration.requests().stream()

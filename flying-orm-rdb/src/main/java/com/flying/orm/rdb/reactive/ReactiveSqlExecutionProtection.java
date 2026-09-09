@@ -9,14 +9,13 @@ import com.flying.orm.rdb.execution.SqlRowLimitExceededException;
 import com.flying.orm.rdb.observation.SqlStatementType;
 import reactor.core.publisher.Flux;
 
-import java.time.Duration;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.ToLongFunction;
 
 /**
  * 统一 SQL 执行结果的保护规则。
- * 负责把「行数上限」、「结果集内存上限」和「超时」这三件事放在同一条链路里做。
+ * 负责行数和结果集内存上限；执行时限由上层拥有。
  * 这样无论是 R2DBC 执行会话还是接口默认逻辑，表现都一致，便于排查和维护。
  */
 final class ReactiveSqlExecutionProtection {
@@ -37,10 +36,10 @@ final class ReactiveSqlExecutionProtection {
                                    String sql,
                                    SqlExecutionOptions options,
                                    ToLongFunction<T> rowSizer) {
-        SqlExecutionOptions safeOptions = requireOptions(options);
+        SqlExecutionOptions safeOptions = options;
         requireSql(sql);
         if (safeOptions.maxRows() <= 0 && safeOptions.maxResultBytes() <= 0) {
-            return protectTimeoutIfNeeded(source, safeOptions);
+            return source;
         }
 
         Flux<T> protectedSource = Flux.defer(() -> {
@@ -74,7 +73,7 @@ final class ReactiveSqlExecutionProtection {
                              sink.next(tuple.getT2());
                          });
         });
-        return protectTimeoutIfNeeded(protectedSource, safeOptions);
+        return protectedSource;
     }
 
     private static <T> long estimateBytes(ToLongFunction<T> rowSizer, T row) {
@@ -90,16 +89,22 @@ final class ReactiveSqlExecutionProtection {
         }
     }
 
-    private static <T> Flux<T> protectTimeoutIfNeeded(Flux<T> source, SqlExecutionOptions options) {
-        if (options.timeout().isZero()) {
-            return source;
+    static SqlExecutionOptions requireSupportedOptions(SqlExecutionOptions options) {
+        SqlExecutionOptions safeOptions = Objects.requireNonNull(
+                options, "sql execution options must not be null");
+        if (!safeOptions.timeout().isZero()) {
+            throw new UnsupportedOperationException(
+                    "R2DBC SQL timeouts must be controlled by the caller");
         }
-        Duration timeout = options.timeout();
-        return SqlExecutionTimeouts.total(source, timeout);
+        return safeOptions;
     }
 
-    private static SqlExecutionOptions requireOptions(SqlExecutionOptions options) {
-        return Objects.requireNonNull(options, "sql execution options must not be null");
+    static Throwable translateBatchFailure(Throwable error) {
+        if (error instanceof IllegalStateException) {
+            VirtualMachineError fatal = findVirtualMachineError(error);
+            return fatal == null ? error : fatal;
+        }
+        return translate(error);
     }
 
     private static void requireSql(String sql) {

@@ -290,8 +290,11 @@ final class FormSqlRenderSupport {
         return new FormEncodedConditionValue(writeValue(safeField, value));
     }
 
-    /** 普通标量留给通用渲染器编码一次；只有驱动形态依赖字段/方言时才提前转换并做不重复编码标记。 */
+    /** 普通标量留给通用渲染器；显式字段 codec 与方言转换提前编码一次，避免被运行时值类型覆盖。 */
     boolean requiresFieldAwareConditionEncoding(DynamicField field) {
+        if (!customFieldCodecs.isEmpty() && customFieldCodecs.containsKey(field)) {
+            return true;
+        }
         if (field.databaseType().isArray()
                 || OffsetTimeValueCodec.isOffsetTimeDataType(field.databaseType())
                 || FormFieldValueSupport.isJson(field)

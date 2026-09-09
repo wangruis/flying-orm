@@ -1,5 +1,7 @@
 package com.flying.orm.core.page;
 
+import com.flying.orm.core.internal.Names;
+
 import java.util.Locale;
 
 /**
@@ -20,7 +22,7 @@ public record PageSort(String field, Direction direction) {
      * @param direction 排序方向
      */
     public PageSort {
-        field = PageNames.requireText(field, "page sort field");
+        field = Names.requireText(field, "page sort field");
         direction = direction == null ? Direction.ASC : direction;
     }
 

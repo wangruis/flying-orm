@@ -42,7 +42,8 @@ final class EntityJoinQueryCommand<R> {
         EntityMetadata<J> rightMetadata = models.metadata(Objects.requireNonNull(
                 joinedType, "joined entity type must not be null"));
         if (joined.containsKey(rightMetadata.type())) {
-            throw new IllegalArgumentException("join entity source must not be duplicated");
+            throw new IllegalArgumentException("join entity class is ambiguous; "
+                    + "use JoinQuerySpec with explicit JoinSource references for self joins");
         }
         dynamic.join(type,
                      rightMetadata.toDynamicForm(),

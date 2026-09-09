@@ -32,14 +32,12 @@ public final class ConditionGroup implements ConditionNode {
 
     private final TreeSummary treeSummary;
 
-    private final ConditionExecutionView executionView;
+    private volatile ConditionExecutionView executionView;
 
     private ConditionGroup(LogicalOperator operator, List<ConditionNode> children) {
         this.operator = Objects.requireNonNull(operator, "logical operator must not be null");
         this.children = List.copyOf(children);
         this.treeSummary = summarize(this.children);
-        this.executionView = ConditionExecutionViews.compile(
-                this.operator, this.children, TermCondition::ownedValue);
     }
 
     private ConditionGroup(LogicalOperator operator, List<ConditionNode> children, Owned owned) {
@@ -47,8 +45,6 @@ public final class ConditionGroup implements ConditionNode {
         this.children = Collections.unmodifiableList(
                 Objects.requireNonNull(children, "condition children must not be null"));
         this.treeSummary = summarize(this.children);
-        this.executionView = ConditionExecutionViews.compile(
-                this.operator, this.children, TermCondition::ownedValue);
     }
 
     /** 包内编译链发布已经受节点预算约束、且不会再修改的子节点列表。 */
@@ -106,9 +102,21 @@ public final class ConditionGroup implements ConditionNode {
         return children;
     }
 
-    /** 仅供 SQL 编译内核读取构造时固定的条件执行视图。 */
+    /** 仅供 SQL 编译内核按需读取并复用条件执行视图。 */
     public ConditionExecutionView executionView() {
-        return executionView;
+        ConditionExecutionView current = executionView;
+        if (current != null) {
+            return current;
+        }
+        synchronized (this) {
+            current = executionView;
+            if (current == null) {
+                current = ConditionExecutionViews.compile(
+                        operator, children, TermCondition::ownedValue);
+                executionView = current;
+            }
+            return current;
+        }
     }
 
     /**

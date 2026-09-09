@@ -3,6 +3,7 @@ package com.flying.orm.rdb.internal.mapping;
 import com.flying.orm.core.annotation.FieldStrategy;
 import com.flying.orm.core.annotation.FieldFill;
 import com.flying.orm.core.annotation.IdType;
+import com.flying.orm.core.annotation.KeySequence;
 import com.flying.orm.core.annotation.OrderBy;
 import com.flying.orm.core.annotation.TableField;
 import com.flying.orm.core.annotation.TableId;
@@ -38,8 +39,8 @@ final class EntityFieldMetadataCompiler {
         Optional<LogicDeleteValues> logicDelete = logicDelete(field, columnName, classLogicDelete);
         EntityFieldTypeResolver.EnumValueDefinition enumValue = EntityFieldTypeResolver.enumValue(field);
         EntityEnumStorage enumStorage = EntityFieldTypeResolver.enumStorage(field, enumValue);
-        boolean primaryKey = isPrimaryKey(field);
-        ValueGeneration generation = EntityValueGenerationResolver.resolve(entityType, field);
+        boolean primaryKey = flyingId.isPresent();
+        ValueGeneration generation = valueGeneration(entityType, flyingId);
         boolean selectable = flyingField.map(TableField::select).orElse(true);
         OrderBy orderBy = field.getAnnotation(OrderBy.class);
         if (orderBy != null && orderBy.sort() < 0) {
@@ -69,7 +70,7 @@ final class EntityFieldMetadataCompiler {
                                        null,
                                        null,
                                        generation,
-                                       idType(field, primaryKey, generation),
+                                       flyingId.map(TableId::type).orElse(IdType.NONE),
                                        enumStorage,
                                        enumValue.memberName(),
                                        selectable,
@@ -110,15 +111,20 @@ final class EntityFieldMetadataCompiler {
         return namingStrategy.columnName(field.getName());
     }
 
-    private static boolean isPrimaryKey(Field field) {
-        return FlyingAnnotationReader.tableId(field).isPresent();
-    }
-
-    private static IdType idType(Field field, boolean primaryKey, ValueGeneration generation) {
-        if (!primaryKey) {
-            return IdType.NONE;
+    private static ValueGeneration valueGeneration(Class<?> entityType, Optional<TableId> flyingId) {
+        if (flyingId.isEmpty()) {
+            return ValueGeneration.none();
         }
-        return FlyingAnnotationReader.tableId(field).map(TableId::type).orElse(IdType.NONE);
+        Optional<ValueGeneration> sequence = FlyingAnnotationReader.keySequence(entityType)
+                .map(KeySequence::value)
+                .map(FlyingAnnotationReader::text)
+                .map(ValueGeneration::sequence);
+        if (sequence.isPresent()) {
+            return sequence.orElseThrow();
+        }
+        // NONE 按安全的 INPUT 处理；ASSIGN_ID/ASSIGN_UUID 仍由 Repository 的 SQL 前阶段处理。
+        return flyingId.orElseThrow().type() == IdType.AUTO
+                ? ValueGeneration.identity() : ValueGeneration.none();
     }
 
     private static boolean isVersion(Field field) {

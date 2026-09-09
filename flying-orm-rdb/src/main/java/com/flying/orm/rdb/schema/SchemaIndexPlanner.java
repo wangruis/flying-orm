@@ -9,8 +9,11 @@ import com.flying.orm.core.sql.render.SqlRequest;
 
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 
 /** 只负责索引差异的匹配、重建和删除规划。 */
 final class SchemaIndexPlanner {
@@ -43,6 +46,33 @@ final class SchemaIndexPlanner {
                     DynamicForm target,
                     List<IndexMetadata> indexes,
                     SchemaMigrationOptions options) {
+        forEachChange(current, target, indexes, (source, index) -> {
+            if (source == null) {
+                requests.add(tables.createIndex(target.table(), index));
+            } else {
+                addChange(requests, skipped, target.table(), source, index, options);
+            }
+        }, index -> {
+            if (options.dropIndexAllowed()) {
+                requests.add(tables.dropIndex(target.table(), index));
+            } else {
+                skipped.add(new SkippedSchemaChange(SkippedSchemaChange.Kind.DROP_INDEX,
+                                                    index.name(),
+                                                    "SAFE mode does not drop existing indexes"));
+            }
+        });
+    }
+
+    /**
+     * 正向和回滚共用索引身份匹配，但各自决定已匹配索引是否需要重建。
+     * 先按目标顺序交付匹配项（source 为 null 表示新增），再按当前顺序交付移除项；
+     * 已有的等价旧版生成索引只保留，不交付变更，避免将兼容别名误当作新增或删除。
+     */
+    static void forEachChange(TableMetadata current,
+                              DynamicForm target,
+                              List<IndexMetadata> indexes,
+                              BiConsumer<IndexMetadata, IndexMetadata> matched,
+                              Consumer<IndexMetadata> removed) {
         List<IndexMetadata> generatedIndexes = target.toTableMetadata().indexes();
         Set<String> targetIndexNames = new HashSet<>();
         indexes.forEach(index -> targetIndexNames.add(index.normalizedName()));
@@ -57,7 +87,7 @@ final class SchemaIndexPlanner {
             IndexMetadata currentIndex = matchingIndex(current, index, ambiguousTargetIndexNames);
             if (currentIndex != null) {
                 matchedCurrentIndexNames.add(currentIndex.name());
-                addChange(requests, skipped, target.table(), currentIndex, index, options);
+                matched.accept(currentIndex, index);
                 continue;
             }
             IndexMetadata legacyIndex = SchemaMigrationSupport.findLegacyGeneratedUniqueIndex(
@@ -69,17 +99,17 @@ final class SchemaIndexPlanner {
             if (legacyIndex != null) {
                 consumedLegacyIndexNames.add(legacyIndex.normalizedName());
             } else {
-                requests.add(tables.createIndex(target.table(), index));
+                matched.accept(null, index);
             }
         }
-        addRemovals(requests,
-                    skipped,
-                    current,
-                    target.table(),
-                    options,
-                    targetPhysicalIndexNames,
-                    consumedLegacyIndexNames,
-                    matchedCurrentIndexNames);
+        for (IndexMetadata index : current.indexes()) {
+            boolean retained = consumedLegacyIndexNames.contains(index.normalizedName())
+                    || matchedCurrentIndexNames.contains(index.name())
+                    || targetPhysicalIndexNames.contains(index.name());
+            if (!retained) {
+                removed.accept(index);
+            }
+        }
     }
 
     private static IndexMetadata matchingIndex(TableMetadata current,
@@ -98,9 +128,7 @@ final class SchemaIndexPlanner {
                            IndexMetadata current,
                            IndexMetadata target,
                            SchemaMigrationOptions options) {
-        if (current.name().equals(target.name())
-                && current.unique() == target.unique()
-                && SchemaMigrationSupport.sameIndexColumns(current, target, options.columnRenames())) {
+        if (sameIndex(current, target, options.columnRenames())) {
             return;
         }
         if (options.rebuildIndexAllowed()) {
@@ -113,28 +141,12 @@ final class SchemaIndexPlanner {
         }
     }
 
-    private void addRemovals(List<SqlRequest> requests,
-                             List<SkippedSchemaChange> skipped,
-                             TableMetadata current,
-                             String table,
-                             SchemaMigrationOptions options,
-                             Set<String> targetPhysicalNames,
-                             Set<String> consumedLegacyNames,
-                             Set<String> matchedCurrentNames) {
-        for (IndexMetadata index : current.indexes()) {
-            boolean present = consumedLegacyNames.contains(index.normalizedName())
-                    || matchedCurrentNames.contains(index.name())
-                    || targetPhysicalNames.contains(index.name());
-            if (present) {
-                continue;
-            }
-            if (options.dropIndexAllowed()) {
-                requests.add(tables.dropIndex(table, index));
-            } else {
-                skipped.add(new SkippedSchemaChange(SkippedSchemaChange.Kind.DROP_INDEX,
-                                                    index.name(),
-                                                    "SAFE mode does not drop existing indexes"));
-            }
-        }
+    /** 正向和回滚必须按同一份列重命名事实判断索引是否真的发生变化。 */
+    static boolean sameIndex(IndexMetadata current,
+                             IndexMetadata target,
+                             Map<String, String> columnRenames) {
+        return current.name().equals(target.name())
+                && current.unique() == target.unique()
+                && SchemaMigrationSupport.sameIndexColumns(current, target, columnRenames);
     }
 }

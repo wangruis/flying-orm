@@ -1,5 +1,9 @@
 package com.flying.orm.rdb.metadata;
 
+import com.flying.orm.core.metadata.RelationIdentity;
+
+import java.util.Objects;
+
 /**
  * 元数据缓存失效入口。
  *
@@ -36,6 +40,27 @@ public interface MetadataCacheInvalidator {
      */
     default void invalidate(String schema, String table) {
         invalidate(schema + "." + table);
+    }
+
+    /**
+     * 按已经分段的关系身份失效。旧实现无法区分限定名与名称中的字面点号；遇到这种歧义时默认
+     * 全量失效，保证不会留下过期结构。内建缓存会覆盖本方法并执行精确失效。
+     *
+     * @param relation 已分段的关系身份
+     */
+    default void invalidate(RelationIdentity relation) {
+        RelationIdentity target = Objects.requireNonNull(
+                relation, "metadata cache relation must not be null");
+        String schema = target.schema().orElse(null);
+        if (target.catalog().isPresent()
+                || target.table().contains(".")
+                || schema != null && schema.contains(".")) {
+            invalidateAll();
+        } else if (schema == null) {
+            invalidate(target.table());
+        } else {
+            invalidate(schema, target.table());
+        }
     }
 
     /**

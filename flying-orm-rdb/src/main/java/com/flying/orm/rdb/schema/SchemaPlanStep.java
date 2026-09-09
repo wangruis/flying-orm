@@ -37,9 +37,6 @@ public final class SchemaPlanStep {
         this.risk = Objects.requireNonNull(risk, "schema plan risk must not be null");
         this.preconditions = List.copyOf(Objects.requireNonNull(
                 preconditions, "schema plan preconditions must not be null"));
-        if (this.preconditions.stream().anyMatch(Objects::isNull)) {
-            throw new IllegalArgumentException("schema plan preconditions must not contain null");
-        }
         if (request != null && !request.parameters().isEmpty()) {
             throw new IllegalArgumentException("reviewed schema SQL must not contain bound parameters");
         }

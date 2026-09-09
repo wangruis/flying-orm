@@ -2,6 +2,7 @@ package com.flying.orm.core.metadata;
 
 import com.flying.orm.core.field.FieldIdentity;
 import com.flying.orm.core.internal.Names;
+import com.flying.orm.core.sql.render.SqlIdentifiers;
 import com.flying.orm.core.type.DatabaseType;
 
 import java.util.Objects;
@@ -28,6 +29,7 @@ public final class ColumnDefinition {
     private final Integer scale;
     private final Integer temporalPrecision;
     private final ColumnDefault defaultValue;
+    private final String defaultConstraintName;
     private final String comment;
     private final ValueGeneration generation;
     private final String charset;
@@ -43,6 +45,7 @@ public final class ColumnDefinition {
         scale = nonNegative(builder.scale, "column scale");
         temporalPrecision = nonNegative(builder.temporalPrecision, "column temporal precision");
         defaultValue = builder.defaultValue;
+        defaultConstraintName = optionalDefaultConstraintName(builder.defaultConstraintName);
         comment = optionalText(builder.comment, "column comment");
         generation = builder.generation;
         charset = optionalText(builder.charset, "column charset");
@@ -114,6 +117,11 @@ public final class ColumnDefinition {
         return defaultValue;
     }
 
+    /** 数据库回读或调用方显式指定的默认约束名；未指定时为空，不要求实体猜测数据库生成的名称。 */
+    public String defaultConstraintName() {
+        return defaultConstraintName;
+    }
+
     public String comment() {
         return comment;
     }
@@ -142,6 +150,7 @@ public final class ColumnDefinition {
         private Integer scale;
         private Integer temporalPrecision;
         private ColumnDefault defaultValue = ColumnDefault.none();
+        private String defaultConstraintName;
         private String comment;
         private ValueGeneration generation = ValueGeneration.none();
         private String charset;
@@ -187,6 +196,11 @@ public final class ColumnDefinition {
             return this;
         }
 
+        public Builder defaultConstraintName(String defaultConstraintName) {
+            this.defaultConstraintName = defaultConstraintName;
+            return this;
+        }
+
         public Builder comment(String comment) {
             this.comment = comment;
             return this;
@@ -228,5 +242,16 @@ public final class ColumnDefinition {
 
     private static String optionalText(String value, String name) {
         return value == null ? null : Names.requireText(value, name);
+    }
+
+    private static String optionalDefaultConstraintName(String value) {
+        if (value == null) {
+            return null;
+        }
+        String name = SqlIdentifiers.requireIdentifier(value, "column default constraint name");
+        if (name.indexOf('.') >= 0) {
+            throw new IllegalArgumentException("column default constraint name must not be qualified");
+        }
+        return name;
     }
 }

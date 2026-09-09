@@ -35,7 +35,8 @@ public final class EntityDmlOperator<T> {
         this.renderer = Objects.requireNonNull(renderer, "sql renderer must not be null");
         var metadata = this.client.entityModels()
                                   .metadata(Objects.requireNonNull(type, "entity type must not be null"));
-        this.model = form == null ? new EntityDmlModel<>(metadata) : new EntityDmlModel<>(metadata, form);
+        this.model = new EntityDmlModel<>(metadata, form == null ? metadata.toDynamicForm() : form,
+                metadata.hasEnumConditionValues() ? client.entityModels().entityValues(type) : null);
     }
 
     /** 创建绑定实体映射的响应式 DML 入口。 */
@@ -57,7 +58,8 @@ public final class EntityDmlOperator<T> {
 
     /** @return 当前实体的新查询命令 */
     public EntityDmlQueryOperator<T> query() {
-        return new EntityDmlQueryOperator<>(client, new EntityQueryCommand<>(model.newState(renderer)));
+        return new EntityDmlQueryOperator<>(client,
+                new EntityQueryCommand<>(model.newState(renderer), client.defaultFieldScope()));
     }
 
     /** @return 当前实体的新更新命令 */

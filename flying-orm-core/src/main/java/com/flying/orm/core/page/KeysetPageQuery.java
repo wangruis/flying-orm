@@ -29,7 +29,6 @@ public record KeysetPageQuery(int size,
         if (sorts.isEmpty()) {
             throw new IllegalArgumentException("keyset pagination requires at least one sort field");
         }
-        sorts.forEach(sort -> Objects.requireNonNull(sort, "keyset sort must not be null"));
         position = Objects.requireNonNull(position, "keyset cursor position must not be null");
     }
 

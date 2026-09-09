@@ -2,6 +2,8 @@ package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.ConditionGroups;
 import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
@@ -70,6 +72,15 @@ final class FormBatchSqlRenderer {
                                DynamicForm physicalForm,
                                Map<String, Object> firstRow,
                                Map<String, Object> sourceRow) {
+        return upsertPlan(logicalForm, preparedLogicalValues, physicalForm, firstRow, sourceRow, null);
+    }
+
+    BatchInsertPlan upsertPlan(DynamicForm logicalForm,
+                               Map<String, Object> preparedLogicalValues,
+                               DynamicForm physicalForm,
+                               Map<String, Object> firstRow,
+                               Map<String, Object> sourceRow,
+                               ConditionGroup targetScope) {
         DynamicForm safeForm = Objects.requireNonNull(physicalForm, "dynamic form must not be null");
         List<FormSqlRenderSupport.FieldValue> firstValues = support.writeFields(
                 safeForm,
@@ -77,8 +88,9 @@ final class FormBatchSqlRenderer {
                 0L);
         List<DynamicField> layout = firstValues.stream().map(FormSqlRenderSupport.FieldValue::field).toList();
         RepositoryUpsertValues stagedValues = sourceRow instanceof RepositoryUpsertValues values ? values : null;
+        boolean scopedTarget = targetScope != null && !ConditionGroups.isEmpty(targetScope);
         UpsertFieldPlan fields = UpsertFieldPlan.create(
-                logicalForm, preparedLogicalValues, safeForm, layout, stagedValues);
+                logicalForm, preparedLogicalValues, safeForm, layout, stagedValues, scopedTarget);
         requireCompletePrimaryKey(safeForm, fields.insertFields());
         List<String> insertColumns = identifiers(fields.insertFields());
         List<String> conflictColumns = identifiers(fields.conflictFields());
@@ -87,6 +99,20 @@ final class FormBatchSqlRenderer {
         List<String> valueExpressions = fields.parameterFields().stream()
                                                .map(support::valueExpression)
                                                .toList();
+        if (scopedTarget && !updateColumns.isEmpty()) {
+            if (!(upsertDialect instanceof StagedUpsertDialect staged)) {
+                throw new UnsupportedOperationException("custom upsert dialect does not support target row scope");
+            }
+            String table = support.identifier(safeForm);
+            String qualifier = staged.scopeTargetQualifier(table);
+            java.util.function.UnaryOperator<String> field = name -> qualifier + "." + support.identifier(name);
+            FormSqlRenderSupport.ConditionSql condition = support.condition(
+                    safeForm, targetScope, field, field, name -> qualifier, null);
+            String sql = staged.renderScoped(table, insertColumns, conflictColumns, updateColumns,
+                                             parameterColumns, valueExpressions, condition.sql());
+            return plan(safeForm, fields.parameterFields(), firstValues, sql, condition.parameters(),
+                        staged.scopeParameterIndex(insertColumns.size(), parameterColumns.size()));
+        }
         String sql = renderUpsert(insertColumns,
                                   conflictColumns,
                                   updateColumns,
@@ -171,21 +197,38 @@ final class FormBatchSqlRenderer {
                                  List<DynamicField> layout,
                                  List<FormSqlRenderSupport.FieldValue> firstValues,
                                  String sql) {
+        return plan(form, layout, firstValues, sql, List.of(), layout.size());
+    }
+
+    private BatchInsertPlan plan(DynamicForm form,
+                                 List<DynamicField> layout,
+                                 List<FormSqlRenderSupport.FieldValue> firstValues,
+                                 String sql,
+                                 List<Object> scopeParameters,
+                                 int scopeParameterIndex) {
         Map<String, Object> valuesByField = new java.util.HashMap<>(Math.max(16, firstValues.size() * 2));
         firstValues.forEach(value -> valuesByField.put(
                 value.field().normalizedName(), value.value()));
-        Object[] firstParameters = layout.stream()
-                                         .map(field -> valuesByField.get(field.normalizedName()))
-                                         .toArray();
+        List<Object> parameters = new ArrayList<>(layout.size() + scopeParameters.size());
+        layout.forEach(field -> parameters.add(valuesByField.get(field.normalizedName())));
+        List<Class<?>> parameterTypes = new ArrayList<>(layout.stream().map(support::parameterType).toList());
+        if (!scopeParameters.isEmpty()) {
+            parameters.addAll(scopeParameterIndex, scopeParameters);
+            List<Class<?>> scopeTypes = new ArrayList<>(scopeParameters.size());
+            scopeParameters.forEach(value -> scopeTypes.add(value == null ? Object.class : value.getClass()));
+            parameterTypes.addAll(scopeParameterIndex, scopeTypes);
+        }
         return new BatchInsertPlan(support.compiledStatement(
                                            sql,
-                                           layout.size(),
+                                           parameters.size(),
                                            SqlBindMarkerStyle.CANONICAL),
                                    layout,
                                    BatchColumnLayout.of(form,
                                                         layout,
                                                         support),
-                                   firstParameters,
-                                   layout.stream().map(support::parameterType).toList());
+                                   parameters.toArray(),
+                                   parameterTypes,
+                                   scopeParameters,
+                                   scopeParameterIndex);
     }
 }

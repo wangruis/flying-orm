@@ -9,11 +9,17 @@ import java.util.Objects;
  *
  * @param planFingerprint 被批准计划的稳定指纹
  * @param reason 为什么接受这次不可自动回滚的风险
+ * @param writesQuiesced 调用方确认相关写入已静止，并会保持至验证成功或完成失败恢复
  * @author wangr
  * @date 2026-08-03
  * @version v1.0
  */
-public record SchemaMigrationApproval(String planFingerprint, String reason) {
+public record SchemaMigrationApproval(String planFingerprint, String reason, boolean writesQuiesced) {
+
+    /** 原有批准只接受计划风险，不替调用方声明写入已经停止。 */
+    public SchemaMigrationApproval(String planFingerprint, String reason) {
+        this(planFingerprint, reason, false);
+    }
 
     public SchemaMigrationApproval {
         planFingerprint = requireText(planFingerprint, "migration approval fingerprint");
@@ -38,6 +44,23 @@ public record SchemaMigrationApproval(String planFingerprint, String reason) {
         ReviewedSchemaPlan safePlan = Objects.requireNonNull(
                 plan, "reviewed relational schema plan must not be null");
         return new SchemaMigrationApproval(safePlan.fingerprint(), reason);
+    }
+
+    /**
+     * 批准需要静止写入窗口的精确计划，例如 MySQL/Oracle 的非原子外键替换。
+     *
+     * <p>调用方须先阻止所有会影响旧、新外键关系的写入，包括子表写入和引用表的更新、删除及级联写入。
+     * 新建且尚未交付写入者的数据库也满足该前提。该窗口必须持续至整个计划回读验证成功；失败或取消后，
+     * 由调用方检查实际结构并恢复，不能直接重放旧计划。ORM 不停止写入、不探测集群，也不自动补偿 DDL。</p>
+     *
+     * @param plan 已审核的冻结计划
+     * @param reason 静止写入窗口及变更批准的真实说明
+     * @return 同时确认计划指纹与写入前提的批准
+     */
+    public static SchemaMigrationApproval approveWithWritesQuiesced(ReviewedSchemaPlan plan, String reason) {
+        ReviewedSchemaPlan safePlan = Objects.requireNonNull(
+                plan, "reviewed relational schema plan must not be null");
+        return new SchemaMigrationApproval(safePlan.fingerprint(), reason, true);
     }
 
     private static String requireText(String value, String name) {

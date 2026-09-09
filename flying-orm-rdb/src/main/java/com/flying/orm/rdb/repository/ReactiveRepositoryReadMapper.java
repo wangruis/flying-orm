@@ -9,6 +9,7 @@ import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.form.ReactiveFormClient;
 import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.mapping.EntityQueryDefaults;
 import com.flying.orm.rdb.lock.LockingReadSpec;
 import com.flying.orm.rdb.lock.ReadLock;
 import reactor.core.publisher.Flux;
@@ -48,11 +49,12 @@ final class ReactiveRepositoryReadMapper<T> {
     }
 
     Flux<T> select(ConditionGroup where, DataScope scope, SqlExecutionOptions options) {
-        return lifecycle.postLoad(client.select(querySpec(where, scope, options), entityType));
+        return lifecycle.postLoad(client.select(
+                EntityQueryDefaults.query(form, metadata, where, scope, options, client.defaultFieldScope()), entityType));
     }
 
     Flux<T> lockingRead(ConditionGroup where, ReadLock lock) {
-        QuerySpec query = querySpec(where, null, null);
+        QuerySpec query = EntityQueryDefaults.query(form, metadata, where, null, null, client.defaultFieldScope());
         return lifecycle.postLoad(client.lockingRead(
                 LockingReadSpec.of(query, Objects.requireNonNull(
                         lock, "repository read lock must not be null")), entityType));
@@ -62,18 +64,8 @@ final class ReactiveRepositoryReadMapper<T> {
                              PageQuery page,
                              DataScope scope,
                              SqlExecutionOptions options) {
-        return client.page(querySpec(where, scope, options), page, entityType)
+        return client.page(EntityQueryDefaults.query(form, metadata, where, scope, options,
+                client.defaultFieldScope()), page, entityType)
                 .flatMap(lifecycle::postLoad);
-    }
-
-    private QuerySpec querySpec(ConditionGroup where,
-                                DataScope scope,
-                                SqlExecutionOptions options) {
-        QuerySpec spec = RepositoryQueryDefaults.apply(
-                QuerySpec.of(form, RepositoryLogicDeletes.activeWhere(metadata, form, where)), metadata);
-        if (scope != null) {
-            spec = spec.withScope(scope);
-        }
-        return options == null ? spec : spec.withExecutionOptions(options);
     }
 }

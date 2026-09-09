@@ -2,18 +2,17 @@ package com.flying.orm.rdb.schema;
 
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
-import com.flying.orm.rdb.execution.SqlExecutionSequence;
 import com.flying.orm.rdb.execution.SqlExecutionSequenceException;
 import com.flying.orm.rdb.execution.SqlExecutionSequenceResult;
 import com.flying.orm.rdb.execution.SqlExecutionStepResult;
 import com.flying.orm.rdb.observation.SqlExecutionStatus;
-import com.flying.orm.rdb.reactive.ConnectionScopedReactiveSqlExecutor;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.transaction.R2dbcTransactionContext;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -37,16 +36,13 @@ import static com.flying.orm.rdb.schema.ReactiveSchemaMigrationObservation.obser
 final class SchemaMigrationExecutor {
 
     private final ReactiveSqlExecutor executor;
-    private final FormSchemaSqlRenderer renderer;
     private final SchemaMigrationObserver observer;
     private final SchemaDdlTransactionSupport ddlTransactionSupport;
 
     SchemaMigrationExecutor(ReactiveSqlExecutor executor,
-                            FormSchemaSqlRenderer renderer,
                             SchemaMigrationObserver observer,
                             SchemaDdlTransactionSupport ddlTransactionSupport) {
         this.executor = Objects.requireNonNull(executor, "reactive sql executor must not be null");
-        this.renderer = Objects.requireNonNull(renderer, "form schema sql renderer must not be null");
         this.observer = SchemaMigrationObservers.safe(observer);
         this.ddlTransactionSupport = Objects.requireNonNull(
                 ddlTransactionSupport, "DDL transaction support must not be null");
@@ -112,15 +108,16 @@ final class SchemaMigrationExecutor {
             String planFingerprint = safePlan.fingerprint();
             long startedAt = System.nanoTime();
             AtomicBoolean observed = new AtomicBoolean();
+            List<SqlExecutionStepResult> completed = Collections.synchronizedList(new ArrayList<>());
             return executeReviewedPlan(
-                    safePlan, safeOptions, scope, planFingerprint)
+                    safePlan, safeOptions, scope, planFingerprint, completed)
                     .doOnError(scope::executionFailed)
                     .doOnSuccess(result -> observe(observer, observed, safePlan, planFingerprint,
-                                                   result, startedAt, SqlExecutionStatus.SUCCESS, null))
+                                                   result, completed, startedAt, SqlExecutionStatus.SUCCESS, null))
                     .doOnError(error -> observe(observer, observed, safePlan, planFingerprint,
-                                                null, startedAt, SqlExecutionStatus.ERROR, error))
+                                                null, completed, startedAt, SqlExecutionStatus.ERROR, error))
                     .doOnCancel(() -> observe(observer, observed, safePlan, planFingerprint,
-                                              null, startedAt, SqlExecutionStatus.CANCELLED, null));
+                                              null, completed, startedAt, SqlExecutionStatus.CANCELLED, null));
         }, ReactiveSchemaInvalidationScope::publisherTerminated, true);
     }
 
@@ -157,7 +154,7 @@ final class SchemaMigrationExecutor {
                 .map(step -> step.request().orElseThrow(() -> new IllegalStateException(
                         "reviewed schema execution contains a non-executable step")))
                 .toList();
-        List<String> tables = List.of(plan.desiredTable().orElseThrow().identity().table());
+        List<String> tables = List.of(plan.targetIdentity().orElseThrow().table());
         Consumer<String> tableInvalidator = ignored -> invalidator.run();
         return Mono.defer(() -> {
             List<SqlExecutionStepResult> completed = new ArrayList<>(requests.size());
@@ -167,7 +164,7 @@ final class SchemaMigrationExecutor {
                             .then(MySqlSchemaCommentSupport.validate(
                                     executor, requests, options.sqlExecutionOptions(), plan.fingerprint()))
                             .then(Mono.defer(() -> executeVerifiedRequests(
-                                    steps, requests, options, scope, plan.fingerprint(), completed))),
+                                    steps, requests, options, scope, completed))),
                     ReactiveSchemaInvalidationScope::publisherTerminated,
                     true)
                     .onErrorResume(RuntimeException.class, failure -> completed.size() == steps.size()
@@ -181,29 +178,9 @@ final class SchemaMigrationExecutor {
             List<SqlRequest> requests,
             SchemaMigrationExecutionOptions options,
             ReactiveSchemaInvalidationScope invalidationScope,
-            String planFingerprint,
             List<SqlExecutionStepResult> completed) {
-        Mono<SqlExecutionSequenceResult> execution;
-        if (!options.hasLockTimeout()) {
-            execution = executeRequestSequence(requests, options.sqlExecutionOptions(), completed);
-        } else if (executor instanceof ConnectionScopedReactiveSqlExecutor scoped) {
-            SchemaDdlSessionGuard guard = renderer.lockTimeoutGuard(options.lockTimeout());
-            execution = scoped.executeInConnection(
-                    new SqlExecutionSequence(guard.setup(), requests, guard.cleanup()),
-                    options.sqlExecutionOptions());
-        } else {
-            return Mono.error(new SchemaMigrationRejectedException(
-                    SchemaMigrationFailureCode.EXECUTOR_CAPABILITY_REQUIRED,
-                    planFingerprint,
-                    "DDL lock timeout requires a connection-scoped reactive SQL executor"));
-        }
-        return execution
+        return executeRequestSequence(requests, options.sqlExecutionOptions(), completed)
                 .doOnSubscribe(ignored -> invalidationScope.executionStarted())
-                .doOnNext(result -> {
-                    if (completed.isEmpty()) {
-                        completed.addAll(result.workSteps());
-                    }
-                })
                 .map(result -> invalidationScope.externalTransactionRegistered()
                         ? VerifiedSchemaPlanExecutor.externalTransactionAttempt(
                                 steps, result.workSteps())
@@ -245,35 +222,25 @@ final class SchemaMigrationExecutor {
             List<SqlRequest> requests,
             SqlExecutionOptions options,
             List<SqlExecutionStepResult> completed) {
-        return executeRequestSequence(requests, options, completed, 0);
-    }
-
-    private Mono<SqlExecutionSequenceResult> executeRequestSequence(
-            List<SqlRequest> requests,
-            SqlExecutionOptions options,
-            List<SqlExecutionStepResult> completed,
-            int index) {
-        if (index == requests.size()) {
-            return Mono.just(new SqlExecutionSequenceResult(completed));
-        }
-        SqlRequest request = requests.get(index);
-        return Mono.defer(() -> {
+        return Flux.range(0, requests.size())
+                .concatMap(index -> Mono.defer(() -> {
+                    SqlRequest request = requests.get(index);
                     long startedAt = System.nanoTime();
                     return executor.rowsUpdated(request, options)
                             .map(rows -> new SqlExecutionStepResult(
                                     index, request, ddlRowsUpdated(rows),
-                                    System.nanoTime() - startedAt));
-                })
-                .flatMap(step -> {
-                    completed.add(step);
-                    return executeRequestSequence(requests, options, completed, index + 1);
-                });
+                                    System.nanoTime() - startedAt))
+                            .switchIfEmpty(Mono.error(() -> new IllegalStateException(
+                                    "reactive SQL executor returned no result")));
+                }).doOnNext(completed::add), 1)
+                .then(Mono.fromSupplier(() -> new SqlExecutionSequenceResult(completed)));
     }
 
     private Mono<SchemaMigrationResult> executeReviewedPlan(ReviewedSchemaMigrationPlan plan,
                                                              SchemaMigrationExecutionOptions options,
                                                              ReactiveSchemaInvalidationScope invalidationScope,
-                                                             String planFingerprint) {
+                                                             String planFingerprint,
+                                                             List<SqlExecutionStepResult> completed) {
         List<SqlRequest> requests = plan.requestsForExecution(options.approval(), planFingerprint);
         if (requests.isEmpty()) {
             return Mono.just(new SchemaMigrationResult(plan.migration(), 0L, List.of()));
@@ -286,31 +253,21 @@ final class SchemaMigrationExecutor {
                 .then(MySqlSchemaCommentSupport.validate(
                         executor, requests, options.sqlExecutionOptions(), planFingerprint))
                 .then(Mono.defer(() -> executeReviewedRequests(
-                        plan, options, invalidationScope, requests, planFingerprint)));
+                        plan, options, invalidationScope, requests, completed)));
     }
 
     private Mono<SchemaMigrationResult> executeReviewedRequests(ReviewedSchemaMigrationPlan plan,
                                                                   SchemaMigrationExecutionOptions options,
                                                                   ReactiveSchemaInvalidationScope invalidationScope,
                                                                   List<SqlRequest> requests,
-                                                                  String planFingerprint) {
-        if (!options.hasLockTimeout()) {
-            return executeRequests(requests, options.sqlExecutionOptions())
-                    .doOnSubscribe(ignored -> invalidationScope.executionStarted())
-                    .map(rows -> new SchemaMigrationResult(plan.migration(), rows, List.of()));
-        }
-        if (!(executor instanceof ConnectionScopedReactiveSqlExecutor scoped)) {
-            return Mono.error(new SchemaMigrationRejectedException(
-                    SchemaMigrationFailureCode.EXECUTOR_CAPABILITY_REQUIRED,
-                    planFingerprint,
-                    "DDL lock timeout requires a connection-scoped reactive SQL executor"));
-        }
-        SchemaDdlSessionGuard guard = renderer.lockTimeoutGuard(options.lockTimeout());
-        SqlExecutionSequence sequence = new SqlExecutionSequence(guard.setup(), requests, guard.cleanup());
-        return scoped.executeInConnection(sequence, options.sqlExecutionOptions())
-                     .doOnSubscribe(ignored -> invalidationScope.executionStarted())
-                     .map(result -> new SchemaMigrationResult(
-                             plan.migration(), result.rowsUpdated(), result.workSteps()));
+                                                                  List<SqlExecutionStepResult> completed) {
+        return executeRequestSequence(requests, options.sqlExecutionOptions(), completed)
+                .doOnSubscribe(ignored -> invalidationScope.executionStarted())
+                .map(result -> new SchemaMigrationResult(
+                        plan.migration(),
+                        result.workSteps().stream().mapToLong(SqlExecutionStepResult::rowsUpdated)
+                              .reduce(0L, ReactiveSchemaMigrationObservation::addExact),
+                        List.of()));
     }
 
     /**

@@ -1,9 +1,5 @@
 package com.flying.orm.rdb.operator;
 
-import com.flying.orm.core.form.DynamicField;
-import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.ForeignKeyMetadata;
-import com.flying.orm.core.metadata.IndexMetadata;
 import com.flying.orm.rdb.metadata.ReactiveFormMetadataReader;
 import com.flying.orm.rdb.schema.ReactiveSchemaClient;
 import com.flying.orm.rdb.schema.ReviewedSchemaMigrationPlan;
@@ -14,8 +10,6 @@ import com.flying.orm.rdb.schema.SchemaMigrationReviewPolicy;
 import com.flying.orm.rdb.schema.SchemaMigrationResult;
 import reactor.core.publisher.Mono;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Objects;
 
 /**
@@ -34,20 +28,12 @@ public final class CreateOrAlterTableBuilder {
 
     private final ReactiveFormMetadataReader metadataReader;
 
-    private final String table;
-
-    private final List<DynamicField> fields = new ArrayList<>();
-
-    private final List<IndexMetadata> indexes = new ArrayList<>();
-
-    private final List<ForeignKeyMetadata> foreignKeys = new ArrayList<>();
-
-    private SchemaMigrationOptions options = SchemaMigrationOptions.safe();
+    private final DdlStructureDraft draft;
 
     CreateOrAlterTableBuilder(ReactiveSchemaClient schemaClient, ReactiveFormMetadataReader metadataReader, String table) {
         this.schemaClient = Objects.requireNonNull(schemaClient, "schema client must not be null");
         this.metadataReader = Objects.requireNonNull(metadataReader, "reactive form metadata reader must not be null");
-        this.table = requireText(table, "table");
+        this.draft = new DdlStructureDraft(table);
     }
 
     /**
@@ -86,7 +72,7 @@ public final class CreateOrAlterTableBuilder {
      * @return 当前表构建器
      */
     public CreateOrAlterTableBuilder options(SchemaMigrationOptions options) {
-        this.options = Objects.requireNonNull(options, "schema migration options must not be null");
+        draft.options(options);
         return this;
     }
 
@@ -105,7 +91,8 @@ public final class CreateOrAlterTableBuilder {
      * @return 惰性的详细迁移结果
      */
     public Mono<SchemaMigrationResult> commitDetailed() {
-        return schemaClient.createOrAlterDetailed(buildForm(), indexes, foreignKeys, metadataReader, options);
+        return schemaClient.createOrAlterDetailed(
+                draft.form(), draft.indexes(), draft.foreignKeys(), metadataReader, draft.options());
     }
 
     /**
@@ -114,7 +101,8 @@ public final class CreateOrAlterTableBuilder {
      * @return 惰性的结构化迁移计划
      */
     public Mono<SchemaMigrationPlan> plan() {
-        return schemaClient.planCreateOrAlter(buildForm(), indexes, foreignKeys, metadataReader, options);
+        return schemaClient.planCreateOrAlter(
+                draft.form(), draft.indexes(), draft.foreignKeys(), metadataReader, draft.options());
     }
 
     /**
@@ -123,7 +111,7 @@ public final class CreateOrAlterTableBuilder {
      */
     public Mono<ReviewedSchemaMigrationPlan> review(SchemaMigrationReviewPolicy policy) {
         return schemaClient.reviewCreateOrAlter(
-                buildForm(), indexes, foreignKeys, metadataReader, options, policy);
+                draft.form(), draft.indexes(), draft.foreignKeys(), metadataReader, draft.options(), policy);
     }
 
     /**
@@ -140,29 +128,7 @@ public final class CreateOrAlterTableBuilder {
         return schemaClient.executeReviewed(reviewedPlan, metadataReader);
     }
 
-    private DynamicForm buildForm() {
-        DynamicForm.Builder builder = DynamicForm.builder(table, table);
-        fields.forEach(builder::addField);
-        return builder.build();
-    }
-
-    void addField(DynamicField field) {
-        fields.add(Objects.requireNonNull(field, "dynamic field must not be null"));
-    }
-
-    void addIndex(IndexMetadata index) {
-        indexes.add(Objects.requireNonNull(index, "index metadata must not be null"));
-    }
-
-    void addForeignKey(ForeignKeyMetadata foreignKey) {
-        foreignKeys.add(Objects.requireNonNull(foreignKey, "foreign key metadata must not be null"));
-    }
-
-    static String requireText(String value, String name) {
-        String text = Objects.requireNonNull(value, name + " must not be null").trim();
-        if (text.isEmpty()) {
-            throw new IllegalArgumentException(name + " must not be blank");
-        }
-        return text;
+    DdlStructureDraft draft() {
+        return draft;
     }
 }

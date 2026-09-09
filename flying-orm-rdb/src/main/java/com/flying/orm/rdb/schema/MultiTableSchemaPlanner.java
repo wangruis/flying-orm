@@ -67,6 +67,10 @@ public final class MultiTableSchemaPlanner {
         List<SchemaOperation> secondPhase = new ArrayList<>();
         for (RelationalTableDefinition table : components.dependencyOrder()) {
             secondPhase.addAll(SchemaIndexPlanner.addOperations(table));
+        }
+        // 外键环内不能靠表顺序保证引用目标先就绪；先发布全部索引，再闭合外键，
+        // 才能让引用另一张表独立唯一索引的外键获得已经存在的候选键。
+        for (RelationalTableDefinition table : components.dependencyOrder()) {
             secondPhase.addAll(SchemaForeignKeyPlanner.addOperations(
                     table,
                     foreignKey -> manualCycleForeignKeys.contains(foreignKey)

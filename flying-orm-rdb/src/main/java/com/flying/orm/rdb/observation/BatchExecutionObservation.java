@@ -51,14 +51,16 @@ public sealed interface BatchExecutionObservation
     static BatchExecutionObservation chunk(BatchWriteRequestView request,
                                            BatchChunkResult chunk,
                                            long durationNanos) {
-        return BatchExecutionObservationFactory.chunk(request, chunk, durationNanos);
+        BatchWriteRequestView safeRequest = Objects.requireNonNull(
+                request, "batch request view must not be null");
+        return Chunk.fromValidated(safeRequest, chunk, durationNanos);
     }
 
     /** 根据完整批量结果创建汇总事件，失败分类取冲突或首个结构化失败。 */
     static BatchExecutionObservation summary(BatchWriteRequestView request,
                                              BatchWriteResult result,
                                              long durationNanos) {
-        return BatchExecutionObservationFactory.summary(request, result, durationNanos);
+        return summary(request, BatchSummaryMetrics.from(result), durationNanos);
     }
 
     /** 流式入口直接接收增量汇总值，不为汇总日志保存全部分片。 */
@@ -70,7 +72,7 @@ public sealed interface BatchExecutionObservation
                                              BatchChunkResult.Failure firstFailure,
                                              BatchChunkResult.RecoveryToken firstRecoveryToken,
                                              long durationNanos) {
-        return BatchExecutionObservationFactory.summary(
+        return summary(
                 request,
                 new BatchSummaryMetrics(status, inputCount, affectedRows, conflictCount,
                                         0, 0, 0, firstFailure, firstRecoveryToken),
@@ -89,7 +91,7 @@ public sealed interface BatchExecutionObservation
                                              BatchChunkResult.Failure firstFailure,
                                              BatchChunkResult.RecoveryToken firstRecoveryToken,
                                              long durationNanos) {
-        return BatchExecutionObservationFactory.summary(
+        return summary(
                 request,
                 new BatchSummaryMetrics(status, inputCount, affectedRows, conflictCount,
                                         chunkCount, successfulChunkCount, failedChunkCount,
@@ -101,14 +103,46 @@ public sealed interface BatchExecutionObservation
     static BatchExecutionObservation failedSummary(BatchWriteRequestView request,
                                                    long durationNanos,
                                                    Throwable error) {
-        return BatchExecutionObservationFactory.failedSummary(request, durationNanos, error);
+        BatchWriteRequestView safeRequest = Objects.requireNonNull(
+                request, "batch request view must not be null");
+        Throwable safeError = Objects.requireNonNull(error, "batch write error must not be null");
+        return new Summary(safeRequest, BatchWriteResult.Status.UNKNOWN,
+                           0, 0, 0, 0, 0, durationNanos,
+                           SqlFailureCategory.classify(safeError),
+                           BatchChunkResult.Failure.from(safeError), null);
     }
 
     /** 创建恢复查询事件；恢复本身失败时同时保留异常分类。 */
     static BatchExecutionObservation recovery(BatchResolution resolution,
                                               long durationNanos,
                                               Throwable error) {
-        return BatchExecutionObservationFactory.recovery(resolution, durationNanos, error);
+        BatchResolution safeResolution = Objects.requireNonNull(resolution,
+                                                                "batch resolution must not be null");
+        SqlFailureCategory category = error != null
+                ? SqlFailureCategory.classify(error)
+                : safeResolution.status() == BatchResolution.Status.COMMITTED
+                        ? SqlFailureCategory.NONE : SqlFailureCategory.UNKNOWN;
+        return new Recovery(safeResolution.status(), durationNanos, category,
+                            error == null ? null : BatchChunkResult.Failure.from(error),
+                            safeResolution.token());
+    }
+
+    private static BatchExecutionObservation summary(BatchWriteRequestView request,
+                                                     BatchSummaryMetrics metrics,
+                                                     long durationNanos) {
+        BatchWriteRequestView safeRequest = Objects.requireNonNull(
+                request, "batch request view must not be null");
+        return new Summary(safeRequest,
+                           metrics.status(),
+                           metrics.inputCount(),
+                           metrics.affectedRows(),
+                           metrics.chunkCount(),
+                           metrics.successfulChunkCount(),
+                           metrics.failedChunkCount(),
+                           durationNanos,
+                           metrics.failureCategory(),
+                           metrics.firstFailure(),
+                           metrics.firstRecoveryToken());
     }
 
     /** 单个批量分片的执行事实。 */
@@ -139,6 +173,12 @@ public sealed interface BatchExecutionObservation
                                    long durationNanos) {
             BatchChunkResult safeChunk = Objects.requireNonNull(
                     chunk, "batch chunk result must not be null");
+            SqlFailureCategory category = switch (safeChunk.status()) {
+                case COMMITTED, ENLISTED, ROLLED_BACK -> SqlFailureCategory.NONE;
+                case CONFLICTED -> SqlFailureCategory.OPTIMISTIC_LOCK;
+                case FAILED, UNKNOWN -> safeChunk.failure() == null
+                        ? SqlFailureCategory.UNKNOWN : SqlFailureCategory.fromKind(safeChunk.failure().kind());
+            };
             return new Chunk(request,
                              safeChunk.status(),
                              safeChunk.chunkIndex(),
@@ -146,7 +186,7 @@ public sealed interface BatchExecutionObservation
                              safeChunk.inputCount(),
                              safeChunk.affectedRows(),
                              durationNanos,
-                             BatchObservationClassification.category(safeChunk),
+                             category,
                              safeChunk.failure(),
                              safeChunk.recoveryToken());
         }

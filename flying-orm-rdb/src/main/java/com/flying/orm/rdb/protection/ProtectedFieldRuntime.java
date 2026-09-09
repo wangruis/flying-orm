@@ -3,12 +3,14 @@ package com.flying.orm.rdb.protection;
 import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.result.DynamicRow;
 
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -32,7 +34,6 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
     private final ProtectedQueryRewriter queries;
     private final ProtectedResultTransformer results;
     private final MaskedFieldResultTransformer masking;
-    private final ProtectedFieldOperationPlans operations;
 
     private ProtectedFieldRuntime(ProtectedFieldKeyRing keys,
                                   ProtectedValueNormalizerRegistry normalizers,
@@ -50,7 +51,6 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
             this.queries = new ProtectedQueryRewriter(tokens);
             this.results = new ProtectedResultTransformer(cipher, masking);
         }
-        this.operations = new ProtectedFieldOperationPlans(writes, results, masking);
     }
 
     /** @return 只提供标准脱敏策略、遇到加密字段时明确拒绝的运行时 */
@@ -109,7 +109,15 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
     @InternalApi
     public WriteOperation writeOperation(DynamicForm form, DynamicForm physicalForm,
                                          DataScope scope, ValueCodecRegistry codecs) {
-        return new WriteOperation(operations.write(form, physicalForm, scope, codecs));
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        DynamicForm safePhysicalForm = Objects.requireNonNull(
+                physicalForm, "physical form must not be null");
+        if (safeForm.protections().encryptedFields().isEmpty()) {
+            return new WriteOperation(safePhysicalForm, null);
+        }
+        requireKeys();
+        return new WriteOperation(
+                safePhysicalForm, writes.plan(safeForm, safePhysicalForm, scope, codecs));
     }
 
     /**
@@ -119,7 +127,14 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
      */
     public List<ContainsFieldTokens> prepareContainsTokens(DynamicForm form, Map<String, Object> values,
                                                            DataScope scope, ValueCodecRegistry codecs) {
-        return operations.containsTokens(form, values, scope, codecs);
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        boolean containsSearch = safeForm.protections().encryptedFields().values().stream()
+                .anyMatch(definition -> definition.searchModes().contains(EncryptedSearchMode.CONTAINS));
+        if (!containsSearch) {
+            return List.of();
+        }
+        return writeOperation(safeForm, ProtectedFormLayout.physical(safeForm), scope, codecs)
+                .containsTokens(values);
     }
 
     /**
@@ -128,7 +143,12 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
      */
     public Map<String, byte[]> prepareReceiptIdentities(DynamicForm form, Map<String, Object> values,
                                                         DataScope scope, ValueCodecRegistry codecs) {
-        return operations.receiptIdentities(form, values, scope, codecs);
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        if (safeForm.protections().encryptedFields().isEmpty()) {
+            return Map.of();
+        }
+        return writeOperation(safeForm, ProtectedFormLayout.physical(safeForm), scope, codecs)
+                .receiptIdentities(values);
     }
 
     /** 提取单表查询中的显式 CONTAINS 条件，供有界候选查询与解密复核编排使用。 */
@@ -174,15 +194,31 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
                                       ConditionGroup where,
                                       DataScope scope,
                                       ValueCodecRegistry codecs) {
+        return prepareQuery(form, physicalForm, where, scope, codecs,
+                            ProtectedFormLayout.visibleFieldNames(visibleForm));
+    }
+
+    /**
+     * 内部规划边界直接传入最终 SQL 所需的投影；纯条件路径传空列表，避免遍历并丢弃全部业务字段。
+     */
+    @InternalApi
+    public PreparedQuery prepareQuery(DynamicForm form,
+                                      DynamicForm physicalForm,
+                                      ConditionGroup where,
+                                      DataScope scope,
+                                      ValueCodecRegistry codecs,
+                                      List<String> visibleFields) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
         DynamicForm safePhysicalForm = Objects.requireNonNull(
                 physicalForm, "physical form must not be null");
+        List<String> safeVisibleFields = Objects.requireNonNull(
+                visibleFields, "protected visible fields must not be null");
         if (safeForm.protections().encryptedFields().isEmpty()) {
             return new PreparedQuery(safePhysicalForm, Objects.requireNonNull(where, "query where must not be null"),
-                                     ProtectedFormLayout.visibleFieldNames(visibleForm));
+                                     safeVisibleFields);
         }
         requireKeys();
-        return queries.prepare(safeForm, safePhysicalForm, visibleForm, where, scope, codecs);
+        return queries.prepare(safeForm, safePhysicalForm, where, scope, codecs, safeVisibleFields);
     }
 
     /** 解密已经物化为 byte[] 的字段，并按查询级展示策略处理显式 masked 字段。 */
@@ -195,7 +231,19 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
     @InternalApi
     public ResultOperation resultOperation(DynamicForm form, DataScope scope,
                                            SensitiveDisplayMode displayMode, ValueCodecRegistry codecs) {
-        return new ResultOperation(operations.result(form, scope, displayMode, codecs));
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        SensitiveDisplayMode safeDisplayMode = Objects.requireNonNull(
+                displayMode, "sensitive display mode must not be null");
+        if (safeForm.protections().isEmpty()) {
+            return new ResultOperation(null, null, null, safeDisplayMode);
+        }
+        if (!safeForm.protections().encryptedFields().isEmpty()) {
+            requireKeys();
+            return new ResultOperation(
+                    results.plan(safeForm, scope, safeDisplayMode, codecs),
+                    null, null, safeDisplayMode);
+        }
+        return new ResultOperation(null, masking, safeForm, safeDisplayMode);
     }
 
     /** 对已经解密的候选行执行与令牌生成完全相同的规范化后 substring 复核。 */
@@ -244,36 +292,54 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
     /** 单次写入或批量订阅共享的保护值计划。 */
     @InternalApi
     public static final class WriteOperation {
-        private final ProtectedFieldOperationPlans.WritePlan plan;
+        private final DynamicForm physicalForm;
+        private final ProtectedWriteTransformer.Plan encrypted;
 
-        private WriteOperation(ProtectedFieldOperationPlans.WritePlan plan) {
-            this.plan = plan;
+        private WriteOperation(DynamicForm physicalForm, ProtectedWriteTransformer.Plan encrypted) {
+            this.physicalForm = physicalForm;
+            this.encrypted = encrypted;
         }
 
         public PreparedWrite prepare(Map<String, Object> values) {
-            return plan.prepare(values);
+            Map<String, Object> safeValues = Objects.requireNonNull(
+                    values, "dynamic form values must not be null");
+            return encrypted == null
+                    ? new PreparedWrite(physicalForm, safeValues) : encrypted.prepare(safeValues);
         }
 
         public List<ContainsFieldTokens> containsTokens(Map<String, Object> values) {
-            return plan.containsTokens(values);
+            return encrypted == null ? List.of() : encrypted.containsTokens(values);
         }
 
         public Map<String, byte[]> receiptIdentities(Map<String, Object> values) {
-            return plan.receiptIdentities(values);
+            return encrypted == null ? Map.of() : encrypted.receiptIdentities(values);
         }
     }
 
     /** 单次查询结果流共享的保护结果计划。 */
     @InternalApi
     public static final class ResultOperation {
-        private final ProtectedFieldOperationPlans.ResultPlan plan;
+        private final ProtectedResultTransformer.ResultPlan encrypted;
+        private final MaskedFieldResultTransformer masking;
+        private final DynamicForm form;
+        private final SensitiveDisplayMode displayMode;
 
-        private ResultOperation(ProtectedFieldOperationPlans.ResultPlan plan) {
-            this.plan = plan;
+        private ResultOperation(ProtectedResultTransformer.ResultPlan encrypted,
+                                MaskedFieldResultTransformer masking,
+                                DynamicForm form,
+                                SensitiveDisplayMode displayMode) {
+            this.encrypted = encrypted;
+            this.masking = masking;
+            this.form = form;
+            this.displayMode = displayMode;
         }
 
         public DynamicRow transform(DynamicRow row) {
-            return plan.transform(row);
+            DynamicRow safeRow = Objects.requireNonNull(row, "dynamic row must not be null");
+            if (encrypted != null) {
+                return encrypted.transform(safeRow);
+            }
+            return masking == null ? safeRow : masking.transform(form, safeRow, displayMode);
         }
     }
 
@@ -347,7 +413,11 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
         }
 
         private static List<byte[]> copyTokens(List<byte[]> values) {
-            return ProtectedFieldOperationPlans.copyTokens(values);
+            List<byte[]> copy = new ArrayList<>(Objects.requireNonNull(
+                    values, "protected contains tokens must not be null").size());
+            values.forEach(value -> copy.add(Objects.requireNonNull(
+                    value, "protected contains token must not be null").clone()));
+            return List.copyOf(copy);
         }
     }
 

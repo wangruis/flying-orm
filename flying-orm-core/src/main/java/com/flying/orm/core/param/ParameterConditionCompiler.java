@@ -1,13 +1,15 @@
 package com.flying.orm.core.param;
 
 import com.flying.orm.core.condition.ConditionGroup;
-import com.flying.orm.core.internal.condition.ConditionValueNormalizer;
-import com.flying.orm.core.internal.condition.ConditionValuePolicy;
 import com.flying.orm.core.condition.ConditionValueShape;
+import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.condition.TermHandler;
 import com.flying.orm.core.condition.TermRegistry;
 import com.flying.orm.core.field.FieldIdentity;
 import com.flying.orm.core.internal.Names;
+import com.flying.orm.core.internal.condition.ConditionValueNormalizer;
+import com.flying.orm.core.internal.condition.ConditionValuePolicy;
+import com.flying.orm.core.internal.value.BindableValueSnapshots;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -247,9 +249,7 @@ public final class ParameterConditionCompiler {
                                                                 maxStringLength);
                 if (!compiledTerms.isEmpty()) {
                     // 整组无有效值时不创建空括号；有值时保留一个明确的 OR 子组。
-                    builder.or(or -> compiledTerms.forEach(term -> or.whereIfPresent(term.identity(),
-                                                                                    term.operator(),
-                                                                                    term.value())));
+                    builder.or(or -> compiledTerms.forEach(term -> publish(or, terms, term)));
                 }
                 return;
             }
@@ -257,8 +257,30 @@ public final class ParameterConditionCompiler {
             ParameterConditionSpec spec = compiledSpec.spec();
             Object value = resolveValue(compiledSpec, indexedParameters, terms, maxCollectionSize, maxStringLength);
             if (value != EmptyValue.INSTANCE) {
-                builder.whereIfPresent(spec.identity(), spec.operator(), value);
+                publish(builder, terms, new CompiledTerm(spec.identity(), spec.operator(), value));
             }
+        }
+
+        private static void publish(ConditionGroup.Builder builder,
+                                    TermRegistry terms,
+                                    CompiledTerm term) {
+            ConditionValueShape customShape = terms.find(term.operator())
+                    .map(TermHandler::shape)
+                    .orElse(ConditionValueShape.SCALAR);
+            boolean customCollection = TermRegistry.standard().find(term.operator()).isEmpty()
+                    && customShape != ConditionValueShape.NONE
+                    && customShape != ConditionValueShape.SCALAR
+                    && term.value() instanceof List<?>;
+            Object value = customCollection ? snapshotCustomCollection(term.value()) : term.value();
+            builder.add(TermCondition.of(term.identity(), term.operator(), value));
+        }
+
+        /** 自定义多值 term 的值形状由注册项声明；发布时只补齐数组元素所有权，不重复做预算和文本校验。 */
+        private static Object snapshotCustomCollection(Object value) {
+            if (!(value instanceof List<?> values)) {
+                return value;
+            }
+            return values.stream().map(BindableValueSnapshots::arrayGraph).toList();
         }
 
         private List<CompiledTerm> compileTerms(Map<String, ?> indexedParameters,

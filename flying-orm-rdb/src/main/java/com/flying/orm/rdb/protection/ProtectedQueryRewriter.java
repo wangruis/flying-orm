@@ -33,15 +33,15 @@ final class ProtectedQueryRewriter {
     /** 生成物理表单、已改写条件和仅业务可见的投影列表。 */
     ProtectedFieldRuntime.PreparedQuery prepare(DynamicForm form,
                                                  DynamicForm physicalForm,
-                                                 DynamicForm visibleForm,
                                                  ConditionGroup where,
                                                  DataScope scope,
-                                                 ValueCodecRegistry codecs) {
+                                                 ValueCodecRegistry codecs,
+                                                 List<String> visibleFields) {
         String tenant = ProtectedFieldValues.tenantIdentity(form, scope, codecs);
         return new ProtectedFieldRuntime.PreparedQuery(
                 Objects.requireNonNull(physicalForm, "physical form must not be null"),
                 rewriteGroup(form, where, tenant, codecs),
-                ProtectedFormLayout.visibleFieldNames(visibleForm));
+                Objects.requireNonNull(visibleFields, "protected visible fields must not be null"));
     }
 
     /** 提取单个顶层 AND CONTAINS 条件，并继续改写其余保护条件。 */

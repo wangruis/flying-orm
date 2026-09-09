@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.schema;
 
 import com.flying.orm.core.type.DatabaseType;
+import com.flying.orm.core.type.LogicalType;
 
 import java.util.List;
 import java.util.Locale;
@@ -73,7 +74,21 @@ final class SchemaTypeMapping {
         return withTypeArguments(mapped, length, precision, scale);
     }
 
+    String renderPhysical(String value, Integer length, Integer precision, Integer scale) {
+        DatabaseType physical = safeType(value, "physical data type");
+        if (!physical.arguments().isEmpty()) {
+            return physical.declaration();
+        }
+        return withTypeArguments(physical.declaration(), length, precision, scale);
+    }
+
     private String mappedType(DatabaseType type) {
+        if (databaseStyle == SchemaDialect.GeneratedValueStyle.POSTGRESQL && type.isArray()) {
+            String scalar = type.canonical().substring(
+                    0, type.canonical().length() - type.arrayDimensions() * 2);
+            return mappedType(safeType(scalar, "array element data type"))
+                    + "[]".repeat(type.arrayDimensions());
+        }
         String direct = mappings.get(type.canonical());
         if (direct != null) {
             return mappedTemporalCapacity(type, direct);
@@ -83,7 +98,15 @@ final class SchemaTypeMapping {
             return scalar;
         }
         String temporal = mappedTemporalType(type);
-        return temporal == null ? type.declaration() : mappedTemporalCapacity(type, temporal);
+        if (temporal != null) {
+            return mappedTemporalCapacity(type, temporal);
+        }
+        if (type.logicalType() == LogicalType.UUID
+                && "UUID".equals(type.baseName())
+                && !mappings.containsKey(type.canonical())) {
+            throw new IllegalArgumentException("UUID requires an explicit schema dialect type mapping");
+        }
+        return type.declaration();
     }
 
     private String mappedScalarModifierType(DatabaseType type) {

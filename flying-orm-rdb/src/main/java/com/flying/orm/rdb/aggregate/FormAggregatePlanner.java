@@ -15,10 +15,11 @@ import com.flying.orm.core.scope.FieldUse;
 import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.scope.FieldUseRequirements;
 import com.flying.orm.core.scope.FieldUseSnapshot;
+import com.flying.orm.core.scope.FieldVisibility;
 import com.flying.orm.core.sql.render.SqlFragment;
 import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
-import com.flying.orm.rdb.form.FieldUseGuard;
 import com.flying.orm.rdb.form.FormAggregateReadSupport;
 import com.flying.orm.rdb.form.FormDataSqlRenderer;
 import com.flying.orm.rdb.form.StructuredConditionResolver;
@@ -123,7 +124,7 @@ public final class FormAggregatePlanner {
         for (AggregateExpression<?> aggregate : safeSpec.aggregates()) {
             DynamicField field = read.readableForm().field(aggregate.sourceField());
             AggregateTypeSupport.requireAggregateContract(aggregate, field, reads);
-            String expression = AggregateFunctionSqlRenderer.render(
+            String expression = renderFunction(
                     aggregate.function(), reads.identifier(field.name()),
                     field.databaseType().logicalType(), sqlServerDialect);
             select.add(expression + " as " + reads.identifier(aggregate.alias()));
@@ -138,7 +139,7 @@ public final class FormAggregatePlanner {
                         new ResultTarget(field, result, expression, valueField));
             if (correlatedHaving) {
                 correlatedExpressions.put(FieldIdentity.of(aggregate.alias()).key(),
-                        AggregateFunctionSqlRenderer.render(
+                        renderFunction(
                                 aggregate.function(), outerQualifier + "." + reads.identifier(field.name()),
                                 field.databaseType().logicalType(), sqlServerDialect));
             }
@@ -177,11 +178,11 @@ public final class FormAggregatePlanner {
         parameters.addAll(where.parameters());
         parameters.addAll(having.parameters());
         SqlRequest request = new SqlRequest(sql.toString(), parameters);
-        FieldUseSnapshot fieldUse = FieldUseGuard.approveAggregate(
+        FieldUseSnapshot fieldUse = reads.approveAggregate(
                 read.logicalForm().id(), requirements.build(), read.scope().fields(), request,
                 fieldUsePolicy, shapeLimits, layout.size(), safeSpec.groups().size(),
                 safeSpec.aggregates().size(), havingNodes, query.sorts().size());
-        AggregateResultVisibilityGuard.validate(safeSpec.aggregates(), aggregateFields, fieldUse);
+        validateResultVisibility(safeSpec.aggregates(), aggregateFields, fieldUse);
         return new Plan(
                 request,
                 query.executionOptions().orElse(defaultExecutionOptions),
@@ -301,6 +302,49 @@ public final class FormAggregatePlanner {
             case SUM, AVG -> DynamicField.of(aggregate.alias(), "DECIMAL");
             case MIN, MAX -> DynamicField.of(aggregate.alias(), source.databaseType());
         };
+    }
+
+    /** 渲染已经通过类型契约校验的聚合表达式。 */
+    private static String renderFunction(AggregateFunction function,
+                                         String field,
+                                         LogicalType sourceType,
+                                         boolean sqlServerDialect) {
+        return switch (function) {
+            case COUNT -> "count(" + field + ")";
+            case COUNT_DISTINCT -> "count(distinct " + field + ")";
+            // SQL Server 会把整数 SUM/AVG 保留在源整数类型族。聚合前提升输入，
+            // 同时避免 SUM 溢出和 AVG 整除截断；聚合后再 cast 已无法恢复丢失的事实。
+            case SUM -> "sum(" + stableDecimalInput(field, sourceType, sqlServerDialect) + ")";
+            case AVG -> "avg(" + stableDecimalInput(field, sourceType, sqlServerDialect) + ")";
+            case MIN -> "min(" + field + ")";
+            case MAX -> "max(" + field + ")";
+        };
+    }
+
+    private static String stableDecimalInput(String field,
+                                             LogicalType sourceType,
+                                             boolean sqlServerDialect) {
+        boolean integerSource = switch (sourceType) {
+            case SMALL_INTEGER, INTEGER, BIG_INTEGER -> true;
+            default -> false;
+        };
+        return sqlServerDialect && integerSource
+                ? "cast(" + field + " as decimal(38,10))"
+                : field;
+    }
+
+    /** COUNT 的结果固定为 Long，不能继承源文本字段的脱敏器。 */
+    private static void validateResultVisibility(List<AggregateExpression<?>> aggregates,
+                                                 List<DynamicField> fields,
+                                                 FieldUseSnapshot fieldUse) {
+        for (int index = 0; index < aggregates.size(); index++) {
+            AggregateFunction function = aggregates.get(index).function();
+            if ((function == AggregateFunction.COUNT || function == AggregateFunction.COUNT_DISTINCT)
+                    && fieldUse.visibility(fields.get(index).name()) == FieldVisibility.MASKED) {
+                throw new IllegalArgumentException(
+                        "COUNT output cannot inherit MASKED visibility from its source field");
+            }
+        }
     }
 
     private record ResultTarget(DynamicField source, DynamicField result, String expression,

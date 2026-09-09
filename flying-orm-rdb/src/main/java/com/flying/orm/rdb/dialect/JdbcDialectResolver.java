@@ -4,6 +4,7 @@ import javax.sql.DataSource;
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
 import java.sql.SQLException;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 
@@ -56,6 +57,7 @@ public final class JdbcDialectResolver {
                     .orElseThrow(() -> new IllegalArgumentException(
                             "unsupported rdb dialect from jdbc metadata"));
             String version = metadata.getDatabaseProductVersion();
+            dialect = resolveVersionedDialect(dialect, metadata, version);
             return new ResolvedDatabase(productName == null || productName.isBlank() ? "unknown" : productName,
                                         version == null || version.isBlank() ? "unknown" : version,
                                         dialect);
@@ -85,6 +87,49 @@ public final class JdbcDialectResolver {
             return java.util.Optional.empty();
         }
         return RdbDialectResolver.tryResolveName(url.substring(prefix + 1, driverEnd));
+    }
+
+    private static RdbDialect resolveVersionedDialect(RdbDialect dialect,
+                                                       DatabaseMetaData metadata,
+                                                       String productVersion) throws SQLException {
+        if (!"oracle".equals(dialect.name())) {
+            return dialect;
+        }
+        return RdbDialect.oracle(resolveOracleVersion(metadata.getDatabaseMajorVersion(), productVersion));
+    }
+
+    private static OracleVersion resolveOracleVersion(int majorVersion, String productVersion) {
+        if (majorVersion >= 23) {
+            return OracleVersion.V23AI;
+        }
+        if (majorVersion >= 21) {
+            return OracleVersion.V21C;
+        }
+        if (majorVersion >= 19) {
+            return OracleVersion.V19C;
+        }
+        if (majorVersion >= 12) {
+            return OracleVersion.V12C;
+        }
+        if (majorVersion > 0) {
+            throw new IllegalArgumentException("unsupported oracle database version");
+        }
+
+        // 极少数代理驱动不报告 major version；此时只识别现有受支持版本标签，无法确认则保持 19c 默认语义。
+        String normalized = productVersion == null ? "" : productVersion.toLowerCase(Locale.ROOT);
+        if (normalized.contains("23ai")) {
+            return OracleVersion.V23AI;
+        }
+        if (normalized.contains("21c")) {
+            return OracleVersion.V21C;
+        }
+        if (normalized.contains("19c")) {
+            return OracleVersion.V19C;
+        }
+        if (normalized.contains("12c")) {
+            return OracleVersion.V12C;
+        }
+        return OracleVersion.V19C;
     }
 
     private record ResolvedDatabase(String product, String version, RdbDialect dialect) {

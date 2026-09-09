@@ -7,6 +7,8 @@ import com.flying.orm.rdb.schema.SchemaSnapshot;
 import com.flying.orm.rdb.schema.SchemaSnapshotCoverage;
 import reactor.core.publisher.Mono;
 
+import java.util.Objects;
+
 /**
  * 从真实数据库把表结构读回动态表单。它只负责读取和转换，不负责建表、迁移或缓存。
  *
@@ -77,6 +79,27 @@ public interface ReactiveFormMetadataReader {
     default Mono<SchemaSnapshot> readSnapshot(String schema, String table) {
         return readTable(schema, table).map(metadata -> SchemaSnapshot.fromLegacy(
                 RelationIdentity.of(null, schema, table), metadata));
+    }
+
+    /**
+     * 按已经分段的关系身份读取结构。旧实现可继续承接普通名称；无 schema 且名称含点号时，旧的
+     * 单字符串契约无法证明身份，因而明确失败而不是猜成 schema.table。
+     */
+    default Mono<SchemaSnapshot> readSnapshot(RelationIdentity relation) {
+        RelationIdentity target = Objects.requireNonNull(
+                relation, "schema relation identity must not be null");
+        if (target.catalog().isPresent()) {
+            return Mono.error(new UnsupportedOperationException(
+                    "custom metadata reader must implement catalog-aware relation identity"));
+        }
+        if (target.schema().isPresent()) {
+            return readSnapshot(target.schema().orElseThrow(), target.table());
+        }
+        if (target.table().contains(".")) {
+            return Mono.error(new UnsupportedOperationException(
+                    "custom metadata reader must implement literal-dot relation identity"));
+        }
+        return readSnapshot(target.table());
     }
 
     /**

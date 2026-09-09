@@ -4,16 +4,16 @@ import java.time.Duration;
 import java.util.Objects;
 
 /**
- * SQL 执行保护选项。框架默认保留单个 LOB 物化和 ORM 自有资源清理边界；结果流总行数、
- * 总估算字节和 SQL 生命周期由调用方按业务语义治理，需要 ORM 兜底时显式配置正数。
+ * SQL 参数透传和结果物化保护选项，默认保留单个 LOB 物化上限。
+ * 执行和清理生命周期由上层与驱动治理；普通单条 JDBC 可显式透传 Statement 查询超时，
+ * 但该值不代表 ORM 总时限，多语句或不支持透传的执行入口必须明确拒绝正时限。
  *
- * @param timeout                  SQL 调用的总超时，0 表示不限
+ * @param timeout                  普通单条 JDBC 的 Statement 查询超时提示，0 不覆盖驱动默认值
  * @param maxRows                  查询最多返回多少行，0 表示不限
  * @param maxResultBytes           单次订阅累计返回的估算字节上限，0 表示不限
  * @param maxLargeObjectBytes      单个二进制大字段最多物化多少字节，0 表示不限
  * @param maxLargeObjectChars      单个文本大字段最多物化多少字符，0 表示不限
- * @param cleanupTimeout           数据库结果确定后最多等待 ORM 自有或登记资源清理多久，0 表示不限；
- *                                 不限制普通驱动或连接池的连接归还
+ * @param cleanupTimeout           兼容字段，仅支持 0；正数抛出 UnsupportedOperationException
  * @param fetchSize                每次建议驱动预取多少行，0 表示使用驱动默认值
  * @author wangr
  * @date 2026-08-03
@@ -42,8 +42,8 @@ public record SqlExecutionOptions(Duration timeout,
     /** 单个文本 LOB 默认最多物化一千六百万字符。 */
     public static final long DEFAULT_MAX_LARGE_OBJECT_CHARS = 16_000_000L;
 
-    /** ORM 自有或登记资源默认最多清理五秒；普通驱动或连接池归还不受该值限制。 */
-    public static final Duration DEFAULT_CLEANUP_TIMEOUT = Duration.ofSeconds(5);
+    /** ORM 不拥有清理时限；正常资源释放仍由原执行路径完成。 */
+    public static final Duration DEFAULT_CLEANUP_TIMEOUT = Duration.ZERO;
 
     /** 默认保留驱动抓取策略；大结果流可通过 {@link #withFetchSize(int)} 显式启用分批抓取。 */
     private static final int SAFE_FETCH_SIZE = 0;
@@ -60,7 +60,7 @@ public record SqlExecutionOptions(Duration timeout,
     }
 
     /**
-     * 创建普通业务 SQL 的轻量默认值。结果流保持直通，单个 LOB 与 ORM 自有资源清理仍有界。
+     * 创建普通业务 SQL 的轻量默认值。结果流保持直通，单个 LOB 物化仍有界，时限默认归零。
      *
      * @return 可作为单例共享的不可变执行保护
      */
@@ -82,27 +82,19 @@ public record SqlExecutionOptions(Duration timeout,
     }
 
     /**
-     * 以普通业务安全默认值为基线替换执行时间。需要解除其他保护时必须先显式选择 {@link #unlimited()}。
+     * 以普通业务安全默认值配置单条 JDBC Statement 超时提示，不派生清理时限。
      *
      * @param timeout 超时时间，0 表示不限制
      * @return 执行保护选项
      */
     public static SqlExecutionOptions timeout(Duration timeout) {
         Duration safeTimeout = Objects.requireNonNull(timeout, "sql execution timeout must not be null");
-        Duration cleanupBoundary = safeTimeout.isZero()
-                ? DEFAULT_CLEANUP_TIMEOUT
-                : (safeTimeout.compareTo(DEFAULT_CLEANUP_TIMEOUT) < 0
-                        ? safeTimeout
-                        : DEFAULT_CLEANUP_TIMEOUT);
-        // usingWhen 会等待 ORM 自有或登记资源清理后再转发超时错误。只限制业务阶段却无限等待 LOB、
-        // 取消或失败清理，会让“300ms 超时”无法按期返回；因此便捷工厂为这些清理设置同一有限边界。
-        // 业务 timeout=0 只关闭执行截止，解除其他保护仍必须显式使用 unlimited()。
         return new SqlExecutionOptions(safeTimeout,
                                        0,
                                        0,
                                        DEFAULT_MAX_LARGE_OBJECT_BYTES,
                                        DEFAULT_MAX_LARGE_OBJECT_CHARS,
-                                       cleanupBoundary,
+                                       DEFAULT_CLEANUP_TIMEOUT,
                                        SAFE_FETCH_SIZE);
     }
 
@@ -136,6 +128,9 @@ public record SqlExecutionOptions(Duration timeout,
         }
         if (cleanupTimeout.isNegative()) {
             throw new IllegalArgumentException("resource cleanup timeout must not be negative");
+        }
+        if (!cleanupTimeout.isZero()) {
+            throw new UnsupportedOperationException("resource cleanup timeout must be managed by the caller");
         }
         if (fetchSize < 0) {
             throw new IllegalArgumentException("sql execution fetch size must not be negative");
@@ -196,12 +191,11 @@ public record SqlExecutionOptions(Duration timeout,
     }
 
     /**
-     * 单独限制数据库结果确定后的 ORM 自有或登记资源清理时间，例如 LOB、取消和失败路径清理。
-     * 该上限不参与普通 SQL 的操作截止时间，也不限制普通驱动或连接池的连接归还，避免 ORM 越过
-     * 外部资源边界或把已经确定的数据库事实改写成清理超时。
+     * 保留旧清理时限签名；正常资源释放保留，时限由上层治理。
      *
-     * @param cleanupTimeout 最多等待 ORM 自有或登记资源清理多久，0 表示不限
-     * @return 带新清理上限的不可变选项
+     * @param cleanupTimeout 仅支持 0
+     * @return 不启用 ORM 清理时限的不可变选项
+     * @throws UnsupportedOperationException 配置正时限时
      */
     public SqlExecutionOptions withCleanupTimeout(Duration cleanupTimeout) {
         return new SqlExecutionOptions(timeout,

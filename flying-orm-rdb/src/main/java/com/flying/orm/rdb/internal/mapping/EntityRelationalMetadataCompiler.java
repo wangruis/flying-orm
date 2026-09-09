@@ -36,7 +36,7 @@ import java.util.Set;
 /**
  * 把实体注解和程序化声明编译成一份严格、不可变的关系模型。
  *
- * <p>反射扫描由 {@link EntityMetadataCompiler} 完成一次；本类只在 Schema/descriptor 冷路径上把扫描结果
+ * <p>反射扫描由 {@link EntityMetadataResolver} 完成一次；本类只在 Schema/descriptor 冷路径上把扫描结果
  * 投影成 CRUD 元数据和完整关系元数据。普通旧实体仍走原来的轻量编译，不承担这里的约束归并和指纹成本。</p>
  *
  * @author wangr
@@ -60,8 +60,7 @@ public final class EntityRelationalMetadataCompiler {
         Class<T> safeType = Objects.requireNonNull(entityType, "entity type must not be null");
         EntityTypeMappingRegistry safeMappings = Objects.requireNonNull(
                 typeMappings, "entity type mappings must not be null");
-        EntityCompilation<T> compilation = new EntityMetadataCompiler(EntityNamingStrategy.SNAKE_CASE)
-                .compileModel(safeType);
+        EntityCompilation<T> compilation = EntityMetadataResolver.compileModel(safeType);
 
         rejectSchemaAnnotationsOnExcludedFields(compilation.excludedFields());
         LinkedHashMap<String, Property> properties = properties(compilation, safeMappings);

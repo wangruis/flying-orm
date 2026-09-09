@@ -91,6 +91,10 @@ final class OracleAnonymousBlockBoundary {
                     acceptWord(sql.substring(index, wordEnd).toUpperCase(Locale.ROOT));
                     index = wordEnd;
                 } else {
+                    if (pendingEnd && "CASE".equals(scopes.peek()) && !Character.isWhitespace(current)) {
+                        closeScope(scopes);
+                        pendingEnd = false;
+                    }
                     if (endLabel && !Character.isWhitespace(current)) {
                         throw multipleStatements();
                     }
@@ -103,9 +107,16 @@ final class OracleAnonymousBlockBoundary {
             if (leadingDeclare && "DECLARE".equals(word)) {
                 leadingDeclare = false;
             } else if (pendingEnd) {
-                closePendingEnd(scopes, word);
-                pendingEnd = false;
-                endLabel = true;
+                if ("CASE".equals(scopes.peek()) && !"CASE".equals(word)) {
+                    // An expression END does not consume its following expression/block keyword.
+                    closeScope(scopes);
+                    pendingEnd = false;
+                    acceptWord(word);
+                } else {
+                    closePendingEnd(scopes, word);
+                    pendingEnd = false;
+                    endLabel = true;
+                }
             } else if (endLabel) {
                 throw multipleStatements();
             } else if ("END".equals(word)) {

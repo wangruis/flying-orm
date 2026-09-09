@@ -35,7 +35,7 @@ public final class SyncEntityDmlUpdateOperator<T> {
     /** 对数值属性执行数据库端原子减少。 */
     public SyncEntityDmlUpdateOperator<T> decrement(EntityProperty<T, ? extends Number> property, Number amount) { command.decrement(property, amount); return this; }
     /** 添加严格等值条件。 */
-    public SyncEntityDmlUpdateOperator<T> where(EntityProperty<T, ?> property, Object value) { command.state().where().equal(property, value); return this; }
+    public SyncEntityDmlUpdateOperator<T> where(EntityProperty<T, ?> property, Object value) { command.state().where().where(property, value); return this; }
     /** 继续追加严格 AND 等值条件。 */
     public SyncEntityDmlUpdateOperator<T> and(EntityProperty<T, ?> property, Object value) { return where(property, value); }
     /** 使用已注册条件运算符追加 AND 条件。 */

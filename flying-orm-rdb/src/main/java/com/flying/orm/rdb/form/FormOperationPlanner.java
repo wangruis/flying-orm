@@ -147,7 +147,7 @@ final class FormOperationPlanner {
         FormPreparedWrite write = renderer.protection().prepareWrite(
                 form, physicalForm, values, effectiveScope);
         ProtectedFieldRuntime.PreparedQuery query = renderer.protection().prepareQuery(
-                form, physicalForm, form, where, effectiveScope);
+                form, physicalForm, where, effectiveScope, List.of());
         SqlRequest request = safeSpec.lock()
                                      .map(lock -> renderer.protection().update(write, query.where(), lock))
                                      .orElseGet(() -> renderer.protection().update(write, query.where()));
@@ -155,7 +155,7 @@ final class FormOperationPlanner {
         if (renderer.protection().requiresOwnerQuery(form, values)) {
             ownerQuery = safeSpec.lock()
                     .map(lock -> renderer.protection().prepareQuery(
-                            form, physicalForm, form, withExpectedVersion(where, lock), effectiveScope))
+                            form, physicalForm, withExpectedVersion(where, lock), effectiveScope, List.of()))
                     .orElse(query);
         }
         ProtectedWriteWork protectedWrite = renderer.protection().protectedWrite(
@@ -186,14 +186,14 @@ final class FormOperationPlanner {
                     FormPreparedWrite write = renderer.protection().prepareWrite(
                             form, values, effectiveScope);
                     ProtectedFieldRuntime.PreparedQuery query = renderer.protection().prepareQuery(
-                            form, form, activeWhere, effectiveScope);
+                            form, activeWhere, effectiveScope, List.of());
                     return lock == null
                             ? renderer.protection().update(write, query.where())
                             : renderer.protection().update(write, query.where(), lock);
                 })
                 .orElseGet(() -> {
                     ProtectedFieldRuntime.PreparedQuery query = renderer.protection().prepareQuery(
-                            form, form, scopedWhere, effectiveScope);
+                            form, scopedWhere, effectiveScope, List.of());
                     return renderer.protection().delete(query, lock);
                 });
         return new PlannedWrite(form, request, executionOptions(safeSpec), lock, null);
@@ -214,7 +214,7 @@ final class FormOperationPlanner {
         ConditionGroup where = scopes.scopedWhere(form, safeSpec.where(), safeSpec.scope());
         com.flying.orm.core.scope.DataScope effectiveScope = scopes.effectiveScope(safeSpec.scope());
         ProtectedFieldRuntime.PreparedQuery query = renderer.protection().prepareQuery(
-                form, form, where, effectiveScope);
+                form, where, effectiveScope, List.of());
         OptimisticLockOptions lock = safeSpec.lock().orElse(null);
         SqlRequest request = renderer.protection().delete(query, lock);
         return new PlannedWrite(form, request, executionOptions(safeSpec), lock, null);

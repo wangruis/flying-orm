@@ -30,7 +30,7 @@ import java.util.function.Supplier;
 
 /**
  * 统一维护一条 SQL 执行链路里的连接、Statement 和收尾动作。
- * 查询、更新和同连接序列都从这里获取并释放连接，避免各入口对超时、取消和清理失败作出不同判断。
+ * 查询、更新和同连接序列都从这里获取并释放连接，统一处理取消和清理失败。
  * 实例只保存不可变依赖，可以被执行器并发复用；每次订阅的连接和行映射状态彼此隔离。
  *
  * @author wangr
@@ -84,8 +84,6 @@ final class R2dbcExecutionSession {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
         List<Object> safeParameters = Objects.requireNonNull(
                 executionParameters, "execution parameters must not be null");
-        SqlExecutionOptions safeOptions = Objects.requireNonNull(options,
-                                                              "sql execution options must not be null");
         Function<Flux<T>, Flux<T>> safeProtection = Objects.requireNonNull(
                 operationProtection, "sql operation protection must not be null");
         return Flux.usingWhen(acquireConnection(),
@@ -93,14 +91,14 @@ final class R2dbcExecutionSession {
                                   Statement statement = prepareStatement(lease.connection(),
                                                                        safeRequest,
                                                                        safeParameters,
-                                                                       safeOptions.fetchSize());
+                                                                       options.fetchSize());
                                   return safeProtection.apply(Flux.from(
                                           operation.apply(statement, lease::largeObjects)));
                               },
-                              lease -> leaseCleanup.closeAfterResult(lease, operationType, safeOptions, true),
+                              lease -> leaseCleanup.closeAfterResult(lease, operationType, true),
                               (lease, error) -> leaseCleanup.closeAfterError(
-                                      lease, operationType, safeOptions, error),
-                              lease -> leaseCleanup.cancelAfterResult(lease, operationType, safeOptions));
+                                      lease, operationType, error),
+                              lease -> leaseCleanup.cancelAfterResult(lease, operationType));
     }
     <T> Mono<T> withStatementMono(SqlRequest request,
                                   SqlExecutionOptions options,
@@ -112,11 +110,10 @@ final class R2dbcExecutionSession {
                                          snapshotExecutionParameters(safeRequest),
                                          options,
                                          operationType,
-                                         (statement, largeObjects) -> protectMono(
-                                                 operation.apply(statement, largeObjects), options));
+                                          operation);
     }
 
-    /** 只拥有 Statement/连接的资源边界；操作把唯一执行时限放在其证据转换之前。 */
+    /** 只拥有 Statement/连接的资源边界；结果与失败证据由操作提供。 */
     <T> Mono<T> withPreparedStatementResource(SqlRequest request,
                                           List<Object> executionParameters,
                                           SqlExecutionOptions options,
@@ -136,27 +133,13 @@ final class R2dbcExecutionSession {
                                                                       0);
                                  return operation.apply(statement, lease::largeObjects);
                              },
-                             lease -> leaseCleanup.closeAfterResult(lease, operationType, safeOptions, true),
-                             (lease, error) -> leaseCleanup.closeAfterError(lease, operationType, safeOptions, error),
-                             lease -> leaseCleanup.cancelAfterResult(lease, operationType, safeOptions));
+                             lease -> leaseCleanup.closeAfterResult(lease, operationType, true),
+                             (lease, error) -> leaseCleanup.closeAfterError(lease, operationType, error),
+                             lease -> leaseCleanup.cancelAfterResult(lease, operationType));
     }
     Flux<DynamicRow> protectRows(Flux<DynamicRow> source, String sql, SqlExecutionOptions options) {
-        SqlExecutionOptions safeOptions = Objects.requireNonNull(options,
-                                                                   "sql execution options must not be null");
-        SqlExecutionOptions resultOptions = safeOptions.timeout().isZero()
-                ? safeOptions : safeOptions.withTimeout(java.time.Duration.ZERO);
-        Flux<DynamicRow> boundedRows = ReactiveSqlExecutionProtection.protectRows(
-                source,
-                sql,
-                resultOptions,
-                BatchMemoryBudget::estimateRowBytes);
-        if (safeOptions.timeout().isZero()) {
-            return boundedRows;
-        }
-        return Flux.deferContextual(context -> {
-            R2dbcSqlDeadline deadline = R2dbcSqlDeadline.currentOrStart(context, safeOptions);
-            return deadline.protectExecution(boundedRows);
-        });
+        return ReactiveSqlExecutionProtection.protectRows(
+                source, sql, options, BatchMemoryBudget::estimateRowBytes);
     }
 
     /** SqlRequest 已拥有普通参数；这里只冻结 core 无法读取的 R2DBC 包装器载荷。 */
@@ -175,15 +158,6 @@ final class R2dbcExecutionSession {
             }
         }
         return snapshot == null ? source : Collections.unmodifiableList(snapshot);
-    }
-    <T> Mono<T> protectMono(Mono<T> source, SqlExecutionOptions options) {
-        SqlExecutionOptions safeOptions = Objects.requireNonNull(options,
-                                                                   "sql execution options must not be null");
-        if (safeOptions.timeout().isZero()) {
-            return source;
-        }
-        return Mono.deferContextual(context -> R2dbcSqlDeadline.currentOrStart(context, safeOptions)
-                                                               .protectExecution(source));
     }
     Mono<ConnectionLease> acquireConnection() {
         return Mono.deferContextual(context -> {
@@ -271,26 +245,18 @@ final class R2dbcExecutionSession {
     }
 
     Mono<Void> closeAfterResult(ConnectionLease lease,
-                               SqlExecutionOperation operation,
-                               SqlExecutionOptions options,
-                               boolean outcomeConfirmed) {
-        return leaseCleanup.closeAfterResult(lease, operation, options, outcomeConfirmed);
+                                SqlExecutionOperation operation,
+                                boolean outcomeConfirmed) {
+        return leaseCleanup.closeAfterResult(lease, operation, outcomeConfirmed);
     }
 
-    Mono<Void> closeAfterResult(ConnectionLease lease,
-                                SqlExecutionOperation operation,
-                                boolean outcomeConfirmed,
-                                R2dbcCleanupDeadline deadline) {
-        return leaseCleanup.closeAfterResult(lease, operation, outcomeConfirmed, deadline);
-    }
     Mono<Void> closeAfterCleanupFailure(ConnectionLease lease,
                                         SqlExecutionOperation operation,
                                         ResourceCleanupObservation.Phase phase,
                                         boolean outcomeConfirmed,
-                                        Throwable primaryError,
-                                        R2dbcCleanupDeadline deadline) {
+                                        Throwable primaryError) {
         return leaseCleanup.closeAfterCleanupFailure(
-                lease, operation, phase, outcomeConfirmed, primaryError, deadline);
+                lease, operation, phase, outcomeConfirmed, primaryError);
     }
 
     static Publisher<DynamicRow> mapRows(Result result,

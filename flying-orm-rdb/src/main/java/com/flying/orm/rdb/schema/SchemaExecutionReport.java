@@ -33,9 +33,6 @@ public final class SchemaExecutionReport {
         this.planFingerprint = requireText(planFingerprint, "schema plan fingerprint");
         this.status = Objects.requireNonNull(status, "schema execution status must not be null");
         this.steps = List.copyOf(Objects.requireNonNull(steps, "schema step results must not be null"));
-        if (this.steps.stream().anyMatch(Objects::isNull)) {
-            throw new IllegalArgumentException("schema step results must not contain null");
-        }
         this.preExecutionActualFingerprint = optionalText(
                 preExecutionActualFingerprint, "pre-execution schema fingerprint");
         this.postExecutionActualFingerprint = optionalText(

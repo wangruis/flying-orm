@@ -14,7 +14,6 @@ import com.flying.orm.rdb.protection.ProtectedContainsLayout;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
 import com.flying.orm.rdb.transaction.JdbcTransactionParticipant;
 
-import java.time.Duration;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
@@ -39,12 +38,9 @@ import java.util.function.Consumer;
  */
 public final class JdbcSchemaClient {
 
-    /**
-     * 同步 JDBC 执行器没有公开的连接级 session 能力，所以默认只开启单条 SQL 的执行保护。
-     * 锁超时需要调用方显式打开，并提供外部事务连接来保证 setup/work/cleanup 使用同一会话。
-     */
+    /** 执行和会话锁等待时限由上层管理，Schema 默认不设置治理预算。 */
     private static final SchemaMigrationExecutionOptions DEFAULT_EXECUTION_OPTIONS =
-            SchemaMigrationExecutionOptions.defaults().withLockTimeout(Duration.ZERO);
+            SchemaMigrationExecutionOptions.defaults();
 
     private final SyncSqlExecutor executor;
     private final FormSchemaSqlRenderer renderer;
@@ -54,7 +50,7 @@ public final class JdbcSchemaClient {
     private final SchemaDdlTransactionSupport ddlTransactionSupport;
     private final JdbcTransactionParticipant transactionParticipant;
     private final SchemaCacheInvalidationCoordinator metadataInvalidator;
-    private final JdbcSchemaMigrationPlanner planner;
+    private final SchemaMigrationPlanner planner;
     private final JdbcSchemaMigrationExecutor migrationExecutor;
 
     private JdbcSchemaClient(SyncSqlExecutor executor,
@@ -76,10 +72,9 @@ public final class JdbcSchemaClient {
         this.transactionParticipant = Objects.requireNonNull(
                 transactionParticipant, "jdbc transaction participant must not be null");
         this.metadataInvalidator = SchemaCacheInvalidationCoordinator.from(metadataInvalidator);
-        this.planner = new JdbcSchemaMigrationPlanner(this.renderer);
+        this.planner = this.renderer.migrationPlanner();
         this.migrationExecutor = new JdbcSchemaMigrationExecutor(
                 this.executor,
-                this.renderer,
                 this.observer,
                 this.ddlTransactionSupport,
                 this.transactionParticipant,
@@ -195,7 +190,7 @@ public final class JdbcSchemaClient {
             throw new IllegalStateException(
                     "dangerous schema migration options require reviewCreateOrAlter and executeReviewed");
         }
-        SchemaMigrationPlan plan = planner.plan(form, indexes, foreignKeys, metadataReader, safeOptions);
+        SchemaMigrationPlan plan = planner.planJdbc(form, indexes, foreignKeys, metadataReader, safeOptions);
         long rows = migrationExecutor.executeWithInvalidation(
                 plan.requests(), metadataTables(form, plan.additionalCreatedTables()), invalidatorFor(metadataReader),
                 defaultExecutionOptions.sqlExecutionOptions());
@@ -209,7 +204,7 @@ public final class JdbcSchemaClient {
                                                            JdbcFormMetadataReader metadataReader,
                                                            SchemaMigrationOptions migrationOptions,
                                                            SchemaMigrationReviewPolicy reviewPolicy) {
-        return planner.review(form,
+        return planner.reviewJdbc(form,
                               indexes,
                               foreignKeys,
                               metadataReader,
@@ -242,19 +237,19 @@ public final class JdbcSchemaClient {
                                                  SchemaMigrationExecutionOptions options) {
         ReviewedSchemaPlan safePlan = Objects.requireNonNull(
                 reviewedPlan, "reviewed schema plan must not be null");
+        safePlan.requireExecutionDialect(relationalDialect);
         JdbcFormMetadataReader safeReader = Objects.requireNonNull(
                 metadataReader, "jdbc form metadata reader must not be null");
-        RelationIdentity relation = safePlan.desiredTable()
+        RelationIdentity relation = safePlan.targetIdentity()
                 .orElseThrow(() -> new IllegalArgumentException(
-                        "reviewed schema plan must contain a desired verification table"))
-                .identity();
+                        "reviewed schema plan must contain a verification target"));
         SchemaCacheInvalidationCoordinator invalidator = metadataInvalidator.with(
-                safeReader, safeReader::invalidate);
+                safeReader, safeReader);
         return migrationExecutor.executeReviewed(
                 safePlan,
                 () -> readSnapshot(safeReader, relation),
                 safeReader::snapshotCoverage,
-                () -> invalidate(invalidator, relation),
+                () -> invalidator.invalidate(relation),
                 options);
     }
 
@@ -273,6 +268,23 @@ public final class JdbcSchemaClient {
                 metadataReader, "jdbc form metadata reader must not be null");
         SchemaSnapshot actual = readSnapshot(safeReader, safeDesired.identity());
         return reviewer.review(database, safeDesired, actual, safeReader.snapshotCoverage(), mode);
+    }
+
+    /**
+     * 直读一次当前结构，并审核调用方明确提出的关系删除目标。删除始终使用精确兼容模式，
+     * 不会从缺少实体或表定义推断删除。
+     */
+    public ReviewedSchemaPlan reviewRelationalAbsent(DatabaseDescriptor database,
+                                                     RelationIdentity target,
+                                                     JdbcFormMetadataReader metadataReader) {
+        RelationalSchemaPlanReviewer reviewer = relationalReviewer();
+        RelationIdentity safeTarget = Objects.requireNonNull(
+                target, "absent relational target identity must not be null");
+        JdbcFormMetadataReader safeReader = Objects.requireNonNull(
+                metadataReader, "jdbc form metadata reader must not be null");
+        SchemaSnapshot actual = readSnapshot(safeReader, safeTarget);
+        return reviewer.reviewAbsent(
+                database, safeTarget, actual, safeReader.snapshotCoverage());
     }
 
     /** 使用客户端默认的逐条 SQL 执行保护。 */
@@ -300,7 +312,7 @@ public final class JdbcSchemaClient {
                                                  List<IndexMetadata> indexes,
                                                  JdbcFormMetadataReader metadataReader,
                                                  SchemaMigrationOptions options) {
-        return planner.plan(form, indexes, List.of(), metadataReader, options);
+        return planner.planJdbc(form, indexes, List.of(), metadataReader, options);
     }
 
     /** 执行明确描述的动态表结构变更集合。 */
@@ -341,7 +353,7 @@ public final class JdbcSchemaClient {
     private Consumer<String> invalidatorFor(JdbcFormMetadataReader reader) {
         JdbcFormMetadataReader safeReader = Objects.requireNonNull(
                 reader, "jdbc form metadata reader must not be null");
-        return metadataInvalidator.with(safeReader, safeReader::invalidate);
+        return metadataInvalidator.with(safeReader, safeReader);
     }
 
     static SchemaSnapshot readSnapshot(JdbcFormMetadataReader reader,
@@ -350,18 +362,7 @@ public final class JdbcSchemaClient {
             throw new UnsupportedOperationException(
                     "catalog-qualified schema snapshots are not supported by the JDBC reader");
         }
-        return relation.schema().isPresent()
-                ? reader.readSnapshot(relation.schema().orElseThrow(), relation.table())
-                : reader.readSnapshot(relation.table());
-    }
-
-    private static void invalidate(SchemaCacheInvalidationCoordinator invalidator,
-                                   RelationIdentity relation) {
-        if (relation.schema().isPresent()) {
-            invalidator.invalidate(relation.schema().orElseThrow(), relation.table());
-        } else {
-            invalidator.invalidate(relation.table());
-        }
+        return reader.readSnapshot(relation);
     }
 
     private static List<String> metadataTables(SchemaMigrationPlan plan) {

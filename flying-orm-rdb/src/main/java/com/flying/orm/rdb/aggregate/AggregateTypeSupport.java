@@ -88,8 +88,11 @@ final class AggregateTypeSupport {
         }
         LogicalType logicalType = field.databaseType().logicalType();
         boolean compatible = switch (logicalType) {
-            case SMALL_INTEGER, INTEGER -> javaType == Byte.class
+            case SMALL_INTEGER -> javaType == Byte.class
                     || javaType == Short.class || javaType == Integer.class;
+            case INTEGER -> javaType == Byte.class || javaType == Short.class
+                    || javaType == Integer.class
+                    || field.databaseType().unsigned() && javaType == Long.class;
             case BIG_INTEGER -> javaType == Long.class || javaType == BigInteger.class;
             case DECIMAL -> javaType == BigDecimal.class || javaType == BigInteger.class
                     || javaType == Double.class || javaType == Float.class;

@@ -5,6 +5,7 @@ import com.flying.orm.core.internal.hash.StableEncoder;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.RelationalMetadataFingerprint;
 
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -13,7 +14,7 @@ import java.util.Objects;
  * @author wangr
  * @version v3.2
  */
-public final class SchemaSnapshotFingerprint {
+final class SchemaSnapshotFingerprint {
 
     private static final StableDigest.Domain DOMAIN = StableDigest.domain("schema-snapshot/v1");
 
@@ -29,6 +30,7 @@ public final class SchemaSnapshotFingerprint {
             encoder.text("TABLE_COMMENT_STATE", source.tableComment().state().name())
                     .nullableText("TABLE_COMMENT", source.tableComment().value())
                     .text("COLUMNS_STATE", source.columns().state().name())
+                    .bool("PHYSICAL_COLUMN_TYPES", source.physicalColumnTypes())
                     .text("PRIMARY_KEY_STATE", source.primaryKey().state().name())
                     .text("UNIQUES_STATE", source.uniqueConstraints().state().name())
                     .text("INDEXES_STATE", source.indexes().state().name())
@@ -36,6 +38,12 @@ public final class SchemaSnapshotFingerprint {
                     .text("CHECKS_STATE", source.checks().state().name())
                     .text("TABLE_PARTITION_STATE", source.partition().state().name())
                     .text("KNOWN_DEFINITION", RelationalMetadataFingerprint.of(source.knownDefinition()));
+            if (!source.observedLogicalTypes().isEmpty()) {
+                encoder.integer("OBSERVED_LOGICAL_TYPE_COUNT", source.observedLogicalTypes().size());
+                source.observedLogicalTypes().entrySet().stream().sorted(Map.Entry.comparingByKey())
+                        .forEach(entry -> encoder.text("OBSERVED_COLUMN_NAME", entry.getKey())
+                                .text("OBSERVED_LOGICAL_TYPE", entry.getValue().canonical()));
+            }
             encoder.integer("UNKNOWN_ATTRIBUTE_COUNT", source.unknownAttributes().size());
             source.unknownAttributes().stream().sorted().forEach(
                     attribute -> encoder.text("UNKNOWN_ATTRIBUTE", attribute.name()));

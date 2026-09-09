@@ -66,13 +66,12 @@ public final class TermRegistry {
         Map<String, TermHandler> indexedHandlers = new LinkedHashMap<>(Names.mapCapacity(copiedHandlers.size()));
         List<TermExtensionDescriptor> descriptors = new ArrayList<>();
         for (TermHandler handler : copiedHandlers) {
-            TermHandler safeHandler = Objects.requireNonNull(handler, "term handler must not be null");
-            String normalizedId = Names.key(safeHandler.id(), "term id");
-            TermHandler previous = indexedHandlers.putIfAbsent(normalizedId, safeHandler);
+            String normalizedId = Names.key(handler.id(), "term id");
+            TermHandler previous = indexedHandlers.putIfAbsent(normalizedId, handler);
             if (previous != null) {
                 throw new IllegalArgumentException("duplicate term id");
             }
-            descriptor(safeHandler, normalizedId).ifPresent(descriptors::add);
+            descriptor(handler, normalizedId).ifPresent(descriptors::add);
         }
         this.handlers = copiedHandlers;
         this.handlersById = Map.copyOf(indexedHandlers);

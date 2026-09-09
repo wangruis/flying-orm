@@ -35,7 +35,10 @@ record BatchSummaryMetrics(BatchWriteResult.Status status,
     static BatchSummaryMetrics from(BatchWriteResult result) {
         BatchWriteResult safeResult = Objects.requireNonNull(result, "batch write result must not be null");
         long chunkCount = safeResult.chunks().size();
-        long successfulChunkCount = BatchObservationClassification.successfulChunkCount(safeResult);
+        long successfulChunkCount = safeResult.chunks().stream()
+                .filter(chunk -> chunk.status() == BatchChunkResult.Status.COMMITTED
+                        || chunk.status() == BatchChunkResult.Status.ENLISTED)
+                .count();
         return new BatchSummaryMetrics(
                 safeResult.status(),
                 safeResult.inputCount(),
@@ -44,17 +47,23 @@ record BatchSummaryMetrics(BatchWriteResult.Status status,
                 chunkCount,
                 successfulChunkCount,
                 chunkCount - successfulChunkCount,
-                BatchObservationClassification.firstFailure(safeResult),
-                BatchObservationClassification.firstRecoveryToken(safeResult));
+                safeResult.chunks().stream().map(BatchChunkResult::failure)
+                        .filter(Objects::nonNull).findFirst().orElse(null),
+                safeResult.chunks().stream().map(BatchChunkResult::recoveryToken)
+                        .filter(Objects::nonNull).findFirst().orElse(null));
     }
 
     SqlFailureCategory failureCategory() {
         if (conflictCount > 0) {
             return SqlFailureCategory.OPTIMISTIC_LOCK;
         }
-        return firstFailure == null
-                ? BatchObservationClassification.category(status)
-                : BatchObservationClassification.category(firstFailure);
+        if (firstFailure != null) {
+            return SqlFailureCategory.fromKind(firstFailure.kind());
+        }
+        return switch (status) {
+            case COMMITTED, ENLISTED, ROLLED_BACK -> SqlFailureCategory.NONE;
+            case PARTIAL, UNKNOWN -> SqlFailureCategory.UNKNOWN;
+        };
     }
 
     private static void requireNonNegative(String name, long value) {

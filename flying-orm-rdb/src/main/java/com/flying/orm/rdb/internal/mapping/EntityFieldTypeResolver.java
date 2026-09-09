@@ -2,6 +2,7 @@ package com.flying.orm.rdb.internal.mapping;
 
 import com.flying.orm.core.annotation.EnumValue;
 import com.flying.orm.rdb.mapping.EntityEnumStorage;
+import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
 import com.flying.orm.rdb.mapping.MappingException;
 import tools.jackson.databind.JsonNode;
 
@@ -16,6 +17,7 @@ import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.OffsetTime;
 import java.util.Map;
+import java.util.UUID;
 
 /** 从 Java 字段类型和自有 @EnumValue 声明推断跨方言逻辑数据类型。 */
 final class EntityFieldTypeResolver {
@@ -77,6 +79,9 @@ final class EntityFieldTypeResolver {
         }
         if (String.class.equals(safeType) || safeType.isEnum()) {
             return "VARCHAR";
+        }
+        if (UUID.class.equals(safeType)) {
+            return EntityTypeMappingRegistry.standard().resolve(safeType).databaseType().canonical();
         }
         if (Long.class.equals(safeType)) {
             return "BIGINT";

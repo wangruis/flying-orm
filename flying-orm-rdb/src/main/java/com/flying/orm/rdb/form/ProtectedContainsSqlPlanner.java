@@ -8,6 +8,7 @@ import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.sql.render.SqlFragment;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.PaginationDialect;
+import com.flying.orm.rdb.protection.ProtectedContainsLayout;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 
 import java.util.ArrayList;
@@ -46,10 +47,11 @@ final class ProtectedContainsSqlPlanner {
             throw new IllegalArgumentException("protected contains candidate limit must be positive and bounded");
         }
         String owners = safe.primaryKeys().stream().map(support::identifier).collect(Collectors.joining(", "));
-        String tokenColumn = support.identifier("token_hash");
+        String tokenColumn = support.identifier(ProtectedContainsLayout.tokenHashColumn(safe.primaryKeys()));
         String base = "select " + owners + " from " + support.derivedRelationIdentifier(
                 safe.physicalForm(), safe.tokenTable())
-                + " where " + support.identifier("field_tag") + " = ? and " + tokenColumn + " in (%s)"
+                + " where " + support.identifier(ProtectedContainsLayout.fieldTagColumn(safe.primaryKeys()))
+                + " = ? and " + tokenColumn + " in (%s)"
                 + " group by " + owners
                 + " having count(distinct " + tokenColumn + ") = ?"
                 + " order by " + owners;
@@ -109,8 +111,10 @@ final class ProtectedContainsSqlPlanner {
         List<String> candidateColumns = candidateColumns(safe.primaryKeys().size());
         List<Object> parameters = new ArrayList<>();
         List<String> candidates = new ArrayList<>(safe.tokenGroups().size());
+        String fieldTag = ProtectedContainsLayout.fieldTagColumn(safe.primaryKeys());
+        String tokenHash = ProtectedContainsLayout.tokenHashColumn(safe.primaryKeys());
         for (ProtectedFieldRuntime.ContainsTokenGroup group : safe.tokenGroups()) {
-            candidates.add(candidateSubquery(safe, group, candidateColumns, parameters));
+            candidates.add(candidateSubquery(safe, group, candidateColumns, fieldTag, tokenHash, parameters));
         }
         String businessAlias = "fop_business";
         SqlFragment where = businessCondition(safe, businessAlias);
@@ -188,6 +192,8 @@ final class ProtectedContainsSqlPlanner {
     private String candidateSubquery(ProtectedFieldRuntime.PreparedContainsQuery query,
                                      ProtectedFieldRuntime.ContainsTokenGroup group,
                                      List<String> candidateColumns,
+                                     String fieldTag,
+                                     String tokenHash,
                                      List<Object> parameters) {
         String tokenAlias = "fop_token";
         List<byte[]> tokens = group.tokens();
@@ -201,13 +207,13 @@ final class ProtectedContainsSqlPlanner {
         String groupedOwners = query.primaryKeys().stream()
                                     .map(field -> qualified(tokenAlias, field))
                                     .collect(Collectors.joining(", "));
-        String tokenColumn = qualified(tokenAlias, "token_hash");
+        String tokenColumn = qualified(tokenAlias, tokenHash);
         parameters.add(query.fieldTag());
         parameters.addAll(tokens);
         parameters.add(query.distinctTokenCount());
         return "select " + owners + " from " + support.derivedRelationIdentifier(
                 query.physicalForm(), query.tokenTable()) + " " + tokenAlias
-                + " where " + qualified(tokenAlias, "field_tag") + " = ? and " + tokenColumn
+                + " where " + qualified(tokenAlias, fieldTag) + " = ? and " + tokenColumn
                 + " in (" + markers + ") group by " + groupedOwners
                 + " having count(distinct " + tokenColumn + ") = ?";
     }

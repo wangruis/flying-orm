@@ -5,6 +5,7 @@ import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.RemovalCause;
 import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.schema.SchemaSnapshot;
@@ -113,6 +114,11 @@ final class CachedReactiveFormMetadataReader implements ReactiveFormMetadataCach
         return delegate.readSnapshot(schema, table);
     }
 
+    @Override
+    public Mono<SchemaSnapshot> readSnapshot(RelationIdentity relation) {
+        return delegate.readSnapshot(relation);
+    }
+
     private <T> Mono<T> contextual(MetadataCacheKey key,
                                    MetadataCacheRegionStats stats,
                                    Supplier<Mono<T>> loader) {
@@ -137,7 +143,7 @@ final class CachedReactiveFormMetadataReader implements ReactiveFormMetadataCach
             invalidate(safeTable.substring(0, separator), safeTable.substring(separator + 1));
             return;
         }
-        removeMatchingTable(safeTable);
+        removeMatching(null, safeTable);
         dependentInvalidator.invalidate(safeTable);
     }
 
@@ -147,6 +153,19 @@ final class CachedReactiveFormMetadataReader implements ReactiveFormMetadataCach
         String safeTable = requireText(table, "metadata cache table");
         removeMatching(safeSchema, safeTable);
         dependentInvalidator.invalidate(safeSchema, safeTable);
+    }
+
+    @Override
+    public void invalidate(RelationIdentity relation) {
+        RelationIdentity target = Objects.requireNonNull(
+                relation, "metadata cache relation must not be null");
+        if (target.catalog().isPresent()) {
+            invalidateAll();
+            return;
+        }
+        MetadataCacheKey key = MetadataCacheKey.table(target);
+        removeMatching(key.schema(), key.table());
+        dependentInvalidator.invalidate(target);
     }
 
     @Override
@@ -260,11 +279,9 @@ final class CachedReactiveFormMetadataReader implements ReactiveFormMetadataCach
     }
 
     private void removeMatching(String schema, String table) {
-        entries.asMap().keySet().removeIf(key -> Objects.equals(key.schema(), schema) && key.table().equals(table));
-    }
-
-    private void removeMatchingTable(String table) {
-        entries.asMap().keySet().removeIf(key -> key.table().equals(table));
+        entries.asMap().keySet().removeIf(
+                key -> key.table().equals(table)
+                        && (schema == null || key.schema() == null || Objects.equals(key.schema(), schema)));
     }
 
     private Cache<MetadataCacheKey, MetadataCachedValue<?>> newCache(CacheRegionPolicy policy) {

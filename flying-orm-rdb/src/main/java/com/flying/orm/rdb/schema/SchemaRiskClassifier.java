@@ -18,7 +18,7 @@ import java.util.Objects;
  * @author wangr
  * @version v3.2
  */
-public final class SchemaRiskClassifier {
+final class SchemaRiskClassifier {
 
     private SchemaRiskClassifier() {
     }

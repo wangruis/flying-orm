@@ -45,7 +45,7 @@ public record SqlPlanSpec(String dialect,
         table = normalizeTable(table);
         operation = requireText(operation, "sql plan operation").toLowerCase(Locale.ROOT);
         fields = List.copyOf(Objects.requireNonNull(fields, "sql plan fields must not be null"));
-        if (fields.stream().anyMatch(field -> field == null || field.isBlank())) {
+        if (fields.stream().anyMatch(String::isBlank)) {
             throw new IllegalArgumentException("sql plan fields must not contain blank values");
         }
         conditionShape = requireNonNullShape(conditionShape, "condition");

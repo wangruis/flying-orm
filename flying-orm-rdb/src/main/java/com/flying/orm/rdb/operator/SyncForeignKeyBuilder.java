@@ -2,8 +2,6 @@ package com.flying.orm.rdb.operator;
 
 import com.flying.orm.core.metadata.ForeignKeyMetadata;
 
-import java.util.Objects;
-
 /**
  * 同步外键定义 builder。
  *
@@ -17,19 +15,17 @@ import java.util.Objects;
 public final class SyncForeignKeyBuilder {
 
     private final SyncCreateOrAlterTableBuilder table;
-    private final SyncDdlStructureState jdbcState;
-    private final ForeignKeyMetadata.Builder jdbcForeignKey;
+    private final ForeignKeyMetadata.Builder foreignKey;
 
-    SyncForeignKeyBuilder(SyncDdlStructureState jdbcState, String name, SyncCreateOrAlterTableBuilder table) {
-        this.table = Objects.requireNonNull(table, "table builder must not be null");
-        this.jdbcState = Objects.requireNonNull(jdbcState, "sync DDL state must not be null");
-        this.jdbcForeignKey = ForeignKeyMetadata.builder(
-                CreateOrAlterTableBuilder.requireText(name, "foreign key name"));
+    SyncForeignKeyBuilder(SyncCreateOrAlterTableBuilder table, String name) {
+        this.table = table;
+        this.foreignKey = ForeignKeyMetadata.builder(
+                DdlStructureDraft.requireText(name, "foreign key name"));
     }
 
     /** 追加当前表的一个外键列。 */
     public SyncForeignKeyBuilder column(String name) {
-        jdbcForeignKey.addColumn(CreateOrAlterTableBuilder.requireText(name, "foreign key column"));
+        foreignKey.addColumn(DdlStructureDraft.requireText(name, "foreign key column"));
         return this;
     }
 
@@ -44,15 +40,15 @@ public final class SyncForeignKeyBuilder {
 
     /** 设置被引用的物理表名。 */
     public SyncForeignKeyBuilder referenceTable(String name) {
-        jdbcForeignKey.referenceTable(
-                CreateOrAlterTableBuilder.requireText(name, "foreign key reference table"));
+        foreignKey.referenceTable(
+                DdlStructureDraft.requireText(name, "foreign key reference table"));
         return this;
     }
 
     /** 追加一个被引用的列。 */
     public SyncForeignKeyBuilder referenceColumn(String name) {
-        jdbcForeignKey.addReferenceColumn(
-                CreateOrAlterTableBuilder.requireText(name, "foreign key reference column"));
+        foreignKey.addReferenceColumn(
+                DdlStructureDraft.requireText(name, "foreign key reference column"));
         return this;
     }
 
@@ -67,7 +63,7 @@ public final class SyncForeignKeyBuilder {
 
     /** 冻结当前外键描述并加入表级草稿。 */
     public SyncCreateOrAlterTableBuilder commit() {
-        jdbcState.addForeignKey(jdbcForeignKey.build());
+        table.draft().addForeignKey(foreignKey.build());
         return table;
     }
 }

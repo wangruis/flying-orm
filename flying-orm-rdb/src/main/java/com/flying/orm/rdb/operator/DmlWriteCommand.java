@@ -1,6 +1,9 @@
 package com.flying.orm.rdb.operator;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.ConditionNode;
+import com.flying.orm.core.condition.TermCondition;
+import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.form.LogicDeleteDefinition;
 import com.flying.orm.core.scope.DataScope;
@@ -10,6 +13,7 @@ import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.lock.OptimisticLockOptions;
 
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -82,13 +86,50 @@ final class DmlWriteCommand {
     WriteSpec spec() {
         WriteSpec spec;
         if (kind == Kind.UPDATE) {
-            DynamicForm form = DmlFormBuilder.form(table, values.keySet(), lock, logicDelete, where);
+            DynamicForm form = form(values.keySet());
             spec = WriteSpec.update(form, values, where).withScope(scope);
         } else {
-            DynamicForm form = DmlFormBuilder.form(table, Set.of(), lock, logicDelete, where);
+            DynamicForm form = form(Set.of());
             spec = WriteSpec.delete(form, where).withScope(scope);
         }
         return lock == null ? spec : spec.withLock(lock);
+    }
+
+    /**
+     * 用本次命令真正出现的字段构造临时表单。
+     *
+     * <p>表名、赋值字段、条件字段和逻辑删除字段已经分别在进入命令时完成 SQL 标识符校验；这里只对
+     * 来自独立 {@link OptimisticLockOptions} 的版本字段补齐同一边界校验，随后保留声明顺序生成表单。</p>
+     */
+    private DynamicForm form(Set<String> fields) {
+        Set<String> names = new LinkedHashSet<>(fields);
+        collectConditionFields(where, names);
+        if (lock != null) {
+            names.add(SqlIdentifiers.requireIdentifier(lock.field(), "operator field"));
+        }
+        if (logicDelete != null) {
+            names.add(logicDelete.fieldName());
+        }
+
+        DynamicForm.Builder builder = DynamicForm.builder(table, table);
+        for (String name : names) {
+            builder.addField(DynamicField.of(name, "OTHER"));
+        }
+        if (logicDelete != null) {
+            builder.logicDelete(
+                    logicDelete.fieldName(), logicDelete.notDeletedValue(), logicDelete.deletedValue());
+        }
+        return builder.build();
+    }
+
+    private static void collectConditionFields(ConditionGroup group, Set<String> names) {
+        for (ConditionNode child : group.children()) {
+            if (child instanceof ConditionGroup nested) {
+                collectConditionFields(nested, names);
+            } else {
+                names.add(((TermCondition) child).field());
+            }
+        }
     }
 
     private void requireKind(Kind expected) {

@@ -95,7 +95,7 @@ final class EntityRelationalConstraintCompiler {
             List<Property> members = resolveProperties(
                     properties, List.of(annotation.properties()), "unique constraint");
             UniqueConstraintDefinition definition = new UniqueConstraintDefinition(
-                    defaultName(annotation.name(), id), columns(members));
+                    defaultName(annotation.name(), id), columns(members), annotation.nullPolicy());
             merge(definitions, id, definition, Object::equals, "unique constraint");
         }
     }
@@ -185,9 +185,8 @@ final class EntityRelationalConstraintCompiler {
     private static TargetProperties targetProperties(
             Class<?> targetType,
             String[] propertyNames) {
-        EntityCompilation<?> target = new EntityMetadataCompiler(EntityNamingStrategy.SNAKE_CASE)
-                .compileModel(Objects.requireNonNull(
-                        targetType, "foreign key target entity must not be null"));
+        EntityCompilation<?> target = EntityMetadataResolver.compileModel(Objects.requireNonNull(
+                targetType, "foreign key target entity must not be null"));
         LinkedHashMap<String, EntityFieldMetadata> properties = new LinkedHashMap<>();
         for (int index = 0; index < target.persistentFields().size(); index++) {
             properties.put(target.persistentFields().get(index).getName(),

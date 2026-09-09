@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.mapping;
 
+import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 
@@ -37,11 +38,12 @@ public interface EntityMappingListener {
      * @return 组合后的监听器
      */
     static EntityMappingListener compose(EntityMappingListener... listeners) {
-        List<EntityMappingListener> ordered = List.of(listeners).stream()
-                                                      .map(listener -> Objects.requireNonNull(
-                                                              listener, "entity mapping listener must not be null"))
-                                                      .filter(listener -> listener != NONE)
-                                                      .toList();
+        List<EntityMappingListener> ordered = Arrays.stream(Objects.requireNonNull(
+                        listeners, "entity mapping listeners must not be null"))
+                .map(listener -> Objects.requireNonNull(
+                        listener, "entity mapping listener must not be null"))
+                .filter(listener -> listener != NONE)
+                .toList();
         if (ordered.isEmpty()) {
             return NONE;
         }

@@ -39,16 +39,15 @@ public final class FeatureRegistry {
         Map<Class<? extends Feature>, Feature> indexedByType = new LinkedHashMap<>(Names.mapCapacity(copiedFeatures.size()));
 
         for (Feature feature : copiedFeatures) {
-            Feature safeFeature = Objects.requireNonNull(feature, "feature must not be null");
-            String normalizedId = Names.key(safeFeature.id(), "feature id");
-            Feature previousById = indexedById.putIfAbsent(normalizedId, safeFeature);
+            String normalizedId = Names.key(feature.id(), "feature id");
+            Feature previousById = indexedById.putIfAbsent(normalizedId, feature);
             if (previousById != null) {
                 throw new IllegalArgumentException("duplicate feature id");
             }
 
             @SuppressWarnings("unchecked")
-            Class<? extends Feature> featureType = (Class<? extends Feature>) safeFeature.getClass();
-            Feature previousByType = indexedByType.putIfAbsent(featureType, safeFeature);
+            Class<? extends Feature> featureType = (Class<? extends Feature>) feature.getClass();
+            Feature previousByType = indexedByType.putIfAbsent(featureType, feature);
             if (previousByType != null) {
                 throw new IllegalArgumentException("duplicate feature type: " + featureType.getName());
             }

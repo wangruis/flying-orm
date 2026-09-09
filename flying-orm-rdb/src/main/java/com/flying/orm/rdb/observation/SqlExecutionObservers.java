@@ -153,15 +153,27 @@ public final class SqlExecutionObservers {
         if (delegates.size() == 1) {
             return delegates.getFirst();
         }
+        // Bind each delegate's requested details once, as execution adapters do at assembly.
+        int[] detailRequirements = new int[delegates.size()];
+        int combinedRequirements = 0;
+        for (int index = 0; index < delegates.size(); index++) {
+            SqlExecutionObserver delegate = delegates.get(index);
+            int details = (delegate.requiresParameterValues() ? 1 : 0)
+                    | (delegate.requiresTransactionSource() ? 2 : 0);
+            detailRequirements[index] = details;
+            combinedRequirements |= details;
+        }
+        boolean parametersRequired = (combinedRequirements & 1) != 0;
+        boolean transactionSourceRequired = (combinedRequirements & 2) != 0;
         return new SqlExecutionObserver() {
             @Override
             public boolean requiresParameterValues() {
-                return delegates.stream().anyMatch(SqlExecutionObserver::requiresParameterValues);
+                return parametersRequired;
             }
 
             @Override
             public boolean requiresTransactionSource() {
-                return delegates.stream().anyMatch(SqlExecutionObserver::requiresTransactionSource);
+                return transactionSourceRequired;
             }
 
             @Override
@@ -171,19 +183,34 @@ public final class SqlExecutionObservers {
 
             @Override
             public void onExecution(SqlExecutionObservation observation, List<Object> parameters) {
-                delegates.forEach(observer -> observer.onExecution(observation, parameters));
+                publish(observation, parameters, null, 1);
             }
 
             @Override
             public void onExecution(SqlExecutionObservation observation, SqlTransactionSource transactionSource) {
-                delegates.forEach(observer -> observer.onExecution(observation, transactionSource));
+                publish(observation, null, transactionSource, 2);
             }
 
             @Override
             public void onExecution(SqlExecutionObservation observation,
                                     List<Object> parameters,
                                     SqlTransactionSource transactionSource) {
-                delegates.forEach(observer -> observer.onExecution(observation, parameters, transactionSource));
+                publish(observation, parameters, transactionSource, 3);
+            }
+
+            private void publish(SqlExecutionObservation observation,
+                                 List<Object> parameters,
+                                 SqlTransactionSource transactionSource,
+                                 int availableDetails) {
+                for (int index = 0; index < delegates.size(); index++) {
+                    SqlExecutionObserver delegate = delegates.get(index);
+                    switch (detailRequirements[index] & availableDetails) {
+                        case 0 -> delegate.onExecution(observation);
+                        case 1 -> delegate.onExecution(observation, parameters);
+                        case 2 -> delegate.onExecution(observation, transactionSource);
+                        case 3 -> delegate.onExecution(observation, parameters, transactionSource);
+                    }
+                }
             }
 
             @Override
@@ -201,6 +228,11 @@ public final class SqlExecutionObservers {
         SqlExecutionObserver delegate = Objects.requireNonNull(observer,
                                                                "sql execution observer must not be null");
         return safe(new SqlExecutionObserver() {
+            @Override
+            public boolean enabled() {
+                return delegate.enabled();
+            }
+
             @Override
             public boolean requiresParameterValues() {
                 return delegate.requiresParameterValues();

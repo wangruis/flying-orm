@@ -15,18 +15,22 @@ import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.metadata.TablePartitionDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
+import com.flying.orm.core.metadata.UniqueNullPolicy;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.sql.render.SqlIdentifiers;
 import com.flying.orm.core.type.DatabaseType;
+import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.rdb.schema.SchemaSnapshot;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -45,6 +49,15 @@ final class FormMetadataRowConverter {
             "(?i)^next\\s+value\\s+for\\s+(.+)$");
     private static final Pattern ORACLE_SEQUENCE_DEFAULT = Pattern.compile(
             "(?i)^(.+?)\\.nextval$");
+    private static final Pattern POSTGRESQL_TYPE_IDENTIFIER = Pattern.compile("[a-z_][a-z0-9_]*");
+    private static final String POSTGRESQL_VECTOR_EXTENSION_MARKER = "_flying_orm_pgvector_";
+    private static final String ORACLE_QUOTED_IDENTIFIER = "\"(?:[^\"]|\"\")+\"";
+    private static final Pattern ORACLE_NULL_DISTINCT_CASE = Pattern.compile(
+            "(?is)^case\\s+when\\s+(.+?)\\s+then\\s+(" + ORACLE_QUOTED_IDENTIFIER
+                    + ")\\s+(?:else\\s+null\\s+)?end$");
+    private static final Pattern ORACLE_NONNULL_COLUMN = Pattern.compile(
+            "(?i)\\s*(" + ORACLE_QUOTED_IDENTIFIER + ")\\s+is\\s+not\\s+null\\s*");
+    private static final Pattern ORACLE_AND = Pattern.compile("(?i)and\\s+");
 
     private FormMetadataRowConverter() {
     }
@@ -73,6 +86,33 @@ final class FormMetadataRowConverter {
         TableMetadata.Builder builder = TableMetadata.builder(table);
         form.toTableMetadata().columns().forEach(builder::addColumn);
         toIndexes(indexRows).forEach(builder::addIndex);
+        toForeignKeys(foreignKeyRows).forEach(builder::addForeignKey);
+        return builder.build();
+    }
+
+    static TableMetadata toTableMetadata(String table,
+                                         DynamicForm form,
+                                         List<? extends Map<String, Object>> indexRows,
+                                         List<? extends Map<String, Object>> foreignKeyRows,
+                                         List<? extends Map<String, Object>> uniqueRows,
+                                         InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
+        if (uniqueRows.isEmpty()) {
+            return toTableMetadata(table, form, indexRows, foreignKeyRows);
+        }
+        UniqueProjection unique = toUniqueProjection(uniqueRows, dialect);
+        TableMetadata.Builder builder = TableMetadata.builder(table);
+        form.toTableMetadata().columns().forEach(builder::addColumn);
+        toIndexes(indexRows).forEach(builder::addIndex);
+        for (UniqueConstraintDefinition constraint : unique.constraints()) {
+            IndexMetadata.Builder index = IndexMetadata.builder(constraint.name()).unique();
+            constraint.columns().forEach(index::addColumn);
+            builder.addIndex(index.build());
+        }
+        for (IndexDefinition uniqueIndex : unique.indexes()) {
+            IndexMetadata.Builder index = IndexMetadata.builder(uniqueIndex.name()).unique();
+            uniqueIndex.keys().forEach(key -> index.addColumn(key.column()));
+            builder.addIndex(index.build());
+        }
         toForeignKeys(foreignKeyRows).forEach(builder::addForeignKey);
         return builder.build();
     }
@@ -116,6 +156,23 @@ final class FormMetadataRowConverter {
             List<? extends Map<String, Object>> checkRows,
             Function<String, String> typeMapper,
             InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
+        return toCompleteSchemaSnapshot(
+                identity, columnRows, tableRows, primaryKeyRows, uniqueRows, indexRows,
+                foreignKeyRows, checkRows, typeMapper, null, dialect);
+    }
+
+    static SchemaSnapshot toCompleteSchemaSnapshot(
+            RelationIdentity identity,
+            List<? extends Map<String, Object>> columnRows,
+            List<? extends Map<String, Object>> tableRows,
+            List<? extends Map<String, Object>> primaryKeyRows,
+            List<? extends Map<String, Object>> uniqueRows,
+            List<? extends Map<String, Object>> indexRows,
+            List<? extends Map<String, Object>> foreignKeyRows,
+            List<? extends Map<String, Object>> checkRows,
+            Function<String, String> typeMapper,
+            Function<String, String> snapshotTypeMapper,
+            InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
         Objects.requireNonNull(columnRows, "metadata column rows must not be null");
         Objects.requireNonNull(tableRows, "metadata table rows must not be null");
         if (tableRows.isEmpty() && columnRows.isEmpty()) {
@@ -124,14 +181,20 @@ final class FormMetadataRowConverter {
         if (tableRows.size() != 1 || columnRows.isEmpty()) {
             throw new IllegalStateException("table existence and column metadata are inconsistent");
         }
-        List<ColumnDefinition> columns = toColumnDefinitions(columnRows, typeMapper, dialect);
+        ColumnProjection projection = toColumnDefinitions(
+                columnRows, typeMapper, snapshotTypeMapper, dialect);
+        List<ColumnDefinition> columns = projection.columns();
+        UniqueProjection uniqueProjection = toUniqueProjection(uniqueRows, dialect);
+        UniqueProjection indexProjection = toIndexProjection(indexRows, dialect, projection.semanticTypes().keySet());
+        List<UniqueConstraintDefinition> uniqueConstraints = new ArrayList<>(uniqueProjection.constraints());
+        uniqueConstraints.addAll(indexProjection.constraints());
         SchemaSnapshot.Builder snapshot = SchemaSnapshot.builder(identity)
                 .tablePresent()
-                .columns(columns)
-                .uniqueConstraints(toUniqueConstraints(uniqueRows))
-                .indexes(toIndexDefinitions(indexRows))
+                .physicalColumns(columns, projection.semanticTypes())
+                .uniqueConstraints(uniqueConstraints)
+                .indexes(mergeIndexes(indexProjection.indexes(), uniqueProjection.indexes()))
                 .foreignKeys(toForeignKeyDefinitions(identity, foreignKeyRows))
-                .checks(toCheckConstraints(checkRows, columns, dialect));
+                .checks(toCheckConstraints(checkRows, projection.semanticTypes(), dialect));
         applyTableFacts(snapshot, tableRows, dialect);
         PrimaryKeyDefinition primaryKey = toPrimaryKey(primaryKeyRows);
         if (primaryKey == null) {
@@ -142,40 +205,107 @@ final class FormMetadataRowConverter {
         return snapshot.build();
     }
 
-    private static List<ColumnDefinition> toColumnDefinitions(
+    private static ColumnProjection toColumnDefinitions(
             List<? extends Map<String, Object>> rows,
             Function<String, String> typeMapper,
+            Function<String, String> snapshotTypeMapper,
             InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
         Function<String, String> safeTypeMapper = Objects.requireNonNull(
                 typeMapper, "type mapper must not be null");
+        Function<String, String> safeSnapshotTypeMapper = snapshotTypeMapper == null
+                ? safeTypeMapper : snapshotTypeMapper;
         List<ColumnDefinition> columns = new ArrayList<>(rows.size());
+        Map<String, DatabaseType> semanticTypes = new LinkedHashMap<>();
         for (Map<String, Object> row : rows) {
             requireRepresentable(row, "COLUMN_REPRESENTABLE", "UNSUPPORTED_COLUMN_REASON",
                                  "column", text(row, "COLUMN_NAME"));
-            String mappedType = safeTypeMapper.apply(text(row, "DATA_TYPE"));
-            DatabaseType databaseType = DatabaseType.of(mappedType);
+            String logicalMetadata = optionalText(row, "LOGICAL_DATA_TYPE");
+            String semanticSource = logicalMetadata == null
+                    || "ARRAY".equalsIgnoreCase(logicalMetadata)
+                    || "USER-DEFINED".equalsIgnoreCase(logicalMetadata)
+                    ? text(row, "DATA_TYPE") : logicalMetadata;
+            String semanticType = safeTypeMapper.apply(semanticSource);
+            String physicalType = optionalText(row, "PHYSICAL_DATA_TYPE");
+            String mappedType = dialect == InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL
+                    && snapshotTypeMapper != null
+                    ? postgresqlPhysicalType(row, safeSnapshotTypeMapper)
+                    : safeSnapshotTypeMapper.apply(physicalType == null ? text(row, "DATA_TYPE") : physicalType);
+            Long largeObjectLength = h2LargeObjectLength(mappedType, row, dialect);
+            DatabaseType databaseType = DatabaseType.of(largeObjectLength != null
+                    && largeObjectLength > Integer.MAX_VALUE
+                    ? mappedType + "(" + largeObjectLength + ")" : mappedType);
             ValueGeneration generation = generation(row);
             ColumnDefinition.Builder column = ColumnDefinition.builder(text(row, "COLUMN_NAME"), databaseType)
+                    .length(largeObjectLength != null && largeObjectLength <= Integer.MAX_VALUE
+                            ? largeObjectLength.intValue() : null)
                     .nullable(nullable(row))
                     .comment(optionalText(row, "REMARKS"))
                     .generation(generation)
                     .charset(optionalText(row, "COLUMN_CHARSET"))
                     .collation(optionalText(row, "COLUMN_COLLATION"));
-            applyTypeArguments(column, databaseType, row);
+            if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER) {
+                column.defaultConstraintName(optionalText(row, "DEFAULT_CONSTRAINT_NAME"));
+            }
+            DatabaseType semanticDatabaseType = DatabaseType.of(semanticType);
+            semanticTypes.put(text(row, "COLUMN_NAME"), semanticDatabaseType);
+            applyTypeArguments(column, databaseType, row, dialect);
             if (!generation.generated()) {
                 column.defaultValue(RelationalMetadataValueParser.columnDefault(
-                        nullableRawText(row, "COLUMN_DEFAULT"), databaseType, dialect));
+                        nullableRawText(row, "COLUMN_DEFAULT"), semanticDatabaseType, dialect));
             }
             columns.add(column.build());
         }
-        return List.copyOf(columns);
+        return new ColumnProjection(List.copyOf(columns), Map.copyOf(semanticTypes));
+    }
+
+    static String postgresqlPhysicalType(Map<String, Object> row,
+                                         Function<String, String> typeMapper) {
+        Function<String, String> safeMapper = Objects.requireNonNull(
+                typeMapper, "PostgreSQL physical type mapper must not be null");
+        DatabaseType formatted = DatabaseType.of(
+                safeMapper.apply(text(row, "PHYSICAL_DATA_TYPE")))
+                .requireSafe("PostgreSQL physical data type");
+        String schema = postgresqlTypeIdentifier(text(row, "PHYSICAL_TYPE_SCHEMA"));
+        String name = postgresqlTypeIdentifier(text(row, "PHYSICAL_TYPE_NAME"));
+        String extension = optionalText(row, "PHYSICAL_TYPE_EXTENSION");
+        boolean array = bool(row, "PHYSICAL_ARRAY");
+        if (array != formatted.isArray()) {
+            throw new IllegalStateException("PostgreSQL physical array metadata is inconsistent");
+        }
+        String identity = "vector".equals(extension) && "vector".equals(name)
+                ? POSTGRESQL_VECTOR_EXTENSION_MARKER + schema + "." + name
+                : schema + "." + name;
+        if ("pg_catalog".equals(schema) && "interval".equals(name)) {
+            String canonical = formatted.canonical();
+            if (!canonical.startsWith("interval")) {
+                throw new IllegalStateException("PostgreSQL interval metadata is inconsistent");
+            }
+            return identity + canonical.substring("interval".length());
+        }
+        String arguments = formatted.arguments().isEmpty()
+                ? "" : "(" + String.join(",", formatted.arguments()) + ")";
+        return identity + arguments + "[]".repeat(formatted.arrayDimensions());
+    }
+
+    private static String postgresqlTypeIdentifier(String value) {
+        if (!POSTGRESQL_TYPE_IDENTIFIER.matcher(value).matches()) {
+            throw new IllegalStateException("PostgreSQL quoted type identity cannot be represented safely");
+        }
+        return value;
     }
 
     private static void applyTypeArguments(ColumnDefinition.Builder column,
                                            DatabaseType databaseType,
-                                           Map<String, Object> row) {
+                                           Map<String, Object> row,
+                                           InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
+        if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE
+                && "FLOAT".equals(databaseType.baseName())) {
+            column.precision(integer(row, "NUMERIC_PRECISION", 1));
+            return;
+        }
         if (switch (databaseType.baseName()) {
-            case "VARCHAR", "BLOB", "MYSQL_BINARY" -> true;
+            case "VARCHAR", "MYSQL_BINARY", "CHAR", "NCHAR", "NVARCHAR", "VARCHAR2", "NVARCHAR2",
+                    "CHARACTER", "CHARACTER VARYING", "BINARY", "BINARY VARYING", "VARBINARY", "RAW" -> true;
             default -> false;
         }) {
             column.length(integer(row, "CHARACTER_MAXIMUM_LENGTH", 1));
@@ -183,13 +313,37 @@ final class FormMetadataRowConverter {
         }
         if (databaseType.logicalType().numeric()
                 && ("DECIMAL".equals(databaseType.baseName())
-                    || "NUMERIC".equals(databaseType.baseName()))) {
-            column.precision(integer(row, "NUMERIC_PRECISION", 1))
-                  .scale(integer(row, "NUMERIC_SCALE", 0));
+                    || "NUMERIC".equals(databaseType.baseName())
+                    || "NUMBER".equals(databaseType.baseName()))) {
+            Integer scale = integer(row, "NUMERIC_SCALE", 0);
+            if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE
+                    && value(row, "NUMERIC_SCALE") != null && scale == null) {
+                throw new IllegalStateException("Oracle numeric scale cannot be represented safely");
+            }
+            column.precision(integer(row, "NUMERIC_PRECISION", 1)).scale(scale);
             return;
         }
-        if (databaseType.isTemporal()) {
+        if (databaseType.isTemporal() && databaseType.logicalType() != LogicalType.DATE) {
             column.temporalPrecision(temporalPrecision(row));
+        }
+    }
+
+    private static Long h2LargeObjectLength(String type, Map<String, Object> row,
+                                           InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
+        if (dialect != InformationSchemaFormMetadataReader.SnapshotDialect.H2
+                || !("BINARY LARGE OBJECT".equals(type) || "CHARACTER LARGE OBJECT".equals(type))) {
+            return null;
+        }
+        Object raw = value(row, "CHARACTER_MAXIMUM_LENGTH");
+        if (raw == null) {
+            return null;
+        }
+        try {
+            long length = new BigDecimal(raw.toString().trim()).longValueExact();
+            // H2 uses Long.MAX_VALUE for an unbounded large object.
+            return length > 0 && length < Long.MAX_VALUE ? length : null;
+        } catch (NumberFormatException | ArithmeticException error) {
+            throw new IllegalStateException("invalid H2 large object capacity", error);
         }
     }
 
@@ -300,14 +454,48 @@ final class FormMetadataRowConverter {
         return new PrimaryKeyDefinition(entry.getKey(), entry.getValue());
     }
 
-    private static List<UniqueConstraintDefinition> toUniqueConstraints(
-            List<? extends Map<String, Object>> rows) {
+    private static UniqueProjection toUniqueProjection(
+            List<? extends Map<String, Object>> rows,
+            InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
         rows.forEach(row -> requireRepresentable(
                 row, "CONSTRAINT_REPRESENTABLE", null,
                 "unique constraint", text(row, "CONSTRAINT_NAME")));
-        return namedColumns(rows).entrySet().stream()
-                .map(entry -> new UniqueConstraintDefinition(entry.getKey(), entry.getValue()))
-                .toList();
+        if (dialect != InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL) {
+            List<UniqueConstraintDefinition> constraints = namedColumns(rows).entrySet().stream()
+                    .map(entry -> new UniqueConstraintDefinition(entry.getKey(), entry.getValue()))
+                    .toList();
+            return new UniqueProjection(constraints, List.of());
+        }
+
+        Map<String, MySqlUniqueAccumulator> keys = new LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            String name = text(row, "CONSTRAINT_NAME");
+            String column = text(row, "COLUMN_NAME");
+            String direction = optionalText(row, "INDEX_DIRECTION");
+            keys.computeIfAbsent(name, MySqlUniqueAccumulator::new)
+                    .add(column, direction == null ? "ASC" : direction);
+        }
+        List<UniqueConstraintDefinition> constraints = new ArrayList<>(keys.size());
+        List<IndexDefinition> indexes = new ArrayList<>();
+        for (MySqlUniqueAccumulator key : keys.values()) {
+            if (key.descending) {
+                indexes.add(key.index());
+            } else {
+                constraints.add(key.constraint());
+            }
+        }
+        return new UniqueProjection(constraints, indexes);
+    }
+
+    private static List<IndexDefinition> mergeIndexes(List<IndexDefinition> indexes,
+                                                       List<IndexDefinition> uniqueIndexes) {
+        if (uniqueIndexes.isEmpty()) {
+            return indexes;
+        }
+        List<IndexDefinition> merged = new ArrayList<>(indexes.size() + uniqueIndexes.size());
+        merged.addAll(indexes);
+        merged.addAll(uniqueIndexes);
+        return List.copyOf(merged);
     }
 
     private static Map<String, List<String>> namedColumns(List<? extends Map<String, Object>> rows) {
@@ -320,19 +508,29 @@ final class FormMetadataRowConverter {
         return constraints;
     }
 
-    private static List<IndexDefinition> toIndexDefinitions(
-            List<? extends Map<String, Object>> rows) {
+    private static UniqueProjection toIndexProjection(
+            List<? extends Map<String, Object>> rows,
+            InformationSchemaFormMetadataReader.SnapshotDialect dialect,
+            Set<String> columnNames) {
         Map<String, RelationalIndexAccumulator> indexes = new LinkedHashMap<>();
         for (Map<String, Object> row : Objects.requireNonNull(rows, "index metadata rows must not be null")) {
             String name = text(row, "INDEX_NAME");
             requireRepresentable(row, "INDEX_REPRESENTABLE", "UNSUPPORTED_INDEX_REASON", "index", name);
             boolean unique = bool(row, "UNIQUE_INDEX");
+            boolean filtered = bool(row, "INDEX_FILTERED");
+            String filter = optionalText(row, "INDEX_FILTER");
             RelationalIndexAccumulator index = indexes.computeIfAbsent(
-                    name, ignored -> new RelationalIndexAccumulator(name, unique));
-            if (index.unique != unique) {
-                throw new IllegalStateException("index metadata changes uniqueness inside one index");
+                    name, ignored -> new RelationalIndexAccumulator(name, unique, filtered, filter));
+            if (index.unique != unique || index.filtered != filtered || !Objects.equals(index.filter, filter)) {
+                throw new IllegalStateException("index metadata changes shape inside one index");
             }
             String direction = text(row, "INDEX_DIRECTION").toUpperCase(Locale.ROOT);
+            String expression = optionalText(row, "INDEX_EXPRESSION");
+            if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE
+                    && "ASC".equals(direction) && expression != null) {
+                index.addOracleNullDistinctKey(oracleNullDistinctKey(expression));
+                continue;
+            }
             String column = indexColumn(row, direction);
             index.keys.add(switch (direction) {
                 case "ASC" -> IndexKeyPart.asc(column);
@@ -340,7 +538,61 @@ final class FormMetadataRowConverter {
                 default -> throw new IllegalStateException("unsupported index direction");
             });
         }
-        return indexes.values().stream().map(RelationalIndexAccumulator::build).toList();
+        List<UniqueConstraintDefinition> constraints = new ArrayList<>();
+        List<IndexDefinition> ordinaryIndexes = new ArrayList<>();
+        for (RelationalIndexAccumulator index : indexes.values()) {
+            if (index.oracleKeys != null) {
+                constraints.add(index.oracleNullDistinctKey(columnNames));
+            } else if (index.filtered) {
+                constraints.add(index.nullDistinctKey(dialect));
+            } else {
+                ordinaryIndexes.add(index.build());
+            }
+        }
+        return new UniqueProjection(constraints, ordinaryIndexes);
+    }
+
+    private static final class MySqlUniqueAccumulator {
+
+        private final String name;
+        private final List<String> columns = new ArrayList<>();
+        private final List<IndexKeyPart> keys = new ArrayList<>();
+        private boolean descending;
+
+        private MySqlUniqueAccumulator(String name) {
+            this.name = name;
+        }
+
+        private void add(String column, String direction) {
+            columns.add(column);
+            switch (direction.toUpperCase(Locale.ROOT)) {
+                case "ASC" -> keys.add(IndexKeyPart.asc(column));
+                case "DESC" -> {
+                    keys.add(IndexKeyPart.desc(column));
+                    descending = true;
+                }
+                default -> throw new IllegalStateException("unsupported unique-key direction");
+            }
+        }
+
+        private UniqueConstraintDefinition constraint() {
+            return new UniqueConstraintDefinition(name, columns);
+        }
+
+        private IndexDefinition index() {
+            IndexDefinition.Builder builder = IndexDefinition.builder(name).unique();
+            keys.forEach(builder::addKey);
+            return builder.build();
+        }
+    }
+
+    private record UniqueProjection(List<UniqueConstraintDefinition> constraints,
+                                    List<IndexDefinition> indexes) {
+
+        private UniqueProjection {
+            constraints = List.copyOf(constraints);
+            indexes = List.copyOf(indexes);
+        }
     }
 
     private static String indexColumn(Map<String, Object> row, String direction) {
@@ -369,6 +621,69 @@ final class FormMetadataRowConverter {
             throw new IllegalStateException("index expression cannot be represented safely");
         }
         return identifier.toString();
+    }
+
+    private static OracleNullDistinctKey oracleNullDistinctKey(String expression) {
+        Matcher key = ORACLE_NULL_DISTINCT_CASE.matcher(oracleExpressionWithoutParentheses(expression).trim());
+        if (!key.matches()) {
+            throw new IllegalStateException("index expression cannot be represented safely");
+        }
+        String predicate = key.group(1);
+        List<String> nonNullColumns = new ArrayList<>();
+        Matcher column = ORACLE_NONNULL_COLUMN.matcher(predicate);
+        Matcher conjunction = ORACLE_AND.matcher(predicate);
+        int offset = 0;
+        while (offset < predicate.length()) {
+            if (!column.region(offset, predicate.length()).lookingAt()) {
+                throw new IllegalStateException("unsupported null-distinct index predicate");
+            }
+            nonNullColumns.add(unquoteIdentifierPart(column.group(1)));
+            offset = column.end();
+            if (offset == predicate.length()) {
+                break;
+            }
+            if (!conjunction.region(offset, predicate.length()).lookingAt()) {
+                throw new IllegalStateException("unsupported null-distinct index predicate");
+            }
+            offset = conjunction.end();
+            if (offset == predicate.length()) {
+                throw new IllegalStateException("incomplete null-distinct index predicate");
+            }
+        }
+        return new OracleNullDistinctKey(unquoteIdentifierPart(key.group(2)), nonNullColumns);
+    }
+
+    /** Oracle adds expression parentheses; quoted physical column names must remain byte-for-byte intact. */
+    private static String oracleExpressionWithoutParentheses(String expression) {
+        StringBuilder normalized = new StringBuilder(expression.length());
+        boolean quoted = false;
+        int depth = 0;
+        for (int index = 0; index < expression.length(); index++) {
+            char current = expression.charAt(index);
+            if (current == '"') {
+                normalized.append(current);
+                if (quoted && index + 1 < expression.length() && expression.charAt(index + 1) == '"') {
+                    normalized.append(expression.charAt(++index));
+                } else {
+                    quoted = !quoted;
+                }
+            } else if (!quoted && (current == '(' || current == ')')) {
+                depth += current == '(' ? 1 : -1;
+                if (depth < 0) {
+                    throw new IllegalStateException("unbalanced index expression");
+                }
+                normalized.append(' ');
+            } else {
+                normalized.append(current);
+            }
+        }
+        if (quoted || depth != 0) {
+            throw new IllegalStateException("unbalanced index expression");
+        }
+        return normalized.toString();
+    }
+
+    private record OracleNullDistinctKey(String column, List<String> nonNullColumns) {
     }
 
     private static List<ForeignKeyDefinition> toForeignKeyDefinitions(
@@ -417,10 +732,8 @@ final class FormMetadataRowConverter {
 
     private static List<CheckConstraintDefinition> toCheckConstraints(
             List<? extends Map<String, Object>> rows,
-            List<ColumnDefinition> columns,
+            Map<String, DatabaseType> columnTypes,
             InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
-        Map<String, DatabaseType> columnTypes = new LinkedHashMap<>();
-        columns.forEach(column -> columnTypes.put(column.name(), column.databaseType()));
         List<CheckConstraintDefinition> checks = new ArrayList<>(rows.size());
         for (Map<String, Object> row : Objects.requireNonNull(rows, "check metadata rows must not be null")) {
             String name = text(row, "CONSTRAINT_NAME");
@@ -432,6 +745,9 @@ final class FormMetadataRowConverter {
         }
         return List.copyOf(checks);
     }
+
+    private record ColumnProjection(List<ColumnDefinition> columns,
+                                    Map<String, DatabaseType> semanticTypes) { }
 
     private static void requireRepresentable(Map<String, Object> row,
                                              String flag,
@@ -543,6 +859,14 @@ final class FormMetadataRowConverter {
         Map<String, IndexAccumulator> indexes = new LinkedHashMap<>();
         for (Map<String, Object> row : rows) {
             String name = text(row, "INDEX_NAME");
+            if (bool(row, "INDEX_FILTERED")) {
+                throw new IllegalStateException("filtered index requires complete relational metadata");
+            }
+            String expression = optionalText(row, "INDEX_EXPRESSION");
+            String direction = optionalText(row, "INDEX_DIRECTION");
+            if (expression != null && !"DESC".equalsIgnoreCase(direction)) {
+                throw new IllegalStateException("index expression requires complete relational metadata");
+            }
             if (value(row, "INDEX_REPRESENTABLE") != null && !bool(row, "INDEX_REPRESENTABLE")) {
                 String reason = optionalText(row, "UNSUPPORTED_INDEX_REASON");
                 throw new IllegalStateException("index metadata cannot be represented safely: " + name
@@ -551,7 +875,7 @@ final class FormMetadataRowConverter {
             IndexAccumulator index = indexes.computeIfAbsent(name,
                                                              indexName -> new IndexAccumulator(indexName,
                                                                                                bool(row, "UNIQUE_INDEX")));
-            index.columns().add(text(row, "COLUMN_NAME"));
+            index.columns().add(indexColumn(row, direction));
         }
         return indexes.values().stream().map(IndexAccumulator::toMetadata).toList();
     }
@@ -722,11 +1046,60 @@ final class FormMetadataRowConverter {
 
         private final String name;
         private final boolean unique;
+        private final boolean filtered;
+        private final String filter;
         private final List<IndexKeyPart> keys = new ArrayList<>();
+        private List<OracleNullDistinctKey> oracleKeys;
 
-        private RelationalIndexAccumulator(String name, boolean unique) {
+        private RelationalIndexAccumulator(String name, boolean unique, boolean filtered, String filter) {
             this.name = name;
             this.unique = unique;
+            this.filtered = filtered;
+            this.filter = filter;
+        }
+
+        private void addOracleNullDistinctKey(OracleNullDistinctKey key) {
+            if (oracleKeys == null) {
+                oracleKeys = new ArrayList<>();
+            }
+            oracleKeys.add(key);
+            keys.add(IndexKeyPart.asc(key.column()));
+        }
+
+        private UniqueConstraintDefinition oracleNullDistinctKey(Set<String> columnNames) {
+            List<String> columns = keys.stream().map(IndexKeyPart::column).toList();
+            Set<String> expected = new HashSet<>(columns);
+            if (!unique || filtered || oracleKeys.size() != keys.size()
+                    || expected.size() != columns.size() || !columnNames.containsAll(expected)) {
+                throw new IllegalStateException("index cannot be represented as null-distinct uniqueness");
+            }
+            for (OracleNullDistinctKey key : oracleKeys) {
+                if (key.nonNullColumns().size() != expected.size()
+                        || !expected.equals(new HashSet<>(key.nonNullColumns()))) {
+                    throw new IllegalStateException("index predicate must cover every unique key column exactly once");
+                }
+            }
+            return new UniqueConstraintDefinition(name, columns, UniqueNullPolicy.DISTINCT);
+        }
+
+        private UniqueConstraintDefinition nullDistinctKey(
+                InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
+            if (dialect != InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER
+                    || !unique || filter == null
+                    || keys.stream().anyMatch(key -> key.direction() != IndexKeyPart.Direction.ASC)) {
+                throw new IllegalStateException("filtered index cannot be represented as null-distinct uniqueness");
+            }
+            // SQL Server 会给已解析的过滤条件加括号。只认可键列逐一 IS NOT NULL 的合取，
+            // 其余表达式、缺失的定义或不同字段都不能冒充完整关系模型。
+            String predicate = filter.replace("(", "").replace(")", "").trim();
+            String expected = keys.stream().map(key -> java.util.regex.Pattern.quote("[" + key.column() + "]")
+                    + "(?i:\\s+is\\s+not\\s+null)")
+                    .collect(java.util.stream.Collectors.joining("(?i:\\s+and\\s+)"));
+            if (!predicate.matches(expected)) {
+                throw new IllegalStateException("filtered index has unsupported null-distinct predicate");
+            }
+            return new UniqueConstraintDefinition(name, keys.stream().map(IndexKeyPart::column).toList(),
+                    UniqueNullPolicy.DISTINCT);
         }
 
         private IndexDefinition build() {

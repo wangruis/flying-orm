@@ -136,6 +136,8 @@ public final class JoinQuerySpec {
         /**
          * 加入一个新数据源并创建首个等值 ON 条件。
          *
+         * <p>同一表单或物理表可加入多次；每次返回的来源序号独立，后续操作须使用对应来源引用。</p>
+         *
          * @return 新加入的数据源，可用于继续追加复合 ON、条件和投影
          */
         public JoinSource join(JoinType type,
@@ -145,10 +147,6 @@ public final class JoinQuerySpec {
                                String rightField) {
             JoinSource safeLeft = requireSource(leftSource);
             DynamicForm safeForm = Objects.requireNonNull(form, "joined form must not be null");
-            if (sources.stream().anyMatch(
-                    source -> source.form().mapsToSameRelation(safeForm))) {
-                throw new IllegalArgumentException("join source must not be duplicated");
-            }
             JoinSource joined = new JoinSource(sources.size(), safeForm);
             JoinFieldPair firstOn = new JoinFieldPair(new JoinFieldRef(safeLeft, leftField),
                                                       new JoinFieldRef(joined, rightField));
@@ -201,6 +199,14 @@ public final class JoinQuerySpec {
             if (candidate.length() > JoinProjection.MAX_PORTABLE_ALIAS_LENGTH
                     || !candidate.matches("[A-Za-z_][A-Za-z0-9_]*")) {
                 candidate = "s" + safeSource.ordinal() + "_f" + fieldOrdinal(reference);
+            }
+            if (aliases.contains(candidate.toLowerCase(Locale.ROOT))
+                    && projections.stream().noneMatch(projection -> projection.field().equals(reference))) {
+                String prefix = "s" + safeSource.ordinal() + "_p";
+                int suffix = 0;
+                do {
+                    candidate = prefix + suffix++;
+                } while (aliases.contains(candidate.toLowerCase(Locale.ROOT)));
             }
             return selectAs(safeSource, reference.field(), candidate);
         }

@@ -135,7 +135,7 @@ public final class BatchChunkExecutionFact {
         long previous = -1L;
         BitSet compressed = new BitSet(count);
         for (Long offset : snapshot) {
-            long value = Objects.requireNonNull(offset, "batch evidence offset must not be null");
+            long value = offset;
             if (value < start || value >= end) {
                 throw new IllegalArgumentException("batch evidence offset must belong to its chunk");
             }

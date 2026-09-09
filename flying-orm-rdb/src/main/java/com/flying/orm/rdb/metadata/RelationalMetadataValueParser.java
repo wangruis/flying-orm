@@ -65,6 +65,11 @@ final class RelationalMetadataValueParser {
             return ColumnDefault.literal(expression);
         }
         String value = stripOuterParentheses(expression.trim());
+        if ((dialect == InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE
+                || dialect == InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER)
+                && "NULL".equalsIgnoreCase(value)) {
+            return ColumnDefault.none();
+        }
         if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER) {
             var cast = SQL_SERVER_TEMPORAL_CAST.matcher(value);
             var convert = SQL_SERVER_TEMPORAL_CONVERT.matcher(value);
@@ -127,7 +132,7 @@ final class RelationalMetadataValueParser {
             }
         }
         if (databaseType.logicalType().numeric()) {
-            return ColumnDefault.literal(number(literal, databaseType.logicalType()));
+            return ColumnDefault.literal(number(literal, databaseType));
         }
         if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL) {
             return ColumnDefault.literal(convertString(literal, databaseType.logicalType()));
@@ -186,18 +191,45 @@ final class RelationalMetadataValueParser {
         throw new IllegalStateException("typed Oracle schema literal cannot be represented safely");
     }
 
-    private static Object number(String value, LogicalType type) {
+    private static Object number(String value, DatabaseType type) {
         try {
-            return switch (type) {
-                case SMALL_INTEGER -> Short.valueOf(value);
-                case INTEGER -> Integer.valueOf(value);
-                case BIG_INTEGER -> Long.valueOf(value);
+            return switch (type.logicalType()) {
+                case SMALL_INTEGER, INTEGER, BIG_INTEGER -> integerNumber(new BigDecimal(value), type);
                 case DECIMAL -> new BigDecimal(value);
                 case FLOAT -> Double.valueOf(value);
                 default -> throw new IllegalStateException("column is not numeric");
             };
         } catch (NumberFormatException error) {
             throw new IllegalStateException("numeric schema literal cannot be parsed safely", error);
+        }
+    }
+
+    /** Keep existing integer carriers when exact; CHECK operands need not fit the column width. */
+    private static Object integerNumber(BigDecimal value, DatabaseType type) {
+        try {
+            return switch (type.logicalType()) {
+                case SMALL_INTEGER -> {
+                    if (type.unsigned() || "MEDIUMINT".equals(type.baseName())) {
+                        yield value.intValueExact();
+                    }
+                    yield value.shortValueExact();
+                }
+                case INTEGER -> {
+                    if (type.unsigned()) {
+                        yield value.longValueExact();
+                    }
+                    yield value.intValueExact();
+                }
+                case BIG_INTEGER -> {
+                    if (type.unsigned()) {
+                        yield value.toBigIntegerExact();
+                    }
+                    yield value.longValueExact();
+                }
+                default -> throw new IllegalStateException("column is not integral");
+            };
+        } catch (ArithmeticException outsideIntegerCarrier) {
+            return value;
         }
     }
 
@@ -219,9 +251,9 @@ final class RelationalMetadataValueParser {
 
     private static Object checkNumber(
             String value,
-            LogicalType type,
+            DatabaseType type,
             InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
-        if (type != LogicalType.BOOLEAN) {
+        if (type.logicalType() != LogicalType.BOOLEAN) {
             return number(value, type);
         }
         if (dialect != InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER
@@ -460,7 +492,7 @@ final class RelationalMetadataValueParser {
                 case STRING -> convertString(token.text(), type.logicalType());
                 case DATE_LITERAL -> oracleTemporalLiteral("DATE", token.text(), type);
                 case TIMESTAMP_LITERAL -> oracleTemporalLiteral("TIMESTAMP", token.text(), type);
-                case NUMBER -> checkNumber(token.text(), type.logicalType(), dialect);
+                case NUMBER -> checkNumber(token.text(), type, dialect);
                 case TRUE -> true;
                 case FALSE -> false;
                 default -> throw unsupported();

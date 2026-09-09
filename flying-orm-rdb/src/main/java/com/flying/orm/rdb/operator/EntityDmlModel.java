@@ -3,6 +3,7 @@ package com.flying.orm.rdb.operator;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.internal.mapping.EntityValues;
 
 import java.util.Objects;
 
@@ -19,14 +20,20 @@ final class EntityDmlModel<T> {
 
     private final EntityMetadata<T> metadata;
     private final DynamicForm form;
+    private final EntityValues<T> entityValues;
 
     EntityDmlModel(EntityMetadata<T> metadata) {
         this(metadata, Objects.requireNonNull(metadata, "entity metadata must not be null").toDynamicForm());
     }
 
     EntityDmlModel(EntityMetadata<T> metadata, DynamicForm form) {
+        this(metadata, form, null);
+    }
+
+    EntityDmlModel(EntityMetadata<T> metadata, DynamicForm form, EntityValues<T> entityValues) {
         this.metadata = Objects.requireNonNull(metadata, "entity metadata must not be null");
         this.form = Objects.requireNonNull(form, "entity dynamic form must not be null");
+        this.entityValues = entityValues;
     }
 
     EntityMetadata<T> metadata() {
@@ -34,6 +41,6 @@ final class EntityDmlModel<T> {
     }
 
     EntityCommandState<T> newState(SqlRenderer renderer) {
-        return new EntityCommandState<>(metadata, form, renderer);
+        return new EntityCommandState<>(metadata, form, renderer, entityValues);
     }
 }
