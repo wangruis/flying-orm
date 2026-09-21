@@ -22,7 +22,7 @@ class PublicConsumerCompilationTest {
         assertNotNull(compiler, "the Java 21 build requires a JDK compiler");
         Path classes = Path.of(FlyingOrmClients.class.getProtectionDomain().getCodeSource().getLocation().toURI());
         Path module = classes.getParent().getParent();
-        Path source = module.resolve("src/it/api-compat-consumer/src/main/java/com/flying/orm/compat/UpperServiceConsumer.java");
+        Path source = module.resolve("src/test/resources/com/flying/orm/compat/UpperServiceConsumer.java");
         assertTrue(Files.isRegularFile(source), "the upper consumer fixture must be present");
         Path output = Files.createDirectories(module.resolve("target/api-consumer-test-classes"));
         var diagnostics = new DiagnosticCollector<JavaFileObject>();
