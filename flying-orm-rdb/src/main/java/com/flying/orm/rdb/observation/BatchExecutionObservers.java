@@ -1,0 +1,84 @@
+package com.flying.orm.rdb.observation;
+
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
+
+import java.util.Objects;
+
+/** 批量 observer 的包内安全分发实现，外部实现不能声明自己已经隔离。 */
+final class BatchExecutionObservers {
+
+    private BatchExecutionObservers() {
+    }
+
+    static BatchExecutionObserver safe(BatchExecutionObserver observer) {
+        BatchExecutionObserver safeObserver = Objects.requireNonNull(
+                observer, "batch execution observer must not be null");
+        if (safeObserver instanceof Isolated) {
+            return safeObserver;
+        }
+        try {
+            return safeObserver.enabled() ? new Safe(safeObserver) : safeObserver;
+        } catch (RuntimeException failure) {
+            return BatchExecutionObserver.noop();
+        }
+    }
+
+    static BatchExecutionObserver composite(BatchExecutionObserver first,
+                                             BatchExecutionObserver second) {
+        BatchExecutionObserver safeFirst = safe(Objects.requireNonNull(
+                first, "first batch observer must not be null"));
+        BatchExecutionObserver safeSecond = safe(Objects.requireNonNull(
+                second, "second batch observer must not be null"));
+        if (!safeFirst.enabled()) {
+            return safeSecond;
+        }
+        if (!safeSecond.enabled()) {
+            return safeFirst;
+        }
+        return new Composite(safeFirst, safeSecond);
+    }
+
+    interface Isolated {
+    }
+
+    private record Safe(BatchExecutionObserver delegate)
+            implements BatchExecutionObserver, Isolated {
+
+        @Override
+        public void onExecution(BatchExecutionObservation observation) {
+            try {
+                delegate.onExecution(observation);
+            } catch (RuntimeException ignored) {
+                // 旁路 observer 的普通故障只丢本次事件；直接 Error 原样传播。
+            }
+        }
+
+
+        @Override
+        public void onExecutionEvidence(BatchExecutionEvidence evidence) {
+            try {
+                delegate.onExecutionEvidence(evidence);
+            } catch (RuntimeException ignored) {
+                // evidence 审计旁路与既有观察事件使用同一隔离规则。
+            }
+        }
+    }
+
+    private record Composite(BatchExecutionObserver first,
+                             BatchExecutionObserver second)
+            implements BatchExecutionObserver, Isolated {
+
+        @Override
+        public void onExecution(BatchExecutionObservation observation) {
+            first.onExecution(observation);
+            second.onExecution(observation);
+        }
+
+
+        @Override
+        public void onExecutionEvidence(BatchExecutionEvidence evidence) {
+            first.onExecutionEvidence(evidence);
+            second.onExecutionEvidence(evidence);
+        }
+    }
+}

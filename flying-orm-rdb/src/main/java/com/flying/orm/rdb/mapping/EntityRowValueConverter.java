@@ -1,0 +1,110 @@
+package com.flying.orm.rdb.mapping;
+
+import com.flying.orm.core.codec.ValueCodec;
+import com.flying.orm.core.codec.ValueCodecRegistry;
+import com.flying.orm.core.type.DatabaseType;
+import com.flying.orm.core.type.LogicalType;
+import com.flying.orm.rdb.codec.ArrayValueCodec;
+import com.flying.orm.rdb.codec.JdbcLegacyTemporalAdapter;
+import com.flying.orm.rdb.internal.mapping.EntityEnumValueCodec;
+import com.flying.orm.rdb.json.JsonValueCodec;
+
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.OffsetDateTime;
+import java.time.ZoneOffset;
+import java.util.Collection;
+
+/** 把驱动值转换为实体字段值；反射写入计划只负责选择目标成员。 */
+final class EntityRowValueConverter {
+
+    private EntityRowValueConverter() {
+    }
+
+    static Object readCustom(Object value, EntityTypeMappingRegistry.Mapping mapping) {
+        try {
+            return mapping.codec().read(value, mapping.javaType());
+        } catch (IllegalArgumentException error) {
+            throw new MappingException("row value cannot be converted to " + mapping.javaType().getName(), error);
+        }
+    }
+
+    static Object convert(Object value,
+                          Class<?> targetType,
+                          DatabaseType databaseType,
+                          EntityEnumStorage enumStorage,
+                          EntityEnumValueCodec enumValue,
+                          ValueCodec customCodec,
+                          ValueCodecRegistry valueCodecs) {
+        try {
+            if (enumValue != null) {
+                Object normalized = absoluteTimestampCarrier(value, enumValue.valueType(), databaseType);
+                if (normalized != null && customCodec != null && !enumValue.valueType().isInstance(normalized)) {
+                    normalized = customCodec.read(normalized, enumValue.valueType());
+                }
+                return enumValue.read(normalized, valueCodecs);
+            }
+            if (enumStorage == EntityEnumStorage.ORDINAL && targetType.isEnum() && value != null) {
+                int ordinal = valueCodecs.read(value, Integer.class);
+                Object[] constants = targetType.getEnumConstants();
+                if (ordinal < 0 || ordinal >= constants.length) {
+                    throw new IllegalArgumentException("enum ordinal is out of range: " + ordinal);
+                }
+                return constants[ordinal];
+            }
+            if (value != null && targetType.isInstance(value)) {
+                return value;
+            }
+            if (customCodec != null) {
+                return customCodec.read(value, targetType);
+            }
+            // Binary and textual array carriers use their scalar codecs, not SQL Array decoding.
+            if ((targetType.isArray() && targetType != byte[].class
+                    && targetType != Byte[].class && targetType != char[].class)
+                    || (Collection.class.isAssignableFrom(targetType)
+                    && value != null
+                    && value.getClass().isArray()
+                    && value.getClass() != byte[].class)) {
+                return ArrayValueCodec.read(value, targetType, valueCodecs);
+            }
+            if (JsonValueCodec.supportsTarget(targetType)) {
+                return JsonValueCodec.read(value, targetType);
+            }
+            return readScalar(value, targetType, databaseType, valueCodecs);
+        } catch (IllegalArgumentException error) {
+            throw new MappingException("row value cannot be converted to " + targetType.getName(), error);
+        }
+    }
+
+    private static Object readScalar(Object value,
+                                     Class<?> targetType,
+                                     DatabaseType databaseType,
+                                     ValueCodecRegistry valueCodecs) {
+        Object normalized = absoluteTimestampCarrier(value, targetType, databaseType);
+        return JdbcLegacyTemporalAdapter.read(valueCodecs, normalized, targetType);
+    }
+
+    private static Object absoluteTimestampCarrier(Object value,
+                                                   Class<?> targetType,
+                                                   DatabaseType databaseType) {
+        if (!(value instanceof LocalDateTime localDateTime)
+                || databaseType.isArray()
+                || databaseType.logicalType() != LogicalType.OFFSET_TIMESTAMP) {
+            return value;
+        }
+        if (Instant.class.equals(targetType)) {
+            // 使用不同于目标类型的 UTC 载体，确保应用 codec 仍按注册顺序参与转换或拒绝。
+            return localDateTime.atOffset(ZoneOffset.UTC);
+        }
+        if (OffsetDateTime.class.equals(targetType)) {
+            return localDateTime.toInstant(ZoneOffset.UTC);
+        }
+        return value;
+    }
+
+    static EntityEnumValueCodec enumValueCodec(Class<?> javaType, EntityFieldMetadata field) {
+        return field.enumValueMember() == null
+                ? null
+                : EntityEnumValueCodec.create(javaType, field.enumValueMember(), field.databaseType());
+    }
+}

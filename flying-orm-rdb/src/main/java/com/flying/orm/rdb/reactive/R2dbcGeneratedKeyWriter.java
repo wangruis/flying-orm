@@ -1,0 +1,214 @@
+package com.flying.orm.rdb.reactive;
+
+import static com.flying.orm.core.internal.error.ThrowableGraph.findVirtualMachineError;
+
+import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.rdb.batch.BatchMemoryBudget;
+import com.flying.orm.rdb.execution.GeneratedKeyReadException;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.execution.SqlResultMemoryLimitExceededException;
+import com.flying.orm.rdb.execution.SqlRowLimitExceededException;
+import com.flying.orm.rdb.execution.SqlWriteResult;
+import com.flying.orm.rdb.observation.SqlExecutionOperation;
+import com.flying.orm.rdb.observation.SqlStatementType;
+import com.flying.orm.rdb.result.DynamicRow;
+import io.r2dbc.spi.Result;
+import io.r2dbc.spi.Row;
+import io.r2dbc.spi.Statement;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Objects;
+import java.util.function.Function;
+import java.util.function.LongConsumer;
+import java.util.function.Supplier;
+
+/**
+ * 在一次 R2DBC Statement 消费中同时收集更新计数和数据库生成键。
+ *
+ * <p>{@link Result} 只能消费一次，因此直接遍历 segment，把更新计数和键行汇总到同一结果，避免为取主键
+ * 重复执行 insert。实例不保存订阅状态，可以由执行器并发复用。</p>
+ */
+final class R2dbcGeneratedKeyWriter {
+
+    private final R2dbcExecutionSession session;
+
+    R2dbcGeneratedKeyWriter(R2dbcExecutionSession session) {
+        this.session = Objects.requireNonNull(session, "R2DBC execution session must not be null");
+    }
+
+    Mono<SqlWriteResult> write(SqlRequest request, SqlExecutionOptions options) {
+        return write(request, options, null);
+    }
+
+    Mono<SqlWriteResult> write(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
+        SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
+        return write(safeRequest,
+                     R2dbcExecutionSession.snapshotExecutionParameters(safeRequest),
+                     options,
+                     generatedKeyColumn);
+    }
+
+    Mono<SqlWriteResult> write(SqlRequest request,
+                               List<Object> executionParameters,
+                               SqlExecutionOptions options,
+                               String generatedKeyColumn) {
+        return write(request, executionParameters, options, generatedKeyColumn, null);
+    }
+
+    Mono<SqlWriteResult> write(SqlRequest request,
+                               List<Object> executionParameters,
+                               SqlExecutionOptions options,
+                               String generatedKeyColumn,
+                               LongConsumer confirmedRows) {
+        SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
+        SqlExecutionOptions safeOptions = Objects.requireNonNull(options, "sql execution options must not be null");
+        return session.withPreparedStatementResource(
+                safeRequest,
+                executionParameters,
+                SqlExecutionOperation.UPDATE,
+                (statement, largeObjects) -> {
+                    Accumulator accumulator = new Accumulator(safeOptions, largeObjects, confirmedRows);
+                    return accumulator.collect(statement, generatedKeyColumn)
+                            .onErrorMap(accumulator::wrapFailure);
+                });
+    }
+
+    /** 一个 Result 的行共享布局；更新计数和键预算仍由整个 Statement 累计。 */
+    private static final class ResultConsumer implements Function<Result.Segment, Publisher<Void>> {
+
+        private final Accumulator accumulator;
+        private R2dbcLargeObjectRows.Mapper mapper;
+
+        private ResultConsumer(Accumulator accumulator) {
+            this.accumulator = accumulator;
+        }
+
+        @Override
+        public Mono<Void> apply(Result.Segment segment) {
+            if (segment instanceof Result.UpdateCount count) {
+                accumulator.addAffectedRows(count.value());
+                return Mono.empty();
+            }
+            if (segment instanceof Result.RowSegment row) {
+                return accumulator.addKey(row, this);
+            }
+            if (segment instanceof Result.Message message) {
+                return Mono.error(message.exception());
+            }
+            return Mono.empty();
+        }
+
+        private Mono<DynamicRow> map(Row row) {
+            if (mapper == null) {
+                mapper = R2dbcLargeObjectRows.mapper(row.getMetadata(), accumulator.options,
+                                                     accumulator.largeObjects);
+            }
+            return mapper.map(row);
+        }
+    }
+
+    /** 每次订阅单独创建，所有可变状态都不会跨请求共享。 */
+    static final class Accumulator {
+
+        private final SqlExecutionOptions options;
+        private final Supplier<R2dbcLargeObjectScope> largeObjects;
+        private final LongConsumer confirmedRows;
+        private final List<DynamicRow> keys = new ArrayList<>();
+        private long affectedRows;
+        private long estimatedBytes;
+        private boolean updateCountSeen;
+        private long generatedRowsSeen;
+        private boolean writeObserved;
+        private boolean handoffCompleted;
+
+        Accumulator(SqlExecutionOptions options,
+                            Supplier<R2dbcLargeObjectScope> largeObjects,
+                            LongConsumer confirmedRows) {
+            this.options = options;
+            this.largeObjects = Objects.requireNonNull(
+                    largeObjects, "large object cleanup scope must not be null");
+            this.confirmedRows = confirmedRows;
+        }
+
+        Mono<SqlWriteResult> collect(Statement statement, String generatedKeyColumn) {
+            if (generatedKeyColumn == null) {
+                statement.returnGeneratedValues();
+            } else {
+                String column = generatedKeyColumn.trim();
+                if (column.isEmpty()) {
+                    return Mono.error(new IllegalArgumentException("generated key column must not be blank"));
+                }
+                statement.returnGeneratedValues(column);
+            }
+            return Flux.from(statement.execute())
+                    .concatMap(result -> Flux.from(result.flatMap(new ResultConsumer(this))), 1)
+                    .then(Mono.fromSupplier(this::result));
+        }
+
+        private void addAffectedRows(long rows) {
+            writeObserved = true;
+            updateCountSeen = true;
+            affectedRows = R2dbcExecutionCounts.add(affectedRows, rows);
+            publishConfirmedRows();
+        }
+
+        private Mono<Void> addKey(Result.RowSegment segment, ResultConsumer consumer) {
+            writeObserved = true;
+            generatedRowsSeen = R2dbcExecutionCounts.add(generatedRowsSeen, 1L);
+            if (!updateCountSeen) {
+                publishConfirmedRows();
+            }
+            if (options.maxRows() > 0 && keys.size() >= options.maxRows()) {
+                return Mono.error(new SqlRowLimitExceededException(
+                        SqlStatementType.INSERT, options.maxRows(), keys.size()));
+            }
+            return consumer.map(segment.row()).doOnNext(key -> {
+                if (options.maxResultBytes() > 0) {
+                    estimatedBytes = saturatedAdd(estimatedBytes, BatchMemoryBudget.estimateRowBytes(key));
+                    if (estimatedBytes == Long.MAX_VALUE || estimatedBytes > options.maxResultBytes()) {
+                        throw new SqlResultMemoryLimitExceededException(
+                                SqlStatementType.INSERT, options.maxResultBytes(), estimatedBytes, keys.size());
+                    }
+                }
+                keys.add(key);
+            }).then();
+        }
+
+        private SqlWriteResult result() {
+            // 有些驱动只发布生成键行而不发布 UpdateCount；单行 insert 时每个键行代表一条成功写入。
+            return new SqlWriteResult(rowCount(), keys);
+        }
+
+        private long rowCount() {
+            return updateCountSeen ? affectedRows : generatedRowsSeen;
+        }
+
+        private void publishConfirmedRows() {
+            if (confirmedRows != null) {
+                confirmedRows.accept(rowCount());
+            }
+        }
+
+        /** 保护写收到生成键后才进入侧索引阶段；内部构造出结果不等于它已经交付。 */
+        void completeHandoff() {
+            handoffCompleted = true;
+        }
+
+        Throwable wrapFailure(Throwable failure) {
+            VirtualMachineError fatal = findVirtualMachineError(failure);
+            // 结果交接前的读取失败仍保留写入证据；已进入侧索引阶段的错误不改写含义。
+            if (fatal != null || !writeObserved || handoffCompleted || failure instanceof GeneratedKeyReadException) {
+                return fatal == null ? failure : fatal;
+            }
+            return new GeneratedKeyReadException(rowCount(), failure);
+        }
+
+        private static long saturatedAdd(long left, long right) {
+            return Long.MAX_VALUE - left < right ? Long.MAX_VALUE : left + right;
+        }
+    }
+}

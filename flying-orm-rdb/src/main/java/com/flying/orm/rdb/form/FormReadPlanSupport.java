@@ -1,0 +1,367 @@
+package com.flying.orm.rdb.form;
+
+import com.flying.orm.core.condition.QueryShapeLimits;
+import com.flying.orm.core.condition.StructuredConditionPolicy;
+import com.flying.orm.core.page.CursorPageQuery;
+import com.flying.orm.core.page.PageQuery;
+import com.flying.orm.core.page.PageSort;
+import com.flying.orm.core.scope.FieldUsePolicy;
+import com.flying.orm.core.protection.SensitiveDisplayMode;
+import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.form.spec.QuerySpec;
+import com.flying.orm.rdb.lock.LockingReadDialect;
+import com.flying.orm.rdb.lock.LockingReadPlan;
+import com.flying.orm.rdb.lock.LockingReadSpec;
+import com.flying.orm.rdb.lock.ReadLock;
+import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
+
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+
+/**
+ * 普通、offset、cursor 与锁定读取的纯计划逻辑；不读取连接或事务状态。
+ *
+ * @author wangr
+ * @version v3.2
+ */
+final class FormReadPlanSupport {
+
+    private FormReadPlanSupport() {
+    }
+
+    static FormOperationPlanner.PlannedQuery select(FormOperationPlanner planner, QuerySpec spec) {
+        QuerySpec safeSpec = Objects.requireNonNull(spec, "query spec must not be null");
+        return select(planner, safeSpec, scopedRead(planner, safeSpec), safeSpec.sensitiveDisplayMode());
+    }
+
+    static GovernedPlanEnvelope<FormOperationPlanner.PlannedQuery> selectGoverned(
+            FormOperationPlanner planner,
+            QuerySpec spec,
+            FieldUsePolicy policy,
+            QueryShapeLimits limits) {
+        QuerySpec safeSpec = Objects.requireNonNull(spec, "query spec must not be null");
+        FormScopeSupport.GovernedRead governed = governedRead(planner, safeSpec);
+        QueryShapeBudget budget = new QueryShapeBudget(limits);
+        FormOperationPlanner.PlannedQuery plan = select(planner, safeSpec, governed.read(),
+                FieldUseGuard.effectiveDisplayMode(policy, safeSpec.sensitiveDisplayMode()), budget);
+        return FieldUseGuard.query(
+                plan, planner.renderer, safeSpec, governed.businessWhere(), plan.outputFields(),
+                safeSpec.sorts().stream().map(PageSort::field).toList(), safeSpec.sorts().size(), false,
+                plan.scope(), plan.request(), policy, budget);
+    }
+
+    static FormOperationPlanner.PlannedPage page(
+            FormOperationPlanner planner, QuerySpec spec, PageQuery page) {
+        QuerySpec safeSpec = Objects.requireNonNull(spec, "query spec must not be null");
+        FormQueryShapeGuard.requireUngroupedPagination(safeSpec, "offset pagination");
+        PageQuery requested = Objects.requireNonNull(page, "page query must not be null");
+        return page(planner, safeSpec, requested, scopedRead(planner, safeSpec), safeSpec.sensitiveDisplayMode());
+    }
+
+    static GovernedPlanEnvelope<FormOperationPlanner.PlannedPage> pageGoverned(
+            FormOperationPlanner planner,
+            QuerySpec spec,
+            PageQuery page,
+            FieldUsePolicy policy,
+            QueryShapeLimits limits) {
+        QuerySpec safeSpec = Objects.requireNonNull(spec, "query spec must not be null");
+        FormQueryShapeGuard.requireUngroupedPagination(safeSpec, "offset pagination");
+        PageQuery requested = Objects.requireNonNull(page, "page query must not be null");
+        FormScopeSupport.GovernedRead governed = governedRead(planner, safeSpec);
+        QueryShapeBudget budget = new QueryShapeBudget(limits);
+        FormOperationPlanner.PlannedPage plan = page(planner, safeSpec, requested, governed.read(),
+                FieldUseGuard.effectiveDisplayMode(policy, safeSpec.sensitiveDisplayMode()), budget);
+        return FieldUseGuard.query(
+                plan, planner.renderer, safeSpec, governed.businessWhere(), plan.outputFields(),
+                plan.page().sorts().stream().map(PageSort::field).toList(),
+                plan.page().sorts().size(), false,
+                plan.scope(), plan.dataRequest(), policy, budget);
+    }
+
+    static FormOperationPlanner.PlannedCursorPage cursorPage(
+            FormOperationPlanner planner,
+            QuerySpec spec,
+            CursorPageQuery page) {
+        QuerySpec safeSpec = requireCursorSpec(spec);
+        CursorPageQuery safePage = Objects.requireNonNull(page, "cursor page query must not be null");
+        return cursorPage(planner, safeSpec, safePage, scopedRead(planner, safeSpec), safeSpec.sensitiveDisplayMode());
+    }
+
+    static GovernedPlanEnvelope<FormOperationPlanner.PlannedCursorPage> cursorPageGoverned(
+            FormOperationPlanner planner,
+            QuerySpec spec,
+            CursorPageQuery page,
+            FieldUsePolicy policy,
+            QueryShapeLimits limits) {
+        QuerySpec safeSpec = requireCursorSpec(spec);
+        CursorPageQuery safePage = Objects.requireNonNull(page, "cursor page query must not be null");
+        FormScopeSupport.GovernedRead governed = governedRead(planner, safeSpec);
+        QueryShapeBudget budget = new QueryShapeBudget(limits);
+        FormOperationPlanner.PlannedCursorPage plan = cursorPage(
+                planner, safeSpec, safePage, governed.read(),
+                FieldUseGuard.effectiveDisplayMode(policy, safeSpec.sensitiveDisplayMode()), budget);
+        return FieldUseGuard.query(
+                plan, planner.renderer, safeSpec, governed.businessWhere(), plan.outputFields(),
+                plan.page().sorts().stream().map(sort -> sort.field()).toList(),
+                plan.page().callerSortCount(), true,
+                plan.scope(), plan.request(), policy, budget);
+    }
+
+    static FormOperationPlanner.PlannedLockingRead lockingRead(
+            FormOperationPlanner planner, LockingReadSpec spec) {
+        LockingReadSpec safeSpec = Objects.requireNonNull(spec, "locking read spec must not be null");
+        LockingReadDialect dialect = requireLockingDialect(planner, safeSpec.lock());
+        FormOperationPlanner.PlannedQuery query = selectLocking(
+                planner, safeSpec.query(), dialect, safeSpec.lock(),
+                scopedRead(planner, safeSpec.query()), safeSpec.query().sensitiveDisplayMode());
+        return new FormOperationPlanner.PlannedLockingRead(
+                query, new LockingReadPlan(query.request()));
+    }
+
+    static GovernedPlanEnvelope<FormOperationPlanner.PlannedLockingRead> lockingReadGoverned(
+            FormOperationPlanner planner,
+            LockingReadSpec spec,
+            FieldUsePolicy policy,
+            QueryShapeLimits limits) {
+        LockingReadSpec safeSpec = Objects.requireNonNull(spec, "locking read spec must not be null");
+        LockingReadDialect dialect = requireLockingDialect(planner, safeSpec.lock());
+        FormScopeSupport.GovernedRead governed = governedRead(planner, safeSpec.query());
+        QueryShapeBudget budget = new QueryShapeBudget(limits);
+        FormOperationPlanner.PlannedQuery query = selectLocking(
+                planner, safeSpec.query(), dialect, safeSpec.lock(), governed.read(),
+                FieldUseGuard.effectiveDisplayMode(policy, safeSpec.query().sensitiveDisplayMode()), budget);
+        FormOperationPlanner.PlannedLockingRead locking =
+                new FormOperationPlanner.PlannedLockingRead(
+                query, new LockingReadPlan(query.request()));
+        GovernedPlanEnvelope<FormOperationPlanner.PlannedQuery> approved = FieldUseGuard.query(
+                query, planner.renderer, safeSpec.query(), governed.businessWhere(), query.outputFields(),
+                safeSpec.query().sorts().stream().map(PageSort::field).toList(),
+                safeSpec.query().sorts().size(), false,
+                query.scope(), query.request(), policy, budget);
+        return new GovernedPlanEnvelope<>(locking, approved.fieldUse());
+    }
+
+    static ScopedRead scopedRead(FormOperationPlanner planner, QuerySpec spec) {
+        return spec.structuredInput()
+                   .map(input -> planner.scopes.scopedStructuredRead(
+                           spec.form(), input,
+                           spec.structuredPolicy().orElse(StructuredConditionPolicy.defaults()), spec.scope()))
+                   .orElseGet(() -> planner.scopes.scopedRead(spec.form(), spec.where(), spec.scope()));
+    }
+
+    /** governed 才创建该上下文；结构化条件仍只编译一次。 */
+    static FormScopeSupport.GovernedRead governedRead(FormOperationPlanner planner, QuerySpec spec) {
+        return spec.structuredInput()
+                   .map(input -> planner.scopes.governedStructuredRead(
+                           spec.form(), input,
+                           spec.structuredPolicy().orElse(StructuredConditionPolicy.defaults()), spec.scope()))
+                   .orElseGet(() -> planner.scopes.governedRead(spec.form(), spec.where(), spec.scope()));
+    }
+
+    static SqlExecutionOptions executionOptions(FormOperationPlanner planner, QuerySpec spec) {
+        return spec.executionOptions().orElse(planner.defaultExecutionOptions);
+    }
+
+    static LockingReadDialect requireLockingDialect(FormOperationPlanner planner, ReadLock lock) {
+        LockingReadDialect dialect = planner.renderer.lockingReadDialect();
+        if (!dialect.supports(Objects.requireNonNull(lock, "read lock must not be null"))) {
+            throw new UnsupportedOperationException(
+                    "locking read is not supported by this database descriptor");
+        }
+        return dialect;
+    }
+
+    private static FormOperationPlanner.PlannedQuery select(
+            FormOperationPlanner planner,
+            QuerySpec spec,
+            ScopedRead read,
+            SensitiveDisplayMode displayMode) {
+        return select(planner, spec, read, displayMode, null);
+    }
+
+    private static FormOperationPlanner.PlannedQuery select(
+            FormOperationPlanner planner,
+            QuerySpec spec,
+            ScopedRead read,
+            SensitiveDisplayMode displayMode,
+            QueryShapeBudget budget) {
+        List<String> projections = FormQueryShapeGuard.readableProjections(spec, read.form());
+        List<String> groups = FormQueryShapeGuard.readableGroups(spec, read.form());
+        List<PageSort> sorts = FormQueryShapeGuard.readableSorts(spec.form(), read.form(), spec.sorts());
+        FormQueryShapeGuard.requireValidGrouping(projections, groups, sorts);
+        List<String> outputFields = FormQueryShapeGuard.outputFields(projections, read.form());
+        accountReadShape(budget, outputFields.size(), groups.size(), sorts.size());
+        Optional<ProtectedFieldRuntime.PreparedContainsQuery> contains = planner.renderer.protection()
+                .prepareContainsQuery(spec.form(), read.form(), read.where(), read.scope());
+        if (contains.isPresent()) {
+            FormQueryShapeGuard.requireContainsShape(spec);
+            SqlRequest request = planner.renderer.protection().contains.rows(
+                    contains.orElseThrow(), sorts, ProtectedContainsResultSupport.DEFAULT_CANDIDATE_LIMIT);
+            return new FormOperationPlanner.PlannedQuery(
+                    spec.form(), request, executionOptions(planner, spec),
+                    read.scope(), displayMode,
+                    contains.orElseThrow(), outputFields);
+        }
+        ProtectedFieldRuntime.PreparedQuery query = planner.renderer.protection().prepareQuery(
+                spec.form(), read.where(), read.scope(), outputFields);
+        SqlRequest request = planner.renderer.protection().select(query, groups, sorts);
+        return new FormOperationPlanner.PlannedQuery(
+                spec.form(), request, executionOptions(planner, spec),
+                read.scope(), displayMode, null,
+                outputFields);
+    }
+
+    private static FormOperationPlanner.PlannedQuery selectLocking(
+            FormOperationPlanner planner,
+            QuerySpec spec,
+            LockingReadDialect dialect,
+            ReadLock lock,
+            ScopedRead read,
+            SensitiveDisplayMode displayMode) {
+        return selectLocking(planner, spec, dialect, lock, read, displayMode, null);
+    }
+
+    private static FormOperationPlanner.PlannedQuery selectLocking(
+            FormOperationPlanner planner,
+            QuerySpec spec,
+            LockingReadDialect dialect,
+            ReadLock lock,
+            ScopedRead read,
+            SensitiveDisplayMode displayMode,
+            QueryShapeBudget budget) {
+        List<String> projections = FormQueryShapeGuard.readableProjections(spec, read.form());
+        List<String> groups = FormQueryShapeGuard.readableGroups(spec, read.form());
+        List<PageSort> sorts = FormQueryShapeGuard.readableSorts(spec.form(), read.form(), spec.sorts());
+        FormQueryShapeGuard.requireValidGrouping(projections, groups, sorts);
+        List<String> outputFields = FormQueryShapeGuard.outputFields(projections, read.form());
+        accountReadShape(budget, outputFields.size(), groups.size(), sorts.size());
+        if (!groups.isEmpty()) {
+            throw new UnsupportedOperationException("locking read does not support grouped queries");
+        }
+        if (planner.renderer.protection().prepareContainsQuery(
+                spec.form(), read.form(), read.where(), read.scope()).isPresent()) {
+            throw new UnsupportedOperationException(
+                    "locking read does not support protected contains queries");
+        }
+        ProtectedFieldRuntime.PreparedQuery query = planner.renderer.protection().prepareQuery(
+                spec.form(), read.where(), read.scope(), outputFields);
+        SqlRequest request = planner.renderer.protection().selectLocking(
+                query, groups, sorts, dialect, lock);
+        return new FormOperationPlanner.PlannedQuery(
+                spec.form(), request, executionOptions(planner, spec),
+                read.scope(), displayMode, null,
+                outputFields);
+    }
+
+    private static FormOperationPlanner.PlannedPage page(
+            FormOperationPlanner planner,
+            QuerySpec spec,
+            PageQuery requested,
+            ScopedRead read,
+            SensitiveDisplayMode displayMode) {
+        return page(planner, spec, requested, read, displayMode, null);
+    }
+
+    private static FormOperationPlanner.PlannedPage page(
+            FormOperationPlanner planner,
+            QuerySpec spec,
+            PageQuery requested,
+            ScopedRead read,
+            SensitiveDisplayMode displayMode,
+            QueryShapeBudget budget) {
+        List<String> projections = FormQueryShapeGuard.readableProjections(spec, read.form());
+        List<String> outputFields = FormQueryShapeGuard.outputFields(projections, read.form());
+        List<PageSort> requestedSorts = spec.sorts().isEmpty() ? requested.sorts() : spec.sorts();
+        List<PageSort> sorts = FormQueryShapeGuard.readableSorts(spec.form(), read.form(), requestedSorts);
+        PageQuery effectivePage = new PageQuery(requested.page(), requested.size(), sorts);
+        accountReadShape(budget, outputFields.size(), 0, sorts.size());
+        Optional<ProtectedFieldRuntime.PreparedContainsQuery> contains = planner.renderer.protection()
+                .prepareContainsQuery(spec.form(), read.form(), read.where(), read.scope());
+        if (contains.isPresent()) {
+            FormQueryShapeGuard.requireContainsShape(spec);
+            SqlRequest request = planner.renderer.protection().contains.rows(
+                    contains.orElseThrow(), effectivePage.sorts(),
+                    ProtectedContainsResultSupport.DEFAULT_CANDIDATE_LIMIT);
+            return new FormOperationPlanner.PlannedPage(
+                    spec.form(), null, request, effectivePage,
+                    executionOptions(planner, spec), read.scope(),
+                    displayMode, contains.orElseThrow(),
+                    outputFields);
+        }
+        ProtectedFieldRuntime.PreparedQuery query = planner.renderer.protection().prepareQuery(
+                spec.form(), read.where(), read.scope(), outputFields);
+        return new FormOperationPlanner.PlannedPage(
+                spec.form(), planner.renderer.protection().count(query),
+                planner.renderer.protection().select(query, effectivePage), effectivePage,
+                executionOptions(planner, spec), read.scope(), displayMode,
+                null, outputFields);
+    }
+
+    private static FormOperationPlanner.PlannedCursorPage cursorPage(
+            FormOperationPlanner planner,
+            QuerySpec spec,
+            CursorPageQuery page,
+            ScopedRead read,
+            SensitiveDisplayMode displayMode) {
+        return cursorPage(planner, spec, page, read, displayMode, null);
+    }
+
+    private static FormOperationPlanner.PlannedCursorPage cursorPage(
+            FormOperationPlanner planner,
+            QuerySpec spec,
+            CursorPageQuery page,
+            ScopedRead read,
+            SensitiveDisplayMode displayMode,
+            QueryShapeBudget budget) {
+        CursorPageNormalizer.NormalizedCursorPage normalized = CursorPageNormalizer.normalize(read.form(), page);
+        FormQueryShapeGuard.requireReadableUnencryptedCursorSorts(
+                spec.form(), read.form(), normalized.sorts(), displayMode);
+        List<String> projections = FormQueryShapeGuard.readableProjections(spec, read.form());
+        FormQueryShapeGuard.requireCursorProjection(projections, normalized.sorts());
+        List<String> outputFields = FormQueryShapeGuard.outputFields(projections, read.form());
+        accountReadShape(budget, outputFields.size(), 0, normalized.sorts().size());
+        Optional<ProtectedFieldRuntime.PreparedContainsQuery> contains = planner.renderer.protection()
+                .prepareContainsQuery(spec.form(), read.form(), read.where(), read.scope());
+        if (contains.isPresent()) {
+            FormQueryShapeGuard.requireContainsShape(spec);
+            SqlRequest request = planner.renderer.protection().contains.rows(
+                    contains.orElseThrow(), normalized, ProtectedContainsResultSupport.DEFAULT_CANDIDATE_LIMIT);
+            return new FormOperationPlanner.PlannedCursorPage(
+                    spec.form(), request, normalized,
+                    executionOptions(planner, spec), read.scope(),
+                    displayMode, contains.orElseThrow(),
+                    outputFields);
+        }
+        ProtectedFieldRuntime.PreparedQuery query = planner.renderer.protection().prepareQuery(
+                spec.form(), read.where(), read.scope(), outputFields);
+        return new FormOperationPlanner.PlannedCursorPage(
+                spec.form(), planner.renderer.protection().select(query, normalized),
+                normalized, executionOptions(planner, spec), read.scope(),
+                displayMode, null,
+                outputFields);
+    }
+
+    private static QuerySpec requireCursorSpec(QuerySpec spec) {
+        QuerySpec safeSpec = Objects.requireNonNull(spec, "query spec must not be null");
+        FormQueryShapeGuard.requireUngroupedPagination(safeSpec, "cursor pagination");
+        if (!safeSpec.sorts().isEmpty()) {
+            throw new IllegalArgumentException(
+                    "cursor pagination sorts must be declared with CursorPageQuery");
+        }
+        return safeSpec;
+    }
+
+    private static void accountReadShape(QueryShapeBudget budget,
+                                         int projections,
+                                         int groups,
+                                         int sorts) {
+        if (budget == null) {
+            return;
+        }
+        budget.addProjections(projections);
+        budget.addGroups(groups);
+        budget.addSorts(sorts);
+    }
+}

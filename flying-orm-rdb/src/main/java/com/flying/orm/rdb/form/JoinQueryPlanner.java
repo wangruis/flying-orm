@@ -1,0 +1,279 @@
+package com.flying.orm.rdb.form;
+
+import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.QueryShapeLimits;
+import com.flying.orm.core.form.DynamicField;
+import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.join.JoinProjection;
+import com.flying.orm.core.join.JoinQuerySpec;
+import com.flying.orm.core.join.JoinSource;
+import com.flying.orm.core.metadata.ValueGeneration;
+import com.flying.orm.core.page.PageQuery;
+import com.flying.orm.core.protection.SensitiveDisplayMode;
+import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.scope.FieldScope;
+import com.flying.orm.core.scope.FieldUsePolicy;
+import com.flying.orm.core.scope.FieldUseRequirements;
+import com.flying.orm.core.scope.FieldUseSnapshot;
+import com.flying.orm.core.scope.JoinFieldDecision;
+import com.flying.orm.core.scope.ScopeAccessException;
+import com.flying.orm.core.scope.ScopeErrorCode;
+import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+
+/**
+ * 把 JOIN AST、默认 Scope 和本次 Scope 固定为可执行的只读计划。
+ *
+ * @author wangr
+ * @date 2026-08-09
+ * @version v1.0
+ */
+final class JoinQueryPlanner {
+
+    private static final ConditionGroup EMPTY = ConditionGroup.and().build();
+
+    private final FormDataSqlRenderer renderer;
+    private final FormScopeSupport scopes;
+    private final SqlExecutionOptions defaultOptions;
+    private final JoinResultProtector results;
+
+    JoinQueryPlanner(FormDataSqlRenderer renderer,
+                     FormScopeSupport scopes,
+                     SqlExecutionOptions defaultOptions) {
+        this.renderer = Objects.requireNonNull(renderer, "form data sql renderer must not be null");
+        this.scopes = Objects.requireNonNull(scopes, "form scope support must not be null");
+        this.defaultOptions = Objects.requireNonNull(defaultOptions, "default SQL execution options must not be null");
+        this.results = new JoinResultProtector(this.renderer);
+    }
+
+    PlannedJoin plan(JoinQuerySpec spec, SqlExecutionOptions options) {
+        JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
+        PreparedJoin prepared = prepare(safeSpec);
+        return new PlannedJoin(safeSpec, prepared.resultForm(),
+                               renderer.joinQueries().select(
+                                       safeSpec, prepared.physicalForms(), prepared.protections(),
+                                       prepared.businessConditions()),
+                               options == null ? defaultOptions : options,
+                               prepared.scopes(),
+                               prepared.resultPlan(), prepared.decodingPlan());
+    }
+
+    GovernedPlanEnvelope<PlannedJoin> planGoverned(JoinQuerySpec spec,
+                                                    SqlExecutionOptions options,
+                                                    FieldUsePolicy policy,
+                                                    QueryShapeLimits limits) {
+        JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
+        FieldUseRequirements.Builder requirements = FieldUseRequirements.builder();
+        QueryShapeBudget budget = new QueryShapeBudget(limits);
+        PreparedJoin prepared = prepare(safeSpec, requirements, budget,
+                FieldUseGuard.effectiveDisplayMode(policy, safeSpec.sensitiveDisplayMode()));
+        FieldUseSnapshot fieldUse = approveFieldUse(
+                requirements.build(), prepared.scopes(), policy);
+        SqlRequest request = renderer.joinQueries().select(
+                safeSpec, prepared.physicalForms(), prepared.protections(), prepared.businessConditions());
+        FieldUseGuard.accountRenderedRequest(budget, request);
+        PlannedJoin plan = new PlannedJoin(safeSpec, prepared.resultForm(), request,
+                                           options == null ? defaultOptions : options,
+                                           prepared.scopes(), prepared.resultPlan(), prepared.decodingPlan());
+        return new GovernedPlanEnvelope<>(plan, fieldUse);
+    }
+
+    PlannedJoinPage page(JoinQuerySpec spec, PageQuery page, SqlExecutionOptions options) {
+        JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
+        PageQuery safePage = Objects.requireNonNull(page, "join page query must not be null");
+        PreparedJoin prepared = prepare(safeSpec);
+        JoinQuerySqlRenderer joins = renderer.joinQueries();
+        return new PlannedJoinPage(safeSpec, prepared.resultForm(),
+                                   joins.count(safeSpec, prepared.physicalForms(), prepared.protections(),
+                                               prepared.businessConditions()),
+                                   joins.select(safeSpec, prepared.physicalForms(), prepared.protections(),
+                                                prepared.businessConditions(), safePage),
+                                   safePage,
+                                   options == null ? defaultOptions : options,
+                                   prepared.scopes(),
+                                   prepared.resultPlan(), prepared.decodingPlan());
+    }
+
+    GovernedPlanEnvelope<PlannedJoinPage> pageGoverned(JoinQuerySpec spec,
+                                                        PageQuery page,
+                                                        SqlExecutionOptions options,
+                                                        FieldUsePolicy policy,
+                                                        QueryShapeLimits limits) {
+        JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
+        PageQuery safePage = Objects.requireNonNull(page, "join page query must not be null");
+        FieldUseRequirements.Builder requirements = FieldUseRequirements.builder();
+        QueryShapeBudget budget = new QueryShapeBudget(limits);
+        PreparedJoin prepared = prepare(safeSpec, requirements, budget,
+                FieldUseGuard.effectiveDisplayMode(policy, safeSpec.sensitiveDisplayMode()));
+        FieldUseSnapshot fieldUse = approveFieldUse(
+                requirements.build(), prepared.scopes(), policy);
+        JoinQuerySqlRenderer joins = renderer.joinQueries();
+        SqlRequest count = joins.count(safeSpec, prepared.physicalForms(), prepared.protections(),
+                                       prepared.businessConditions());
+        SqlRequest data = joins.select(safeSpec, prepared.physicalForms(), prepared.protections(),
+                                       prepared.businessConditions(), safePage);
+        FieldUseGuard.accountRenderedRequest(budget, data);
+        PlannedJoinPage plan = new PlannedJoinPage(safeSpec, prepared.resultForm(), count, data, safePage,
+                                                   options == null ? defaultOptions : options,
+                                                   prepared.scopes(), prepared.resultPlan(), prepared.decodingPlan());
+        return new GovernedPlanEnvelope<>(plan, fieldUse);
+    }
+
+    /** governed JOIN 在 SQL 生成前按来源自己的 FieldScope 完成一次审批。 */
+    private static FieldUseSnapshot approveFieldUse(
+            FieldUseRequirements requirements,
+            Map<JoinSource, DataScope> scopes,
+            FieldUsePolicy policy) {
+        Map<JoinSource, DataScope> safeScopes = Objects.requireNonNull(
+                scopes, "join scopes must not be null");
+        Map<JoinSource, FieldScope> fieldScopes = new LinkedHashMap<>(safeScopes.size());
+        safeScopes.forEach((source, scope) -> fieldScopes.put(
+                Objects.requireNonNull(source, "join source must not be null"),
+                Objects.requireNonNull(scope, "join data scope must not be null").fields()));
+        FieldUseSnapshot snapshot = Objects.requireNonNull(
+                policy, "field use policy must not be null")
+                .approveJoin(requirements, fieldScopes);
+        for (JoinFieldDecision decision : snapshot.joinDecisions()) {
+            if (decision.denied()) {
+                rejectFieldUse(decision);
+            }
+        }
+        return snapshot;
+    }
+
+    private static void rejectFieldUse(JoinFieldDecision decision) {
+        JoinSource source = decision.field().source();
+        String description = "source[" + source.ordinal() + ':' + source.form().id()
+                + "]." + decision.field().field();
+        throw new ScopeAccessException(
+                decision.use().write()
+                        ? ScopeErrorCode.FIELD_NOT_WRITABLE : ScopeErrorCode.FIELD_NOT_READABLE,
+                source.form().id(),
+                decision.field().field(),
+                "join field [" + description + "] is not allowed for "
+                        + decision.use() + " from " + decision.origin());
+    }
+
+    private PreparedJoin prepare(JoinQuerySpec safeSpec) {
+        return prepare(safeSpec, null, null, safeSpec.sensitiveDisplayMode());
+    }
+
+    private PreparedJoin prepare(JoinQuerySpec safeSpec,
+                                 FieldUseRequirements.Builder requirements,
+                                 QueryShapeBudget budget,
+                                 SensitiveDisplayMode displayMode) {
+        Map<JoinSource, ConditionGroup> protections = new LinkedHashMap<>();
+        Map<JoinSource, ConditionGroup> businessConditions = new LinkedHashMap<>();
+        List<ScopedRead> scopedReads = new ArrayList<>(safeSpec.sources().size());
+        Map<JoinSource, DynamicForm> readableForms = new LinkedHashMap<>();
+        Map<JoinSource, DynamicForm> physicalForms = new LinkedHashMap<>();
+        Map<JoinSource, DataScope> effectiveScopes = new LinkedHashMap<>();
+        for (JoinSource source : safeSpec.sources()) {
+            ScopedRead read = scopes.scopedRead(source.form(), EMPTY, safeSpec.scope(source));
+            scopedReads.add(read);
+            readableForms.put(source, read.form());
+            effectiveScopes.put(source, read.scope());
+        }
+        if (requirements == null) {
+            JoinReadGuard.validate(safeSpec, readableForms);
+        } else {
+            JoinReadGuard.validate(safeSpec, readableForms, requirements, budget, renderer);
+        }
+        for (int index = 0; index < safeSpec.sources().size(); index++) {
+            JoinSource source = safeSpec.sources().get(index);
+            ScopedRead read = scopedReads.get(index);
+            DynamicForm physicalForm = renderer.protection().physicalForm(source.form());
+            ProtectedFieldRuntime.PreparedQuery protection = renderer.protection().prepareQuery(
+                    source.form(), physicalForm, read.where(), read.scope(), List.of());
+            protections.put(source, protection.where());
+            ProtectedFieldRuntime.PreparedQuery business = renderer.protection().prepareQuery(
+                    source.form(), physicalForm, safeSpec.where(source), read.scope(), List.of());
+            businessConditions.put(source, business.where());
+            physicalForms.put(source, physicalForm);
+        }
+        JoinResultProtector.ResultPlan resultPlan = results.plan(
+                safeSpec, effectiveScopes, displayMode);
+        DynamicForm resultForm = resultForm(safeSpec, physicalForms);
+        return new PreparedJoin(resultForm, physicalForms, protections,
+                                businessConditions, effectiveScopes, resultPlan,
+                                FormFieldDecodingPlan.joinProjection(safeSpec, resultForm, renderer));
+    }
+
+    /** 投影的物理类型和稳定别名只服务当前 JOIN 计划，由 planner 直接组装结果解码表单。 */
+    private static DynamicForm resultForm(JoinQuerySpec spec,
+                                          Map<JoinSource, DynamicForm> physicalForms) {
+        DynamicForm.Builder result = DynamicForm.builder("join-result", "join_result");
+        for (JoinProjection projection : spec.projections()) {
+            DynamicField source = physicalForms.get(projection.field().source())
+                    .field(projection.field().field());
+            result.addField(new DynamicField(projection.alias(),
+                    source.databaseType(),
+                    false,
+                    true,
+                    false,
+                    source.length(),
+                    source.precision(),
+                    source.scale(),
+                    null,
+                    ValueGeneration.none()));
+        }
+        return result.build();
+    }
+
+    record PlannedJoin(JoinQuerySpec spec,
+                       DynamicForm resultForm,
+                       SqlRequest request,
+                       SqlExecutionOptions options,
+                       Map<JoinSource, DataScope> scopes,
+                       JoinResultProtector.ResultPlan resultPlan,
+                       FormFieldDecodingPlan decodingPlan) {
+        PlannedJoin {
+            spec = Objects.requireNonNull(spec, "join query spec must not be null");
+            resultForm = Objects.requireNonNull(resultForm, "join result form must not be null");
+            request = Objects.requireNonNull(request, "join SQL request must not be null");
+            options = Objects.requireNonNull(options, "join execution options must not be null");
+            scopes = Map.copyOf(Objects.requireNonNull(scopes, "join scopes must not be null"));
+            resultPlan = Objects.requireNonNull(resultPlan, "join result plan must not be null");
+            decodingPlan = Objects.requireNonNull(decodingPlan, "join decoding plan must not be null");
+        }
+    }
+
+    record PlannedJoinPage(JoinQuerySpec spec,
+                           DynamicForm resultForm,
+                           SqlRequest countRequest,
+                           SqlRequest dataRequest,
+                           PageQuery page,
+                           SqlExecutionOptions options,
+                           Map<JoinSource, DataScope> scopes,
+                           JoinResultProtector.ResultPlan resultPlan,
+                           FormFieldDecodingPlan decodingPlan) {
+        PlannedJoinPage {
+            spec = Objects.requireNonNull(spec, "join query spec must not be null");
+            resultForm = Objects.requireNonNull(resultForm, "join result form must not be null");
+            countRequest = Objects.requireNonNull(countRequest, "join count request must not be null");
+            dataRequest = Objects.requireNonNull(dataRequest, "join data request must not be null");
+            page = Objects.requireNonNull(page, "join page query must not be null");
+            options = Objects.requireNonNull(options, "join execution options must not be null");
+            scopes = Map.copyOf(Objects.requireNonNull(scopes, "join scopes must not be null"));
+            resultPlan = Objects.requireNonNull(resultPlan, "join result plan must not be null");
+            decodingPlan = Objects.requireNonNull(decodingPlan, "join decoding plan must not be null");
+        }
+    }
+
+    private record PreparedJoin(
+            DynamicForm resultForm,
+            Map<JoinSource, DynamicForm> physicalForms,
+            Map<JoinSource, ConditionGroup> protections,
+            Map<JoinSource, ConditionGroup> businessConditions,
+            Map<JoinSource, DataScope> scopes,
+            JoinResultProtector.ResultPlan resultPlan,
+            FormFieldDecodingPlan decodingPlan) {
+    }
+}

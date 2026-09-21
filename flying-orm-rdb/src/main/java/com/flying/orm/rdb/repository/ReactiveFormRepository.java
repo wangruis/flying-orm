@@ -1,0 +1,177 @@
+package com.flying.orm.rdb.repository;
+
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
+
+import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.page.PageQuery;
+import com.flying.orm.core.page.PageResult;
+import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.rdb.batch.BatchWriteOptions;
+import com.flying.orm.rdb.aggregate.AggregateRow;
+import com.flying.orm.rdb.aggregate.AggregateSpec;
+import com.flying.orm.rdb.form.ReactiveFormClient;
+import com.flying.orm.rdb.lifecycle.ReactiveEntityListener;
+import com.flying.orm.rdb.internal.mapping.EntityValues;
+import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.lock.ReadLock;
+import com.flying.orm.rdb.operator.EntityDmlDeleteOperator;
+import com.flying.orm.rdb.operator.EntityDmlOperator;
+import com.flying.orm.rdb.operator.EntityDmlQueryOperator;
+import com.flying.orm.rdb.operator.EntityDmlUpdateOperator;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import java.util.List;
+import java.util.Objects;
+
+/**
+ * 实体侧的轻量响应式 Repository。
+ *
+ * <p>这个类是稳定的实体入口，不重新实现 ORM 内核。实体映射交给客户端的元数据模型，SQL、Scope、
+ * 逻辑删除、乐观锁、批量 SQL 执行事实、执行保护和异常分类继续统一走 {@link ReactiveFormClient}。</p>
+ *
+ * <p>内部职责已经分开：单实体写入由 {@link ReactiveRepositoryEntityWriter} 负责，批量协调由
+ * {@link ReactiveRepositoryBatchCoordinator} 负责，查询规格和分页结果由 {@link ReactiveRepositoryReadMapper}
+ * 负责，生命周期顺序由 {@link ReactiveRepositoryLifecycleSupport} 负责。本门面只保留使用者入口，
+ * 带 Scope、乐观锁和执行选项的组合由实体操作符及写入协作者表达。</p>
+ *
+ * <p>Repository 创建后不可变，可以并发共享。所有 Mono/Flux 都是惰性的；真正的实体转换、连接获取和 SQL
+ * 执行发生在订阅时，取消和背压不会被这里偷偷吞掉。</p>
+ *
+ * @param <T> 实体类型
+ * @author wangr
+ * @date 2026-08-06
+ * @version v1.0
+ */
+public final class ReactiveFormRepository<T> {
+
+    private final ReactiveFormClient client;
+    private final DynamicForm form;
+    private final DynamicForm boundForm;
+    private final Class<T> entityType;
+    private final EntityValues<T> entityValues;
+    private final ReactiveEntityListener<T> listener;
+    private final ReactiveRepositoryEntityWriter<T> entityWriter;
+    private final ReactiveRepositoryBatchOperations<T> batchOperations;
+    private final ReactiveRepositoryReadMapper<T> readMapper;
+
+    private ReactiveFormRepository(ReactiveFormClient client,
+                                   DynamicForm form,
+                                   Class<T> type,
+                                   EntityValues<T> entityValues,
+                                   ReactiveEntityListener<T> listener) {
+        this.client = Objects.requireNonNull(client, "reactive form client must not be null");
+        this.boundForm = Objects.requireNonNull(form, "repository form must not be null");
+        this.entityType = Objects.requireNonNull(type, "repository type must not be null");
+        this.entityValues = Objects.requireNonNull(entityValues, "repository entity values must not be null");
+        this.listener = listener;
+        EntityMetadata<T> metadata = client.entityModels().metadata(entityType);
+        this.form = RepositoryLogicDeletes.bind(metadata, boundForm);
+        RepositoryEntityIdSupport<T> ids = RepositoryEntityIdSupport.create(
+                metadata, client.entityModels());
+        ReactiveRepositoryLifecycleSupport<T> lifecycle =
+                new ReactiveRepositoryLifecycleSupport<>(metadata, listener);
+        this.entityWriter = new ReactiveRepositoryEntityWriter<>(
+                client, this.form, metadata, this.entityValues, lifecycle, ids);
+        ReactiveRepositoryBatchCoordinator<T> batchCoordinator = new ReactiveRepositoryBatchCoordinator<>(metadata,
+                this.entityValues, lifecycle, ids);
+        this.batchOperations = new ReactiveRepositoryBatchOperations<>(client, this.form, batchCoordinator);
+        this.readMapper = new ReactiveRepositoryReadMapper<>(client, this.form, entityType, metadata, lifecycle);
+    }
+
+    /**
+     * 使用默认实体反射映射创建 Repository。默认映射从客户端实体模型缓存中取得，和其他实体入口共用同一套安全规则。
+     *
+     * @param client 响应式动态表单客户端
+     * @param form 实体对应的动态表单
+     * @param type 实体类型
+     * @param <T> 实体类型
+     * @return 可并发共享的 Repository
+     */
+    public static <T> ReactiveFormRepository<T> create(ReactiveFormClient client,
+                                                       DynamicForm form,
+                                                       Class<T> type) {
+        EntityValues<T> entityValues = client.entityModels().entityValues(type);
+        return new ReactiveFormRepository<>(client, form, type, entityValues, null);
+    }
+
+    /** 返回一个使用相同映射、客户端和安全配置，但追加了生命周期监听器的新 Repository。 */
+    public ReactiveFormRepository<T> withListener(ReactiveEntityListener<T> listener) {
+        ReactiveEntityListener<T> additional = Objects.requireNonNull(
+                listener, "entity lifecycle listener must not be null");
+        return new ReactiveFormRepository<>(client, boundForm, entityType,
+                entityValues,
+                this.listener == null ? additional : ReactiveEntityListener.compose(this.listener, additional));
+    }
+
+    /** @return 当前实体的 Lambda 查询命令 */
+    public EntityDmlQueryOperator<T> createQuery() {
+        return entityOperator().query();
+    }
+
+    /** @return 当前实体的 Lambda 更新命令 */
+    public EntityDmlUpdateOperator<T> createUpdate() {
+        return entityOperator().update();
+    }
+
+    /** @return 当前实体的 Lambda 删除命令 */
+    public EntityDmlDeleteOperator<T> createDelete() {
+        return entityOperator().delete();
+    }
+
+    private EntityDmlOperator<T> entityOperator() {
+        return EntityDmlOperator.create(client, client.entityRenderer(), form, entityType);
+    }
+
+    public Mono<Long> insert(T entity) { return entityWriter.insert(entity); }
+    public Mono<BatchExecutionEvidence> insertBatch(List<T> entities) { return batchOperations.insert(entities); }
+    public Mono<BatchExecutionEvidence> upsertBatch(List<T> entities) { return batchOperations.upsert(entities); }
+    public Mono<BatchExecutionEvidence> insertBatch(Publisher<T> entities, BatchWriteOptions options) {
+        return batchOperations.insert(entities, options);
+    }
+    public Mono<BatchExecutionEvidence> upsertBatch(Publisher<T> entities, BatchWriteOptions options) {
+        return batchOperations.upsert(entities, options);
+    }
+    public Mono<BatchExecutionEvidence> updateBatch(List<T> entities) { return batchOperations.update(entities); }
+    public Mono<BatchExecutionEvidence> updateBatch(Publisher<T> entities, BatchWriteOptions options) {
+        return batchOperations.update(entities, options);
+    }
+    public Mono<BatchExecutionEvidence> updateBatch(Publisher<T> entities, DataScope scope, BatchWriteOptions options) {
+        return batchOperations.update(entities, scope, options);
+    }
+
+    public Mono<Long> update(T entity, ConditionGroup where) { return entityWriter.update(entity, conditions(where)); }
+
+    public Mono<Long> delete(ConditionGroup where) { return entityWriter.delete(conditions(where)); }
+    public Mono<Long> delete(T entity, ConditionGroup where) { return entityWriter.delete(entity, conditions(where)); }
+
+    public Mono<Long> physicalDelete(ConditionGroup where) { return entityWriter.physicalDelete(conditions(where)); }
+
+    public Flux<T> select(ConditionGroup where) { return readMapper.select(conditions(where), null, null); }
+    /** 在订阅时按受控锁读取当前实体；调用方决定事务范围。 */
+    public Flux<T> lockingRead(ConditionGroup where, ReadLock lock) {
+        return readMapper.lockingRead(conditions(where), lock);
+    }
+    /** 在当前 Repository 绑定的表单上执行类型化聚合。 */
+    public Flux<AggregateRow> aggregate(AggregateSpec spec) {
+        return client.aggregate(requireRepositoryAggregate(spec));
+    }
+    public Mono<PageResult<T>> page(ConditionGroup where, PageQuery page) {
+        return readMapper.page(conditions(where), page, null, null);
+    }
+
+    private ConditionGroup conditions(ConditionGroup where) {
+        return entityValues.normalizeCondition(where, client.entityRenderer().terms());
+    }
+
+    private AggregateSpec requireRepositoryAggregate(AggregateSpec spec) {
+        AggregateSpec safeSpec = Objects.requireNonNull(spec, "aggregate spec must not be null");
+        if (safeSpec.query().form() != boundForm) {
+            throw new IllegalArgumentException("aggregate spec must use the repository form");
+        }
+        return RepositoryLogicDeletes.aggregate(safeSpec, form);
+    }
+
+}
