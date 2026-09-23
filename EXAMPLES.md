@@ -33,9 +33,9 @@ DynamicForm users = DynamicForm.builder("users", "users")
     .logicDelete("deleted", 0, 1)
     .build();
 
-var operator = clients.operator();
-var dml = operator.dml();
-var forms = clients.forms();
+DatabaseOperator operator = clients.operator();
+DmlOperator dml = operator.dml();
+ReactiveFormClient forms = clients.forms();
 ```
 
 逻辑删除字段在模型声明一次，之后表单查询与写入复用。需要显式 schema/catalog 时使用 `DynamicForm.relationalBuilder(id, RelationIdentity.of(catalog, schema, table))`。
@@ -47,13 +47,13 @@ var forms = clients.forms();
 ```java
 Flux<DynamicRow> all = dml.query(users).fetchMap();
 
-var byId = dml.query(users).where("id", 1L).one();
-var active = dml.query(users).where("status", "ACTIVE").fetchMap();
-var containsName = dml.query(users).where("name", "like", "%Alice%").fetchMap();
-var ids = dml.query(users).where("id", "in", List.of(1L, 2L)).fetchMap();
-var excluded = dml.query(users).where("id", "not-in", List.of(1L, 2L)).fetchMap();
-var interval = dml.query(users).where("id", "between", List.of(10L, 20L)).fetchMap();
-var greater = dml.query(users).where("id", ">", 10L).fetchMap();
+Mono<DynamicRow> byId = dml.query(users).where("id", 1L).one();
+Flux<DynamicRow> active = dml.query(users).where("status", "ACTIVE").fetchMap();
+Flux<DynamicRow> containsName = dml.query(users).where("name", "like", "%Alice%").fetchMap();
+Flux<DynamicRow> ids = dml.query(users).where("id", "in", List.of(1L, 2L)).fetchMap();
+Flux<DynamicRow> excluded = dml.query(users).where("id", "not-in", List.of(1L, 2L)).fetchMap();
+Flux<DynamicRow> interval = dml.query(users).where("id", "between", List.of(10L, 20L)).fetchMap();
+Flux<DynamicRow> greater = dml.query(users).where("id", ">", 10L).fetchMap();
 ```
 
 `one()`：零行返回空 Mono，多行报错，不静默取第一条。`like` 值中的 `%`、`_` 保留 SQL 通配符语义，值仍通过绑定传入。
@@ -61,7 +61,7 @@ var greater = dml.query(users).where("id", ">", 10L).fetchMap();
 ### AND、OR、空值与可选条件
 
 ```java
-var rows = dml.query(users)
+Flux<DynamicRow> rows = dml.query(users)
     .where(w -> w.is("status", "ACTIVE")
         .or(group -> group.is("name", "Alice").is("name", "Bob"))
         .and(group -> group.where("id", ">", 10L).where("id", "<", 100L))
@@ -88,7 +88,7 @@ Flux<Long> ids = dml.query(users)
     .where("status", "ACTIVE")
     .fetch(row -> (Long) row.get("id"));
 
-var organizations = dml.query(users)
+Flux<DynamicRow> organizations = dml.query(users)
     .select("org_id")
     .groupBy("org_id")
     .orderByAsc("org_id")
@@ -102,18 +102,18 @@ DTO 的属性/record 组件应与投影匹配；单列可能为 NULL 时不要�
 在客户端装配时注册一次，不在业务查询中拼 SQL：
 
 ```java
-var renderer = SqlRenderer.builder()
+SqlRenderer renderer = SqlRenderer.builder()
     .addDefaultTerms()
     .addTerm(SqlTermHandler.relationExists(
         "user-in-org", "user_org", "membership", "user_id", "org_id"))
     .build();
 
-var clients = FlyingOrmClients.builder(access)
+FlyingOrmClients clients = FlyingOrmClients.builder(access)
     .dialect(RdbDialect.postgresql())
     .renderer(renderer)
     .build();
 
-var rows = clients.operator().dml().query(users)
+Flux<DynamicRow> rows = clients.operator().dml().query(users)
     .where("id", "user-in-org", orgId)
     .fetchMap();
 ```
@@ -127,10 +127,10 @@ StructuredConditionInput input = StructuredConditionInput.or(
     StructuredConditionInput.term("name", "like", "A%"),
     StructuredConditionInput.term("status", "=", "ACTIVE"));
 
-var scopedClients = clients.withDefaultDataScope(DataScope.orgOnly("org_id", trustedOrgId));
-var scoped = scopedClients.operator();
+FlyingOrmClients scopedClients = clients.withDefaultDataScope(DataScope.orgOnly("org_id", trustedOrgId));
+DatabaseOperator scoped = scopedClients.operator();
 
-var result = scoped.dml().query(users)
+Mono<PageResult<DynamicRow>> result = scoped.dml().query(users)
     .filter(input)
     .where("id", ">", 0L)
     .orderByAsc("id")
@@ -142,14 +142,14 @@ var result = scoped.dml().query(users)
 需要独立控制投影、过滤、排序等字段用途时：
 
 ```java
-var policy = FieldUsePolicy.builder()
+FieldUsePolicy policy = FieldUsePolicy.builder()
     .visibility("id", FieldVisibility.FULL)
     .visibility("name", FieldVisibility.FULL)
     .allow("id", FieldUse.PROJECT, FieldUse.FILTER, FieldUse.SORT)
     .allow("name", FieldUse.PROJECT, FieldUse.FILTER)
     .build();
 
-var result = scoped.dml().query()
+Flux<DynamicRow> result = scoped.dml().query()
     .from(users, policy)
     .select("id", "name")
     .filter(StructuredConditionInput.term("name", "like", "A%"))
@@ -164,7 +164,7 @@ var result = scoped.dml().query()
 ### 页码：需要总数
 
 ```java
-var page = dml.query(users)
+Mono<PageResult<DynamicRow>> page = dml.query(users)
     .where("status", "ACTIVE")
     .orderByDesc("id")
     .page(1, 20);
@@ -175,21 +175,21 @@ var page = dml.query(users)
 ### 游标：稳定非空排序
 
 ```java
-var first = dml.query(users)
+Mono<CursorPageResult<DynamicRow>> first = dml.query(users)
     .cursorPage(CursorPageQuery.first(20, CursorSort.asc("id")));
 
-var next = dml.query(users)
+Mono<CursorPageResult<DynamicRow>> next = dml.query(users)
     .cursorPage(CursorPageQuery.after(20, List.of(lastId), CursorSort.asc("id")));
 ```
 
 ### Keyset：复合排序、可空字段
 
 ```java
-var first = dml.query(users).keysetPage(KeysetPageQuery.first(
+Mono<KeysetPageResult<DynamicRow>> first = dml.query(users).keysetPage(KeysetPageQuery.first(
     20, KeysetSort.asc("name", NullOrder.LAST), KeysetSort.asc("id", NullOrder.LAST)));
 
 // previous 是已取得的 KeysetPageResult；仅在 hasMore() 为 true 时继续。
-var next = dml.query(users).keysetPage(KeysetPageQuery.after(
+Mono<KeysetPageResult<DynamicRow>> next = dml.query(users).keysetPage(KeysetPageQuery.after(
     20, previous.nextPosition(),
     KeysetSort.asc("name", NullOrder.LAST), KeysetSort.asc("id", NullOrder.LAST)));
 ```
@@ -199,8 +199,8 @@ var next = dml.query(users).keysetPage(KeysetPageQuery.after(
 ## 报表与聚合
 
 ```java
-var userCount = AggregateExpression.count("id", "user_count");
-var distinctNames = AggregateExpression.countDistinct("name", "name_count");
+AggregateExpression<Long> userCount = AggregateExpression.count("id", "user_count");
+AggregateExpression<Long> distinctNames = AggregateExpression.countDistinct("name", "name_count");
 
 Flux<AggregateRow> report = dml.query(users)
     .where("status", "ACTIVE")
@@ -218,9 +218,9 @@ Flux<Long> counts = report.map(row -> row.get(userCount));
 `count(field, alias)` 统计非空值；统计行数应选非空主键。SUM / AVG / MIN / MAX 同样使用类型化表达式：
 
 ```java
-var total = AggregateExpression.sum("amount", "total_amount");
-var average = AggregateExpression.avg("amount", "average_amount");
-var largest = AggregateExpression.max("amount", "largest_amount", LogicalType.DECIMAL, BigDecimal.class);
+AggregateExpression<BigDecimal> total = AggregateExpression.sum("amount", "total_amount");
+AggregateExpression<BigDecimal> average = AggregateExpression.avg("amount", "average_amount");
+AggregateExpression<BigDecimal> largest = AggregateExpression.max("amount", "largest_amount", LogicalType.DECIMAL, BigDecimal.class);
 ```
 
 这些表达式用于具有 `amount` 字段的订单表单，添加到同一 `aggregate` 回调即可。前端 `filter`、服务端 `where`、Scope 和字段用途检查在报表入口同样生效。
@@ -230,7 +230,7 @@ var largest = AggregateExpression.max("amount", "largest_amount", LogicalType.DE
 普通多表查询：
 
 ```java
-var rows = dml.joinQuery(users)
+Flux<DynamicRow> rows = dml.joinQuery(users)
     .leftJoin(organizations, "org_id", "id")
     .select(users, "id")
     .selectAs(users, "name", "user_name")
@@ -245,11 +245,11 @@ var rows = dml.joinQuery(users)
 同表自关联要区分“员工源”和“主管源”，使用稳定来源引用：
 
 ```java
-var builder = JoinQuerySpec.builder(users);
-var employee = builder.root();
-var manager = builder.join(JoinType.LEFT, users, employee, "manager_id", "id");
+JoinQuerySpec.Builder builder = JoinQuerySpec.builder(users);
+JoinSource employee = builder.root();
+JoinSource manager = builder.join(JoinType.LEFT, users, employee, "manager_id", "id");
 
-var query = builder
+JoinQuerySpec query = builder
     .select(employee, "id")
     .selectAs(employee, "name", "employee_name")
     .selectAs(manager, "name", "manager_name")
@@ -268,7 +268,7 @@ Flux<DynamicRow> rows = forms.selectJoin(query);
 `User` 是带 getter/setter 的实体，含 `id/name/orgId/status/version` 属性；映射和治理注解见 [ANNOTATIONS](ANNOTATIONS.md)。
 
 ```java
-var repository = clients.repository(User.class);
+ReactiveFormRepository<User> repository = clients.repository(User.class);
 
 Flux<User> active = repository.createQuery()
     .where(User::getStatus, "ACTIVE")
@@ -282,16 +282,16 @@ Flux<String> names = repository.createQuery()
     .fetch()
     .map(User::getName);
 
-var one = repository.createQuery().where(User::getId, 1L).one();
-var page = repository.createQuery().orderByAsc(User::getId).page(1, 20);
+Mono<User> one = repository.createQuery().where(User::getId, 1L).one();
+Mono<PageResult<User>> page = repository.createQuery().orderByAsc(User::getId).page(1, 20);
 
-var update = repository.createUpdate()
+Mono<Long> update = repository.createUpdate()
     .set(User::getName, "Alice")
     .where(User::getId, 1L)
     .optimisticLock(3L)  // User.version 声明 @Version
     .execute();
 
-var deleted = repository.createDelete().in(User::getId, List.of(1L, 2L)).execute();
+Mono<Long> deleted = repository.createDelete().in(User::getId, List.of(1L, 2L)).execute();
 ```
 
 投影 `fetch()` 返回部分实体；Bean 未选择的属性保留构造器和字段初始化值，record 未选择的组件使用 Java 默认值。旧 `execute()/one()/page()` 保留完整实体约束；动态投影可用 `executeRows()`。实体也支持 `or`、`andGroup`、`between`、`isNull`、`isNotNull` 和 `and(property, operator, value)`。
@@ -301,17 +301,17 @@ var deleted = repository.createDelete().in(User::getId, List.of(1L, 2L)).execute
 ### 单条插入、范围更新、逻辑删除
 
 ```java
-var inserted = dml.insert(users, Map.of(
+Mono<Long> inserted = dml.insert(users, Map.of(
     "id", 1L, "name", "Alice", "org_id", 7L,
     "status", "ACTIVE", "version", 0L, "deleted", 0));
 
-var updated = dml.update(users)
+Mono<Long> updated = dml.update(users)
     .set("status", "DISABLED")
     .where("id", "in", List.of(1L, 2L))
     .scope(DataScope.orgOnly("org_id", 7L))
     .execute();
 
-var deleted = dml.delete(users)
+Mono<Long> deleted = dml.delete(users)
     .where("id", "in", List.of(1L, 2L))
     .scope(DataScope.orgOnly("org_id", 7L))
     .execute();
@@ -332,7 +332,7 @@ Mono<BatchExecutionEvidence> upserted = dml.upsertBatch(users, inputRows);
 ### 每行不同值：乐观锁批量更新
 
 ```java
-var updates = Flux.just(new BatchOptimisticUpdate(
+Flux<BatchOptimisticUpdate> updates = Flux.just(new BatchOptimisticUpdate(
     Map.of("name", "Alice"),
     ConditionGroup.and().where("id", "=", 1L).build(),
     OptimisticLockOptions.increment("version", 3L)));
@@ -345,7 +345,7 @@ Mono<BatchExecutionEvidence> result = dml.updateBatch(users, updates);
 ### 批量预算与结果
 
 ```java
-var batch = BatchSpec.insert(users, Flux.fromIterable(rows))
+BatchSpec batch = BatchSpec.insert(users, Flux.fromIterable(rows))
     .withScope(DataScope.orgOnly("org_id", orgId))
     .withOptions(BatchWriteOptions.of(500)
         .withMemoryLimits(100_000, 32L * 1024 * 1024)
@@ -361,8 +361,8 @@ Mono<BatchExecutionEvidence> result = forms.writeBatch(batch);
 ### 读取已有表
 
 ```java
-var metadata = operator.metadata().readTable("users");
-var rows = operator.metadata().readForm("existingUsers", "users")
+Mono<TableMetadata> metadata = operator.metadata().readTable("users");
+Flux<DynamicRow> rows = operator.metadata().readForm("existingUsers", "users")
     .flatMapMany(form -> operator.dml().query(form).where("id", 1L).fetchMap());
 ```
 
@@ -388,10 +388,10 @@ Mono<Long> changed = operator.ddl().createOrAlter("notes")
 ### 实体注解同步
 
 ```java
-var validation = clients.entitySchemas()
+Mono<EntitySchemaSyncReport> validation = clients.entitySchemas()
     .synchronizeReactive(EntitySchemaSyncMode.VALIDATE, User.class);
 
-var safeUpdate = clients.entitySchemas()
+Mono<EntitySchemaSyncReport> safeUpdate = clients.entitySchemas()
     .synchronizeReactive(EntitySchemaSyncMode.SAFE_UPDATE, User.class);
 ```
 
@@ -402,7 +402,7 @@ var safeUpdate = clients.entitySchemas()
 先在客户端装配时配置应用提供的密钥：
 
 ```java
-var clients = FlyingOrmClients.builder(access)
+FlyingOrmClients clients = FlyingOrmClients.builder(access)
     .dialect(RdbDialect.postgresql())
     .protectedFields(ProtectedFieldKeyRing.single("v1", applicationEncryptionKey))
     .build();
@@ -422,16 +422,16 @@ DynamicForm contacts = DynamicForm.builder("contacts", "contacts")
 结构维护会处理声明对应的物理列和辅助关系；写入使用逻辑字段名，不手动加密：
 
 ```java
-var dml = clients.operator().dml();
-var inserted = dml.insert(contacts, Map.of("id", 1L, "phone", "13800001234"));
+DmlOperator dml = clients.operator().dml();
+Mono<Long> inserted = dml.insert(contacts, Map.of("id", 1L, "phone", "13800001234"));
 
-var exact = dml.query(contacts)
+Flux<DynamicRow> exact = dml.query(contacts)
     .where("phone", ProtectedConditions.EXACT, "13800001234").masked().fetchMap();
 
-var suffix = dml.query(contacts)
+Flux<DynamicRow> suffix = dml.query(contacts)
     .where("phone", ProtectedConditions.SUFFIX, "1234").fetchMap();
 
-var contains = dml.query(contacts)
+Flux<DynamicRow> contains = dml.query(contacts)
     .where("phone", ProtectedConditions.CONTAINS, "0000").fetchMap();
 ```
 
@@ -444,8 +444,8 @@ var contains = dml.query(contacts)
 锁定读取仍使用模型和条件：
 
 ```java
-var query = QuerySpec.of(users, ConditionGroup.and().where("id", "=", 1L).build());
-var locked = forms.lockingRead(LockingReadSpec.of(query, ReadLock.updateNowait()));
+QuerySpec query = QuerySpec.of(users, ConditionGroup.and().where("id", "=", 1L).build());
+Flux<DynamicRow> locked = forms.lockingRead(LockingReadSpec.of(query, ReadLock.updateNowait()));
 ```
 
 锁定语义需数据库支持，其有效范围由上层连接和事务边界决定；ORM 不开启事务。
@@ -453,7 +453,7 @@ var locked = forms.lockingRead(LockingReadSpec.of(query, ReadLock.updateNowait()
 ## 同步调用与扩展配置
 
 ```java
-var sync = clients.syncOperator().dml();
+SyncDmlOperator sync = clients.syncOperator().dml();
 List<DynamicRow> rows = sync.query(users).where("org_id", 7L).fetchMap();
 DynamicRow one = sync.query(users).where("id", 1L).one(); // 无匹配时为 null
 BatchExecutionEvidence evidence = sync.insertBatch(users, inputList);

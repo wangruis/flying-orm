@@ -26,29 +26,29 @@ Java 21+。数据库驱动与连接池由应用自行提供。以下是本分支
 
 ```java
 // R2DBC
-var access = R2dbcConnectionAccess.of(
+R2dbcConnectionAccess access = R2dbcConnectionAccess.of(
     request -> connectionFactory.create(),
     (signal, connection, request) -> connection.close());
 
-var clients = FlyingOrmClients.builder(access)
+FlyingOrmClients clients = FlyingOrmClients.builder(access)
     .dialect(RdbDialect.postgresql())
     .build();
 
-var operator = clients.operator();
+DatabaseOperator operator = clients.operator();
 ```
 
 JDBC 使用相同装配入口：
 
 ```java
-var access = JdbcConnectionAccess.of(
+JdbcConnectionAccess access = JdbcConnectionAccess.of(
     request -> dataSource.getConnection(),
     (connection, request) -> connection.close());
 
-var clients = FlyingOrmClients.builder(access)
+FlyingOrmClients clients = FlyingOrmClients.builder(access)
     .dialect(RdbDialect.postgresql())
     .build();
 
-var operator = clients.syncOperator();
+SyncDatabaseOperator operator = clients.syncOperator();
 ```
 
 客户端适合单例共享，在应用关闭时调用 `clients.close()`；它不关闭应用的连接池。若应用使用事务，应在回调中遵守应用框架的借还规则，不能照搬直接获取/关闭连接的示例。
@@ -87,7 +87,7 @@ DDL 需显式调用，普通查询不会自动改表。响应式代码由调用�
 ## 实体 Repository
 
 ```java
-var users = clients.repository(User.class);
+ReactiveFormRepository<User> users = clients.repository(User.class);
 
 Flux<String> names = users.createQuery()
     .select(User::getName)
@@ -101,10 +101,10 @@ Flux<String> names = users.createQuery()
 ## 前端条件与数据范围
 
 ```java
-var scoped = clients.operator()
+DatabaseOperator scoped = clients.operator()
     .withDefaultDataScope(DataScope.orgOnly("org_id", trustedOrgId));
 
-var page = scoped.dml().query(users)
+Mono<PageResult<DynamicRow>> page = scoped.dml().query(users)
     .filter(input)                    // StructuredConditionInput，不是 SQL
     .where("name", "like", "A%")      // 服务端追加条件
     .orderByAsc("id")

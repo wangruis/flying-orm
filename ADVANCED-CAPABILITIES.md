@@ -7,17 +7,17 @@
 注册一次，执行时只提供参数和已批准的标识符：
 
 ```java
-var templates = SqlTemplateRegistry.builder()
+SqlTemplateRegistry templates = SqlTemplateRegistry.builder()
     .register(SqlTemplate.query("user-by-id",
         "select id, name from ${table} where id = :id", Set.of("table")))
     .build();
 
-var clients = FlyingOrmClients.builder(access)
+FlyingOrmClients clients = FlyingOrmClients.builder(access)
     .dialect(RdbDialect.postgresql())
     .sqlTemplates(templates)
     .build();
 
-var row = clients.operator().sqlTemplate("user-by-id")
+Mono<DynamicRow> row = clients.operator().sqlTemplate("user-by-id")
     .identifier("table", "users")
     .bind("id", 1001L)
     .one();
@@ -50,11 +50,11 @@ SQL 文本只来自可信后端代码。模板与原生 SQL **不自动注入 Sc
 默认配置可直接使用，高级配置按需启用。读取/批量预算是资源边界，不是连接或事务超时策略。
 
 ```java
-var limits = SqlExecutionOptions.safeDefaults()
+SqlExecutionOptions limits = SqlExecutionOptions.safeDefaults()
     .withMaxRows(1000)
     .withMaxResultBytes(8L * 1024 * 1024)
     .withFetchSize(128);
-var rows = clients.operator().dml().query(users).fetchMap(limits);
+Flux<DynamicRow> rows = clients.operator().dml().query(users).fetchMap(limits);
 ```
 
 超出保护预算会报错，不是静默截断；业务分页使用 `page / cursorPage / keysetPage`。
