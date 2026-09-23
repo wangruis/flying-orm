@@ -1,8 +1,10 @@
 package com.flying.orm.rdb.operator;
 
+import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.rdb.metadata.JdbcFormMetadataReader;
 import com.flying.orm.rdb.schema.JdbcSchemaClient;
 
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -48,5 +50,10 @@ public final class SyncDdlOperator {
      */
     public SyncCreateOrAlterTableBuilder createOrAlter(String table) {
         return new SyncCreateOrAlterTableBuilder(jdbcSchemaClient, jdbcMetadataReader, table);
+    }
+
+    /** 从同一份动态表单安全建表或增量调整；危险变更仍需现有审核入口。 */
+    public long createOrAlter(DynamicForm form) {
+        return jdbcSchemaClient.createOrAlter(form, List.of(), jdbcMetadataReader);
     }
 }

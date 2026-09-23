@@ -82,10 +82,8 @@ class FormScopeGuardOperatorTenantTest {
                 SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql());
         FormScopeGuard guard = new FormScopeGuard(renderer, resolver, DataScope.none());
 
-        guard.scopedStructuredRead(form,
-                                   StructuredConditionInput.term("marker", "=", new Marker("one")),
-                                   StructuredConditionPolicy.defaults(),
-                                   DataScope.none());
+        guard.scopedRead(com.flying.orm.rdb.form.spec.QuerySpec.structured(form,
+                StructuredConditionInput.term("marker", "=", new Marker("one"))));
 
         assertEquals(1, validations.get());
         assertEquals(1, adaptations.get());

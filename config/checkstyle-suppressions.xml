@@ -13,6 +13,9 @@
     <suppress checks="MethodCount" files="SyncFormOperations\.java"/>
     <suppress checks="MethodCount" files="ReactiveFormRepository\.java"/>
     <suppress checks="MethodCount" files="SyncFormRepository\.java"/>
+    <!-- Complete fluent query terminals stay together; state/planning remain in DmlQueryCommand. -->
+    <suppress checks="MethodCount" files="(?:^|[\\/])QueryOperator\.java$"/>
+    <suppress checks="MethodCount" files="(?:^|[\\/])SyncQueryOperator\.java$"/>
 
     <!-- Entity/schema facades keep their complete JDBC/R2DBC contract together. -->
     <suppress checks="FileLength|MethodCount" files="(?:^|[\\/])EntitySchemaSynchronizer\.java$"/>

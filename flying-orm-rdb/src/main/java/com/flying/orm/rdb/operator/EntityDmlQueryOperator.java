@@ -66,7 +66,7 @@ public final class EntityDmlQueryOperator<T>
     /** 追加降序字段。 */
     public EntityDmlQueryOperator<T> orderByDesc(EntityProperty<T, ?> property) { command.orderByDesc(property); return this; }
 
-    /** 选择投影字段；投影查询必须通过 {@link #executeRows()} 取得紧凑行。 */
+    /** 选择投影字段；fetch 返回部分实体，executeRows 返回紧凑行。 */
     @SafeVarargs
     public final EntityDmlQueryOperator<T> select(EntityProperty<T, ?>... properties) { command.select(properties); return this; }
 
@@ -79,6 +79,10 @@ public final class EntityDmlQueryOperator<T>
 
     /** 执行查询并返回惰性实体流。 */
     public Flux<T> execute() { return client.select(command.entitySpec(), command.state().metadata().type()); }
+    /** 查询实体流；显式 select 时只填写已选择字段，其余遵循既有映射默认值。 */
+    public Flux<T> fetch() { return client.select(command.fetchSpec(), command.state().metadata().type()); }
+    /** 使用本次资源保护读取实体或部分实体。 */
+    public Flux<T> fetch(SqlExecutionOptions options) { return client.select(command.fetchSpec().withExecutionOptions(options), command.state().metadata().type()); }
     /** 使用本次显式执行保护执行查询。 */
     public Flux<T> execute(SqlExecutionOptions options) { return client.select(command.entitySpec().withExecutionOptions(options), command.state().metadata().type()); }
     /** 查询零或一条记录；多于一条会失败，避免静默截断。 */

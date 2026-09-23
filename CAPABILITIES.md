@@ -1,70 +1,55 @@
-# flying-orm 4.1.0 能力
+# flying-orm 4.1.1 能力
 
-flying-orm 是面向动态表单、实体 Repository 的轻量 Java ORM。核心流程是：Java 语义 → 参数化 SQL → JDBC/R2DBC 执行 → 结果映射。
+Java 模型与条件 → 参数化 SQL → JDBC / R2DBC 执行 → 结果映射。常用操作使用短入口，复杂模型继续使用同一内核的规格对象，不需要另装一套客户端。
 
-## 正式能力
+## 能力与入口
 
-| 能力 | 说明 |
-| --- | --- |
-| 动态表单与实体读写 | 运行时表结构、查询、插入、更新、删除 |
-| 条件与安全 | 参数驱动、可扩展条件、标识符校验、无 SQL 注入 |
-| 数据治理 | Scope、租户、逻辑删除、乐观锁、字段用途治理 |
-| 关系查询 | JOIN、同表自关联、分页、游标、聚合 |
-| 批量写入 | 批量增删改、UPSERT、范围内更新、保护批量、执行证据 |
-| 实体结构同步 | 注解建模、Schema 审核、迁移计划、DDL、回读验证 |
-| 类型与主键 | 生成键、回填、UUID、日期、数组和自定义类型映射 |
-| 字段保护 | 加密、EXACT/SUFFIX/CONTAINS 检索、脱敏 |
-| 执行模式 | JDBC 同步、R2DBC 响应式、取消、背压、资源清理 |
+| 能力 | 直接入口 | 保留的语义 |
+| --- | --- | --- |
+| 动态表单 CRUD | `operator.dml().query(form) / insert / update / delete` | 运行时模型、类型转换、参数快照、非空写条件保护 |
+| 实体读写 | `clients.repository(Type.class)` | 注解映射、Lambda 字段、生成键、填充和生命周期 |
+| 投影与结果映射 | `select(...).fetchMap() / fetch(Type.class) / fetch(mapper)` | DynamicRow、bean、record、自定义 RowMapper；实体 `fetch()` 支持部分投影 |
+| 条件 | `where(field, operator, value)`、`filter(input)` | AND/OR、NULL、集合、区间、可选条件、已注册业务语义 |
+| Scope 与字段治理 | `withDefaultDataScope`、`scope`、`from(form, policy, limits)` | 行范围取交集；投影、过滤、排序、分组等用途分别审核 |
+| 分页 | `page / cursorPage / keysetPage` | 页码与总数、稳定游标、复合可空 keyset、明确 NULL 顺序 |
+| JOIN / 自关联 | `dml().joinQuery`、`JoinQuerySpec` | 多来源、复合 ON、来源限定排序与分页；同表不同角色独立治理 |
+| 报表 | `query(form).aggregate(...)` | 分组、COUNT / COUNT DISTINCT / SUM / AVG / MIN / MAX、HAVING、类型化结果 |
+| 写入治理 | `update / delete`、`WriteSpec` | 租户、逻辑删除、乐观锁、字段权限、范围内写入 |
+| 批量 | `insertBatch / upsertBatch / updateBatch` | 有界缓冲、逐行乐观锁、范围内冲突更新、生成键、保护字段、执行证据 |
+| 多行同值更新 / 删除 | `update / delete + where(..., "in", ids)` | 一条范围操作，继续应用 Scope 与逻辑删除 |
+| 动态结构 | `operator.ddl()`、`clients.schema()` | 建表、加列、索引、差异计划、风险审核、执行前核验与回读 |
+| 读取已有结构 | `operator.metadata().readTable / readForm` | 表、列、索引与外键元数据，动态表单转换、显式缓存失效 |
+| 实体注解结构同步 | `clients.entitySchemas()` | 校验、安全更新、批准后的危险变更；完整关系模型使用 relational 入口 |
+| 加密、检索、脱敏 | 模型声明 + `ProtectedConditions` | EXACT / SUFFIX / CONTAINS、辅助关系、候选验证、声明/强制脱敏 |
+| 锁定读取 | `forms.lockingRead` | 方言支持的行锁语义，不管理事务 |
+| SQL 模板与原生 SQL | `operator.sqlTemplate / unsafeNativeSql` | 注册模板、标识符槽位、命名参数、映射与执行保护 |
 
-## 查询
+## 查询安全
 
-查询支持字段投影、条件组合、排序、分页、旧游标、JOIN、同表自关联、聚合和锁定读取。
-条件通过结构化 API 构造，业务值始终作为参数绑定；动态表名、列名和排序字段必须来自受控映射。
-Scope、租户、逻辑删除和字段用途策略在 SQL 计划阶段统一合并。
+前端只提供结构化条件，不提供 SQL；服务端决定模型、可用条件、字段用途和 Scope。条件值参数绑定，字段及标识符受控解析。自定义条件处理器和原生 SQL 属于可信后端代码。
 
-```java
-var condition = ConditionGroup.and().where("status", "=", "ACTIVE").build();
-forms.select(QuerySpec.of("users", condition));
-```
+绑定 DynamicForm 的入口保留字段治理、加密及脱敏。物理表字符串查询不具备未提供的表单元数据；模板/原生 SQL 不自动注入租户或逻辑删除，不能当作受治理表单查询替代品。
 
-## 写入与批量
+## 批量语义
 
-单条和批量写入共用字段映射、codec、Scope 和保护规则。批量支持 INSERT、UPDATE、DELETE、UPSERT、生成键回填及保护字段辅助关系维护。
-带 Scope 的 UPSERT 在冲突更新 SQL 内核验原目标行；范围外目标不会被更新。批量结果只报告已接收输入、已证明位置、影响行数和冲突等实际执行事实，不报告事务提交状态。
+- INSERT、UPSERT 和每行独立乐观锁 UPDATE 使用批量内核；没有独立的 `BatchSpec.delete`。
+- 输入、行重量和缓冲有预算，响应式输入在订阅后消耗，不为方便而收集整批。
+- Scope 限制 UPSERT 的已有冲突目标，不允许越范围更新。
+- `BatchExecutionEvidence` 只报告已证明的执行位置、影响行数、冲突及安全失败摘要。未知计数不是零，也不代表已提交。
+- 失败、重试、补偿及原子性由上层裁决；不能把证据当事务回执。
 
-## Schema
+## 模型与结构
 
-实体注解和关系模型可生成表、列、主键、唯一约束、索引、外键、CHECK、注释、默认值、生成方式及受控分区声明。
-Schema 流程为：读取快照 → 生成差异 → 风险审核 → 执行前核验 → 执行 → 回读验证。普通 CRUD 不自动建表。
-五方言保留各自 SQL 差异；无法安全表达的变更在发送 SQL 前拒绝，不降级为错误结构。
+实体注解支持表、列、主键、生成方式、唯一约束、索引、外键、CHECK、注释及受控分区声明。类型能力包括 UUID、日期时间、数组、自定义 codec、实体类型映射及主键回填。
 
-## 字段保护
+PostgreSQL、MySQL、Oracle、SQL Server、H2 使用各自方言能力；不支持的语义明确拒绝。PostgreSQL 分区父表声明不等于 ORM 分片。数据库版本支持和真实往返测试必须单独核验，静态方言合同不等于五库实测认证。
 
-显式声明 `@EncryptedField`、`@MaskedField` 或 DynamicForm 保护字段后，可使用密文列、EXACT/SUFFIX/CONTAINS 检索列、辅助关系和脱敏展示。
-保护声明同时进入 CRUD、批量、Schema、回读和差异链路。密钥由上层提供，未声明字段不会自动加密或脱敏。
+## 配置与边界
 
-## 安全与资源
+缓存、字段填充、ID 生成、扩展条件、日志、观测、批量预算和保护字段策略在客户端装配阶段配置。普通查询不需要操作内部 Runtime、Planner 或协调器。
 
-- 标识符经过白名单/方言规则校验，业务值不拼接进 SQL。
-- R2DBC 保持冷 Publisher、取消和背压；不隐藏 `subscribe` 或 `block`。
-- ORM 只清理自己创建的 Statement、ResultSet、LOB；外部 Connection 的关闭和归还由上层完成。
-- SQL 日志默认不输出敏感值；异常保留结构化分类和实际执行事实。
+JDBC 返回同步结果；R2DBC 返回原生 Flux/Mono，保留取消、背压与资源清理。不提供事务、分片、驱动或连接池管理，也不配置连接、事务及执行超时。外部 Connection 由上层获取/释放，ORM 清理自己的语句、结果与 LOB。
 
-## 职责边界
+## 阅读入口
 
-flying-orm 不提供或感知：
-
-- 事务及事务结果恢复
-- 分片、路由、归并和分片事务
-- 连接池、DataSource/ConnectionFactory 生命周期
-- 具体数据库驱动的选择、凭据、健康检查、重连
-- 连接、事务、执行和 Schema 会话锁等待的超时策略
-
-连接由上层通过 JDBC/R2DBC 获取与释放。ORM 只清理自己创建的 Statement、ResultSet、LOB 等语句级资源。
-
-## 使用入口
-
-- [README](README.md)：快速接入和示例
-- [专业能力](ADVANCED-CAPABILITIES.md)：Operator、Schema、缓存和 API 细节
-- [示例](EXAMPLES.md)：DynamicForm、Repository、批量、Schema 和两种执行入口
-- [实体注解](ANNOTATIONS.md)：映射、关系、分区和字段治理
+[快速接入](README.md) · [完整示例](EXAMPLES.md) · [高级能力](ADVANCED-CAPABILITIES.md) · [实体注解](ANNOTATIONS.md)

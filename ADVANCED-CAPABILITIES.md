@@ -1,38 +1,31 @@
-# flying-orm 4.1.0 高级能力
+# flying-orm 4.1.1 高级能力
 
-## DatabaseOperator
-
-用于程序化 DML、DDL 和原生 SQL。仍使用 flying-orm 的参数绑定、Scope、标识符校验和结果映射。
-
-```java
-var rows = clients.operator()
-    .dml()
-    .query()
-    .select("id", "name")
-    .from("users")
-    .fetchMap();
-```
+普通 CRUD、分页与报表优先使用 [表单或 Repository 入口](EXAMPLES.md)。以下接口用于服务端明确控制的特殊查询与扩展。
 
 ## 注册 SQL 模板
 
-模板在装配阶段注册，运行时只绑定业务参数；动态表名等标识符单独传入。
+注册一次，执行时只提供参数和已批准的标识符：
 
 ```java
-SqlTemplateRegistry templates = SqlTemplateRegistry.builder()
+var templates = SqlTemplateRegistry.builder()
     .register(SqlTemplate.query("user-by-id",
-        "select ${table}.* from ${table} where id = :id",
-        Set.of("table")))
+        "select id, name from ${table} where id = :id", Set.of("table")))
     .build();
 
-SqlTemplateEngine engine = SqlTemplateEngine.create(
-    templates, RdbDialect.postgresql(), ValueCodecRegistry.standard());
-SqlRequest request = engine.render("user-by-id",
-    Map.of("id", 1001L), Map.of("table", "users"));
+var clients = FlyingOrmClients.builder(access)
+    .dialect(RdbDialect.postgresql())
+    .sqlTemplates(templates)
+    .build();
+
+var row = clients.operator().sqlTemplate("user-by-id")
+    .identifier("table", "users")
+    .bind("id", 1001L)
+    .one();
 ```
 
-## 受控原生 SQL
+值使用命名参数绑定；标识符不能用值参数代替，必须由后端受控映射决定。复杂应用可配置 `sqlTemplateParameterProvider`，JDBC 对应 `syncSqlTemplateParameterProvider`。
 
-适用于数据库专有语法。SQL 只能由服务端代码提供；业务值必须绑定，动态标识符必须来自受控映射。
+## 受控原生 SQL
 
 ```java
 Flux<DynamicRow> rows = clients.operator()
@@ -41,30 +34,41 @@ Flux<DynamicRow> rows = clients.operator()
     .query();
 ```
 
-## JDBC / R2DBC 边界
+SQL 文本只来自可信后端代码。模板与原生 SQL **不自动注入 Scope、租户、逻辑删除或保护字段规则**；需要这些语义时使用绑定 DynamicForm 的查询。普通值仍须绑定，不能拼接前端输入。
 
-- JDBC 同步执行，R2DBC 响应式执行。
-- 连接由上层获取、释放和管理；ORM 不持有 DataSource、ConnectionFactory 或连接池。
-- 驱动、路由、健康检查、重连、凭据和所有超时策略由上层负责。
-- ORM 只清理自己创建的 Statement、ResultSet、LOB 等资源。
+## 扩展配置
 
-## 事务与分片边界
+| 需要扩展的内容 | 装配入口 / 所有者 |
+| --- | --- |
+| 标准及业务条件、参数 codec | `SqlRenderer.builder()` → `builder.renderer(...)` |
+| ID、字段填充、实体结构声明 | `idGenerator`、`fieldFiller`、`entitySchema` |
+| 加密密钥、规范化与脱敏策略 | `protectedFields`、`protectedFieldPolicies` |
+| 读取保护与批量预算 | `executionOptions`、`batchWriteOptions`、`batchMemoryLimits` |
+| SQL、批量观测与安全日志 | `observers`、`sqlExecutionLog` |
+| 缓存和迁移观测 | `cachePolicy`、`migrationObserver`、`migrationExecutionOptions` |
 
-ORM 不创建、探测或参与事务，不提供提交、回滚、事务恢复或分片路由。多语句原子性、重试和分片由上层实现。
+默认配置可直接使用，高级配置按需启用。读取/批量预算是资源边界，不是连接或事务超时策略。
 
-## Schema、缓存与保护字段
+```java
+var limits = SqlExecutionOptions.safeDefaults()
+    .withMaxRows(1000)
+    .withMaxResultBytes(8L * 1024 * 1024)
+    .withFetchSize(128);
+var rows = clients.operator().dml().query(users).fetchMap(limits);
+```
 
-- Schema：实体注解、审核计划、五方言 DDL、执行前核验和回读验证。
-- 缓存：SQL/条件/元数据使用有界缓存，按显式失效更新，不读取事务上下文。
-- 保护字段：显式声明后提供加密、EXACT/SUFFIX/CONTAINS 检索和脱敏；密钥由上层提供。
+超出保护预算会报错，不是静默截断；业务分页使用 `page / cursorPage / keysetPage`。
 
-Schema 规划和审核直接读取当前数据库事实，不命中或写入普通 CRUD 元数据缓存。旧版表元数据路径使用
-`readTableForSchema(String)`，保留列、索引、外键等原有信息；关系型快照路径继续使用 `readSnapshot`。
-内建 JDBC reader 和响应式缓存已实现旁路。无缓存的自定义响应式 reader 可沿用默认方法；自带缓存的
-reader 必须覆盖 `readTableForSchema` 并委派自己的无缓存加载路径，不要求调用方手工清空 CRUD 缓存。
+## Schema 与元数据
 
-## 使用入口
+`ddl().createOrAlter` 用于普通安全结构调整；`plan / review / executeReviewed` 保留完整审核流程。实体关系同步使用 `entitySchemas().synchronizeRelational...`，显式表达外键、CHECK、分区等关系事实。
 
-常用接入、连接端口实现和完整示例见 [README](README.md)；实体注解见 [ANNOTATIONS.md](ANNOTATIONS.md)。
+Schema 规划直接读取数据库结构，不复用普通 CRUD 的元数据缓存。自带缓存的自定义 reader 必须为 `readTableForSchema` / 关系快照提供真实无缓存读取；内建实现已处理此边界。
 
-返回 [README](README.md) · [常用能力](CAPABILITIES.md)
+## 生命周期边界
+
+客户端不保存 DataSource、ConnectionFactory 或具体连接池；只保存上层连接访问端口。连接成功获取后，ORM 清理自身语句资源并调用上层释放回调；获取失败不调用释放，释放失败不会静默吞掉。
+
+事务、分片、路由、健康检查、重连和超时全部由上层负责。`ReadLock` 只表达 SQL 行锁，DDL Builder 的 `commit()` 只结束 DSL。
+
+[README](README.md) · [能力清单](CAPABILITIES.md) · [完整示例](EXAMPLES.md) · [实体注解](ANNOTATIONS.md)

@@ -232,6 +232,13 @@ public final class QuerySpec {
                              structuredInput, structuredPolicy, mode);
     }
 
+    /** 替换服务端业务条件；存在前端结构化条件时，两者仍以 AND 合并。 */
+    public QuerySpec withWhere(ConditionGroup where) {
+        return new QuerySpec(form, Objects.requireNonNull(where, "query where must not be null"),
+                             scope, projections, groups, sorts, executionOptions,
+                             structuredInput, structuredPolicy, sensitiveDisplayMode);
+    }
+
     private static List<String> copyTextList(List<String> values, String name) {
         List<String> copied = List.copyOf(Objects.requireNonNull(values, name + " must not be null"));
         for (String value : copied) {

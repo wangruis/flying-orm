@@ -23,6 +23,18 @@ public final class DmlDeleteOperator {
 
     private final ReactiveFormClient formClient;
     private final DmlWriteCommand command;
+
+    DmlDeleteOperator(ReactiveFormClient formClient, DmlWriteCommand command) {
+        this.formClient = Objects.requireNonNull(formClient, "form client must not be null");
+        this.command = Objects.requireNonNull(command, "write command must not be null");
+    }
+
+    /** 以 AND 追加等值条件。 */
+    public DmlDeleteOperator where(String field, Object value) { return where(field, "=", value); }
+    /** 以 AND 追加标准或已注册的业务条件。 */
+    public DmlDeleteOperator where(String field, String operator, Object value) {
+        command.where(field, operator, value); return this;
+    }
     private boolean physical;
 
     DmlDeleteOperator(ReactiveFormClient formClient, SqlRenderer renderer, String table) {

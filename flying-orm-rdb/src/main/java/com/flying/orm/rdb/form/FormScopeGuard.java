@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.ConditionGroups;
 import com.flying.orm.core.condition.ConditionNode;
 import com.flying.orm.core.condition.StructuredConditionInput;
 import com.flying.orm.core.condition.StructuredConditionPolicy;
@@ -13,6 +14,7 @@ import com.flying.orm.core.scope.FieldScope;
 import com.flying.orm.core.scope.ScopeAccessException;
 import com.flying.orm.core.scope.ScopeErrorCode;
 import com.flying.orm.core.scope.TenantScope;
+import com.flying.orm.rdb.form.spec.QuerySpec;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -64,32 +66,30 @@ final class FormScopeGuard {
         return FormDataScopes.apply(safeForm, where, effectiveScope);
     }
 
+    ScopedRead scopedRead(QuerySpec spec) {
+        DataScope effective = effectiveScope(spec.scope());
+        return buildScopedRead(spec.form(), businessWhere(spec, effective), effective);
+    }
+
+    GovernedScopedRead governedRead(QuerySpec spec) {
+        DataScope effective = effectiveScope(spec.scope());
+        ConditionGroup business = businessWhere(spec, effective);
+        return new GovernedScopedRead(buildScopedRead(spec.form(), business, effective), business);
+    }
+
+    private ConditionGroup businessWhere(QuerySpec spec, DataScope scope) {
+        return spec.structuredInput()
+                .map(input -> {
+                    ConditionGroup compiled = compileStructuredCondition(
+                            spec.form(), input, spec.structuredPolicy().orElseThrow(), scope.fields());
+                    return ConditionGroups.isEmpty(spec.where()) ? compiled : ConditionGroups.and(spec.where(), compiled);
+                })
+                .orElseGet(spec::where);
+    }
+
     ScopedRead scopedRead(DynamicForm form, ConditionGroup where, DataScope scope) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
         return buildScopedRead(safeForm, where, effectiveScope(scope));
-    }
-
-    ScopedRead scopedStructuredRead(DynamicForm form,
-                                    StructuredConditionInput input,
-                                    StructuredConditionPolicy policy,
-                                    DataScope scope) {
-        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        DataScope effectiveScope = effectiveScope(scope);
-        ConditionGroup where = compileStructuredCondition(safeForm, input, policy, effectiveScope.fields());
-        return buildScopedRead(safeForm, where, effectiveScope);
-    }
-
-    /** governed 路径额外保留同一次编译的业务条件；普通读取不创建这个上下文。 */
-    GovernedScopedRead governedStructuredRead(DynamicForm form,
-                                              StructuredConditionInput input,
-                                              StructuredConditionPolicy policy,
-                                              DataScope scope) {
-        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        DataScope effectiveScope = effectiveScope(scope);
-        ConditionGroup businessWhere = compileStructuredCondition(
-                safeForm, input, policy, effectiveScope.fields());
-        return new GovernedScopedRead(
-                buildScopedRead(safeForm, businessWhere, effectiveScope), businessWhere);
     }
 
     /** 使用 writeScope 已验证的业务谓词和已合并范围，保留更新权限与逻辑删除语义。 */

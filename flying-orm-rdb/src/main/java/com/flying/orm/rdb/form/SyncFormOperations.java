@@ -1,13 +1,13 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.QueryShapeLimits;
+import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.page.CursorPageQuery;
 import com.flying.orm.core.page.CursorPageResult;
 import com.flying.orm.core.page.KeysetPageQuery;
 import com.flying.orm.core.page.KeysetPageResult;
 import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageResult;
-import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.scope.FieldUseSnapshot;
@@ -15,17 +15,19 @@ import com.flying.orm.rdb.aggregate.AggregateResultDecoder;
 import com.flying.orm.rdb.aggregate.AggregateRow;
 import com.flying.orm.rdb.aggregate.AggregateSpec;
 import com.flying.orm.rdb.aggregate.FormAggregatePlanner;
+import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.form.spec.WriteSpec;
-import com.flying.orm.rdb.execution.SqlWriteResult;
+import com.flying.orm.rdb.lock.LockingReadSpec;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
 import com.flying.orm.rdb.mapping.RowMapper;
-import com.flying.orm.rdb.lock.LockingReadSpec;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
 
 import java.util.List;
+import java.util.Collections;
 import java.util.Objects;
 
 /**
@@ -65,18 +67,21 @@ final class SyncFormOperations {
                        EntityModelRegistry entityModels,
                        FieldUsePolicy fieldUsePolicy,
                        QueryShapeLimits queryShapeLimits) {
+        this(executor, new FormConfiguration(renderer, resolver, defaultDataScope, defaultExecutionOptions,
+                BatchWriteOptions.defaults(), entityModels, fieldUsePolicy, queryShapeLimits));
+    }
+
+    SyncFormOperations(SyncSqlExecutor executor, FormConfiguration configuration) {
         this.executor = Objects.requireNonNull(executor, "sync sql executor must not be null");
-        FormDataSqlRenderer safeRenderer = Objects.requireNonNull(
-                renderer, "form data sql renderer must not be null");
-        this.renderer = safeRenderer;
-        this.fieldUsePolicy = Objects.requireNonNull(fieldUsePolicy, "field use policy must not be null");
-        this.queryShapeLimits = Objects.requireNonNull(queryShapeLimits, "query shape limits must not be null");
-        this.governed = FieldUseGuard.governed(this.fieldUsePolicy, this.queryShapeLimits);
-        FormScopeSupport scopes = new FormScopeSupport(safeRenderer, resolver, defaultDataScope);
-        this.planner = new FormOperationPlanner(safeRenderer, scopes, defaultExecutionOptions);
-        this.joinPlanner = new JoinQueryPlanner(safeRenderer, scopes, defaultExecutionOptions);
-        this.containsResults = new ProtectedContainsResultSupport(safeRenderer);
-        this.decoder = new FormResultDecoder(safeRenderer, entityModels);
+        this.renderer = configuration.renderer();
+        this.fieldUsePolicy = configuration.fieldUsePolicy();
+        this.queryShapeLimits = configuration.queryShapeLimits();
+        this.governed = configuration.governed();
+        FormScopeSupport scopes = new FormScopeSupport(renderer, configuration.resolver(), configuration.dataScope());
+        this.planner = new FormOperationPlanner(renderer, scopes, configuration.executionOptions());
+        this.joinPlanner = new JoinQueryPlanner(renderer, scopes, configuration.executionOptions());
+        this.containsResults = new ProtectedContainsResultSupport(renderer);
+        this.decoder = new FormResultDecoder(renderer, configuration.entityModels());
     }
 
     List<DynamicRow> selectJoin(JoinQuerySpec spec, SqlExecutionOptions options) {
@@ -157,10 +162,10 @@ final class SyncFormOperations {
             GovernedPlanEnvelope<FormOperationPlanner.PlannedLockingRead> envelope =
                     planner.lockingReadGoverned(spec, fieldUsePolicy, queryShapeLimits);
             return selectMapped(new GovernedPlanEnvelope<>(
-                    envelope.plan().query(), envelope.fieldUse()), type, 0);
+                    envelope.plan().query(), envelope.fieldUse()), decoder.rowMapper(type, "form result type must not be null"), 0);
         }
         FormOperationPlanner.PlannedLockingRead plan = planner.lockingRead(spec);
-        return selectMapped(plan.query(), type, 0);
+        return selectMapped(plan.query(), decoder.rowMapper(type, "form result type must not be null"), 0);
     }
 
     FieldUseSnapshot previewFieldUse(QuerySpec spec) {
@@ -209,17 +214,11 @@ final class SyncFormOperations {
     }
 
     <T> List<T> select(QuerySpec spec, Class<T> type) {
-        if (governed) {
-            return selectMapped(
-                    planner.selectGoverned(spec, fieldUsePolicy, queryShapeLimits), type, 0);
-        }
-        return selectMapped(planner.select(spec), type, 0);
+        return selectMapped(spec, decoder.rowMapper(type, "form result type must not be null"), 0);
     }
 
     <T> T selectOne(QuerySpec spec, Class<T> type) {
-        List<T> rows = governed
-                ? selectMapped(planner.selectGoverned(spec, fieldUsePolicy, queryShapeLimits), type, 2)
-                : selectMapped(planner.select(spec), type, 2);
+        List<T> rows = selectMapped(spec, decoder.rowMapper(type, "form result type must not be null"), 2);
         if (rows.isEmpty()) {
             return null;
         }
@@ -227,6 +226,12 @@ final class SyncFormOperations {
             throw new IllegalStateException("entity query expected zero or one row but received " + rows.size());
         }
         return rows.getFirst();
+    }
+
+    <T> List<T> selectMapped(QuerySpec spec, RowMapper<T> mapper, int rowLimit) {
+        return governed
+                ? selectMapped(planner.selectGoverned(spec, fieldUsePolicy, queryShapeLimits), mapper, rowLimit)
+                : selectMapped(planner.select(spec), mapper, rowLimit);
     }
 
     PageResult<DynamicRow> page(QuerySpec spec, PageQuery page) {
@@ -409,7 +414,7 @@ final class SyncFormOperations {
                 safeConfiguration.renderer(), safeConfiguration.resolver(), safeConfiguration.dataScope(),
                 safeConfiguration.executionOptions(), safeConfiguration.fieldUsePolicy(),
                 safeConfiguration.queryShapeLimits())
-                .plan(Objects.requireNonNull(spec, "aggregate spec must not be null"));
+                .plan(Objects.requireNonNull(spec, "aggregate spec must not be null"), safeConfiguration.explicitGovernance());
     }
 
     private SqlWriteResult rowsUpdatedReturningKeys(FormOperationPlanner.PlannedWrite plan) {
@@ -427,14 +432,12 @@ final class SyncFormOperations {
         return plan.requireSuccess(affectedRows);
     }
 
-    private <T> List<T> selectMapped(FormOperationPlanner.PlannedQuery plan, Class<T> type, int rowLimit) {
+    private <T> List<T> selectMapped(FormOperationPlanner.PlannedQuery plan, RowMapper<T> entityMapper, int rowLimit) {
         if (plan.contains()) {
-            RowMapper<T> mapper = decoder.rowMapper(type, "form result type must not be null");
-            return select(plan).stream().map(mapper::map).toList();
+            return select(plan).stream().limit(rowLimit == 0 ? Long.MAX_VALUE : rowLimit).map(entityMapper::map).toList();
         }
         RowMapper<DynamicRow> rowDecoder = decoder.rowDecoder(
                 plan.form(), plan.options(), plan.scope(), plan.displayMode());
-        RowMapper<T> entityMapper = decoder.rowMapper(type, "form result type must not be null");
         return executor.queryMapped(
                 plan.request(), plan.options(), row -> entityMapper.map(rowDecoder.map(row)), rowLimit);
     }
@@ -451,10 +454,9 @@ final class SyncFormOperations {
 
     private <T> List<T> selectMapped(
             GovernedPlanEnvelope<FormOperationPlanner.PlannedQuery> envelope,
-            Class<T> type,
+            RowMapper<T> entityMapper,
             int rowLimit) {
         FormOperationPlanner.PlannedQuery plan = envelope.plan();
-        RowMapper<T> entityMapper = decoder.rowMapper(type, "form result type must not be null");
         if (plan.contains()) {
             List<DynamicRow> rows = select(envelope);
             int size = rowLimit == 0 ? rows.size() : Math.min(rowLimit, rows.size());
@@ -462,7 +464,7 @@ final class SyncFormOperations {
             for (int index = 0; index < size; index++) {
                 mapped.add(entityMapper.map(rows.get(index)));
             }
-            return List.copyOf(mapped);
+            return Collections.unmodifiableList(mapped);
         }
         RowMapper<DynamicRow> rowMapper = governedRowMapper(envelope);
         return executor.queryMapped(

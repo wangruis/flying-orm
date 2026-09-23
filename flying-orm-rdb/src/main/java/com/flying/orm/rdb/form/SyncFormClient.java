@@ -4,22 +4,22 @@ import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.condition.StructuredConditionInput;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.page.CursorPageQuery;
 import com.flying.orm.core.page.CursorPageResult;
 import com.flying.orm.core.page.KeysetPageQuery;
 import com.flying.orm.core.page.KeysetPageResult;
 import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageResult;
-import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.scope.FieldScope;
 import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.scope.FieldUseSnapshot;
 import com.flying.orm.core.sql.render.SqlRenderer;
-import com.flying.orm.rdb.batch.BatchExecutionEvidence;
-import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.aggregate.AggregateRow;
 import com.flying.orm.rdb.aggregate.AggregateSpec;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
+import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlWriteResult;
@@ -28,9 +28,9 @@ import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.internal.sync.SyncBlockingGuard;
+import com.flying.orm.rdb.lock.LockingReadSpec;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
 import com.flying.orm.rdb.mapping.RowMapper;
-import com.flying.orm.rdb.lock.LockingReadSpec;
 import com.flying.orm.rdb.operator.SyncEntityDmlOperator;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.sync.SyncBatchExecutor;
@@ -65,10 +65,7 @@ public final class SyncFormClient {
         this.sqlExecutor = Objects.requireNonNull(sqlExecutor, "sync sql executor must not be null");
         this.batchExecutor = Objects.requireNonNull(batchExecutor, "sync batch executor must not be null");
         this.configuration = Objects.requireNonNull(configuration, "sync form configuration must not be null");
-        this.operations = new SyncFormOperations(
-                this.sqlExecutor, configuration.renderer(), configuration.resolver(), configuration.dataScope(),
-                configuration.executionOptions(), configuration.entityModels(), configuration.fieldUsePolicy(),
-                configuration.queryShapeLimits());
+        this.operations = new SyncFormOperations(this.sqlExecutor, configuration);
         this.batches = new NativeSyncFormBatchOperations(
                 this.batchExecutor, configuration.renderer(), configuration.resolver(), configuration.dataScope(),
                 configuration.batchOptions(), configuration.fieldUsePolicy());
@@ -188,6 +185,14 @@ public final class SyncFormClient {
                 options, "join execution options must not be null"));
     }
     public <T> List<T> select(QuerySpec spec, Class<T> type) { return operations.select(spec, type); }
+
+    /** Operator 的逐行映射终端；rowLimit 为 0 读取全部，正数限制最终消费行数。 */
+    @InternalApi
+    public <T> List<T> selectMapped(QuerySpec spec, RowMapper<T> mapper, int rowLimit) {
+        if (rowLimit < 0) { throw new IllegalArgumentException("row limit must not be negative"); }
+        return operations.selectMapped(Objects.requireNonNull(spec, "query spec must not be null"),
+                Objects.requireNonNull(mapper, "row mapper must not be null"), rowLimit);
+    }
     /** 实体 Lambda 的内部零或一行终端；JDBC 只读取判定基数所需的两行。 */
     @InternalApi
     public <T> T selectOne(QuerySpec spec, Class<T> type) { return operations.selectOne(spec, type); }
@@ -267,6 +272,12 @@ public final class SyncFormClient {
     public SyncFormClient withQueryShapeLimits(QueryShapeLimits limits) {
         return configured(configuration.withQueryShapeLimits(
                 Objects.requireNonNull(limits, "query shape limits must not be null")));
+    }
+
+    /** Operator 的显式查询治理视图；一次配置同时保留策略、预算与启用状态。 */
+    @InternalApi
+    public SyncFormClient withQueryGovernance(FieldUsePolicy policy, QueryShapeLimits limits) {
+        return configured(configuration.withQueryGovernance(policy, limits));
     }
 
     /** 设置没有显式 options 时采用的批量策略。 */

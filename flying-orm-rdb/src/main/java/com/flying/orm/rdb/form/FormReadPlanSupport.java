@@ -1,12 +1,11 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.QueryShapeLimits;
-import com.flying.orm.core.condition.StructuredConditionPolicy;
 import com.flying.orm.core.page.CursorPageQuery;
 import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageSort;
-import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
+import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.form.spec.QuerySpec;
@@ -144,20 +143,12 @@ final class FormReadPlanSupport {
     }
 
     static ScopedRead scopedRead(FormOperationPlanner planner, QuerySpec spec) {
-        return spec.structuredInput()
-                   .map(input -> planner.scopes.scopedStructuredRead(
-                           spec.form(), input,
-                           spec.structuredPolicy().orElse(StructuredConditionPolicy.defaults()), spec.scope()))
-                   .orElseGet(() -> planner.scopes.scopedRead(spec.form(), spec.where(), spec.scope()));
+        return planner.scopes.scopedRead(spec);
     }
 
     /** governed 才创建该上下文；结构化条件仍只编译一次。 */
     static FormScopeSupport.GovernedRead governedRead(FormOperationPlanner planner, QuerySpec spec) {
-        return spec.structuredInput()
-                   .map(input -> planner.scopes.governedStructuredRead(
-                           spec.form(), input,
-                           spec.structuredPolicy().orElse(StructuredConditionPolicy.defaults()), spec.scope()))
-                   .orElseGet(() -> planner.scopes.governedRead(spec.form(), spec.where(), spec.scope()));
+        return planner.scopes.governedRead(spec);
     }
 
     static SqlExecutionOptions executionOptions(FormOperationPlanner planner, QuerySpec spec) {

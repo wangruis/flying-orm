@@ -2,8 +2,8 @@ package com.flying.orm.rdb.operator;
 
 import com.flying.orm.core.lambda.EntityProperty;
 import com.flying.orm.core.page.PageSort;
-import com.flying.orm.core.scope.FieldScope;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
+import com.flying.orm.core.scope.FieldScope;
 import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.mapping.EntityQueryDefaults;
 
@@ -60,6 +60,11 @@ final class EntityQueryCommand<T> {
     QuerySpec entitySpec() {
         requireEntityResult();
         return EntityQueryDefaults.applyProjection(baseSpec(), state.metadata(), defaultFields);
+    }
+
+    /** 显式投影允许映射为部分实体；省略投影时仍遵循实体默认可读字段。 */
+    QuerySpec fetchSpec() {
+        return projections.isEmpty() ? entitySpec() : projectedSpec();
     }
 
     QuerySpec projectedSpec() {

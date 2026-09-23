@@ -113,6 +113,12 @@ public final class ReactiveFormClient {
                 Objects.requireNonNull(limits, "query shape limits must not be null")));
     }
 
+    /** Operator 的显式查询治理视图；一次配置同时保留策略、预算与启用状态。 */
+    @InternalApi
+    public ReactiveFormClient withQueryGovernance(FieldUsePolicy policy, QueryShapeLimits limits) {
+        return configured(configuration.withQueryGovernance(policy, limits));
+    }
+
     /** 不执行 SQL、不获取连接，返回与执行路径相同的字段用途审批快照。 */
     public FieldUseSnapshot previewFieldUse(QuerySpec spec) {
         return operations.previewFieldUse(spec);

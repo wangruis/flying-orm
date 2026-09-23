@@ -178,7 +178,7 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
         return new FormAggregatePlanner(
                 renderer, configuration.resolver(), configuration.dataScope(),
                 defaultExecutionOptions, fieldUsePolicy, queryShapeLimits)
-                .plan(spec);
+                .plan(spec, configuration.explicitGovernance());
     }
 
     Flux<DynamicRow> selectSpec(QuerySpec spec) {

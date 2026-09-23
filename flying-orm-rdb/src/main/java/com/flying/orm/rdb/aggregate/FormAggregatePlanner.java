@@ -8,6 +8,7 @@ import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.field.FieldIdentity;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.internal.value.OwnedBindableValues;
 import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.scope.DataScope;
@@ -18,13 +19,13 @@ import com.flying.orm.core.scope.FieldUseSnapshot;
 import com.flying.orm.core.scope.FieldVisibility;
 import com.flying.orm.core.sql.render.SqlFragment;
 import com.flying.orm.core.sql.render.SqlRequest;
-import com.flying.orm.core.internal.value.OwnedBindableValues;
 import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.form.FormAggregateReadSupport;
 import com.flying.orm.rdb.form.FormDataSqlRenderer;
 import com.flying.orm.rdb.form.StructuredConditionResolver;
 import com.flying.orm.rdb.form.spec.QuerySpec;
+import com.flying.orm.rdb.internal.InternalApi;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -68,6 +69,12 @@ public final class FormAggregatePlanner {
 
     /** 完成 SQL 前校验并返回可由同步/响应式执行器直接消费的不可变计划。 */
     public Plan plan(AggregateSpec spec) {
+        return plan(spec, false);
+    }
+
+    /** 客户端传递显式治理状态；不会关闭字段策略或形状预算本身要求的审批。 */
+    @InternalApi
+    public Plan plan(AggregateSpec spec, boolean explicitGovernance) {
         AggregateSpec safeSpec = Objects.requireNonNull(spec, "aggregate spec must not be null");
         QuerySpec query = safeSpec.query();
         if (!query.projections().isEmpty() || !query.groups().isEmpty()) {
@@ -76,7 +83,7 @@ public final class FormAggregatePlanner {
         }
         AggregateTypeSupport.rejectEncryptedSelections(safeSpec, query.form());
 
-        boolean governed = fieldUsePolicy != FieldUsePolicy.unrestricted()
+        boolean governed = explicitGovernance || fieldUsePolicy != FieldUsePolicy.unrestricted()
                 || shapeLimits != QueryShapeLimits.defaults();
         FieldUseRequirements.Builder requirements = FieldUseRequirements.builder();
         FormAggregateReadSupport.PreparedRead read;
@@ -221,7 +228,6 @@ public final class FormAggregatePlanner {
                                              FormAggregateReadSupport reads) {
         if (query.structuredInput().isPresent()) {
             collectStructured(query.structuredInput().orElseThrow(), requirements);
-            return;
         }
         collectCondition(query.where(), FieldUse.FILTER, requirements, null, governed, reads);
     }

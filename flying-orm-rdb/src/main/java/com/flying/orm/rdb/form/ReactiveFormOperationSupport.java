@@ -45,7 +45,7 @@ class ReactiveFormOperationSupport {
         this.entityModels = configuration.entityModels();
         this.fieldUsePolicy = configuration.fieldUsePolicy();
         this.queryShapeLimits = configuration.queryShapeLimits();
-        this.governed = FieldUseGuard.governed(fieldUsePolicy, queryShapeLimits);
+        this.governed = configuration.governed();
         this.scopes = new FormScopeSupport(renderer, configuration.resolver(), configuration.dataScope());
         this.planner = new FormOperationPlanner(renderer, scopes, defaultExecutionOptions);
         this.results = new FormResultDecoder(renderer, entityModels);

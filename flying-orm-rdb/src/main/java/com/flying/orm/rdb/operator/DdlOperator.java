@@ -1,8 +1,11 @@
 package com.flying.orm.rdb.operator;
 
+import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.rdb.metadata.ReactiveFormMetadataReader;
 import com.flying.orm.rdb.schema.ReactiveSchemaClient;
+import reactor.core.publisher.Mono;
 
+import java.util.List;
 import java.util.Objects;
 
 /**
@@ -34,5 +37,10 @@ public final class DdlOperator {
      */
     public CreateOrAlterTableBuilder createOrAlter(String table) {
         return new CreateOrAlterTableBuilder(schemaClient, metadataReader, table);
+    }
+
+    /** 从同一份动态表单安全建表或增量调整；危险变更仍需现有审核入口。 */
+    public Mono<Long> createOrAlter(DynamicForm form) {
+        return schemaClient.createOrAlter(form, List.of(), metadataReader);
     }
 }

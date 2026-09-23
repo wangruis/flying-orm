@@ -4,6 +4,7 @@ import com.flying.orm.core.sql.render.SqlRequest;
 
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.Objects;
 
 /**
  * 上层实现的 JDBC 连接获取与释放端口。
@@ -19,6 +20,34 @@ import java.sql.SQLException;
  * @version v4.1.0
  */
 public interface JdbcConnectionAccess {
+
+    /** 用上层获取/释放函数接入；不保存 DataSource，也不决定连接生命周期。 */
+    static JdbcConnectionAccess of(Acquirer acquire, Releaser release) {
+        Objects.requireNonNull(acquire, "connection acquirer must not be null");
+        Objects.requireNonNull(release, "connection releaser must not be null");
+        return new JdbcConnectionAccess() {
+            @Override
+            public Connection getConnection(SqlRequest request) throws SQLException {
+                return acquire.getConnection(request);
+            }
+            @Override
+            public void releaseConnection(Connection connection, SqlRequest request) throws SQLException {
+                release.releaseConnection(connection, request);
+            }
+        };
+    }
+
+    /** 允许直接传播 SQLException 的上层获取函数。 */
+    @FunctionalInterface
+    interface Acquirer {
+        Connection getConnection(SqlRequest request) throws SQLException;
+    }
+
+    /** 允许直接传播 SQLException 的上层释放函数。 */
+    @FunctionalInterface
+    interface Releaser {
+        void releaseConnection(Connection connection, SqlRequest request) throws SQLException;
+    }
 
     /**
      * 取得本次工作使用的连接。

@@ -2,13 +2,12 @@ package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.ConditionGroups;
-import com.flying.orm.core.condition.StructuredConditionInput;
-import com.flying.orm.core.condition.StructuredConditionPolicy;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.param.ParameterConditionCompiler;
 import com.flying.orm.core.param.ParameterConditionPackage;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.lock.OptimisticLockOptions;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 
@@ -52,36 +51,17 @@ final class FormScopeSupport {
         return guard.applyWriteScope(form, where, effectiveScope);
     }
 
+    ScopedRead scopedRead(QuerySpec spec) {
+        return guard.scopedRead(spec);
+    }
+
+    GovernedRead governedRead(QuerySpec spec) {
+        var governed = guard.governedRead(spec);
+        return new GovernedRead(governed.read(), governed.businessWhere());
+    }
+
     ScopedRead scopedRead(DynamicForm form, ConditionGroup where, DataScope scope) {
         return guard.scopedRead(form, where, scope);
-    }
-
-    ScopedRead scopedStructuredRead(DynamicForm form,
-                                    StructuredConditionInput input,
-                                    StructuredConditionPolicy policy) {
-        return scopedStructuredRead(form, input, policy, DataScope.none());
-    }
-
-    ScopedRead scopedStructuredRead(DynamicForm form,
-                                    StructuredConditionInput input,
-                                    StructuredConditionPolicy policy,
-                                    DataScope scope) {
-        return guard.scopedStructuredRead(form, input, policy, scope);
-    }
-
-    GovernedRead governedRead(DynamicForm form, ConditionGroup where, DataScope scope) {
-        ConditionGroup businessWhere = Objects.requireNonNull(
-                where, "business where condition must not be null");
-        return new GovernedRead(scopedRead(form, businessWhere, scope), businessWhere);
-    }
-
-    GovernedRead governedStructuredRead(DynamicForm form,
-                                        StructuredConditionInput input,
-                                        StructuredConditionPolicy policy,
-                                        DataScope scope) {
-        FormScopeGuard.GovernedScopedRead governed = guard.governedStructuredRead(
-                form, input, policy, scope);
-        return new GovernedRead(governed.read(), governed.businessWhere());
     }
 
     ConditionGroup applyUpdateScope(DynamicForm form,

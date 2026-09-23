@@ -64,7 +64,7 @@ public final class SyncEntityDmlQueryOperator<T>
     public SyncEntityDmlQueryOperator<T> orderByAsc(EntityProperty<T, ?> property) { command.orderByAsc(property); return this; }
     /** 追加降序字段。 */
     public SyncEntityDmlQueryOperator<T> orderByDesc(EntityProperty<T, ?> property) { command.orderByDesc(property); return this; }
-    /** 选择投影字段；投影结果通过 {@link #executeRows()} 返回。 */
+    /** 选择投影字段；fetch 返回部分实体，executeRows 返回紧凑行。 */
     @SafeVarargs
     public final SyncEntityDmlQueryOperator<T> select(EntityProperty<T, ?>... properties) { command.select(properties); return this; }
     /** 追加 GROUP BY 字段。 */
@@ -75,6 +75,10 @@ public final class SyncEntityDmlQueryOperator<T>
 
     /** 执行并收集执行保护约束的实体结果。 */
     public List<T> execute() { return client.select(command.entitySpec(), command.state().metadata().type()); }
+    /** 查询实体列表；显式 select 时只填写已选择字段，其余遵循既有映射默认值。 */
+    public List<T> fetch() { return client.select(command.fetchSpec(), command.state().metadata().type()); }
+    /** 使用本次资源保护读取实体或部分实体。 */
+    public List<T> fetch(SqlExecutionOptions options) { return client.select(command.fetchSpec().withExecutionOptions(options), command.state().metadata().type()); }
     /** 使用本次显式执行保护查询实体。 */
     public List<T> execute(SqlExecutionOptions options) { return client.select(command.entitySpec().withExecutionOptions(options), command.state().metadata().type()); }
     /** 查询零或一条；没有记录返回 null，多于一条明确失败。 */

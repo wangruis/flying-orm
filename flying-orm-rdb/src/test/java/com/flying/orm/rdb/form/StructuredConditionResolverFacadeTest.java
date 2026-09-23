@@ -14,19 +14,49 @@ import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.json.JsonStructuredConditions;
 import com.flying.orm.rdb.vector.VectorStructuredConditions;
 import com.flying.orm.rdb.vector.VectorTermHandlers;
+import com.flying.orm.rdb.form.spec.QuerySpec;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class StructuredConditionResolverFacadeTest {
+
+    @Test
+    void structuredOrAtMaximumDepthDoesNotGainAnEmptyServerGroup() {
+        StructuredConditionInput input = StructuredConditionInput.term("id", "=", 1);
+        for (int depth = 1; depth < 64; depth++) {
+            input = StructuredConditionInput.or(input);
+        }
+        assertStructuredBoundary(input, StructuredConditionPolicy.defaults().withMaxDepth(64));
+    }
+
+    @Test
+    void structuredOrAtMaximumNodeCountDoesNotGainAnEmptyServerGroup() {
+        var nodes = new StructuredConditionInput[9999];
+        java.util.Arrays.fill(nodes, StructuredConditionInput.term("id", "=", 1));
+        assertStructuredBoundary(StructuredConditionInput.or(nodes),
+                StructuredConditionPolicy.defaults().withMaxNodes(10_000));
+    }
+
+    private static void assertStructuredBoundary(StructuredConditionInput input, StructuredConditionPolicy policy) {
+        var form = DynamicForm.builder("events", "events")
+                .addField(DynamicField.primaryKey("id", "INTEGER")).build();
+        var reads = new FormAggregateReadSupport(FormDataSqlRenderer.create(
+                SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.h2()),
+                StructuredConditionResolver.defaults(), DataScope.none());
+        var spec = QuerySpec.structured(form, input).withStructuredPolicy(policy);
+        var read = assertDoesNotThrow(() -> reads.prepare(spec));
+        assertEquals(com.flying.orm.core.condition.LogicalOperator.OR, read.where().operator());
+        assertDoesNotThrow(() -> reads.prepareGoverned(spec));
+    }
 
     @Test
     void boxedBinaryStructuredConditionKeepsItsCodecTypeThroughSqlRendering() {
@@ -144,8 +174,8 @@ class StructuredConditionResolverFacadeTest {
                 StructuredConditionInput.and(StructuredConditionInput.term("id", "=", 1)));
 
         assertThrows(StructuredConditionException.class,
-                     () -> guard.scopedStructuredRead(
-                             form, deepInput, StructuredConditionPolicy.defaults().withMaxDepth(1), DataScope.none()));
+                     () -> guard.scopedRead(com.flying.orm.rdb.form.spec.QuerySpec.structured(form, deepInput)
+                             .withStructuredPolicy(StructuredConditionPolicy.defaults().withMaxDepth(1))));
         assertEquals(0, invocations.get());
     }
 }

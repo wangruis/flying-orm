@@ -34,17 +34,34 @@ final class DmlWriteCommand {
     private final Kind kind;
     private final SqlRenderer renderer;
     private final String table;
+    private final DynamicForm boundForm;
     private final Map<String, Object> values = new LinkedHashMap<>();
 
-    private ConditionGroup where = ConditionGroup.and().build();
+    private WhereDsl where;
     private OptimisticLockOptions lock;
     private LogicDeleteDefinition logicDelete;
     private DataScope scope = DataScope.none();
 
     private DmlWriteCommand(Kind kind, SqlRenderer renderer, String table) {
+        this(kind, renderer, table, null);
+    }
+
+    private DmlWriteCommand(Kind kind, SqlRenderer renderer, String table, DynamicForm form) {
         this.kind = Objects.requireNonNull(kind, "DML write kind must not be null");
         this.renderer = Objects.requireNonNull(renderer, "sql renderer must not be null");
         this.table = SqlIdentifiers.requireIdentifier(table, "operator " + kind.label + " table");
+        this.boundForm = form;
+        this.where = new WhereDsl(renderer);
+    }
+
+    static DmlWriteCommand update(SqlRenderer renderer, DynamicForm form) {
+        DynamicForm safeForm = Objects.requireNonNull(form, "write form must not be null");
+        return new DmlWriteCommand(Kind.UPDATE, renderer, safeForm.table(), safeForm);
+    }
+
+    static DmlWriteCommand delete(SqlRenderer renderer, DynamicForm form) {
+        DynamicForm safeForm = Objects.requireNonNull(form, "write form must not be null");
+        return new DmlWriteCommand(Kind.DELETE, renderer, safeForm.table(), safeForm);
     }
 
     static DmlWriteCommand update(SqlRenderer renderer, String table) {
@@ -62,9 +79,14 @@ final class DmlWriteCommand {
 
     void where(Function<WhereDsl, WhereDsl> customizer) {
         WhereDsl dsl = new WhereDsl(renderer);
-        this.where = Objects.requireNonNull(customizer, "where customizer must not be null")
+        ConditionGroup snapshot = Objects.requireNonNull(customizer, "where customizer must not be null")
                             .apply(dsl)
                             .build();
+        this.where = new WhereDsl(renderer, snapshot);
+    }
+
+    void where(String field, String operator, Object value) {
+        where.where(field, operator, value);
     }
 
     void optimisticLock(OptimisticLockOptions lock) {
@@ -72,6 +94,9 @@ final class DmlWriteCommand {
     }
 
     void logicDelete(String fieldName, Object notDeletedValue, Object deletedValue) {
+        if (boundForm != null) {
+            throw new IllegalStateException("configure logic delete on the bound DynamicForm");
+        }
         this.logicDelete = LogicDeleteDefinition.of(
                 SqlIdentifiers.requireIdentifier(fieldName, "operator logic delete field"),
                 notDeletedValue,
@@ -84,13 +109,14 @@ final class DmlWriteCommand {
 
     /** 生成交给 FormClient 的不可变写入描述，真正安全校验仍只在统一 Form 计划器中执行一次。 */
     WriteSpec spec() {
+        ConditionGroup conditions = where.build();
         WriteSpec spec;
         if (kind == Kind.UPDATE) {
             DynamicForm form = form(values.keySet());
-            spec = WriteSpec.update(form, values, where).withScope(scope);
+            spec = WriteSpec.update(form, values, conditions).withScope(scope);
         } else {
             DynamicForm form = form(Set.of());
-            spec = WriteSpec.delete(form, where).withScope(scope);
+            spec = WriteSpec.delete(form, conditions).withScope(scope);
         }
         return lock == null ? spec : spec.withLock(lock);
     }
@@ -102,8 +128,11 @@ final class DmlWriteCommand {
      * 来自独立 {@link OptimisticLockOptions} 的版本字段补齐同一边界校验，随后保留声明顺序生成表单。</p>
      */
     private DynamicForm form(Set<String> fields) {
+        if (boundForm != null) {
+            return boundForm;
+        }
         Set<String> names = new LinkedHashSet<>(fields);
-        collectConditionFields(where, names);
+        collectConditionFields(where.build(), names);
         if (lock != null) {
             names.add(SqlIdentifiers.requireIdentifier(lock.field(), "operator field"));
         }

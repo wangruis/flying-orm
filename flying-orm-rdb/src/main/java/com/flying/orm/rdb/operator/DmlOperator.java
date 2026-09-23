@@ -1,11 +1,18 @@
 package com.flying.orm.rdb.operator;
 
-import com.flying.orm.core.sql.render.SqlRenderer;
-import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.sql.render.SqlRenderer;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
+import com.flying.orm.rdb.form.BatchOptimisticUpdate;
 import com.flying.orm.rdb.form.ReactiveFormClient;
+import com.flying.orm.rdb.form.spec.BatchSpec;
+import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Mono;
 
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -45,6 +52,42 @@ public final class DmlOperator {
      */
     public QueryOperator query() {
         return new QueryOperator(formClient, executor, renderer, defaultDataScope);
+    }
+
+    /** 创建绑定动态表单的新查询；元数据、字段保护与 Scope 由原有表单内核处理。 */
+    public QueryOperator query(DynamicForm form) { return query().from(form); }
+
+    /** 插入一行，复用表单的类型转换、租户和加密规则。 */
+    public Mono<Long> insert(DynamicForm form, Map<String, Object> values) {
+        return formClient.insert(WriteSpec.insert(form, values));
+    }
+
+    /** 更新动态表单；保留元数据和非空条件保护。 */
+    public DmlUpdateOperator update(DynamicForm form) {
+        return new DmlUpdateOperator(formClient, DmlWriteCommand.update(renderer, form));
+    }
+
+    /** 删除动态表单；声明逻辑删除时默认软删除。 */
+    public DmlDeleteOperator delete(DynamicForm form) {
+        return new DmlDeleteOperator(formClient, DmlWriteCommand.delete(renderer, form));
+    }
+
+    /** 使用有界批量内核插入；返回实际执行证据。 */
+    public Mono<BatchExecutionEvidence> insertBatch(
+            DynamicForm form, Publisher<Map<String, Object>> rows) {
+        return formClient.writeBatch(BatchSpec.insert(form, rows));
+    }
+
+    /** 按主键批量插入或更新，沿用 Scope 约束冲突目标的语义。 */
+    public Mono<BatchExecutionEvidence> upsertBatch(
+            DynamicForm form, Publisher<Map<String, Object>> rows) {
+        return formClient.writeBatch(BatchSpec.upsert(form, rows));
+    }
+
+    /** 每行携带条件及预期版本的批量更新，保留并发冲突证据。 */
+    public Mono<BatchExecutionEvidence> updateBatch(
+            DynamicForm form, Publisher<BatchOptimisticUpdate> rows) {
+        return formClient.writeBatch(BatchSpec.update(form, rows));
     }
 
     /** 创建以 DynamicForm 为根源的轻量多表查询。 */

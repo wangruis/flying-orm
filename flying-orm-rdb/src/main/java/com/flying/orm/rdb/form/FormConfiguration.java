@@ -17,7 +17,20 @@ record FormConfiguration(FormDataSqlRenderer renderer,
                          BatchWriteOptions batchOptions,
                          EntityModelRegistry entityModels,
                          FieldUsePolicy fieldUsePolicy,
-                         QueryShapeLimits queryShapeLimits) {
+                         QueryShapeLimits queryShapeLimits,
+                         boolean explicitGovernance) {
+
+    FormConfiguration(FormDataSqlRenderer renderer,
+                      StructuredConditionResolver resolver,
+                      DataScope dataScope,
+                      SqlExecutionOptions executionOptions,
+                      BatchWriteOptions batchOptions,
+                      EntityModelRegistry entityModels,
+                      FieldUsePolicy fieldUsePolicy,
+                      QueryShapeLimits queryShapeLimits) {
+        this(renderer, resolver, dataScope, executionOptions, batchOptions, entityModels,
+             fieldUsePolicy, queryShapeLimits, false);
+    }
 
     FormConfiguration {
         renderer = Objects.requireNonNull(renderer, "form data sql renderer must not be null");
@@ -32,36 +45,46 @@ record FormConfiguration(FormDataSqlRenderer renderer,
 
     FormConfiguration withResolver(StructuredConditionResolver value) {
         return new FormConfiguration(renderer, value, dataScope, executionOptions, batchOptions, entityModels,
-                                     fieldUsePolicy, queryShapeLimits);
+                                     fieldUsePolicy, queryShapeLimits, explicitGovernance);
     }
 
     FormConfiguration withExecutionOptions(SqlExecutionOptions value) {
         return new FormConfiguration(renderer, resolver, dataScope, value, batchOptions, entityModels,
-                                     fieldUsePolicy, queryShapeLimits);
+                                     fieldUsePolicy, queryShapeLimits, explicitGovernance);
     }
 
     FormConfiguration withDataScope(DataScope value) {
         return new FormConfiguration(renderer, resolver, value, executionOptions, batchOptions, entityModels,
-                                     fieldUsePolicy, queryShapeLimits);
+                                     fieldUsePolicy, queryShapeLimits, explicitGovernance);
     }
 
     FormConfiguration withBatchOptions(BatchWriteOptions value) {
         return new FormConfiguration(renderer, resolver, dataScope, executionOptions, value, entityModels,
-                                     fieldUsePolicy, queryShapeLimits);
+                                     fieldUsePolicy, queryShapeLimits, explicitGovernance);
     }
 
     FormConfiguration withEntityModels(EntityModelRegistry value) {
         return new FormConfiguration(renderer, resolver, dataScope, executionOptions, batchOptions, value,
-                                     fieldUsePolicy, queryShapeLimits);
+                                     fieldUsePolicy, queryShapeLimits, explicitGovernance);
     }
 
     FormConfiguration withFieldUsePolicy(FieldUsePolicy value) {
         return new FormConfiguration(renderer, resolver, dataScope, executionOptions, batchOptions, entityModels,
-                                     value, queryShapeLimits);
+                                     value, queryShapeLimits, explicitGovernance);
     }
 
     FormConfiguration withQueryShapeLimits(QueryShapeLimits value) {
         return new FormConfiguration(renderer, resolver, dataScope, executionOptions, batchOptions, entityModels,
-                                     fieldUsePolicy, value);
+                                     fieldUsePolicy, value, explicitGovernance);
+    }
+
+    /** 显式治理与“不限制字段/预算”是不同事实，不能根据默认值丢掉前者。 */
+    FormConfiguration withQueryGovernance(FieldUsePolicy policy, QueryShapeLimits limits) {
+        return new FormConfiguration(renderer, resolver, dataScope, executionOptions, batchOptions, entityModels,
+                                     policy, limits, true);
+    }
+
+    boolean governed() {
+        return explicitGovernance || FieldUseGuard.governed(fieldUsePolicy, queryShapeLimits);
     }
 }

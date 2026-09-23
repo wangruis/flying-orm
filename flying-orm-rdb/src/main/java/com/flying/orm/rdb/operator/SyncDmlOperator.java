@@ -1,11 +1,18 @@
 package com.flying.orm.rdb.operator;
 
-import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.sql.render.SqlRenderer;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
+import com.flying.orm.rdb.form.BatchOptimisticUpdate;
 import com.flying.orm.rdb.form.SyncFormClient;
+import com.flying.orm.rdb.form.spec.BatchSpec;
+import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
+import reactor.core.publisher.Flux;
 
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -39,6 +46,42 @@ public final class SyncDmlOperator {
     /** 创建单次同步查询构建器。 */
     public SyncQueryOperator query() {
         return new SyncQueryOperator(formClient, executor, renderer, defaultDataScope);
+    }
+
+    /** 创建绑定动态表单的新查询；元数据、字段保护与 Scope 由原有表单内核处理。 */
+    public SyncQueryOperator query(DynamicForm form) { return query().from(form); }
+
+    /** 插入一行，复用表单的类型转换、租户和加密规则。 */
+    public long insert(DynamicForm form, Map<String, Object> values) {
+        return formClient.insert(WriteSpec.insert(form, values));
+    }
+
+    /** 更新动态表单；保留元数据和非空条件保护。 */
+    public SyncDmlUpdateOperator update(DynamicForm form) {
+        return new SyncDmlUpdateOperator(formClient, DmlWriteCommand.update(renderer, form));
+    }
+
+    /** 删除动态表单；声明逻辑删除时默认软删除。 */
+    public SyncDmlDeleteOperator delete(DynamicForm form) {
+        return new SyncDmlDeleteOperator(formClient, DmlWriteCommand.delete(renderer, form));
+    }
+
+    /** 使用有界批量内核插入；返回实际执行证据。 */
+    public BatchExecutionEvidence insertBatch(
+            DynamicForm form, List<Map<String, Object>> rows) {
+        return formClient.writeBatch(BatchSpec.insert(form, Flux.fromIterable(Objects.requireNonNull(rows, "batch rows must not be null"))));
+    }
+
+    /** 按主键批量插入或更新，沿用 Scope 约束冲突目标的语义。 */
+    public BatchExecutionEvidence upsertBatch(
+            DynamicForm form, List<Map<String, Object>> rows) {
+        return formClient.writeBatch(BatchSpec.upsert(form, Flux.fromIterable(Objects.requireNonNull(rows, "batch rows must not be null"))));
+    }
+
+    /** 每行携带条件及预期版本的批量更新，保留并发冲突证据。 */
+    public BatchExecutionEvidence updateBatch(
+            DynamicForm form, List<BatchOptimisticUpdate> rows) {
+        return formClient.writeBatch(BatchSpec.update(form, Flux.fromIterable(Objects.requireNonNull(rows, "batch rows must not be null"))));
     }
 
     /** 创建以 DynamicForm 为根源的原生 JDBC 轻量多表查询。 */

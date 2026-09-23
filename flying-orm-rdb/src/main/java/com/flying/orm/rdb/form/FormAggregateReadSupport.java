@@ -2,7 +2,6 @@ package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.QueryShapeLimits;
-import com.flying.orm.core.condition.StructuredConditionPolicy;
 import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.field.FieldIdentity;
 import com.flying.orm.core.form.DynamicField;
@@ -56,13 +55,7 @@ public final class FormAggregateReadSupport {
     /** 合并业务条件、客户端/调用 Scope、逻辑删除和受保护条件，且不获取连接。 */
     public PreparedRead prepare(QuerySpec spec) {
         QuerySpec safeSpec = Objects.requireNonNull(spec, "aggregate query spec must not be null");
-        ScopedRead read = safeSpec.structuredInput()
-                .map(input -> scopes.scopedStructuredRead(
-                        safeSpec.form(), input,
-                        safeSpec.structuredPolicy().orElse(StructuredConditionPolicy.defaults()),
-                        safeSpec.scope()))
-                .orElseGet(() -> scopes.scopedRead(
-                        safeSpec.form(), safeSpec.where(), safeSpec.scope()));
+        ScopedRead read = scopes.scopedRead(safeSpec);
         return prepare(safeSpec, read);
     }
 
@@ -72,13 +65,7 @@ public final class FormAggregateReadSupport {
      */
     public GovernedPreparedRead prepareGoverned(QuerySpec spec) {
         QuerySpec safeSpec = Objects.requireNonNull(spec, "aggregate query spec must not be null");
-        FormScopeSupport.GovernedRead governed = safeSpec.structuredInput()
-                .map(input -> scopes.governedStructuredRead(
-                        safeSpec.form(), input,
-                        safeSpec.structuredPolicy().orElse(StructuredConditionPolicy.defaults()),
-                        safeSpec.scope()))
-                .orElseGet(() -> scopes.governedRead(
-                        safeSpec.form(), safeSpec.where(), safeSpec.scope()));
+        FormScopeSupport.GovernedRead governed = scopes.governedRead(safeSpec);
         return new GovernedPreparedRead(
                 prepare(safeSpec, governed.read()), governed.businessWhere());
     }

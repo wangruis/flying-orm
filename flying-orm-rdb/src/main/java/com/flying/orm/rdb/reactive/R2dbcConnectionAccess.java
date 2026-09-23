@@ -5,6 +5,9 @@ import io.r2dbc.spi.Connection;
 import org.reactivestreams.Publisher;
 import reactor.core.publisher.SignalType;
 
+import java.util.Objects;
+import java.util.function.Function;
+
 /**
  * 上层实现的非阻塞 R2DBC 连接获取与释放端口。
  *
@@ -19,6 +22,28 @@ import reactor.core.publisher.SignalType;
  * @version v4.1.0
  */
 public interface R2dbcConnectionAccess {
+
+    /** 用上层非阻塞函数接入；获取和释放调用仍由执行器在订阅链内组合。 */
+    static R2dbcConnectionAccess of(Function<SqlRequest, Publisher<? extends Connection>> acquire, Releaser release) {
+        Objects.requireNonNull(acquire, "connection acquirer must not be null");
+        Objects.requireNonNull(release, "connection releaser must not be null");
+        return new R2dbcConnectionAccess() {
+            @Override
+            public Publisher<? extends Connection> getConnection(SqlRequest request) {
+                return acquire.apply(request);
+            }
+            @Override
+            public Publisher<Void> releaseConnection(SignalType signal, Connection connection, SqlRequest request) {
+                return release.releaseConnection(signal, connection, request);
+            }
+        };
+    }
+
+    /** 上层释放函数接收完成、失败或取消信号；该信号不代表事务状态。 */
+    @FunctionalInterface
+    interface Releaser {
+        Publisher<Void> releaseConnection(SignalType signal, Connection connection, SqlRequest request);
+    }
 
     /**
      * 返回冷 Publisher；每次订阅恰好提供一条连接，获取失败发出错误，不以空完成代替连接。

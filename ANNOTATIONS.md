@@ -1,4 +1,4 @@
-# flying-orm 4.1.0 实体注解
+# flying-orm 4.1.1 实体注解
 
 注解只声明映射、结构和字段治理语义；不创建连接、不配置驱动、不创建事务或连接池。
 
@@ -70,6 +70,8 @@ public class Order {
     @TableColumn(length = 64, nullable = TableColumn.Nullability.NOT_NULL)
     private String orderNo;
 
+    private Long userId;
+
     @TableColumn(precision = 18, scale = 2)
     private BigDecimal amount;
 
@@ -118,6 +120,8 @@ enum UserStatus {
 
     @EnumValue
     private final String code;
+
+    UserStatus(String code) { this.code = code; }
 }
 
 class Customer {
