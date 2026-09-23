@@ -56,7 +56,7 @@ final class FormScopeSupport {
     }
 
     GovernedRead governedRead(QuerySpec spec) {
-        var governed = guard.governedRead(spec);
+        FormScopeGuard.GovernedScopedRead governed = guard.governedRead(spec);
         return new GovernedRead(governed.read(), governed.businessWhere());
     }
 
