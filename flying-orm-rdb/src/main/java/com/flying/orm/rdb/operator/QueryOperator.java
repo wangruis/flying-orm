@@ -100,7 +100,7 @@ public final class QueryOperator {
         if (!command.governed()) {
             return fetch(formClient.entityModels().rawRowMapper(type, formClient.entityRenderer().valueCodecs()));
         }
-        DmlQueryCommand.GovernedQuery query = command.governedQuery(null);
+        var query = command.governedQuery(null);
         return configuredClient(query).select(query.spec(), type);
     }
 
@@ -117,26 +117,26 @@ public final class QueryOperator {
 
     /** 一基页码分页；复用表单分页内核及当前排序。 */
     public Mono<PageResult<DynamicRow>> page(int page, int size) {
-        DmlQueryCommand.GovernedQuery query = command.governedQuery(null);
+        var query = command.governedQuery(null);
         return configuredClient(query).page(query.spec(), new PageQuery(page, size, query.spec().sorts()));
     }
 
     /** 稳定游标分页，不额外查询总数。 */
     public Mono<CursorPageResult<DynamicRow>> cursorPage(CursorPageQuery page) {
-        DmlQueryCommand.GovernedQuery query = command.governedQuery(null);
+        var query = command.governedQuery(null);
         return configuredClient(query).cursorPage(query.spec(), page);
     }
 
     /** 支持复合排序与可空字段的键集分页。 */
     public Mono<KeysetPageResult<DynamicRow>> keysetPage(KeysetPageQuery page) {
-        DmlQueryCommand.GovernedQuery query = command.governedQuery(null);
+        var query = command.governedQuery(null);
         return configuredClient(query).keysetPage(query.spec(), page);
     }
 
     /** 在当前条件与 Scope 下声明类型化报表聚合。 */
     public Flux<AggregateRow> aggregate(Consumer<AggregateSpec.Builder> consumer) {
-        DmlQueryCommand.GovernedQuery query = command.governedQuery(null);
-        AggregateSpec.Builder report = AggregateSpec.builder(query.spec());
+        var query = command.governedQuery(null);
+        var report = AggregateSpec.builder(query.spec());
         Objects.requireNonNull(consumer, "aggregate consumer must not be null").accept(report);
         return configuredClient(query).aggregate(report.build());
     }
