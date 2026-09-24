@@ -9,6 +9,7 @@ import com.flying.orm.core.protection.MaskedFieldDefinition;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.dialect.RdbDialect;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.protection.ProtectedFieldKeyRing;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 import com.flying.orm.rdb.result.DynamicRow;
@@ -38,7 +39,7 @@ class ProtectedContainsResultSupportTest {
             List<DynamicRow> verified = support.finish(
                     form, query(form),
                     List.of(row(1L, "alphabet soup", "first"), row(2L, "alphabet", "second")),
-                    projection, SensitiveDisplayMode.FULL);
+                    projection, SensitiveDisplayMode.FULL, SqlExecutionOptions.safeDefaults());
 
             assertEquals(2, verified.size());
             assertEquals(0, projection.toArrayCalls);
@@ -46,7 +47,7 @@ class ProtectedContainsResultSupportTest {
     }
 
     @Test
-    void keepsCandidateLimitPlaintextVerificationMaskingAndProjection() {
+    void keepsPlaintextVerificationMaskingAndProjection() {
         DynamicForm form = protectedForm();
         try (ProtectedFieldRuntime runtime = ProtectedFieldRuntime.create(
                 ProtectedFieldKeyRing.single("v1", new byte[32]))) {
@@ -58,12 +59,9 @@ class ProtectedContainsResultSupportTest {
                     row(1L, "alphabet soup", "first"),
                     row(2L, "goodbye", "second"));
 
-            assertThrows(ProtectedSearchCandidateLimitExceededException.class,
-                         () -> ProtectedContainsResultSupport.requireCandidateLimit(
-                                 ProtectedContainsResultSupport.DEFAULT_CANDIDATE_LIMIT + 1));
-
             List<DynamicRow> verified = support.finish(
-                    form, query(form), candidates, List.of("secret", "id"), SensitiveDisplayMode.MASKED);
+                    form, query(form), candidates, List.of("secret", "id"), SensitiveDisplayMode.MASKED,
+                    SqlExecutionOptions.safeDefaults());
 
             assertEquals(1, verified.size());
             assertEquals(List.of("secret", "id"), verified.getFirst().keySet().stream().toList());

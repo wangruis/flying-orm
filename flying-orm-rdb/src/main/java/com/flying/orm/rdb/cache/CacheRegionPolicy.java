@@ -17,8 +17,8 @@ public record CacheRegionPolicy(boolean enabled,
                                 boolean recordStats) {
 
     public CacheRegionPolicy {
-        if (maximumWeight <= 0 || maximumWeight >= Integer.MAX_VALUE) {
-            throw new IllegalArgumentException("cache maximum weight must be between 1 and Integer.MAX_VALUE - 1");
+        if (maximumWeight <= 0) {
+            throw new IllegalArgumentException("cache maximum weight must be positive");
         }
         if (maximumEntryWeight <= 0 || maximumEntryWeight > maximumWeight) {
             throw new IllegalArgumentException("cache maximum entry weight must be positive and not exceed total weight");

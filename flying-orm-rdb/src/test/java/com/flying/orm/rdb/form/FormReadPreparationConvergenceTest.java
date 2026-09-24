@@ -50,17 +50,23 @@ class FormReadPreparationConvergenceTest {
     }
 
     @Test
-    void containsOmitsOffsetCountAndKeepsCandidateLimit() {
+    void containsOmitsOffsetCountAndPreservesCallerExecutionLimits() {
         try (Fixture fixture = new Fixture()) {
             QuerySpec spec = QuerySpec.of(fixture.form, ConditionGroup.and()
-                    .add(ProtectedConditions.contains("secret", "alpha")).build());
+                    .add(ProtectedConditions.contains("secret", "alpha")).build())
+                    .withExecutionOptions(SqlExecutionOptions.maxRows(2000).withMaxResultBytes(8192));
             var select = fixture.planner.select(spec);
             var page = fixture.planner.page(spec, new PageQuery(1, 2, List.of()));
             assertNotNull(select.containsQuery());
             assertNull(page.countRequest());
             assertNotNull(page.containsQuery());
-            assertTrue(page.dataRequest().parameters().contains(
-                    ProtectedContainsResultSupport.DEFAULT_CANDIDATE_LIMIT + 1));
+            var cursor = fixture.planner.cursorPage(spec, CursorPageQuery.first(2, CursorSort.asc("id")));
+            assertFalse(select.request().sql().contains(" limit "));
+            assertFalse(page.dataRequest().sql().contains(" limit "));
+            assertFalse(cursor.request().sql().contains(" limit "));
+            assertEquals(spec.executionOptions().orElseThrow(), select.options());
+            assertEquals(select.options(), page.options());
+            assertEquals(select.options(), cursor.options());
         }
     }
 

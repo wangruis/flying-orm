@@ -22,6 +22,29 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class JdbcBatchStreamingLimitTest {
 
     @Test
+    void rejectedRowsDoNotEnterEvidenceButAcceptedUnexecutedTailDoes() {
+        for (int maximum : new int[]{1, 2, 3}) {
+            JdbcBatchEvidenceTestSupport.State state = new JdbcBatchEvidenceTestSupport.State();
+            java.util.concurrent.atomic.AtomicInteger cancelled = new java.util.concurrent.atomic.AtomicInteger();
+            BatchWriteRequest request = com.flying.orm.rdb.batch.BatchWriteRequests.request(
+                    "insert into samples(value) values (?)", 1, List.of(Integer.class),
+                    SqlBindMarkerStyle.CANONICAL,
+                    Flux.range(0, maximum + 1).map(value -> new Object[]{value})
+                            .doOnCancel(cancelled::incrementAndGet),
+                    BatchWriteOptions.of(2).withMaxRows(maximum));
+            com.flying.orm.rdb.batch.BatchExecutionEvidenceException failure = assertThrows(
+                    com.flying.orm.rdb.batch.BatchExecutionEvidenceException.class,
+                    () -> state.writer().writeBatch(request));
+            assertInstanceOf(BatchMemoryLimitExceededException.class, failure.getCause());
+            assertEquals(maximum, failure.evidence().inputCount());
+            assertEquals(maximum / 2 * 2, failure.evidence().successfulCount());
+            assertEquals(maximum / 2, state.executions.get());
+            assertEquals(maximum / 2, state.released.get());
+            assertEquals(1, cancelled.get());
+        }
+    }
+
+    @Test
     void unlimitedRowPolicyStillReadsBoundedChunks() throws Exception {
         BatchWriteRequest request = request(BatchWriteOptions.of(2).withMaxRows(0));
 
@@ -115,7 +138,8 @@ class JdbcBatchStreamingLimitTest {
 
     private static JdbcBatchRows rows(BatchWriteRequest request) {
         return new JdbcBatchRows(
-                request.rows(), request.parameterCount(), request.options().maxRowBytes());
+                request.rows(), request.parameterCount(), request.options().maxRowBytes(),
+                request.options().maxRows(), new com.flying.orm.rdb.batch.BatchExecutionEvidence.Accumulator());
     }
 
     private static Connection connection(List<Object> bound) {

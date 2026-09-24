@@ -40,6 +40,12 @@ record MetadataCacheKey(Kind kind, String formId, String schema, String table) {
                 Kind.FORM, requireText(formId, "metadata cache form id"), schema, table);
     }
 
+    /** 读取键仍区分大小写；失效覆盖数据库可能折叠的别名，不让旧结构留在另一个入口。 */
+    boolean matchesInvalidation(String targetSchema, String targetTable) {
+        return table.equalsIgnoreCase(targetTable)
+                && (targetSchema == null || schema == null || schema.equalsIgnoreCase(targetSchema));
+    }
+
     private static String[] splitTable(String schema, String table) {
         String safeTable = requireText(table, "metadata cache table");
         if (schema != null) {

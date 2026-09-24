@@ -31,6 +31,49 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CompleteSchemaMetadataConversionTest {
 
     @Test
+    void doesNotTreatFixedWidthCheckOperandsAsVariableWidthText() {
+        InformationSchemaFormMetadataReader.Queries queries = PostgreSqlMetadataQueries.queries();
+        assertThrows(IllegalStateException.class, () -> FormMetadataRowConverter.toCompleteSchemaSnapshot(
+                RelationIdentity.table("fixed_text"),
+                List.of(row("COLUMN_NAME", "value", "DATA_TYPE", "character", "LOGICAL_DATA_TYPE", "character",
+                        "PHYSICAL_DATA_TYPE", "character(8)", "PHYSICAL_TYPE_SCHEMA", "pg_catalog",
+                        "PHYSICAL_TYPE_NAME", "bpchar", "PHYSICAL_ARRAY", false, "NULLABLE", true)),
+                List.of(row("TABLE_COMMENT", null)), List.of(), List.of(), List.of(), List.of(),
+                List.of(row("CONSTRAINT_NAME", "ck_value", "CHECK_EXPRESSION", "value::text = 'a '::text",
+                        "CHECK_REPRESENTABLE", true)),
+                queries.typeMapper(), queries.snapshotTypeMapper(),
+                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL));
+    }
+
+    @org.junit.jupiter.api.TestFactory
+    java.util.stream.Stream<org.junit.jupiter.api.DynamicTest> preservesNativePostgresqlDefaultCastSemantics() {
+        return java.util.stream.Stream.of(
+                List.of("character(8)", "character", "bpchar", "a"),
+                List.of("app.code", "character", "code", "a"),
+                List.of("bytea", "bytea", "bytea", "\\x12"),
+                List.of("interval day to second", "interval", "interval", "1 day"))
+                .map(type -> org.junit.jupiter.api.DynamicTest.dynamicTest(type.getFirst(), () -> {
+                    InformationSchemaFormMetadataReader.Queries queries = PostgreSqlMetadataQueries.queries();
+                    SchemaSnapshot snapshot = FormMetadataRowConverter.toCompleteSchemaSnapshot(
+                            RelationIdentity.of(null, "public", "defaults"),
+                            List.of(row("COLUMN_NAME", "value", "DATA_TYPE", type.get(1),
+                                    "LOGICAL_DATA_TYPE", type.get(1), "PHYSICAL_DATA_TYPE", type.get(0),
+                                    "PHYSICAL_TYPE_SCHEMA", type.get(0).startsWith("app.") ? "app" : "pg_catalog",
+                                    "PHYSICAL_TYPE_NAME", type.get(2),
+                                    "PHYSICAL_ARRAY", false, "NULLABLE", true,
+                                    "COLUMN_DEFAULT", "'" + type.get(3) + "'::"
+                                            + (type.get(1).equals("character") ? "bpchar" : type.get(2)))),
+                            List.of(row("TABLE_COMMENT", null)), List.of(), List.of(), List.of(), List.of(),
+                            type.get(1).equals("character") ? List.of(row("CONSTRAINT_NAME", "ck_value",
+                                    "CHECK_EXPRESSION", "value = 'a'::bpchar", "CHECK_REPRESENTABLE", true)) : List.of(),
+                            queries.typeMapper(), queries.snapshotTypeMapper(),
+                            InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL);
+                    assertEquals(ColumnDefault.literal(type.get(3)),
+                            snapshot.completeTable().orElseThrow().columns().getFirst().defaultValue());
+                }));
+    }
+
+    @Test
     void discardsCatalogPrecisionForDateButPreservesTimestampZero() {
         SchemaSnapshot snapshot = FormMetadataRowConverter.toCompleteSchemaSnapshot(
                 RelationIdentity.table("events"),

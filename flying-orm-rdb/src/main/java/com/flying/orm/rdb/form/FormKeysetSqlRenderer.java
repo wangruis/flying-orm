@@ -78,7 +78,7 @@ final class FormKeysetSqlRenderer {
         List<Object> baseParameters = new ArrayList<>(whereParameters.size() + cursorParameters.size());
         baseParameters.addAll(whereParameters);
         baseParameters.addAll(cursorParameters);
-        PageQuery limit = PageQuery.of(1, safePage.size() + 1);
+        PageQuery limit = PageQuery.of(1, Math.addExact(safePage.size(), 1));
         List<Object> parameters = pagination.paginationParameters(baseParameters, limit);
         String sortShape = sortShape(support, safeForm, safePage);
         String pageShape = pageShape(safePage);

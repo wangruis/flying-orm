@@ -57,9 +57,11 @@ final class SchemaColumnCommentCodec {
             return false;
         }
         String physicalType = SchemaDefinitionEquality.actualColumnType(dialect, actualColumn);
-        return dialect.sameDataType(physicalType, dialect.dataType("OFFSET_TIME"))
+        return dialect.sameDataType(physicalType, SchemaTypeMapping.preserveCharacterLengthUnit(
+                    dialect, physicalType, dialect.dataType("OFFSET_TIME")))
                 || style == SchemaDialect.GeneratedValueStyle.ORACLE
-                    && dialect.sameDataType(physicalType, dialect.dataType("TIME"));
+                    && dialect.sameDataType(physicalType, SchemaTypeMapping.preserveCharacterLengthUnit(
+                            dialect, physicalType, dialect.dataType("TIME")));
     }
 
     private static String encodeLogicalType(SchemaDialect.GeneratedValueStyle style,

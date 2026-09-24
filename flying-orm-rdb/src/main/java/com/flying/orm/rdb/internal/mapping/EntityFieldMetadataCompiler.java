@@ -39,6 +39,7 @@ final class EntityFieldMetadataCompiler {
         Optional<LogicDeleteValues> logicDelete = logicDelete(field, columnName, classLogicDelete);
         EntityFieldTypeResolver.EnumValueDefinition enumValue = EntityFieldTypeResolver.enumValue(field);
         EntityEnumStorage enumStorage = EntityFieldTypeResolver.enumStorage(field, enumValue);
+        Class<?> logicDeleteType = enumValue.valueType() == null ? field.getType() : enumValue.valueType();
         boolean primaryKey = flyingId.isPresent();
         ValueGeneration generation = valueGeneration(entityType, flyingId);
         boolean selectable = flyingField.map(TableField::select).orElse(true);
@@ -60,11 +61,11 @@ final class EntityFieldMetadataCompiler {
                                        logicDelete.isPresent(),
                                        logicDelete.map(LogicDeleteValues::notDeletedValue)
                                                   .map(value -> logicDeleteValue(
-                                                          value, field.getType(), deferLogicDeleteLiteralDecoding))
+                                                          value, logicDeleteType, deferLogicDeleteLiteralDecoding))
                                                   .orElse(null),
                                        logicDelete.map(LogicDeleteValues::deletedValue)
                                                   .map(value -> logicDeleteValue(
-                                                          value, field.getType(), deferLogicDeleteLiteralDecoding))
+                                                          value, logicDeleteType, deferLogicDeleteLiteralDecoding))
                                                   .orElse(null),
                                        null,
                                        null,
@@ -90,7 +91,7 @@ final class EntityFieldMetadataCompiler {
                                            Class<?> fieldType,
                                            boolean deferLiteralDecoding) {
         // 严格 descriptor 还要先解析 EntityTypeMappingRegistry，原始文本必须留到映射确定后再交给它的 codec。
-        // 普通 CRUD 没有这份显式映射，继续沿用原来的内置类型转换，既有实体语义不会改变。
+        // 普通 CRUD 按存储类型解读字面量，@EnumValue 使用成员类型，与严格 descriptor 保持一致。
         return deferLiteralDecoding ? literal : EntityFieldTypeResolver.typedValue(literal, fieldType);
     }
 

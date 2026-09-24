@@ -225,7 +225,7 @@ final class FormQuerySqlRenderer {
         if (!page.firstPage()) {
             addCursorParameters(form, page, baseParameters);
         }
-        PageQuery limit = PageQuery.of(1, page.size() + 1);
+        PageQuery limit = PageQuery.of(1, Math.addExact(page.size(), 1));
         List<Object> parameters = paginationDialect.paginationParameters(baseParameters, limit);
         String pageShape = page.firstPage() ? "cursor:first" : "cursor:after:" + page.sorts().size();
         return support.request(operation, form, fields, where, "", sortShape, pageShape,
@@ -238,7 +238,8 @@ final class FormQuerySqlRenderer {
         FormSqlRenderSupport.ConditionSql whereFragment = support.condition(safeForm, where);
         return support.request("count", safeForm, List.of(), whereFragment, "", "", "",
                                whereFragment.parameters(), () -> {
-                           StringBuilder sql = new StringBuilder("select count(*) as total from ")
+                           String count = "sqlserver".equals(support.dialectName) ? "count_big" : "count";
+                           StringBuilder sql = new StringBuilder("select ").append(count).append("(*) as total from ")
                                    .append(support.identifier(safeForm));
                            appendWhere(sql, whereFragment);
                            return sql.toString();

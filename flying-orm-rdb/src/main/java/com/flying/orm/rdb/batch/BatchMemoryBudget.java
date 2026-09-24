@@ -9,17 +9,20 @@ import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.time.temporal.TemporalAccessor;
+import java.util.ArrayDeque;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.IdentityHashMap;
+import java.util.Iterator;
 import java.util.Map;
 
 /**
  * 批量参数的稳定内存估算器。
  *
  * <p>这不是 JVM 对象布局测量器，而是用于执行保护的保守权重：文本按 UTF-8 字节数计算，二进制按真实长度，
- * 数组、集合和 Map 递归累计并加少量容器开销。规则只依赖值本身，同一输入每次都会得到相同结果。</p>
+ * 数组、集合和 Map 迭代累计并加少量容器开销。规则只依赖值本身，同一输入每次都会得到相同结果。</p>
  *
- * <p>无法在安全递归深度或 long 算术范围内完成可信估算时返回 {@link Long#MAX_VALUE}。有界消费者必须把该值
+ * <p>超出 long 算术范围时返回 {@link Long#MAX_VALUE}。有界消费者必须把该值
  * 视为未知预算并失败闭合，不能把它当成可接受的精确等值。</p>
  * @author wangr
  * @date 2026-08-03
@@ -30,13 +33,12 @@ public final class BatchMemoryBudget {
 
     private static final long ROW_OVERHEAD = 24L;
     private static final long REFERENCE_BYTES = 8L;
-    private static final int MAX_NESTING_DEPTH = 64;
 
     private BatchMemoryBudget() {
     }
 
     public static long estimateRowBytes(Object[] row) {
-        return estimateRowBytes(row, row == null ? 0 : row.length, new IdentityHashMap<>(), 0);
+        return estimateRowBytes(row, row == null ? 0 : row.length, new IdentityHashMap<>());
     }
 
     /** Estimates a parameter prefix without allocating a trimmed array for internal metadata rows. */
@@ -45,7 +47,7 @@ public final class BatchMemoryBudget {
         if (length < 0 || length > safeRow.length) {
             throw new IllegalArgumentException("batch row estimate length is out of bounds");
         }
-        return estimateRowBytes(safeRow, length, new IdentityHashMap<>(), 0);
+        return estimateRowBytes(safeRow, length, new IdentityHashMap<>());
     }
 
     /**
@@ -74,7 +76,7 @@ public final class BatchMemoryBudget {
      * 这里复用批量写入器的同一套估算规则，避免两层各算各的，合起来却已经超过内存上限。</p>
      */
     public static long estimateValueBytes(Object value) {
-        return estimateValueBytes(value, new IdentityHashMap<>(), 0);
+        return estimateValueBytes(value, new IdentityHashMap<>());
     }
 
     /**
@@ -85,80 +87,116 @@ public final class BatchMemoryBudget {
         IdentityHashMap<Object, Boolean> seen = new IdentityHashMap<>();
         long total = ROW_OVERHEAD + (long) safeRow.columnCount() * REFERENCE_BYTES;
         for (int index = 0; index < safeRow.columnCount(); index++) {
-            total = saturatedAdd(total, estimateValueBytes(safeRow.value(index), seen, 1));
+            total = saturatedAdd(total, estimateValueBytes(safeRow.value(index), seen));
         }
         return total;
     }
 
     private static long estimateRowBytes(Object[] row,
                                          int length,
-                                         IdentityHashMap<Object, Boolean> seen,
-                                         int depth) {
+                                         IdentityHashMap<Object, Boolean> seen) {
         if (row == null) {
             return REFERENCE_BYTES;
         }
         if (seen.put(row, Boolean.TRUE) != null) {
             return REFERENCE_BYTES;
         }
-        return estimateSeenRowBytes(row, length, seen, depth);
+        return estimateSeenRowBytes(row, length, seen);
     }
 
     private static long estimateSeenRowBytes(Object[] row,
                                              int length,
-                                             IdentityHashMap<Object, Boolean> seen,
-                                             int depth) {
+                                             IdentityHashMap<Object, Boolean> seen) {
         long total = ROW_OVERHEAD + (long) length * REFERENCE_BYTES;
         for (int index = 0; index < length; index++) {
-            total = saturatedAdd(total, estimateValueBytes(row[index], seen, depth + 1));
+            total = saturatedAdd(total, estimateValueBytes(row[index], seen));
         }
         return total;
     }
 
-    private static long estimateValueBytes(Object value, IdentityHashMap<Object, Boolean> seen, int depth) {
-        if (value == null) return REFERENCE_BYTES;
-        if (seen.put(value, Boolean.TRUE) != null) return REFERENCE_BYTES;
-        if (value instanceof byte[] bytes) return 16L + bytes.length;
-        // 输入缓冲会继续强引用 ByteBuffer；remaining 只表示本次可读区间，不能代表被保留的底层容量。
-        if (value instanceof ByteBuffer buffer) return 24L + buffer.capacity();
-        if (value instanceof CharSequence text) return 24L + utf8Length(text);
-        if (depth > MAX_NESTING_DEPTH) return Long.MAX_VALUE;
-        if (value instanceof SqlTypedValue typedValue) {
-            return estimateWrappedValue(typedValue, typedValue.value(), seen, depth);
-        }
-        if (value instanceof Parameter parameter) {
-            return estimateWrappedValue(parameter, parameter.getValue(), seen, depth);
-        }
-        if (value instanceof BigDecimal decimal) return estimateBigDecimalBytes(decimal);
-        if (value instanceof BigInteger integer) return estimateBigIntegerBytes(integer);
-        if (value instanceof Number || value instanceof Boolean || value instanceof Character) return 24L;
-        Class<?> valueType = value.getClass();
-        if (valueType.isArray()) {
-            if (value instanceof Object[] array) {
-                return estimateSeenRowBytes(array, array.length, seen, depth);
+    private static long estimateValueBytes(Object value, IdentityHashMap<Object, Boolean> seen) {
+        long total = 0L;
+        ArrayDeque<Iterator<?>> pending = null;
+        Object current = value;
+        while (true) {
+            long bytes;
+            Iterator<?> children = null;
+            if (current == null || seen.put(current, Boolean.TRUE) != null) {
+                bytes = REFERENCE_BYTES;
+            } else if (current instanceof byte[] binary) {
+                bytes = 16L + binary.length;
+            } else if (current instanceof ByteBuffer buffer) {
+                // remaining 不能代表输入缓冲继续强引用的底层容量。
+                bytes = 24L + buffer.capacity();
+            } else if (current instanceof CharSequence text) {
+                bytes = 24L + utf8Length(text);
+            } else if (current instanceof SqlTypedValue typedValue) {
+                total = saturatedAdd(total, 24L);
+                current = typedValue.value();
+                continue;
+            } else if (current instanceof Parameter parameter) {
+                total = saturatedAdd(total, 24L);
+                current = parameter.getValue();
+                continue;
+            } else if (current instanceof BigDecimal decimal) {
+                bytes = estimateBigDecimalBytes(decimal);
+            } else if (current instanceof BigInteger integer) {
+                bytes = estimateBigIntegerBytes(integer);
+            } else if (current instanceof Number || current instanceof Boolean || current instanceof Character) {
+                bytes = 24L;
+            } else if (current instanceof Object[] array) {
+                bytes = ROW_OVERHEAD + (long) array.length * REFERENCE_BYTES;
+                children = Arrays.asList(array).iterator();
+            } else if (current.getClass().isArray()) {
+                bytes = primitiveArrayBytes(current, current.getClass().getComponentType());
+            } else if (current instanceof Collection<?> collection) {
+                bytes = 24L + (long) collection.size() * REFERENCE_BYTES;
+                children = collection.iterator();
+            } else if (current instanceof Map<?, ?> map) {
+                bytes = 32L + (long) map.size() * 32L;
+                children = mapValues(map);
+            } else {
+                bytes = 64L;
             }
-            return primitiveArrayBytes(value, valueType.getComponentType());
-        }
-        if (value instanceof Collection<?> collection) {
-            long total = 24L + (long) collection.size() * REFERENCE_BYTES;
-            for (Object item : collection) total = saturatedAdd(total, estimateValueBytes(item, seen, depth + 1));
-            return total;
-        }
-        if (value instanceof Map<?, ?> map) {
-            long total = 32L + (long) map.size() * 32L;
-            for (Map.Entry<?, ?> entry : map.entrySet()) {
-                total = saturatedAdd(total, estimateValueBytes(entry.getKey(), seen, depth + 1));
-                total = saturatedAdd(total, estimateValueBytes(entry.getValue(), seen, depth + 1));
+            total = saturatedAdd(total, bytes);
+            if (children != null) {
+                if (pending == null) {
+                    pending = new ArrayDeque<>();
+                }
+                pending.push(children);
             }
-            return total;
+            // 显式深度优先遍历只保存当前容器的迭代位置，不按集合宽度复制元素。
+            while (pending != null && !pending.isEmpty() && !pending.peek().hasNext()) {
+                pending.pop();
+            }
+            if (pending == null || pending.isEmpty()) {
+                return total;
+            }
+            current = pending.peek().next();
         }
-        return 64L;
     }
 
-    private static long estimateWrappedValue(Object wrapper,
-                                             Object value,
-                                             IdentityHashMap<Object, Boolean> seen,
-                                             int depth) {
-        return saturatedAdd(24L, estimateValueBytes(value, seen, depth + 1));
+    private static Iterator<Object> mapValues(Map<?, ?> map) {
+        Iterator<? extends Map.Entry<?, ?>> entries = map.entrySet().iterator();
+        return new Iterator<>() {
+            private Map.Entry<?, ?> entry;
+
+            @Override
+            public boolean hasNext() {
+                return entry != null || entries.hasNext();
+            }
+
+            @Override
+            public Object next() {
+                if (entry != null) {
+                    Object value = entry.getValue();
+                    entry = null;
+                    return value;
+                }
+                entry = entries.next();
+                return entry.getKey();
+            }
+        };
     }
 
     private static long shallowScalarBytes(Object value) {

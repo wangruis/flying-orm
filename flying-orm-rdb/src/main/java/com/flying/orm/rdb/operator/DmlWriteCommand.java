@@ -1,8 +1,6 @@
 package com.flying.orm.rdb.operator;
 
 import com.flying.orm.core.condition.ConditionGroup;
-import com.flying.orm.core.condition.ConditionNode;
-import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.form.LogicDeleteDefinition;
@@ -10,6 +8,7 @@ import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.sql.render.SqlIdentifiers;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.form.spec.WriteSpec;
+import com.flying.orm.rdb.internal.condition.ConditionNodes;
 import com.flying.orm.rdb.lock.OptimisticLockOptions;
 
 import java.util.LinkedHashMap;
@@ -152,13 +151,7 @@ final class DmlWriteCommand {
     }
 
     private static void collectConditionFields(ConditionGroup group, Set<String> names) {
-        for (ConditionNode child : group.children()) {
-            if (child instanceof ConditionGroup nested) {
-                collectConditionFields(nested, names);
-            } else {
-                names.add(((TermCondition) child).field());
-            }
-        }
+        ConditionNodes.forEachTerm(group, term -> names.add(term.field()));
     }
 
     private void requireKind(Kind expected) {

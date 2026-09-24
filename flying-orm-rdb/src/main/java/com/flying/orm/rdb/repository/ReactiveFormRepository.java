@@ -128,6 +128,10 @@ public final class ReactiveFormRepository<T> {
     public Mono<Long> insert(T entity) { return entityWriter.insert(entity); }
     public Mono<BatchExecutionEvidence> insertBatch(List<T> entities) { return batchOperations.insert(entities); }
     public Mono<BatchExecutionEvidence> upsertBatch(List<T> entities) { return batchOperations.upsert(entities); }
+    /** 使用客户端默认批量选项，按背压消费实体流。 */
+    public Mono<BatchExecutionEvidence> insertBatch(Publisher<T> entities) { return batchOperations.insert(entities); }
+    /** 使用客户端默认批量选项，按背压消费实体流。 */
+    public Mono<BatchExecutionEvidence> upsertBatch(Publisher<T> entities) { return batchOperations.upsert(entities); }
     public Mono<BatchExecutionEvidence> insertBatch(Publisher<T> entities, BatchWriteOptions options) {
         return batchOperations.insert(entities, options);
     }
@@ -135,6 +139,8 @@ public final class ReactiveFormRepository<T> {
         return batchOperations.upsert(entities, options);
     }
     public Mono<BatchExecutionEvidence> updateBatch(List<T> entities) { return batchOperations.update(entities); }
+    /** 使用客户端默认批量选项，按背压消费实体流并保留乐观锁语义。 */
+    public Mono<BatchExecutionEvidence> updateBatch(Publisher<T> entities) { return batchOperations.update(entities); }
     public Mono<BatchExecutionEvidence> updateBatch(Publisher<T> entities, BatchWriteOptions options) {
         return batchOperations.update(entities, options);
     }

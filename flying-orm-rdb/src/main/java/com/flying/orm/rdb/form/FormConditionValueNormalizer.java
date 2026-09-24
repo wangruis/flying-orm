@@ -1,14 +1,13 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
-import com.flying.orm.core.condition.ConditionNode;
 import com.flying.orm.core.condition.ConditionValueShape;
-import com.flying.orm.core.condition.LogicalOperator;
 import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.condition.TermHandler;
 import com.flying.orm.core.condition.TermRegistry;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.rdb.internal.condition.ConditionNodes;
 
 import java.lang.reflect.Array;
 import java.util.ArrayList;
@@ -44,33 +43,7 @@ final class FormConditionValueNormalizer {
                              Function<String, DynamicField> valueFieldResolver) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
         ConditionGroup safeWhere = Objects.requireNonNull(where, "where condition must not be null");
-        return normalizeGroup(safeForm, safeWhere, valueFieldResolver);
-    }
-
-    private ConditionGroup normalizeGroup(DynamicForm form, ConditionGroup group,
-                                          Function<String, DynamicField> valueFieldResolver) {
-        List<ConditionNode> children = group.children();
-        List<ConditionNode> normalized = null;
-        for (int index = 0; index < children.size(); index++) {
-            ConditionNode child = children.get(index);
-            ConditionNode next = child instanceof ConditionGroup nested
-                    ? normalizeGroup(form, nested, valueFieldResolver)
-                    : normalizeTerm(form, (TermCondition) child, valueFieldResolver);
-            if (normalized == null && next != child) {
-                normalized = new ArrayList<>(children.size());
-                normalized.addAll(children.subList(0, index));
-            }
-            if (normalized != null) {
-                normalized.add(next);
-            }
-        }
-        if (normalized == null) {
-            return group;
-        }
-        ConditionGroup.Builder builder = group.operator() == LogicalOperator.AND
-                ? ConditionGroup.and() : ConditionGroup.or();
-        normalized.forEach(builder::add);
-        return builder.build();
+        return ConditionNodes.rewrite(safeWhere, term -> normalizeTerm(safeForm, term, valueFieldResolver));
     }
 
     private TermCondition normalizeTerm(DynamicForm form, TermCondition term,

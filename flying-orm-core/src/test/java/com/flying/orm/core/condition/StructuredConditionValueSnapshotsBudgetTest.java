@@ -17,24 +17,24 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
-/** Snapshot contracts preserved while moving budget checks ahead of collection storage allocation. */
+/** Snapshot ownership is independent of the caller's configurable compilation budgets. */
 class StructuredConditionValueSnapshotsBudgetTest {
 
-    private static final int MAX_REFERENCES = 20_000;
+    private static final int FORMER_REFERENCE_LIMIT = 20_000;
 
     @Test
-    void listChargesItsReferencesOnceAtTheBoundary() {
-        assertCollectionBoundary(size -> Collections.nCopies(size, null));
+    void listAllowsReferencesBeyondTheFormerBoundary() {
+        assertCollectionSnapshot(size -> Collections.nCopies(size, null));
     }
 
     @Test
-    void generalCollectionChargesItsReferencesOnceAtTheBoundary() {
-        assertCollectionBoundary(size -> Collections.unmodifiableCollection(Collections.nCopies(size, null)));
+    void generalCollectionAllowsReferencesBeyondTheFormerBoundary() {
+        assertCollectionSnapshot(size -> Collections.unmodifiableCollection(Collections.nCopies(size, null)));
     }
 
     @Test
-    void setRetainsItsReferenceBoundary() {
-        assertCollectionBoundary(size -> {
+    void setAllowsReferencesBeyondTheFormerBoundary() {
+        assertCollectionSnapshot(size -> {
             Collection<Integer> values = new LinkedHashSet<>();
             for (int index = 0; index < size; index++) values.add(index);
             return values;
@@ -42,36 +42,35 @@ class StructuredConditionValueSnapshotsBudgetTest {
     }
 
     @Test
-    void siblingCollectionsShareTheRemainingReferenceBudget() {
+    void siblingCollectionsAreNotSubjectToAnImplicitReferenceBudget() {
         Collection<?> first = Collections.unmodifiableCollection(Collections.nCopies(10_000, null));
         List<?> atLimit = List.of(first, Collections.nCopies(9_998, null));
         List<?> aboveLimit = List.of(first, Collections.nCopies(9_999, null));
 
         assertEquals(2, assertInstanceOf(List.class, input(atLimit).value()).size());
-        assertFailure(aboveLimit, StructuredConditionErrorCode.NODE_COUNT_EXCEEDED);
+        assertEquals(2, assertInstanceOf(List.class, input(aboveLimit).value()).size());
     }
 
     @Test
-    void mapKeysAndValuesReduceTheBudgetAvailableToNestedCollections() {
+    void mapKeysAndValuesHaveNoImplicitReferenceBudget() {
         Collection<?> first = Collections.unmodifiableCollection(Collections.nCopies(10_000, null));
         Map<?, ?> atLimit = Map.of("first", first, "second", Collections.nCopies(9_996, null));
         Map<?, ?> aboveLimit = Map.of("first", first, "second", Collections.nCopies(9_997, null));
 
         assertEquals(2, assertInstanceOf(Map.class, input(atLimit).value()).size());
-        assertFailure(aboveLimit, StructuredConditionErrorCode.NODE_COUNT_EXCEEDED);
+        assertEquals(2, assertInstanceOf(Map.class, input(aboveLimit).value()).size());
     }
 
     @Test
-    void excessiveCollectionDepthPrecedesTheReferenceFailure() {
-        List<?> oversized = Collections.nCopies(MAX_REFERENCES + 1, null);
-        assertFailure(atDepth(oversized, 65), StructuredConditionErrorCode.DEPTH_EXCEEDED);
-        assertFailure(atDepth(Collections.unmodifiableCollection(oversized), 65),
-                      StructuredConditionErrorCode.DEPTH_EXCEEDED);
+    void snapshotAllowsDepthAndSizeToBeGovernedByTheCompilationPolicy() {
+        List<?> oversized = Collections.nCopies(FORMER_REFERENCE_LIMIT + 1, null);
+        assertInstanceOf(List.class, input(atDepth(oversized, 65)).value());
+        assertInstanceOf(List.class, input(atDepth(Collections.unmodifiableCollection(oversized), 65)).value());
     }
 
     @Test
-    void sharedCollectionIsChargedOnceAndEachPublicReadKeepsItsOwnAliases() {
-        List<Object> source = new ArrayList<>(Collections.nCopies(MAX_REFERENCES - 2, null));
+    void sharedCollectionIsCopiedOnceAndEachPublicReadKeepsItsOwnAliases() {
+        List<Object> source = new ArrayList<>(Collections.nCopies(FORMER_REFERENCE_LIMIT - 2, null));
         Collection<Object> shared = Collections.unmodifiableCollection(source);
         StructuredConditionInput input = input(List.of(shared, shared));
         source.set(0, "changed after publication");
@@ -101,11 +100,12 @@ class StructuredConditionValueSnapshotsBudgetTest {
         assertFailure(collection, StructuredConditionErrorCode.VALUE_SHAPE_NOT_ALLOWED);
     }
 
-    private static void assertCollectionBoundary(IntFunction<? extends Collection<?>> values) {
-        Collection<?> snapshot = assertInstanceOf(Collection.class, input(values.apply(MAX_REFERENCES)).value());
-        assertEquals(MAX_REFERENCES, snapshot.size());
+    private static void assertCollectionSnapshot(IntFunction<? extends Collection<?>> values) {
+        Collection<?> snapshot = assertInstanceOf(Collection.class, input(values.apply(FORMER_REFERENCE_LIMIT)).value());
+        assertEquals(FORMER_REFERENCE_LIMIT, snapshot.size());
         assertThrows(UnsupportedOperationException.class, snapshot::clear);
-        assertFailure(values.apply(MAX_REFERENCES + 1), StructuredConditionErrorCode.NODE_COUNT_EXCEEDED);
+        assertEquals(FORMER_REFERENCE_LIMIT + 1,
+                     assertInstanceOf(Collection.class, input(values.apply(FORMER_REFERENCE_LIMIT + 1)).value()).size());
     }
 
     private static StructuredConditionInput input(Object value) {

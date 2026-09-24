@@ -18,19 +18,15 @@ final class SchemaColumnShapeChange {
 
     private final Input input;
 
-    private final SchemaDialect dialect;
-
     private final SchemaTableSqlRenderer tables;
 
     SchemaColumnShapeChange(List<SqlRequest> requests,
                             List<SkippedSchemaChange> skipped,
                             Input input,
-                            SchemaDialect dialect,
                             SchemaTableSqlRenderer tables) {
         this.requests = Objects.requireNonNull(requests, "schema migration requests must not be null");
         this.skipped = Objects.requireNonNull(skipped, "skipped schema changes must not be null");
         this.input = Objects.requireNonNull(input, "schema column change input must not be null");
-        this.dialect = Objects.requireNonNull(dialect, "schema dialect must not be null");
         this.tables = Objects.requireNonNull(tables, "schema table renderer must not be null");
     }
 
@@ -80,12 +76,8 @@ final class SchemaColumnShapeChange {
                             "review and approve the exact migration plan")));
             return false;
         }
-        requests.add(new SqlRequest(dialect.alterColumnNullabilitySql(
-                input.table(),
-                input.target().name(),
-                tables.dataType(input.target()),
-                tables.replacementColumnDefinition(input.target(), input.physical()),
-                input.target().nullable()), List.of()));
+        requests.add(new SqlRequest(tables.alterColumnNullability(
+                input.table(), input.target(), input.physical()), List.of()));
         return true;
     }
 
@@ -127,11 +119,8 @@ final class SchemaColumnShapeChange {
     }
 
     private void addTypeChange() {
-        requests.add(new SqlRequest(dialect.alterColumnTypeSql(
-                input.table(),
-                input.target().name(),
-                tables.dataType(input.target()),
-                tables.replacementColumnDefinition(input.target(), input.physical())), List.of()));
+        requests.add(new SqlRequest(tables.alterColumnType(
+                input.table(), input.target(), input.physical()), List.of()));
     }
 
     /** 一个已有列形态变化的稳定输入。 */

@@ -22,6 +22,7 @@ import com.flying.orm.core.scope.ScopeErrorCode;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.form.spec.WriteSpec;
+import com.flying.orm.rdb.internal.condition.ConditionNodes;
 import com.flying.orm.rdb.internal.mapping.RepositoryUpsertValues;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.dialect.DialectCapabilities;
@@ -315,17 +316,7 @@ final class FieldUseGuard {
                                  FieldUseOrigin origin,
                                  FieldUseRequirements.Builder requirements) {
         ConditionNode safeNode = Objects.requireNonNull(node, "condition node must not be null");
-        if (safeNode instanceof TermCondition term) {
-            requirements.require(term.field(), use, origin);
-            return;
-        }
-        if (safeNode instanceof ConditionGroup group) {
-            for (ConditionNode child : group.children()) {
-                collectCondition(child, use, origin, requirements);
-            }
-            return;
-        }
-        throw new IllegalArgumentException("unsupported condition node for field governance");
+        ConditionNodes.forEachTerm(safeNode, term -> requirements.require(term.field(), use, origin));
     }
 
     static void collectCondition(ConditionNode node,
@@ -335,18 +326,10 @@ final class FieldUseGuard {
                                  TermRegistry terms,
                                  DialectCapabilities capabilities) {
         ConditionNode safeNode = Objects.requireNonNull(node, "condition node must not be null");
-        if (safeNode instanceof TermCondition term) {
+        ConditionNodes.forEachTerm(safeNode, term -> {
             requirements.require(term.field(), use, origin);
             GovernedTermGuard.require(term, use, terms, capabilities);
-            return;
-        }
-        if (safeNode instanceof ConditionGroup group) {
-            for (ConditionNode child : group.children()) {
-                collectCondition(child, use, origin, requirements, terms, capabilities);
-            }
-            return;
-        }
-        throw new IllegalArgumentException("unsupported condition node for field governance");
+        });
     }
 
     /** 聚合/JOIN 等独立规划器在自己的既有遍历中复用同一条扩展治理规则。 */

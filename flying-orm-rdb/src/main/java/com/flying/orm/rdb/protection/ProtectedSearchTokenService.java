@@ -22,7 +22,6 @@ final class ProtectedSearchTokenService {
 
     private static final byte[] DERIVATION_SALT =
             "flying-orm/protected-search/v1".getBytes(StandardCharsets.US_ASCII);
-    private static final int MAX_CONTAINS_TOKENS = 4096;
 
     private final ProtectedFieldKeyRing keys;
     private final ProtectedValueNormalizerRegistry normalizers;
@@ -195,9 +194,6 @@ final class ProtectedSearchTokenService {
         Set<String> unique = new LinkedHashSet<>();
         for (int index = 0; index <= points.length - 3; index++) {
             unique.add(new String(points, index, 3));
-            if (unique.size() > MAX_CONTAINS_TOKENS) {
-                throw new IllegalArgumentException("protected contains token limit exceeded");
-            }
         }
         return List.copyOf(unique);
     }

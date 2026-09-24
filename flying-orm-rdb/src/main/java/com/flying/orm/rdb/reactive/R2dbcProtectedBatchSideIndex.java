@@ -4,6 +4,7 @@ import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.core.internal.value.OwnedBindableValues;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
+import com.flying.orm.rdb.batch.BatchMemoryBudget;
 import com.flying.orm.rdb.execution.ProtectedBatchRows;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
@@ -17,8 +18,11 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
+import java.util.AbstractList;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.function.LongConsumer;
 import java.util.function.Supplier;
@@ -171,30 +175,30 @@ final class R2dbcProtectedBatchSideIndex {
         for (Map<String, Object> owner : owners) {
             addInsertions(insertions, work, owner);
         }
-        return insertions(connection, insertions);
+        return insertions(connection, insertions, Long.MAX_VALUE);
     }
 
     GeneratedTokenBatch generatedTokenBatch(Prepared prepared) {
-        return insertBatchShape(prepared) == null ? null : new GeneratedTokenBatch();
+        return insertBatchShape(prepared) == null ? null : new GeneratedTokenBatch(prepared.maxBufferedBytes());
     }
 
     Mono<Void> completeGeneratedRows(Connection connection, GeneratedTokenBatch batch) {
-        return insertions(connection, batch.insertions);
+        return insertions(connection, batch.insertions, batch.maxBufferedBytes);
     }
 
     private Mono<Void> completeReplacements(Connection connection, List<RowState> rows, long maxBufferedBytes) {
         return Flux.fromIterable(ProtectedReplacementBatchPlan.segments(rows, maxBufferedBytes))
-                   .concatMap(segment -> completeSegment(connection, segment), 1)
+                   .concatMap(segment -> completeSegment(connection, segment, maxBufferedBytes), 0)
                    .then();
     }
 
     Mono<Void> completeGeneratedRow(Connection connection, RowState state,
-                                    R2dbcBatchGeneratedKeyWriter.GeneratedWrite write) {
+                                    R2dbcBatchGeneratedKeyWriter.GeneratedWrite write, long maxBufferedBytes) {
         if (state.work() == null || write.affectedRows() == 0L) {
             return Mono.empty();
         }
         return replace(connection, state,
-                       new SqlWriteResult(write.affectedRows(), List.of(write.generatedKey())));
+                       new SqlWriteResult(write.affectedRows(), List.of(write.generatedKey())), maxBufferedBytes);
     }
 
     private Mono<Void> readOwners(Connection connection,
@@ -228,7 +232,7 @@ final class R2dbcProtectedBatchSideIndex {
         return new SqlExecutionOptions(0, limit, limit, limit, 0);
     }
 
-    private Mono<Void> replace(Connection connection, RowState state, SqlWriteResult result) {
+    private Mono<Void> replace(Connection connection, RowState state, SqlWriteResult result, long maxBufferedBytes) {
         ProtectedWriteWork work = state.work();
         if (work == null || result.affectedRows() == 0L) {
             return Mono.empty();
@@ -243,11 +247,12 @@ final class R2dbcProtectedBatchSideIndex {
         }
         return Flux.fromIterable(owners)
                    .concatMap(owner -> Flux.fromIterable(work.fields())
-                           .concatMap(field -> replaceField(connection, work, owner, field), 1), 1)
+                           .concatMap(field -> replaceField(connection, work, owner, field, maxBufferedBytes), 0), 0)
                    .then();
     }
 
-    private Mono<Void> completeSegment(Connection connection, ProtectedReplacementBatchPlan.Segment segment) {
+    private Mono<Void> completeSegment(Connection connection, ProtectedReplacementBatchPlan.Segment segment,
+                                       long maxBufferedBytes) {
         Mono<Void> deletes;
         if (segment.deleteParameterSets().isEmpty()) {
             deletes = Mono.empty();
@@ -258,23 +263,27 @@ final class R2dbcProtectedBatchSideIndex {
             deletes = R2dbcProtectedSideIndexDml.deleteParameterSets(
                     connection, deleteSql, segment.deleteParameterSets());
         }
-        return deletes.then(insertions(connection, segment.insertions()));
+        return deletes.then(insertions(connection, segment.insertions(), maxBufferedBytes));
     }
 
-    private Mono<Void> insertions(Connection connection, List<ProtectedReplacementBatchPlan.Insertion> insertions) {
+    private Mono<Void> insertions(Connection connection, List<ProtectedReplacementBatchPlan.Insertion> insertions,
+                                  long maxBufferedBytes) {
         if (insertions.isEmpty()) {
             return Mono.empty();
         }
         ProtectedWriteWork work = insertions.getFirst().work();
         String insertSql = bindMarkers.adapt(
                 work.insertSql(), work.ownerFields().size() + 2, SqlBindMarkerStyle.CANONICAL);
-        return Flux.fromIterable(insertions)
-                   .concatMap(insertion -> Flux.range(0, insertion.field().tokenCount())
-                           .map(index -> insertion.work().sideIndexParameters(
-                                   insertion.owner(), insertion.field(), index)), 1)
-                   .buffer(R2dbcProtectedSideIndexDml.MAX_TOKEN_BATCH_SIZE)
+        return insertTokenBatches(connection, insertSql, insertions, maxBufferedBytes);
+    }
+
+    private Mono<Void> insertTokenBatches(Connection connection, String sql,
+                                          Iterable<ProtectedReplacementBatchPlan.Insertion> insertions,
+                                          long maxBufferedBytes) {
+        Iterable<List<List<Object>>> batches = () -> new TokenBatchIterator(insertions.iterator(), maxBufferedBytes);
+        return Flux.fromIterable(batches)
                    .concatMap(parameters -> R2dbcProtectedSideIndexDml.insertParameterSets(
-                           connection, insertSql, parameters), 1)
+                           connection, sql, parameters), 0)
                    .then();
     }
 
@@ -313,34 +322,27 @@ final class R2dbcProtectedBatchSideIndex {
                                            InsertBatchShape shape) {
         String sql = bindMarkers.adapt(
                 shape.sql(), shape.parameterCount(), SqlBindMarkerStyle.CANONICAL);
-        return Flux.fromIterable(prepared.rows())
-                   .filter(state -> state.work() != null)
-                   .concatMap(state -> {
-                       ProtectedWriteWork work = state.work();
-                       Map<String, Object> owner = work.resolveInsertOwner(
-                               new SqlWriteResult(1L, List.of()));
-                       return Flux.fromIterable(work.fields())
-                                  .concatMap(field -> Flux.range(0, field.tokenCount())
-                                          .map(index -> work.sideIndexParameters(owner, field, index)), 1);
-                   }, 1)
-                   .buffer(R2dbcProtectedSideIndexDml.MAX_TOKEN_BATCH_SIZE)
-                   .concatMap(parameters -> R2dbcProtectedSideIndexDml.insertParameterSets(
-                           connection, sql, parameters), 1)
-                   .then();
+        Iterable<ProtectedReplacementBatchPlan.Insertion> insertions = () -> prepared.rows().stream()
+                .filter(state -> state.work() != null)
+                .flatMap(state -> {
+                    ProtectedWriteWork work = state.work();
+                    Map<String, Object> owner = work.resolveInsertOwner(new SqlWriteResult(1L, List.of()));
+                    return work.fields().stream().map(field ->
+                            new ProtectedReplacementBatchPlan.Insertion(work, owner, field));
+                }).iterator();
+        return insertTokenBatches(connection, sql, insertions, prepared.maxBufferedBytes());
     }
 
     private Mono<Void> replaceField(Connection connection,
                                     ProtectedWriteWork work,
                                     Map<String, Object> owner,
-                                    ProtectedWriteWork.FieldTokens field) {
+                                    ProtectedWriteWork.FieldTokens field,
+                                    long maxBufferedBytes) {
         Mono<Void> delete = work.kind() == ProtectedWriteWork.Kind.INSERT
                 ? Mono.empty()
                 : update(connection, work.deleteSql(), work.sideIndexParameters(owner, field, null)).then();
-        String insertSql = bindMarkers.adapt(
-                work.insertSql(), work.ownerFields().size() + 2,
-                SqlBindMarkerStyle.CANONICAL);
-        return delete.then(R2dbcProtectedSideIndexDml.insertTokens(
-                connection, insertSql, work, owner, field));
+        return delete.then(insertions(connection,
+                List.of(new ProtectedReplacementBatchPlan.Insertion(work, owner, field)), maxBufferedBytes));
     }
 
     private Mono<Long> update(Connection connection, String sql, List<Object> parameters) {
@@ -368,6 +370,11 @@ final class R2dbcProtectedBatchSideIndex {
 
     static final class GeneratedTokenBatch {
         private final List<ProtectedReplacementBatchPlan.Insertion> insertions = new ArrayList<>();
+        private final long maxBufferedBytes;
+
+        private GeneratedTokenBatch(long maxBufferedBytes) {
+            this.maxBufferedBytes = maxBufferedBytes;
+        }
 
         void add(RowState state, R2dbcBatchGeneratedKeyWriter.GeneratedWrite write) {
             if (state.work() == null || write.affectedRows() <= 0L) {
@@ -377,6 +384,83 @@ final class R2dbcProtectedBatchSideIndex {
             Map<String, Object> owner = work.resolveInsertOwner(
                     new SqlWriteResult(write.affectedRows(), List.of(write.generatedKey())));
             addInsertions(insertions, work, owner);
+        }
+    }
+
+    /** Each subscription plans only the requested batch, checking a binding view before materializing it. */
+    private static final class TokenBatchIterator implements Iterator<List<List<Object>>> {
+        private final Iterator<ProtectedReplacementBatchPlan.Insertion> insertions;
+        private final long maxBufferedBytes;
+        private ProtectedReplacementBatchPlan.Insertion current;
+        private int tokenIndex;
+
+        private TokenBatchIterator(Iterator<ProtectedReplacementBatchPlan.Insertion> insertions,
+                                   long maxBufferedBytes) {
+            this.insertions = insertions;
+            this.maxBufferedBytes = maxBufferedBytes;
+        }
+
+        @Override
+        public boolean hasNext() {
+            return advance() != null;
+        }
+
+        private ProtectedReplacementBatchPlan.Insertion advance() {
+            while (current == null || tokenIndex >= current.field().tokenCount()) {
+                if (!insertions.hasNext()) return null;
+                current = insertions.next();
+                tokenIndex = 0;
+            }
+            return current;
+        }
+
+        @Override
+        public List<List<Object>> next() {
+            ProtectedReplacementBatchPlan.Insertion insertion = advance();
+            if (insertion == null) throw new NoSuchElementException();
+            List<List<Object>> batch = new ArrayList<>();
+            long bufferedBytes = 0L;
+            long parameters = 0L;
+            do {
+                int parameterCount = insertion.work().ownerFields().size() + 2;
+                if (!batch.isEmpty() && (batch.size() >= R2dbcProtectedSideIndexDml.MAX_TOKEN_BATCH_SIZE
+                        || parameters + parameterCount > ProtectedReplacementBatchPlan.MAX_PARAMETERS)) {
+                    break;
+                }
+                List<Object> view = parameterView(insertion, tokenIndex);
+                long bytes = BatchMemoryBudget.estimateValueBytes(view);
+                if (bytes == Long.MAX_VALUE || bytes > maxBufferedBytes) {
+                    throw new IllegalArgumentException("protected side-index token parameters exceed batch safety limits");
+                }
+                if (!batch.isEmpty() && bytes > maxBufferedBytes - bufferedBytes) {
+                    break;
+                }
+                batch.add(insertion.work().sideIndexParameters(insertion.owner(), insertion.field(), tokenIndex++));
+                bufferedBytes += bytes;
+                parameters += parameterCount;
+                insertion = advance();
+            } while (insertion != null);
+            return batch;
+        }
+
+        private static List<Object> parameterView(ProtectedReplacementBatchPlan.Insertion insertion, int tokenIndex) {
+            List<String> owners = insertion.work().ownerFields();
+            return new AbstractList<>() {
+                @Override
+                public Object get(int index) {
+                    Objects.checkIndex(index, size());
+                    if (index < owners.size()) {
+                        return Objects.requireNonNull(insertion.owner().get(owners.get(index)),
+                                "protected write owner value must not be null");
+                    }
+                    return index == owners.size() ? insertion.field().fieldTag() : insertion.field().ownedToken(tokenIndex);
+                }
+
+                @Override
+                public int size() {
+                    return owners.size() + 2;
+                }
+            };
         }
     }
 

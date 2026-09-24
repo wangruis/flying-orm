@@ -113,10 +113,10 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
                 plan.resultForm(), executor.query(plan.request(), plan.options()), plan.options(),
                 DataScope.none(), SensitiveDisplayMode.FULL, plan.decodingPlan());
         return plan.resultPlan().direct() ? rows
-                : ReactiveProtectionCpuBoundary.sequence(
+                : FormResultDecoder.protectDecodedRows(ReactiveProtectionCpuBoundary.sequence(
                         rows, plan.resultPlan().requiresCpuBoundary(),
                         ReactiveProtectionCpuBoundary.QUERY_PREFETCH)
-                .map(plan.resultPlan()::transform);
+                .map(plan.resultPlan()::transform), plan.options());
     }
 
     private Mono<PageResult<DynamicRow>> pageJoin(
@@ -149,10 +149,10 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
                 plan.resultForm(), executor.query(plan.dataRequest(), plan.options()), plan.options(),
                 DataScope.none(), SensitiveDisplayMode.FULL, plan.decodingPlan());
         return plan.resultPlan().direct() ? rows
-                : ReactiveProtectionCpuBoundary.sequence(
+                : FormResultDecoder.protectDecodedRows(ReactiveProtectionCpuBoundary.sequence(
                         rows, plan.resultPlan().requiresCpuBoundary(),
                         ReactiveProtectionCpuBoundary.QUERY_PREFETCH)
-                .map(plan.resultPlan()::transform);
+                .map(plan.resultPlan()::transform), plan.options());
     }
 
     FieldUseSnapshot previewFieldUse(AggregateSpec spec) {
@@ -171,7 +171,11 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
 
     private Flux<AggregateRow> executeAggregate(FormAggregatePlanner.Plan plan) {
         AggregateResultDecoder aggregateDecoder = new AggregateResultDecoder(plan);
-        return executor.query(plan.request(), plan.options()).map(aggregateDecoder::decode);
+        return Flux.defer(() -> {
+            FormResultDecoder.DecodedResultBudget budget =
+                    new FormResultDecoder.DecodedResultBudget(plan.options().maxResultBytes());
+            return executor.query(plan.request(), plan.options()).map(row -> budget.accept(aggregateDecoder.decode(row)));
+        });
     }
 
     private FormAggregatePlanner.Plan aggregatePlan(AggregateSpec spec) {
@@ -248,13 +252,12 @@ final class ReactiveFormOperations extends ReactiveFormOperationSupport {
 
     private Flux<DynamicRow> verifyContains(FormOperationPlanner.PlannedQuery plan,
                                             List<DynamicRow> rawRows) {
-        ProtectedContainsResultSupport.requireCandidateLimit(rawRows.size());
-        return results.decodeRows(plan.form(), Flux.fromIterable(rawRows), plan.options(),
+        return results.forContains().decodeRows(plan.form(), Flux.fromIterable(rawRows), plan.options(),
                                   plan.scope(), com.flying.orm.core.protection.SensitiveDisplayMode.FULL,
                                   plan.decodingFields())
                       .collectList()
                       .flatMapMany(rows -> Flux.fromIterable(containsResults.finish(
-                              plan.form(), plan.containsQuery(), rows, plan.outputFields(), plan.displayMode())));
+                              plan.form(), plan.containsQuery(), rows, plan.outputFields(), plan.displayMode(), plan.options())));
     }
 
     Mono<CursorPageResult<DynamicRow>> cursorPageSpec(QuerySpec spec, CursorPageQuery page) {

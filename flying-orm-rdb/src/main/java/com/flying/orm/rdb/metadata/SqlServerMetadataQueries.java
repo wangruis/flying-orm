@@ -214,7 +214,8 @@ final class SqlServerMetadataQueries {
             ) generation_sequence
                    on generation_sequence.referencing_id = dc.object_id
             left join sys.extended_properties ep
-                   on ep.major_id = t.object_id
+                   on ep.class = 1
+                  and ep.major_id = t.object_id
                   and ep.minor_id = sc.column_id
                   and ep.name = 'MS_Description'
             where c.TABLE_NAME = ?

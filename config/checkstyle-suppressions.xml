@@ -28,6 +28,13 @@
     <suppress checks="FileLength" files="(?:^|[\\/])SchemaDiffer\.java$"/>
     <suppress checks="FileLength" files="(?:^|[\\/])VerifiedSchemaPlanExecutor\.java$"/>
 
+    <!-- Protected write/query/result conversions share one codec and masking order across all form paths. -->
+    <suppress checks="MethodCount" files="(?:^|[\\/])FormProtectionSqlSupport\.java$"/>
+    <!-- Relational DDL keeps one column grammar; evolution and sequence planning already have separate owners. -->
+    <suppress checks="MethodCount" files="(?:^|[\\/])RelationalSchemaSqlRenderer\.java$"/>
+    <!-- DynamicForm DDL and physical-column preservation share one renderer; migration planning stays outside. -->
+    <suppress checks="MethodCount" files="(?:^|[\\/])SchemaTableSqlRenderer\.java$"/>
+
     <!-- Oracle keeps its versioned data-dictionary facts together; the other dialect files remain bounded. -->
     <suppress checks="FileLength" files="(?:^|[\\/])OracleMetadataQueries\.java$"/>
 

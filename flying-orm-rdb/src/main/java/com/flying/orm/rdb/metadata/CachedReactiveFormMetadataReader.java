@@ -250,13 +250,8 @@ final class CachedReactiveFormMetadataReader implements ReactiveFormMetadataCach
         AtomicReference<MetadataCachedValue<T>> holder = new AtomicReference<>();
         AtomicReference<Mono<T>> valueHolder = new AtomicReference<>();
         long startedAt = System.nanoTime();
-        Mono<T> source;
-        try {
-            source = Objects.requireNonNull(loader.get(), "metadata cache loader must not return null");
-        } catch (RuntimeException | Error error) {
-            stats.failure(System.nanoTime() - startedAt);
-            throw error;
-        }
+        // 先发布缓存占位，再调用 delegate；否则加载链创建期间的失效可能漏掉尚未发布的旧条目。
+        Mono<T> source = Mono.defer(loader);
         /*
          * 成功/失败计数必须放在 share() 前面。放在后面时，共享同一次加载的每个订阅者都会各记一次；
          * 放在前面则只统计真正访问 delegate 的源订阅。最后一个等待者取消时，share 会取消源并让占位条目失效，
@@ -289,9 +284,7 @@ final class CachedReactiveFormMetadataReader implements ReactiveFormMetadataCach
     }
 
     private void removeMatching(String schema, String table) {
-        entries.asMap().keySet().removeIf(
-                key -> key.table().equals(table)
-                        && (schema == null || key.schema() == null || Objects.equals(key.schema(), schema)));
+        entries.asMap().keySet().removeIf(key -> key.matchesInvalidation(schema, table));
     }
 
     private Cache<MetadataCacheKey, MetadataCachedValue<?>> newCache(CacheRegionPolicy policy) {

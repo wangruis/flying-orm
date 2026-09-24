@@ -71,20 +71,29 @@ class ProtectedWriteWorkTest {
     }
 
     @Test
-    void appliesOneOwnerReadLimitForJdbcAndR2dbc() {
-        SqlExecutionOptions bounded = ProtectedWriteWork.ownerReadOptions(SqlExecutionOptions.unlimited());
-
-        assertEquals(2_000L, bounded.maxRows());
-        assertEquals(SqlExecutionOptions.DEFAULT_MAX_RESULT_BYTES, bounded.maxResultBytes());
-        assertEquals(SqlExecutionOptions.DEFAULT_MAX_LARGE_OBJECT_BYTES, bounded.maxLargeObjectBytes());
-        assertEquals(SqlExecutionOptions.DEFAULT_MAX_LARGE_OBJECT_CHARS, bounded.maxLargeObjectChars());
-
+    void ownerReadsHonorDeveloperOptionsWithoutAnInternalCeiling() {
+        SqlExecutionOptions unlimited = SqlExecutionOptions.unlimited();
+        assertSame(unlimited, ProtectedWriteWork.ownerReadOptions(unlimited));
+        SqlExecutionOptions large = SqlExecutionOptions.safeDefaults().withMaxRows(10_000L)
+                .withMaxResultBytes(128L * 1024 * 1024)
+                .withMaxLargeObjectBytes(32L * 1024 * 1024).withMaxLargeObjectChars(32_000_000L);
+        assertSame(large, ProtectedWriteWork.ownerReadOptions(large));
         SqlExecutionOptions strict = SqlExecutionOptions.safeDefaults()
                 .withMaxRows(25L)
                 .withMaxResultBytes(1_024L)
                 .withMaxLargeObjectBytes(512L)
                 .withMaxLargeObjectChars(256L);
         assertSame(strict, ProtectedWriteWork.ownerReadOptions(strict));
+    }
+
+    @Test
+    void ownerRestrictionDoesNotImposeAPortableParameterCeiling() {
+        ProtectedWriteWork work = work(ProtectedWriteWork.Kind.UPDATE, List.of("id"), Map.of());
+        List<Map<String, Object>> owners = java.util.stream.IntStream.rangeClosed(1, 2500)
+                .mapToObj(id -> Map.<String, Object>of("id", id)).toList();
+        SqlRequest request = work.writeRequestForOwners(owners);
+        assertEquals(2502, request.parameters().size());
+        assertEquals(2500, request.parameters().getLast());
     }
 
     private static ProtectedWriteWork work(ProtectedWriteWork.Kind kind,

@@ -287,6 +287,8 @@ final class SchemaTypeComparison {
         DatabaseType targetType = DatabaseType.of(target).requireSafe("target data type");
         if (currentType.logicalType() == LogicalType.INTERVAL
                 || currentType.equals(targetType)
+                || !SchemaTypeMapping.characterLengthUnit(currentType).equals(
+                        SchemaTypeMapping.characterLengthUnit(targetType))
                 || !currentType.comparisonShape().equals(targetType.comparisonShape())) {
             return false;
         }
@@ -312,7 +314,11 @@ final class SchemaTypeComparison {
         List<String> values = type.arguments();
         long[] arguments = new long[values.size()];
         for (int index = 0; index < values.size(); index++) {
-            arguments[index] = numericArgument(values.get(index));
+            String value = values.get(index);
+            if (!SchemaTypeMapping.characterLengthUnit(type).isEmpty()) {
+                value = value.substring(0, value.indexOf(' '));
+            }
+            arguments[index] = numericArgument(value);
         }
         return arguments;
     }

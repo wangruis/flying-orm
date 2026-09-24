@@ -9,6 +9,7 @@ import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.rdb.form.StructuredConditionCustomizer;
 import com.flying.orm.rdb.form.StructuredConditionResolver;
+import com.flying.orm.rdb.internal.condition.ConditionNodes;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -73,8 +74,8 @@ public final class JsonStructuredConditions implements StructuredConditionResolv
      */
     @Override
     public StructuredConditionInput adapt(DynamicForm form, StructuredConditionInput input) {
-        return adaptNode(Objects.requireNonNull(form, "dynamic form must not be null"),
-                         Objects.requireNonNull(input, "structured condition input must not be null"));
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        return ConditionNodes.rewrite(input, term -> adaptTerm(safeForm, term));
     }
 
     @Override
@@ -86,23 +87,15 @@ public final class JsonStructuredConditions implements StructuredConditionResolv
         return safePolicy.withAdditionalTerms(GOVERNED_TERMS);
     }
 
-    private StructuredConditionInput adaptNode(DynamicForm form, StructuredConditionInput input) {
-        if (input.field() != null || input.operator() != null) {
-            String operator = normalize(input.operator());
-            // 非 JSON operator 原样交给后续 resolver，多个 customizer 可以组合而不互相吞条件。
-            if (!BUILT_IN_OPERATORS.contains(operator)) {
-                return input;
-            }
-            validateJsonField(form, input.field());
-            Object value = adaptValue(operator, input.value());
-            return new StructuredConditionInput(input.field(), operator, value, input.logic(), input.terms());
+    private StructuredConditionInput adaptTerm(DynamicForm form, StructuredConditionInput input) {
+        String operator = normalize(input.operator());
+        // 非 JSON operator 原样交给后续 resolver，多个 customizer 可以组合而不互相吞条件。
+        if (!BUILT_IN_OPERATORS.contains(operator)) {
+            return input;
         }
-
-        List<StructuredConditionInput> terms = new ArrayList<>(input.terms().size());
-        for (StructuredConditionInput term : input.terms()) {
-            terms.add(adaptNode(form, Objects.requireNonNull(term, "structured condition child must not be null")));
-        }
-        return new StructuredConditionInput(input.field(), input.operator(), input.value(), input.logic(), terms);
+        validateJsonField(form, input.field());
+        Object value = adaptValue(operator, input.value());
+        return new StructuredConditionInput(input.field(), operator, value, input.logic(), input.terms());
     }
 
     private Object adaptValue(String operator, Object value) {

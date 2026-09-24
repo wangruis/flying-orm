@@ -20,7 +20,6 @@ final class ProtectedFieldCipher {
 
     private static final byte[] DERIVATION_SALT =
             "flying-orm/protected-field/v1".getBytes(StandardCharsets.US_ASCII);
-    private static final int MAX_PLAINTEXT_BYTES = 1_048_576;
 
     private final ProtectedFieldKeyRing keys;
     private final SecureRandom random;
@@ -38,9 +37,6 @@ final class ProtectedFieldCipher {
         byte[] value = Objects.requireNonNull(plaintext, "protected field plaintext must not be null")
                               .getBytes(StandardCharsets.UTF_8);
         try {
-            if (value.length > MAX_PLAINTEXT_BYTES) {
-                throw new IllegalArgumentException("protected field plaintext is too long");
-            }
             String version = keys.currentVersion();
             byte[] nonce = new byte[ProtectedFieldEnvelope.NONCE_LENGTH];
             random.nextBytes(nonce);

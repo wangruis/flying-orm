@@ -50,7 +50,7 @@ public final class MaskingPolicyRegistry {
         return new MaskingPolicyRegistry(values);
     }
 
-    /** @return null 或脱敏后的有界文本 */
+    /** @return null 或策略返回的脱敏文本 */
     public String mask(String value, MaskedFieldDefinition definition) {
         if (value == null) {
             return null;
@@ -62,7 +62,7 @@ public final class MaskingPolicyRegistry {
             throw new IllegalArgumentException("masking policy is not registered");
         }
         String result = mask(policy, value, safeDefinition);
-        if (result == null || result.codePointCount(0, result.length()) > value.codePointCount(0, value.length()) + 8) {
+        if (result == null) {
             throw new IllegalArgumentException("masking policy returned an invalid result");
         }
         return result;

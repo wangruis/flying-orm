@@ -91,8 +91,8 @@ final class R2dbcGeneratedKeyWriter {
         public Mono<Void> apply(Result.Segment segment) {
             if (segment instanceof Result.UpdateCount count) {
                 accumulator.addAffectedRows(count.value());
-                return Mono.empty();
             }
+            // A driver segment may carry both an update count and its generated key row.
             if (segment instanceof Result.RowSegment row) {
                 return accumulator.addKey(row, this);
             }

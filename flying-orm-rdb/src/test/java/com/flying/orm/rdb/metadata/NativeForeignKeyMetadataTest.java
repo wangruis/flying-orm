@@ -14,6 +14,17 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class NativeForeignKeyMetadataTest {
 
     @Test
+    void postgresDoesNotTreatPartialDeleteActionsAsWholeForeignKeyActions() {
+        for (String schema : new String[]{null, "app"}) {
+            String sql = PostgreSqlMetadataQueries.queries().foreignKeyQuery().create(schema, "orders").sql();
+            // JSON access preserves compatibility with catalogs predating confdelsetcols.
+            assertTrue(sql.contains("pg_catalog.to_jsonb(con)->>'confdelsetcols' is null"));
+            // Containment accepts an explicit list of every key column in either order, not a subset.
+            assertTrue(sql.contains("pg_catalog.to_jsonb(con)->'confdelsetcols' @> pg_catalog.to_jsonb(con.conkey)"));
+        }
+    }
+
+    @Test
     void nativeForeignKeyQueriesProjectSourceAndReferencedSchema() {
         List<InformationSchemaFormMetadataReader.Queries> readers = List.of(
                 H2MetadataQueries.queries(),

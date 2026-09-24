@@ -3,7 +3,7 @@ package com.flying.orm.rdb.protection;
 import com.flying.orm.core.protection.MaskedFieldDefinition;
 
 /**
- * 把已解密业务文本转换为有界展示文本。
+ * 把已解密业务文本转换为开发者策略指定的展示文本。
  *
  * @author wangr
  * @date 2026-08-09

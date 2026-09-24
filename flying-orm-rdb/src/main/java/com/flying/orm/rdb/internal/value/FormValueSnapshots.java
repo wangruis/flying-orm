@@ -16,6 +16,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Predicate;
 
 /**
  * Owns raw JSON, SQL ARRAY and VECTOR values while their field meaning is still known.
@@ -30,6 +31,12 @@ public final class FormValueSnapshots {
     }
 
     public static Map<String, Object> snapshot(DynamicForm form, Map<String, Object> source) {
+        return snapshot(form, source, field -> false);
+    }
+
+    /** 显式 codec 拥有领域值的解释；通用快照不能把其 Map/List 子类改成另一种 Java 类型。 */
+    public static Map<String, Object> snapshot(DynamicForm form, Map<String, Object> source,
+                                              Predicate<DynamicField> customValue) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
         Map<String, Object> safeSource = Objects.requireNonNull(source, "form values must not be null");
         if (safeSource.isEmpty()) {
@@ -40,6 +47,10 @@ public final class FormValueSnapshots {
         for (Map.Entry<String, Object> entry : safeSource.entrySet()) {
             Object value = entry.getValue();
             DynamicField field = safeForm.findField(entry.getKey()).orElse(null);
+            if (field != null && customValue.test(field)) {
+                snapshot.put(entry.getKey(), BindableValueSnapshots.logicalValue(value));
+                continue;
+            }
             if (value == null || field == null) {
                 snapshot.put(entry.getKey(), BindableValueSnapshots.logicalValue(value));
                 continue;

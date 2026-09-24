@@ -5,7 +5,7 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * PageQuery 描述一基页码分页请求，限制单页最大数量，避免动态表单列表无边界查询。
+ * PageQuery 描述一基页码分页请求；单页数量由调用方指定，不设置框架固定上限。
  *
  * @param page  一基页码
  * @param size  每页数量
@@ -15,11 +15,6 @@ import java.util.Objects;
  * @version v1.0
  */
 public record PageQuery(int page, int size, List<PageSort> sorts) {
-
-    /**
-     * 单页最大数量。
-     */
-    public static final int MAX_SIZE = 1000;
 
     /**
      * 创建分页请求并完成边界校验。
@@ -32,8 +27,8 @@ public record PageQuery(int page, int size, List<PageSort> sorts) {
         if (page < 1) {
             throw new IllegalArgumentException("page must be greater than or equal to 1");
         }
-        if (size < 1 || size > MAX_SIZE) {
-            throw new IllegalArgumentException("page size must be between 1 and " + MAX_SIZE);
+        if (size < 1) {
+            throw new IllegalArgumentException("page size must be greater than or equal to 1");
         }
         sorts = List.copyOf(Objects.requireNonNull(sorts, "page sorts must not be null"));
     }

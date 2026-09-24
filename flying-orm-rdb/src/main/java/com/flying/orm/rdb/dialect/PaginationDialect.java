@@ -54,7 +54,7 @@ public interface PaginationDialect {
     /**
      * 为候选集、内部校验等非业务分页场景附加严格行数上限。
      *
-     * <p>该能力不受 {@link PageQuery} 的业务页大小限制，但调用方仍必须传入正数硬上限。</p>
+     * <p>调用方显式指定本次查询的正数行数上限，与业务分页独立。</p>
      */
     default SqlRequest limit(String sql, List<Object> parameters, int maxRows) {
         throw new UnsupportedOperationException(

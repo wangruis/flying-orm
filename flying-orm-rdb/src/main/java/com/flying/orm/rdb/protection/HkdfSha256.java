@@ -32,7 +32,7 @@ final class HkdfSha256 {
         byte[] previous = new byte[0];
         int offset = 0;
         for (int block = 1; offset < length; block++) {
-            byte[] input = new byte[previous.length + info.length + 1];
+            byte[] input = new byte[Math.toIntExact((long) previous.length + info.length + 1)];
             System.arraycopy(previous, 0, input, 0, previous.length);
             System.arraycopy(info, 0, input, previous.length, info.length);
             input[input.length - 1] = (byte) block;

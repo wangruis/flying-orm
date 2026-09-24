@@ -34,7 +34,9 @@ public final class SyncEntityDmlDeleteOperator<T> {
     /** 继续追加严格 AND 等值条件。 */
     public SyncEntityDmlDeleteOperator<T> and(EntityProperty<T, ?> property, Object value) { return where(property, value); }
     /** 使用已注册条件运算符追加 AND 条件。 */
-    public SyncEntityDmlDeleteOperator<T> and(EntityProperty<T, ?> property, String operator, Object value) { command.state().where().term(property, operator, value); return this; }
+    public SyncEntityDmlDeleteOperator<T> and(EntityProperty<T, ?> property, String operator, Object value) { return where(property, operator, value); }
+    /** 以 AND 追加标准或已注册的业务条件，字段和值均不作为原始 SQL。 */
+    public SyncEntityDmlDeleteOperator<T> where(EntityProperty<T, ?> property, String operator, Object value) { command.state().where().where(property, operator, value); return this; }
     /** 添加 IS NULL 条件。 */
     public SyncEntityDmlDeleteOperator<T> isNull(EntityProperty<T, ?> property) { command.state().where().isNull(property); return this; }
     /** 添加 IS NOT NULL 条件。 */

@@ -15,17 +15,12 @@ import java.nio.charset.StandardCharsets;
  */
 public record ProtectedFieldContext(String formId, String fieldId, String tenantIdentity) {
 
-    private static final int MAX_COMPONENT_BYTES = 512;
-
-    /** 完成上下文规范化和有界校验。 */
+    /** 完成上下文规范化和必填校验。 */
     public ProtectedFieldContext {
         formId = requireText(formId, "protected form id");
         fieldId = requireText(fieldId, "protected field id");
         // 租户身份来自类型化 codec 编码，任何再规范化都会把两个不同租户折叠到同一密码学上下文。
         tenantIdentity = tenantIdentity == null ? "" : tenantIdentity;
-        requireBounded(formId);
-        requireBounded(fieldId);
-        requireBounded(tenantIdentity);
     }
 
     byte[] aad() {
@@ -41,8 +36,8 @@ public record ProtectedFieldContext(String formId, String fieldId, String tenant
         byte[] formBytes = formId.getBytes(StandardCharsets.UTF_8);
         byte[] fieldBytes = fieldId.getBytes(StandardCharsets.UTF_8);
         byte[] tenantBytes = tenantIdentity.getBytes(StandardCharsets.UTF_8);
-        ByteBuffer target = ByteBuffer.allocate(20 + purposeBytes.length + formBytes.length
-                                                        + fieldBytes.length + tenantBytes.length);
+        ByteBuffer target = ByteBuffer.allocate(Math.toIntExact(
+                20L + purposeBytes.length + formBytes.length + fieldBytes.length + tenantBytes.length));
         target.putInt(ProtectedFieldEnvelope.MAGIC);
         put(target, purposeBytes);
         put(target, formBytes);
@@ -60,11 +55,5 @@ public record ProtectedFieldContext(String formId, String fieldId, String tenant
             throw new IllegalArgumentException(name + " must not be blank");
         }
         return value.trim();
-    }
-
-    private static void requireBounded(String value) {
-        if (value.getBytes(StandardCharsets.UTF_8).length > MAX_COMPONENT_BYTES) {
-            throw new IllegalArgumentException("protected field context is too long");
-        }
     }
 }

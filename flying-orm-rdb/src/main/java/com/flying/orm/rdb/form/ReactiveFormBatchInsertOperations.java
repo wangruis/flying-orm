@@ -181,18 +181,16 @@ final class ReactiveFormBatchInsertOperations extends ReactiveFormOperationSuppo
                 boolean protectedSource = ReactiveProtectionCpuBoundary.writesEncryptedField(
                         safeForm, sourceFirstRow);
                 Map<String, Object> firstSourceValues = protectedSource && !sourceOwned
-                        ? FormValueSnapshots.snapshot(safeForm, sourceFirstRow) : sourceFirstRow;
+                        ? snapshotRow(safeForm, sourceFirstRow) : sourceFirstRow;
                 FieldUseGuard.approveBatchInsert(
-                        safeForm, firstSourceValues, scope, upsert, fieldUsePolicy);
+                        safeForm, sourceFirstRow, scope, upsert, fieldUsePolicy);
                 Map<String, Object> firstValues = scopes.prepareWriteValues(safeForm, firstSourceValues, scope);
                 boolean protectedWrite = ReactiveProtectionCpuBoundary.writesEncryptedField(safeForm, firstValues);
-                Map<String, Object> ownedFirstSource = protectedWrite && !protectedSource && !sourceOwned
-                        ? FormValueSnapshots.snapshot(safeForm, firstSourceValues) : firstSourceValues;
                 Flux<Map<String, Object>> preparedRows = protectedWrite
                         ? replay.index().map(indexed -> indexed.getT1() == 0L
                                 ? firstValues : scopes.prepareWriteValues(safeForm,
                                         sourceOwned ? indexed.getT2()
-                                                : FormValueSnapshots.snapshot(safeForm, indexed.getT2()), scope))
+                                                : snapshotRow(safeForm, indexed.getT2()), scope))
                         : replay;
                 Flux<Map<String, Object>> cpuRows = ReactiveProtectionCpuBoundary.batch(
                         preparedRows,
@@ -208,7 +206,7 @@ final class ReactiveFormBatchInsertOperations extends ReactiveFormOperationSuppo
                     BatchInsertPlan plan = upsert
                             ? renderer.batchRenderer.upsertPlan(
                                     safeForm, firstValues, firstWrite.physicalForm(),
-                                    firstWrite.values(), ownedFirstSource,
+                                    firstWrite.values(), sourceFirstRow,
                                     scope.condition().isEmpty() ? null
                                             : scopes.prepareBatchScope(safeForm, physicalForm, scope).where())
                             : renderer.batchRenderer.insertPlan(firstWrite.physicalForm(), firstWrite.values());
@@ -241,12 +239,16 @@ final class ReactiveFormBatchInsertOperations extends ReactiveFormOperationSuppo
      * 旧式可变时间值在入口处固定，避免订阅前修改改变批量内容。Publisher 入口在逐行接收时处理，
      * 不经过这里的预先收集或复制。
      */
-    private static List<Map<String, Object>> snapshotBatchRows(DynamicForm form,
+    private List<Map<String, Object>> snapshotBatchRows(DynamicForm form,
                                                                 List<Map<String, Object>> rows) {
         return Objects.requireNonNull(rows, "batch rows must not be null")
                       .stream()
-                      .map(row -> FormValueSnapshots.snapshot(form, Objects.requireNonNull(
+                      .map(row -> snapshotRow(form, Objects.requireNonNull(
                               row, "batch row must not be null")))
                       .toList();
+    }
+
+    private Map<String, Object> snapshotRow(DynamicForm form, Map<String, Object> values) {
+        return FormValueSnapshots.snapshot(form, values, field -> renderer.customFieldMapping(field) != null);
     }
 }

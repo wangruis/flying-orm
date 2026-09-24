@@ -6,9 +6,13 @@ import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.LogicalOperator;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.form.TenantStrategy;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.scope.FieldScope;
+import com.flying.orm.core.scope.ScopeAccessException;
+import com.flying.orm.core.scope.ScopeErrorCode;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.RdbDialect;
@@ -20,8 +24,12 @@ import com.flying.orm.rdb.lock.OptimisticLockOptions;
 import com.flying.orm.rdb.protection.ProtectedFieldKeyRing;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.DynamicTest;
+import org.junit.jupiter.api.TestFactory;
 
 import java.util.Map;
+import java.util.List;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -33,6 +41,66 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FormOptimisticConditionRegressionTest {
+
+    @TestFactory
+    Stream<DynamicTest> optimisticWritesCannotMoveRowsOutsideTheirTenant() {
+        return Stream.of(false, true).flatMap(declared -> Stream.of(
+                OptimisticLockOptions.assign("TENANT_ID", 7L, 8L),
+                OptimisticLockOptions.increment("tenant_id", 7L))
+                .flatMap(lock -> Stream.of("update", "batch", "logical-delete").map(operation ->
+                        DynamicTest.dynamicTest(declared + "/" + lock.mode() + "/" + operation, () -> {
+                            DynamicForm form = tenantForm(declared);
+                            FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                                    SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql());
+                            DataScope tenant = DataScope.tenant("tenant_id", 7L);
+                            FormScopeSupport scopes = new FormScopeSupport(
+                                    renderer, StructuredConditionResolver.defaults(), tenant);
+                            FormOperationPlanner planner = new FormOperationPlanner(
+                                    renderer, scopes, SqlExecutionOptions.safeDefaults());
+                            ConditionGroup where = ConditionGroup.and().where("id", "=", 1L).build();
+                            ScopeAccessException failure = assertThrows(ScopeAccessException.class, () -> {
+                                switch (operation) {
+                                    case "update" -> planner.update(WriteSpec.update(
+                                            form, Map.of("name", "updated"), where).withLock(lock));
+                                    case "batch" -> scopes.prepareBatchUpdate(form, new BatchOptimisticUpdate(
+                                            Map.of("name", "updated"), where, lock), tenant);
+                                    case "logical-delete" -> planner.delete(WriteSpec.delete(form, where).withLock(lock));
+                                    default -> throw new AssertionError(operation);
+                                }
+                            });
+                            assertEquals(ScopeErrorCode.TENANT_VALUE_MISMATCH, failure.code());
+                        }))));
+    }
+
+    @Test
+    void lockValidationPreservesInternalVersionWritesAndNonMutatingTenantUses() {
+        DynamicForm form = tenantForm(true);
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql());
+        FormScopeSupport scopes = new FormScopeSupport(renderer, StructuredConditionResolver.defaults(),
+                DataScope.tenant("tenant_id", 7L).withFields(FieldScope.writable("name")));
+        FormOperationPlanner planner = new FormOperationPlanner(renderer, scopes, SqlExecutionOptions.safeDefaults());
+        ConditionGroup where = ConditionGroup.and().where("id", "=", 1L).build();
+        WriteSpec update = WriteSpec.update(form, Map.of("name", "updated"), where);
+
+        assertEquals(List.of("updated", 1L, 7L, 0, 2L), planner.update(update.withLock(
+                OptimisticLockOptions.increment("version", 2L))).request().parameters());
+        assertEquals(List.of("updated", 7L, 1L, 7L, 0, 7L), planner.update(update.withLock(
+                OptimisticLockOptions.assign("tenant_id", 7L, 7L))).request().parameters());
+        assertTrue(planner.physicalDelete(WriteSpec.delete(form, where).withLock(
+                OptimisticLockOptions.increment("tenant_id", 7L))).request().sql().startsWith("delete"));
+    }
+
+    private static DynamicForm tenantForm(boolean declared) {
+        DynamicForm.Builder builder = DynamicForm.builder("tenant_users", "tenant_users")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("tenant_id", "BIGINT"))
+                .addField(DynamicField.of("name", "VARCHAR"))
+                .addField(DynamicField.of("version", "BIGINT"))
+                .addField(DynamicField.of("deleted", "INTEGER"))
+                .logicDelete("deleted", 0, 1);
+        return (declared ? builder.tenant("tenant_id", TenantStrategy.AUTO) : builder).build();
+    }
 
     @Test
     void changingOnlyAnOrdinaryFieldDoesNotPrepareABatchOwnerQuery() {

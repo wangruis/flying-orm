@@ -146,6 +146,7 @@ final class FormOperationPlanner {
         Map<String, Object> values = safeSpec.ownedValues();
         DataScope effectiveScope = scopes.writeScope(safeSpec.where(), safeSpec.scope());
         ConditionGroup where = scopes.applyUpdateScope(form, values, safeSpec.where(), effectiveScope);
+        scopes.validateTenantLock(form, safeSpec.lock().orElse(null), effectiveScope);
         DynamicForm physicalForm = renderer.protection().physicalForm(form);
         FormProtectionSqlSupport.WriteOperation protection = renderer.protection().writeOperation(
                 form, physicalForm, effectiveScope);
@@ -186,6 +187,7 @@ final class FormOperationPlanner {
         OptimisticLockOptions lock = safeSpec.lock().orElse(null);
         SqlRequest request = FormLogicDeletes.deleteValues(form)
                 .map(values -> {
+                    scopes.validateTenantLock(form, lock, effectiveScope);
                     FormPreparedWrite write = renderer.protection().prepareWrite(
                             form, values, effectiveScope);
                     ProtectedFieldRuntime.PreparedQuery query = renderer.protection().prepareQuery(

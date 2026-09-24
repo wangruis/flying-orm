@@ -34,7 +34,6 @@ import java.util.Set;
 public final class ParameterConditionCompiler {
 
     private static final int DEFAULT_MAX_COLLECTION_SIZE = 1_000;
-    private static final int MAX_COLLECTION_SIZE_LIMIT = 1_000;
     private static final int DEFAULT_MAX_STRING_LENGTH = 4_096;
 
     private final List<ParameterConditionSpec> specs;
@@ -370,7 +369,7 @@ public final class ParameterConditionCompiler {
         }
 
         private static List<Object> snapshotIterable(Iterable<?> source, int maxCollectionSize) {
-            List<Object> values = new ArrayList<>(Math.min(maxCollectionSize + 1, 16));
+            List<Object> values = new ArrayList<>(Math.min(maxCollectionSize, 16));
             for (Object value : source) {
                 values.add(value);
                 if (values.size() > maxCollectionSize) {
@@ -501,11 +500,6 @@ public final class ParameterConditionCompiler {
     }
 
     private static int requireCollectionSize(int value) {
-        int positive = requirePositive(value, "parameter condition max collection size");
-        if (positive > MAX_COLLECTION_SIZE_LIMIT) {
-            throw new IllegalArgumentException(
-                    "parameter condition max collection size must not exceed " + MAX_COLLECTION_SIZE_LIMIT);
-        }
-        return positive;
+        return requirePositive(value, "parameter condition max collection size");
     }
 }

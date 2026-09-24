@@ -67,9 +67,18 @@ final class R2dbcSequenceExecutor {
                                                               List<List<Object>> workParameters,
                                                               List<List<Object>> cleanupParameters,
                                                               SqlExecutionOptions options) {
+        List<SqlRequest> firstPhase = sequence.setup();
+        if (firstPhase.isEmpty()) {
+            firstPhase = sequence.work();
+        }
+        if (firstPhase.isEmpty()) {
+            firstPhase = sequence.cleanup();
+        }
+        if (firstPhase.isEmpty()) {
+            return Mono.just(new SqlExecutionSequenceResult(List.of()));
+        }
         return Mono.usingWhen(
-                executionSession.acquireConnection(sequence.setup().isEmpty()
-                        ? sequence.work().getFirst() : sequence.setup().getFirst()).map(SequenceResource::new),
+                executionSession.acquireConnection(firstPhase.getFirst()).map(SequenceResource::new),
                 resource -> executeSequence(resource, sequence,
                                             setupParameters, workParameters, options),
                 resource -> finishSequence(resource, sequence.cleanup(), cleanupParameters, options, null),

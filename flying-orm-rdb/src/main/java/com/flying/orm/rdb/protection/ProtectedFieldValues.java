@@ -224,6 +224,9 @@ final class ProtectedFieldValues {
     }
 
     private static String encodeText(ValueCodecRegistry codecs, Object value) {
+        if (value instanceof ProtectedFieldReprotection.PreparedText prepared) {
+            return prepared.text();
+        }
         try {
             Object encoded = Objects.requireNonNull(codecs, "value codec registry must not be null")
                                     .write(value);

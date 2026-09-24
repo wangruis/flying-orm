@@ -1,6 +1,5 @@
 package com.flying.orm.rdb.reactive;
 
-import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.internal.protection.ProtectedReplacementBatchPlan;
 import io.r2dbc.spi.Connection;
 import io.r2dbc.spi.Result;
@@ -9,7 +8,6 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
-import java.util.Map;
 
 /** Executes a bounded, verified R2DBC statement batch for protected side-index tokens. */
 final class R2dbcProtectedSideIndexDml {
@@ -17,24 +15,6 @@ final class R2dbcProtectedSideIndexDml {
     static final int MAX_TOKEN_BATCH_SIZE = 500;
 
     private R2dbcProtectedSideIndexDml() {
-    }
-
-    static Mono<Void> insertTokens(Connection connection,
-                                   String sql,
-                                   ProtectedWriteWork work,
-                                   Map<String, Object> owner,
-                                   ProtectedWriteWork.FieldTokens field) {
-        int tokenCount = field.tokenCount();
-        if (tokenCount == 0) {
-            return Mono.empty();
-        }
-        int chunks = (tokenCount + MAX_TOKEN_BATCH_SIZE - 1) / MAX_TOKEN_BATCH_SIZE;
-        return Flux.range(0, chunks)
-                   .concatMap(chunk -> executeChunk(
-                           connection, sql, work, owner, field,
-                           chunk * MAX_TOKEN_BATCH_SIZE,
-                           Math.min(tokenCount, (chunk + 1) * MAX_TOKEN_BATCH_SIZE)), 1)
-                   .then();
     }
 
     static Mono<Void> insertParameterSets(Connection connection,
@@ -48,14 +28,13 @@ final class R2dbcProtectedSideIndexDml {
             return Mono.empty();
         }
         int parametersPerSet = parameterSets.getFirst().size();
-        if (parametersPerSet == 0
-                || parametersPerSet > ProtectedReplacementBatchPlan.MAX_PARAMETERS) {
+        if (parametersPerSet == 0) {
             return Mono.error(new IllegalArgumentException(
                     "protected side index token batch exceeds internal limit"));
         }
         int batchSize = Math.min(
                 MAX_TOKEN_BATCH_SIZE,
-                ProtectedReplacementBatchPlan.MAX_PARAMETERS / parametersPerSet);
+                Math.max(1, ProtectedReplacementBatchPlan.MAX_PARAMETERS / parametersPerSet));
         int chunks = (parameterSets.size() + batchSize - 1) / batchSize;
         return Flux.range(0, chunks)
                    .concatMap(chunk -> executeParameterSets(
@@ -71,8 +50,8 @@ final class R2dbcProtectedSideIndexDml {
                                           String sql,
                                           List<List<Object>> parameterSets) {
         if (parameterSets.size() > MAX_TOKEN_BATCH_SIZE
-                || parameterSets.stream().mapToInt(List::size).sum()
-                > ProtectedReplacementBatchPlan.MAX_PARAMETERS) {
+                || (parameterSets.size() > 1 && parameterSets.stream().mapToLong(List::size).sum()
+                > ProtectedReplacementBatchPlan.MAX_PARAMETERS)) {
             return Mono.error(new IllegalArgumentException(
                     "protected side index delete batch exceeds internal limit"));
         }
@@ -90,28 +69,6 @@ final class R2dbcProtectedSideIndexDml {
             return Flux.from(statement.execute())
                        .concatMap(Result::getRowsUpdated, 1)
                        .then();
-        });
-    }
-
-    private static Mono<Void> executeChunk(Connection connection,
-                                           String sql,
-                                           ProtectedWriteWork work,
-                                           Map<String, Object> owner,
-                                           ProtectedWriteWork.FieldTokens field,
-                                           int offset,
-                                           int limit) {
-        return Mono.defer(() -> {
-            Statement statement = connection.createStatement(sql);
-            for (int index = offset; index < limit; index++) {
-                bind(statement, work.sideIndexParameters(owner, field, index));
-                if (index + 1 < limit) {
-                    statement.add();
-                }
-            }
-            return Flux.from(statement.execute())
-                       .concatMap(Result::getRowsUpdated, 1)
-                       .reduce(0L, R2dbcExecutionCounts::add)
-                       .flatMap(total -> requireExactTotal(total, limit - offset));
         });
     }
 

@@ -1,6 +1,5 @@
 package com.flying.orm.rdb.jdbc;
 
-import com.flying.orm.rdb.batch.BatchMemoryLimitExceededException;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.execution.ProtectedBatchRows;
 import java.util.ArrayList;
@@ -20,9 +19,6 @@ final class JdbcBatchSupport {
         while (result.size() < options.bufferSize() && bytes <= reservedLimit) {
             ProtectedBatchRows.RowView row = rows.nextRowView();
             if (row == null) break;
-            if (options.maxRows() > 0 && rows.acceptedCount() > options.maxRows()) {
-                throw new BatchMemoryLimitExceededException("rows", options.maxRows(), rows.acceptedCount());
-            }
             bytes += row.estimatedBytes();
             result.add(row);
         }

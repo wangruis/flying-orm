@@ -9,9 +9,8 @@ import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.rdb.form.StructuredConditionCustomizer;
 import com.flying.orm.rdb.form.StructuredConditionResolver;
+import com.flying.orm.rdb.internal.condition.ConditionNodes;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
@@ -54,8 +53,8 @@ public final class VectorStructuredConditions implements StructuredConditionReso
 
     @Override
     public StructuredConditionInput adapt(DynamicForm form, StructuredConditionInput input) {
-        return adaptNode(Objects.requireNonNull(form, "dynamic form must not be null"),
-                         Objects.requireNonNull(input, "structured condition input must not be null"));
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        return ConditionNodes.rewrite(input, term -> adaptTerm(safeForm, term));
     }
 
     @Override
@@ -67,27 +66,19 @@ public final class VectorStructuredConditions implements StructuredConditionReso
         return customized.withAdditionalTerms(GOVERNED_TERMS);
     }
 
-    private StructuredConditionInput adaptNode(DynamicForm form, StructuredConditionInput input) {
-        if (input.field() != null || input.operator() != null) {
-            String operator = normalize(input.operator());
-            if (!OPERATORS.contains(operator)) {
-                return input;
-            }
-            DynamicField field = form.field(Objects.requireNonNull(input.field(),
-                                                                    "vector condition field must not be null"));
-            if (field.databaseType().isArray() || field.databaseType().logicalType() != LogicalType.VECTOR) {
-                throw new IllegalArgumentException("vector operator requires a VECTOR field: " + field.name());
-            }
-            VectorMetric metric = metric(operator);
-            VectorConditionValue conditionValue = conditionValue(input.value(), field.length(), metric);
-            return new StructuredConditionInput(input.field(), operator, conditionValue, input.logic(), input.terms());
+    private StructuredConditionInput adaptTerm(DynamicForm form, StructuredConditionInput input) {
+        String operator = normalize(input.operator());
+        if (!OPERATORS.contains(operator)) {
+            return input;
         }
-
-        List<StructuredConditionInput> terms = new ArrayList<>(input.terms().size());
-        for (StructuredConditionInput term : input.terms()) {
-            terms.add(adaptNode(form, Objects.requireNonNull(term, "structured condition child must not be null")));
+        DynamicField field = form.field(Objects.requireNonNull(input.field(),
+                                                                "vector condition field must not be null"));
+        if (field.databaseType().isArray() || field.databaseType().logicalType() != LogicalType.VECTOR) {
+            throw new IllegalArgumentException("vector operator requires a VECTOR field: " + field.name());
         }
-        return new StructuredConditionInput(input.field(), input.operator(), input.value(), input.logic(), terms);
+        VectorMetric metric = metric(operator);
+        VectorConditionValue conditionValue = conditionValue(input.value(), field.length(), metric);
+        return new StructuredConditionInput(input.field(), operator, conditionValue, input.logic(), input.terms());
     }
 
     private static VectorConditionValue conditionValue(Object value,

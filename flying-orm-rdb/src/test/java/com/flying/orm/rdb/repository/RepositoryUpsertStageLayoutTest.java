@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.repository;
 
 import com.flying.orm.core.annotation.FieldStrategy;
+import com.flying.orm.core.annotation.EncryptedField;
 import com.flying.orm.core.annotation.IdType;
 import com.flying.orm.core.annotation.TableField;
 import com.flying.orm.core.annotation.TableId;
@@ -18,6 +19,8 @@ import com.flying.orm.rdb.form.ReactiveFormClient;
 import com.flying.orm.rdb.form.SyncFormClient;
 import com.flying.orm.rdb.mapping.FlyingTenant;
 import com.flying.orm.rdb.mapping.MappingException;
+import com.flying.orm.rdb.protection.ProtectedFieldKeyRing;
+import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.sync.SyncBatchExecutor;
@@ -40,6 +43,34 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RepositoryUpsertStageLayoutTest {
+
+    @Test
+    void encryptedReactiveUpsertKeepsStageLayoutsAcrossTheCpuBoundary() {
+        try (ProtectedFieldKeyRing keys = ProtectedFieldKeyRing.builder().current("v1", new byte[32]).build();
+             ProtectedFieldRuntime runtime = ProtectedFieldRuntime.create(keys)) {
+            for (boolean publisher : List.of(false, true)) {
+                CapturingBatchExecutor executor = new CapturingBatchExecutor();
+                ReactiveFormClient client = ReactiveFormClient.create(executor, renderer().withProtectedFields(runtime));
+                ReactiveFormRepository<EncryptedStage> repository = ReactiveFormRepository.create(client,
+                        client.entityModels().metadata(EncryptedStage.class).toDynamicForm(), EncryptedStage.class);
+                List<EncryptedStage> entities = List.of(
+                        new EncryptedStage(7L, "insert value", "update value", "secret"),
+                        new EncryptedStage(8L, "insert value", "update value", "secret"));
+                if (publisher) repository.upsertBatch(Flux.fromIterable(entities)).block();
+                else repository.upsertBatch(entities).block();
+                assertStageLayout(executor.request.get(), executor.rows.get());
+                assertEquals(2, executor.rows.get().size());
+            }
+        }
+    }
+
+    @TableName("encrypted_stages")
+    private record EncryptedStage(@TableId(type = IdType.INPUT) Long id,
+            @TableField(value = "insert_only", insertStrategy = FieldStrategy.ALWAYS,
+                    updateStrategy = FieldStrategy.NEVER) String insertOnly,
+            @TableField(value = "update_only", insertStrategy = FieldStrategy.NEVER,
+                    updateStrategy = FieldStrategy.ALWAYS) String updateOnly,
+            @EncryptedField String secret) { }
 
     @Test
     void keepsInsertAndConflictUpdateStrategiesInSeparateStages() {

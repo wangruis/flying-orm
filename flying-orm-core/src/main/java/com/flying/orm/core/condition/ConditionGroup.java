@@ -7,6 +7,7 @@ import com.flying.orm.core.internal.condition.ConditionValuePolicy;
 import com.flying.orm.core.internal.condition.ConditionExecutionView;
 import com.flying.orm.core.internal.condition.ConditionExecutionViews;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -22,29 +23,21 @@ import java.util.function.Consumer;
  */
 public final class ConditionGroup implements ConditionNode {
 
-    private static final int MAX_AST_DEPTH = 64;
-
-    private static final int MAX_AST_NODES = 10_000;
-
     private final LogicalOperator operator;
 
     private final List<ConditionNode> children;
-
-    private final TreeSummary treeSummary;
 
     private volatile ConditionExecutionView executionView;
 
     private ConditionGroup(LogicalOperator operator, List<ConditionNode> children) {
         this.operator = Objects.requireNonNull(operator, "logical operator must not be null");
         this.children = List.copyOf(children);
-        this.treeSummary = summarize(this.children);
     }
 
     private ConditionGroup(LogicalOperator operator, List<ConditionNode> children, Owned owned) {
         this.operator = Objects.requireNonNull(operator, "logical operator must not be null");
         this.children = Collections.unmodifiableList(
                 Objects.requireNonNull(children, "condition children must not be null"));
-        this.treeSummary = summarize(this.children);
     }
 
     /** 包内编译链发布已经受节点预算约束、且不会再修改的子节点列表。 */
@@ -108,14 +101,42 @@ public final class ConditionGroup implements ConditionNode {
         if (current != null) {
             return current;
         }
-        synchronized (this) {
-            current = executionView;
-            if (current == null) {
-                current = ConditionExecutionViews.compile(
-                        operator, children, TermCondition::ownedValue);
-                executionView = current;
+        // 后序预热子组，编译当前组时只读取已发布的子视图；深度不再占用调用栈。
+        ArrayDeque<ExecutionFrame> pending = new ArrayDeque<>();
+        pending.addLast(new ExecutionFrame(this));
+        while (!pending.isEmpty()) {
+            ExecutionFrame frame = pending.getLast();
+            if (frame.group.executionView != null) {
+                pending.removeLast();
+            } else if (frame.index < frame.group.children.size()) {
+                ConditionNode child = frame.group.children.get(frame.index++);
+                if (child instanceof ConditionGroup group && group.executionView == null) {
+                    pending.addLast(new ExecutionFrame(group));
+                }
+            } else {
+                frame.group.publishExecutionView();
+                pending.removeLast();
             }
-            return current;
+        }
+        return executionView;
+    }
+
+    private void publishExecutionView() {
+        // 只锁当前已经完成子组准备的节点，不沿树持有嵌套锁。
+        synchronized (this) {
+            if (executionView == null) {
+                executionView = ConditionExecutionViews.compile(
+                        operator, children, TermCondition::ownedValue);
+            }
+        }
+    }
+
+    private static final class ExecutionFrame {
+        private final ConditionGroup group;
+        private int index;
+
+        private ExecutionFrame(ConditionGroup group) {
+            this.group = group;
         }
     }
 
@@ -228,9 +249,7 @@ public final class ConditionGroup implements ConditionNode {
          * @return 条件组
          */
         public ConditionGroup build() {
-            ConditionGroup group = snapshot();
-            validateTree(group.treeSummary);
-            return group;
+            return snapshot();
         }
 
         private Builder nested(LogicalOperator nestedOperator, Consumer<Builder> consumer) {
@@ -262,39 +281,15 @@ public final class ConditionGroup implements ConditionNode {
                     shape,
                     value,
                     policy,
-                    (scalar, index) -> TermCondition.snapshotScalar(normalizedOperator, scalar));
+                    (scalar, index) -> TermCondition.snapshotScalar(normalizedOperator, scalar),
+                    Integer.MAX_VALUE,
+                    Integer.MAX_VALUE);
             if (result.present()) {
                 children.add(TermCondition.owned(identity, normalizedOperator, result.value()));
             }
             return this;
         }
 
-        private static void validateTree(TreeSummary summary) {
-            if (summary.nodeCount() > MAX_AST_NODES) {
-                throw new IllegalArgumentException(
-                        "condition AST node count must not exceed " + MAX_AST_NODES);
-            }
-            if (summary.maxDepth() > MAX_AST_DEPTH) {
-                throw new IllegalArgumentException(
-                        "condition AST depth must not exceed " + MAX_AST_DEPTH);
-            }
-        }
-    }
-
-    private static TreeSummary summarize(List<ConditionNode> children) {
-        int nodeCount = 1;
-        int maxChildDepth = 0;
-        for (ConditionNode child : children) {
-            TreeSummary childSummary = child instanceof ConditionGroup group
-                    ? group.treeSummary : TreeSummary.TERM;
-            nodeCount = Math.addExact(nodeCount, childSummary.nodeCount());
-            maxChildDepth = Math.max(maxChildDepth, childSummary.maxDepth());
-        }
-        return new TreeSummary(nodeCount, maxChildDepth + 1);
-    }
-
-    private record TreeSummary(int nodeCount, int maxDepth) {
-        private static final TreeSummary TERM = new TreeSummary(1, 1);
     }
 
     private enum Owned {

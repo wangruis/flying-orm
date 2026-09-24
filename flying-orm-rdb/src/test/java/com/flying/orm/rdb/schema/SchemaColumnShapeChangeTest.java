@@ -27,7 +27,6 @@ class SchemaColumnShapeChangeTest {
                         DynamicField.of("name", "VARCHAR").withLength(64),
                         SchemaMigrationOptions.safe(),
                         false),
-                dialect,
                 new SchemaTableSqlRenderer(dialect));
 
         assertTrue(change.apply());

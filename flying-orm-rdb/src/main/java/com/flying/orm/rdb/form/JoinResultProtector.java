@@ -6,7 +6,6 @@ import com.flying.orm.core.join.JoinSource;
 import com.flying.orm.core.protection.MaskedFieldDefinition;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.scope.DataScope;
-import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 import com.flying.orm.rdb.result.DynamicRow;
 
 import java.util.ArrayList;
@@ -116,7 +115,7 @@ final class JoinResultProtector {
             Map<Integer, Object> replacements = null;
             for (BoundSource source : bound.sources()) {
                 DynamicRow sourceView = safeRow.renameColumnsBound(source.plan());
-                DynamicRow transformed = source.plan().resultOperation().transform(sourceView);
+                DynamicRow transformed = source.plan().resultOperation().apply(sourceView);
                 for (BoundProjection projection : source.projections()) {
                     Object value = transformed.value(projection.protectedIndex());
                     if (value != safeRow.value(projection.outputIndex())) {
@@ -163,7 +162,7 @@ final class JoinResultProtector {
 
         private final JoinSource source;
         private final List<JoinProjection> projections;
-        private final ProtectedFieldRuntime.ResultOperation resultOperation;
+        private final UnaryOperator<DynamicRow> resultOperation;
         private final Map<String, String> renamedColumns;
         private final Map<String, String> primaryAliases;
         private final boolean encrypted;
@@ -171,7 +170,7 @@ final class JoinResultProtector {
         private SourcePlan(JoinSource source,
                            List<JoinProjection> projections,
                            List<JoinProjection> allProjections,
-                           ProtectedFieldRuntime.ResultOperation resultOperation,
+                           UnaryOperator<DynamicRow> resultOperation,
                            boolean encrypted) {
             this.source = source;
             this.projections = projections;
@@ -203,7 +202,7 @@ final class JoinResultProtector {
             return projections;
         }
 
-        private ProtectedFieldRuntime.ResultOperation resultOperation() {
+        private UnaryOperator<DynamicRow> resultOperation() {
             return resultOperation;
         }
 

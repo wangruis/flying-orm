@@ -113,6 +113,11 @@ public final class FormSchemaSqlRenderer {
         return migrations.migrate(changeSet);
     }
 
+    /** 根据物理快照保留变更集未描述的列属性，例如排序规则和默认值。 */
+    public List<SqlRequest> migrate(DynamicFormChangeSet changeSet, SchemaSnapshot snapshot) {
+        return migrations.migrate(changeSet, Objects.requireNonNull(snapshot, "schema snapshot must not be null"));
+    }
+
     /** 安全迁移的快捷入口，只返回可以执行的 SQL。 */
     public List<SqlRequest> migrateSafely(TableMetadata current,
                                           DynamicForm target,
@@ -168,10 +173,6 @@ public final class FormSchemaSqlRenderer {
 
     List<SqlRequest> rollbackDropSequences(List<DynamicField> fields, List<DynamicField> retainedFields) {
         return tables.dropSequences(fields, retainedFields);
-    }
-
-    SqlRequest rollbackAddColumn(String table, com.flying.orm.core.metadata.ColumnMetadata column) {
-        return rollback.rollbackAddColumn(table, column);
     }
 
     SqlRequest rollbackDropColumn(String table, String column) {

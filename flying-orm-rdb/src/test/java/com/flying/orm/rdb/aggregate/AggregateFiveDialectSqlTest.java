@@ -13,10 +13,13 @@ import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.form.FormDataSqlRenderer;
 import com.flying.orm.rdb.form.StructuredConditionResolver;
 import com.flying.orm.rdb.form.spec.QuerySpec;
+import com.flying.orm.rdb.result.DynamicRow;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -46,6 +49,36 @@ class AggregateFiveDialectSqlTest {
         assertEquals(
                 "select avg(cast([amount] as decimal(38,10))) as [amount_avg] from [orders]",
                 sqlServerIntegerAggregate(AggregateExpression.avg("amount", "amount_avg")));
+    }
+
+    @Test
+    void sqlServerCountAndDistinctCountKeepLongResultsInSelectAndHaving() {
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.sqlServer());
+        DynamicForm form = DynamicForm.builder("orders", "orders")
+                .addField(DynamicField.primaryKey("id", "BIGINT")).build();
+        AggregateExpression<Long> count = AggregateExpression.count("id", "rows");
+        AggregateExpression<Long> distinct = AggregateExpression.countDistinct("id", "distinct_rows");
+        AggregateSpec spec = AggregateSpec.builder(QuerySpec.of(form, ConditionGroup.and().build()))
+                .aggregate(count).aggregate(distinct)
+                .having(AggregateHaving.of(ConditionGroup.and()
+                        .where("rows", ">", 2_147_483_647L)
+                        .where("distinct_rows", ">", 2_147_483_647L).build())).build();
+        FormAggregatePlanner.Plan plan = new FormAggregatePlanner(renderer,
+                StructuredConditionResolver.defaults(renderer.valueCodecs()), DataScope.none(),
+                SqlExecutionOptions.safeDefaults(), FieldUsePolicy.unrestricted(), QueryShapeLimits.defaults())
+                .plan(spec);
+
+        assertEquals("select count_big([id]) as [rows], count_big(distinct [id]) as [distinct_rows]"
+                + " from [orders] having count_big([id]) > ? and count_big(distinct [id]) > ?",
+                plan.request().sql());
+        assertEquals(List.of(2_147_483_647L, 2_147_483_647L), plan.request().parameters());
+        Map<String, Object> columns = new LinkedHashMap<>();
+        columns.put("rows", 2_147_483_648L);
+        columns.put("distinct_rows", 2_147_483_648L);
+        AggregateRow result = new AggregateResultDecoder(plan).decode(DynamicRow.copyOf(columns));
+        assertEquals(2_147_483_648L, result.get(count));
+        assertEquals(2_147_483_648L, result.get(distinct));
     }
 
     private static String sqlServerIntegerAggregate(AggregateExpression<BigDecimal> expression) {
@@ -107,7 +140,8 @@ class AggregateFiveDialectSqlTest {
         String average = renderer.conditionRenderer().identifier("average");
         String orders = renderer.conditionRenderer().identifier("orders");
         assertEquals("select " + status + " as " + statusGroup
-                             + ", count(distinct " + tenant + ") as " + tenantCount
+                             + ", " + ("sqlserver".equals(dialect.name()) ? "count_big" : "count")
+                             + "(distinct " + tenant + ") as " + tenantCount
                              + ", sum(" + amount + ") as " + gross
                              + ", avg(" + amount + ") as " + average
                              + " from " + orders

@@ -55,6 +55,17 @@ class NativeTemporalMetadataTest {
     }
 
     @Test
+    void postgreSqlIndexProbeDoesNotDiscardPhysicalStorageSettings() {
+        for (String schema : new String[] {null, "public"}) {
+            String sql = PostgreSqlMetadataQueries.queries().indexQuery().create(schema, "users").sql();
+            assertTrue(sql.contains("and ci.reloptions is null"));
+            assertTrue(sql.contains("and ci.reltablespace = 0"));
+            assertTrue(sql.contains("when ci.reloptions is not null then 'index storage options'"));
+            assertTrue(sql.contains("when ci.reltablespace <> 0 then 'index tablespace'"));
+        }
+    }
+
+    @Test
     void otherDialectIndexProbesRepresentBothDirectionsAndRejectUnsupportedShapes() {
         String mysql = MySqlMetadataQueries.queries().indexQuery().create(null, "users").sql();
         assertTrue(mysql.contains("INDEX_REPRESENTABLE"));

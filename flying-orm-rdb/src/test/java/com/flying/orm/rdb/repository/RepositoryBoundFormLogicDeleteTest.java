@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.repository;
 
+import com.flying.orm.core.annotation.EnumValue;
 import com.flying.orm.core.annotation.IdType;
 import com.flying.orm.core.annotation.TableId;
 import com.flying.orm.core.annotation.TableLogic;
@@ -14,6 +15,7 @@ import com.flying.orm.rdb.aggregate.AggregateExpression;
 import com.flying.orm.rdb.aggregate.AggregateSpec;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchExecutionEvidence;
+import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlWriteResult;
@@ -21,6 +23,10 @@ import com.flying.orm.rdb.form.FormDataSqlRenderer;
 import com.flying.orm.rdb.form.ReactiveFormClient;
 import com.flying.orm.rdb.form.SyncFormClient;
 import com.flying.orm.rdb.form.spec.QuerySpec;
+import com.flying.orm.rdb.id.IdGenerator;
+import com.flying.orm.rdb.mapping.EntityFieldFiller;
+import com.flying.orm.rdb.mapping.EntityModelRegistry;
+import com.flying.orm.rdb.mapping.EntitySchemaDescriptor;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.sync.SyncBatchExecutor;
@@ -30,12 +36,67 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RepositoryBoundFormLogicDeleteTest {
+
+    @Test
+    void syncOrdinaryEnumLogicDeleteUsesStoredLiterals() {
+        assertDoesNotThrow(() -> assertEnumLogicDelete(false, false));
+    }
+
+    @Test
+    void reactiveOrdinaryEnumLogicDeleteUsesStoredLiterals() {
+        assertDoesNotThrow(() -> assertEnumLogicDelete(true, false));
+    }
+
+    @Test
+    void syncDescriptorEnumLogicDeleteUsesStoredLiterals() {
+        assertEnumLogicDelete(false, true);
+    }
+
+    @Test
+    void reactiveDescriptorEnumLogicDeleteUsesStoredLiterals() {
+        assertEnumLogicDelete(true, true);
+    }
+
+    private static void assertEnumLogicDelete(boolean reactive, boolean registered) {
+        RecordingSql sql = new RecordingSql();
+        Map<Class<?>, EntitySchemaDescriptor<?>> schemas = registered
+                ? Map.of(EnumPerson.class, EntitySchemaDescriptor.builder(EnumPerson.class).build())
+                : Map.of();
+        try (EntityModelRegistry models = EntityModelRegistry.create(
+                CacheRegionPolicy.entityMappingDefaults(), IdGenerator.none(), EntityFieldFiller.none(), schemas)) {
+            DynamicForm form = models.metadata(EnumPerson.class).toDynamicForm();
+            if (reactive) {
+                ReactiveFormClient client = ReactiveFormClient.create(sql.reactive(), renderer())
+                        .withEntityModelRegistry(models);
+                ReactiveFormRepository<EnumPerson> repository = ReactiveFormRepository.create(
+                        client, form, EnumPerson.class);
+                repository.insert(new EnumPerson()).block();
+                assertEquals(List.of("a", 7L), sql.last.parameters());
+                repository.select(where()).collectList().block();
+                assertEquals(List.of(7L, "a"), sql.last.parameters());
+                repository.delete(where()).block();
+            } else {
+                SyncFormClient client = SyncFormClient.create(sql.sync(), batches(), renderer())
+                        .withEntityModelRegistry(models);
+                SyncFormRepository<EnumPerson> repository = SyncFormRepository.create(client, form, EnumPerson.class);
+                repository.insert(new EnumPerson());
+                assertEquals(List.of("a", 7L), sql.last.parameters());
+                repository.select(where());
+                assertEquals(List.of(7L, "a"), sql.last.parameters());
+                repository.delete(where());
+            }
+            assertTrue(sql.last.sql().startsWith("update "), sql.last.sql());
+            assertEquals(List.of("d", 7L, "a"), sql.last.parameters());
+        }
+    }
 
     @Test
     void syncExplicitFormRuleKeepsItsValuesAndGroupsOrBeforePhysicalDelete() {
@@ -237,6 +298,26 @@ class RepositoryBoundFormLogicDeleteTest {
                 }
             };
         }
+    }
+
+    private enum DeletionState {
+        ACTIVE("a"), DELETED("d");
+
+        @EnumValue
+        private final String code;
+
+        DeletionState(String code) { this.code = code; }
+    }
+
+    @TableName("enum_people")
+    public static final class EnumPerson {
+        @TableId(type = IdType.INPUT)
+        private Long id = 7L;
+        @TableLogic(value = "a", delval = "d")
+        private DeletionState deleted = DeletionState.ACTIVE;
+
+        public Long getId() { return id; }
+        public DeletionState getDeleted() { return deleted; }
     }
 
     @TableName("people")

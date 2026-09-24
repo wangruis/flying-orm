@@ -46,15 +46,15 @@ class StructuredConditionInputSnapshotTest {
     }
 
     @Test
-    void rejectsValuesBeyondTheDepthBoundary() {
+    void snapshotsValuesBeyondTheFormerDepthBoundary() {
         Object value = "leaf";
         for (int depth = 0; depth < 66; depth++) {
             value = java.util.List.of(value);
         }
         Object deepValue = value;
 
-        assertThrows(StructuredConditionException.class,
-                     () -> StructuredConditionInput.term("payload", "eq", deepValue));
+        assertInstanceOf(java.util.List.class,
+                         StructuredConditionInput.term("payload", "eq", deepValue).value());
     }
 
     @Test

@@ -184,13 +184,12 @@ final class ReactiveFormPageResultSupport {
             FormOperationPlanner.PlannedPage plan,
             List<DynamicRow> rawRows,
             SensitiveDisplayMode displayMode) {
-        ProtectedContainsResultSupport.requireCandidateLimit(rawRows.size());
-        return operations.results.decodeRows(
+        return operations.results.forContains().decodeRows(
                         plan.form(), Flux.fromIterable(rawRows), plan.options(),
                         plan.scope(), SensitiveDisplayMode.FULL, plan.decodingFields())
                 .collectList()
                 .map(rows -> operations.containsResults.finish(
-                        plan.form(), plan.containsQuery(), rows, plan.outputFields(), displayMode));
+                        plan.form(), plan.containsQuery(), rows, plan.outputFields(), displayMode, plan.options()));
     }
 
     private static Mono<List<DynamicRow>> verifyContains(
@@ -198,18 +197,17 @@ final class ReactiveFormPageResultSupport {
             FormOperationPlanner.PlannedCursorPage plan,
             List<DynamicRow> rawRows,
             SensitiveDisplayMode displayMode) {
-        ProtectedContainsResultSupport.requireCandidateLimit(rawRows.size());
-        return operations.results.decodeRows(
+        return operations.results.forContains().decodeRows(
                         plan.form(), Flux.fromIterable(rawRows), plan.options(),
                         plan.scope(), SensitiveDisplayMode.FULL, plan.decodingFields())
                 .collectList()
                 .map(rows -> operations.containsResults.finish(
-                        plan.form(), plan.containsQuery(), rows, plan.outputFields(), displayMode));
+                        plan.form(), plan.containsQuery(), rows, plan.outputFields(), displayMode, plan.options()));
     }
 
     private static PageResult<DynamicRow> containsPage(List<DynamicRow> rows, PageQuery page) {
         int from = (int) Math.min(page.offset(), rows.size());
-        int to = Math.min(from + page.size(), rows.size());
+        int to = (int) Math.min((long) from + page.size(), rows.size());
         return PageResult.of(rows.subList(from, to), rows.size(), page);
     }
 }

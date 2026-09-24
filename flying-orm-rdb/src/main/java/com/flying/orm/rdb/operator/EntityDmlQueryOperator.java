@@ -40,7 +40,9 @@ public final class EntityDmlQueryOperator<T>
     /** 继续追加严格 AND 等值条件。 */
     public EntityDmlQueryOperator<T> and(EntityProperty<T, ?> property, Object value) { return where(property, value); }
     /** 使用已注册条件运算符追加 AND 条件。 */
-    public EntityDmlQueryOperator<T> and(EntityProperty<T, ?> property, String operator, Object value) { command.state().where().term(property, operator, value); return this; }
+    public EntityDmlQueryOperator<T> and(EntityProperty<T, ?> property, String operator, Object value) { return where(property, operator, value); }
+    /** 以 AND 追加标准或已注册的业务条件，字段和值均不作为原始 SQL。 */
+    public EntityDmlQueryOperator<T> where(EntityProperty<T, ?> property, String operator, Object value) { command.state().where().where(property, operator, value); return this; }
     /** 设置本次查询的敏感字段显示方式。 */
     @Override
     public EntityDmlQueryOperator<T> sensitiveDisplay(SensitiveDisplayMode mode) {

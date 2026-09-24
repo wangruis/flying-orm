@@ -46,7 +46,8 @@ final class ReactiveBatchExecutionObservationSupport {
                     if (evidence.state() == BatchExecutionState.SUCCESS) ordinary.success(rows(evidence), size(evidence));
                     else if (evidence.state() == BatchExecutionState.CANCELLED) ordinary.cancelled(rows(evidence), size(evidence));
                     else ordinary.error(rows(evidence), size(evidence),
-                            new IllegalStateException("batch SQL execution was not successful"));
+                            new BatchExecutionEvidenceException(
+                                    "batch SQL execution was not successful", null, evidence));
                 }
                 publish(view, evidence, started);
             }).doOnError(error -> {

@@ -59,7 +59,7 @@ class StructuredConditionDeterministicFailureTest {
                 () -> normalizer.normalize("7",
                                            DynamicField.of("sequence", "INTEGER"),
                                            StructuredConditionPolicy.defaults(),
-                                           "$",
+                                           ConditionCompilationBudget.Path.root("$"),
                                            "="));
 
         assertEquals(StructuredConditionErrorCode.VALUE_CONVERSION_FAILED, error.code());
@@ -77,7 +77,7 @@ class StructuredConditionDeterministicFailureTest {
                                 () -> normalizer.normalize("7",
                                                            DynamicField.of("sequence", "INTEGER"),
                                                            StructuredConditionPolicy.defaults(),
-                                                           "$",
+                                                           ConditionCompilationBudget.Path.root("$"),
                                                            "=")));
     }
 

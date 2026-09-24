@@ -21,7 +21,10 @@ public record TenantScope(String field, Object value) {
         field = requireText(field, "tenant field");
         value = ConditionValueNormalizer.normalize(ConditionValueShape.SCALAR,
                                                    value,
-                                                   ConditionValuePolicy.REJECT_EMPTY)
+                                                   ConditionValuePolicy.REJECT_EMPTY,
+                                                   (scalar, index) -> scalar,
+                                                   Integer.MAX_VALUE,
+                                                   Integer.MAX_VALUE)
                                         .value();
         value = BindableValueSnapshots.logicalValue(value);
     }

@@ -4,6 +4,10 @@ import com.flying.orm.core.page.PageResult;
 import com.flying.orm.rdb.lifecycle.EntityLifecyclePhase;
 import com.flying.orm.rdb.lifecycle.ReactiveEntityListener;
 import com.flying.orm.rdb.mapping.EntityMetadata;
+import org.reactivestreams.Publisher;
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
+import reactor.core.publisher.Flux;
 
 import java.util.List;
 import java.util.Objects;
@@ -84,6 +88,30 @@ final class SyncRepositoryLifecycleSupport<T> {
             // 生命周期监听器本来就是 Publisher 契约。这里是同步调用唯一允许等待它的位置。
             awaiter.awaitCompletion(dispatcher.fire(safePhase, entity, result));
         }
+    }
+
+    /** 批量输入可能来自事件线程；先组合 PRE，再映射实体，不在上游发布线程等待。 */
+    Publisher<T> beforeRows(Publisher<T> source, EntityLifecyclePhase phase) {
+        if (!dispatcher.hasWork(phase)) {
+            return source;
+        }
+        return Flux.defer(() -> {
+            SyncRepositoryPublishers.Demand demand = new SyncRepositoryPublishers.Demand();
+            Publisher<T> requestedSource = subscriber -> source.subscribe(new Subscriber<>() {
+                public void onSubscribe(Subscription subscription) {
+                    if (demand.connect(subscription)) {
+                        subscriber.onSubscribe(demand);
+                    }
+                }
+                public void onNext(T entity) { subscriber.onNext(entity); }
+                public void onError(Throwable error) { subscriber.onError(error); }
+                public void onComplete() { subscriber.onComplete(); }
+            });
+            // concatMap(0) 仍会补取下一项；按 JDBC 的真实需求放行原源，避免提前消费和执行 PRE。
+            return Flux.from(requestedSource)
+                    .concatMap(entity -> dispatcher.fire(phase, entity, null).thenReturn(entity), 0)
+                    .doOnRequest(demand::allow);
+        });
     }
 
     private long write(T entity,

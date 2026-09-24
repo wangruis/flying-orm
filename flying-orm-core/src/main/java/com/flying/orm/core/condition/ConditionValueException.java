@@ -29,7 +29,7 @@ public final class ConditionValueException extends IllegalArgumentException {
         NULL_VALUE,
         BLANK_VALUE,
         COLLECTION_EMPTY,
-        /** 集合超过条件入口允许的默认硬上限。 */
+        /** 集合超过条件入口配置的容量预算。 */
         COLLECTION_TOO_LARGE,
         /** 字符串值超过条件入口允许的资源上限。 */
         STRING_TOO_LONG,

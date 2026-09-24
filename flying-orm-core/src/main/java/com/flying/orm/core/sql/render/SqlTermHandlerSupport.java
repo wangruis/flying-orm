@@ -1,13 +1,12 @@
 package com.flying.orm.core.sql.render;
 
 import com.flying.orm.core.condition.ConditionValueShape;
+import com.flying.orm.core.internal.value.BindableValueSnapshots;
 import java.lang.reflect.Array;
 import java.util.Iterator;
 
 /** Package-local implementations shared by the public standard term factories. */
 final class SqlTermHandlerSupport {
-
-    private static final int MAX_COLLECTION_SIZE = 1_000;
 
     private SqlTermHandlerSupport() {
     }
@@ -81,9 +80,13 @@ final class SqlTermHandlerSupport {
         return SimpleSqlTermHandler.internal(id, shape, renderer);
     }
 
-    /** The public term accessor already returns an isolated value for the extension codec boundary. */
+    /** Standard term accessors own the input; a codec may return a different, borrowed mutable value. */
     static Object parameter(SqlRenderContext context, Object value) {
-        return context.parameter(value);
+        Object encoded = context.parameter(value);
+        Object bindable = SqlFragment.bindableParameter(encoded);
+        return bindable == value || !BindableValueSnapshots.requiresImmutableSnapshot(bindable)
+                ? encoded
+                : SqlFragment.encodedParameter(BindableValueSnapshots.immutableValue(bindable));
     }
 
     private static int appendValues(Object value,
@@ -98,9 +101,6 @@ final class SqlTermHandlerSupport {
         }
         if (value != null && value.getClass().isArray()) {
             int length = Array.getLength(value);
-            if (length > MAX_COLLECTION_SIZE) {
-                throw collectionTooLarge();
-            }
             for (int index = 0; index < length; index++) {
                 count = appendValue(Array.get(value, index), count, context, output);
             }
@@ -113,19 +113,12 @@ final class SqlTermHandlerSupport {
                                    int count,
                                    SqlRenderContext context,
                                    SqlTermOutput output) {
-        if (count == MAX_COLLECTION_SIZE) {
-            throw collectionTooLarge();
-        }
         if (count > 0) {
             output.appendSql(", ");
         }
         output.appendSql("?");
         output.addParameter(parameter(context, value));
         return count + 1;
-    }
-
-    private static IllegalArgumentException collectionTooLarge() {
-        return new IllegalArgumentException("multi-value term must not contain more than 1000 values");
     }
 
     private static IllegalArgumentException invalidRange() {

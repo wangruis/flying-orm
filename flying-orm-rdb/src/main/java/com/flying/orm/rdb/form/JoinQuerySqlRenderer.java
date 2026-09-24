@@ -108,7 +108,9 @@ final class JoinQuerySqlRenderer {
         }
 
         List<Object> parameters = new ArrayList<>();
-        String projection = count ? "count(*) as total" : projections(safeSpec.projections());
+        String projection = count
+                ? ("sqlserver".equals(support.dialectName) ? "count_big" : "count") + "(*) as total"
+                : projections(safeSpec.projections());
         StringBuilder sql = new StringBuilder("select ").append(projection)
                                                            .append(" from ")
                                                            .append(relation(

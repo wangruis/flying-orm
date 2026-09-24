@@ -289,8 +289,12 @@ final class SchemaTypeMapping {
         List<String> values = type.arguments();
         long[] arguments = new long[values.size()];
         for (int index = 0; index < values.size(); index++) {
+            String value = values.get(index);
+            if (!characterLengthUnit(type).isEmpty()) {
+                value = value.substring(0, value.indexOf(' '));
+            }
             try {
-                arguments[index] = Long.parseLong(values.get(index));
+                arguments[index] = Long.parseLong(value);
             } catch (NumberFormatException ignored) {
                 arguments[index] = -1L;
             }
@@ -303,6 +307,10 @@ final class SchemaTypeMapping {
     }
 
     private static String withArguments(String type, String arguments) {
+        String unit = characterLengthUnit(DatabaseType.of(type));
+        if (!unit.isEmpty() && arguments.chars().allMatch(Character::isDigit)) {
+            arguments += " " + unit.toUpperCase(Locale.ROOT);
+        }
         int open = type.indexOf('(');
         if (open >= 0) {
             int close = type.lastIndexOf(')');
@@ -312,5 +320,24 @@ final class SchemaTypeMapping {
         int arrayStart = type.indexOf('[');
         int insertAt = modifier.find() ? modifier.start() : arrayStart >= 0 ? arrayStart : type.length();
         return type.substring(0, insertAt) + "(" + arguments + ")" + type.substring(insertAt);
+    }
+
+    /** 显式声明优先；已有 Oracle 字符列未指定新单位时保留物理单位，不猜测会话默认值。 */
+    static String preserveCharacterLengthUnit(SchemaDialect dialect, String actual, String desired) {
+        if (dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.ORACLE) return desired;
+        DatabaseType target = DatabaseType.of(desired);
+        String unit = characterLengthUnit(DatabaseType.of(actual));
+        if (unit.isEmpty() || !characterLengthUnit(target).isEmpty()
+                || !("CHAR".equals(target.baseName()) || "VARCHAR2".equals(target.baseName()))
+                || target.arguments().size() != 1) return desired;
+        return withArguments(desired, target.arguments().getFirst() + " " + unit.toUpperCase(Locale.ROOT));
+    }
+
+    static String characterLengthUnit(DatabaseType type) {
+        if (!type.safeDeclaration() || type.isArray() || type.arguments().size() != 1
+                || !("CHAR".equals(type.baseName()) || "VARCHAR2".equals(type.baseName()))) return "";
+        String argument = type.arguments().getFirst();
+        int separator = argument.indexOf(' ');
+        return separator < 0 ? "" : argument.substring(separator + 1);
     }
 }

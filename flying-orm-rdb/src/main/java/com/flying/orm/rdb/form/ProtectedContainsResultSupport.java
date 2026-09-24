@@ -4,23 +4,23 @@ import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 import com.flying.orm.rdb.result.DynamicRow;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.UnaryOperator;
 
 /**
- * 对有界 CONTAINS 候选执行明文复核、最终脱敏和投影裁剪。
+ * 对 CONTAINS 候选执行明文复核、最终脱敏和投影裁剪；容量由查询执行选项控制。
  *
  * @author wangr
  * @date 2026-08-10
  * @version v1.0
  */
 final class ProtectedContainsResultSupport {
-
-    static final int DEFAULT_CANDIDATE_LIMIT = 1000;
 
     private final FormDataSqlRenderer renderer;
 
@@ -32,13 +32,16 @@ final class ProtectedContainsResultSupport {
                             ProtectedFieldRuntime.PreparedContainsQuery query,
                             List<DynamicRow> decryptedRows,
                             List<String> outputFields,
-                            SensitiveDisplayMode displayMode) {
+                            SensitiveDisplayMode displayMode,
+                            SqlExecutionOptions options) {
         List<DynamicRow> verified = new ArrayList<>(decryptedRows.size());
         DynamicRow projectionTemplate = null;
         Map<Integer, Object> replacements = null;
+        UnaryOperator<DynamicRow> display = renderer.protection().displayOperation(form, displayMode);
+        FormResultDecoder.DecodedResultBudget budget = new FormResultDecoder.DecodedResultBudget(options.maxResultBytes());
         for (DynamicRow row : decryptedRows) {
             if (renderer.protection().matchesContains(form, query, row)) {
-                DynamicRow displayed = renderer.protection().mask(form, row, displayMode);
+                DynamicRow displayed = budget.accept(display.apply(row));
                 if (sameLayout(displayed, outputFields)) {
                     verified.add(displayed);
                     continue;
@@ -87,9 +90,4 @@ final class ProtectedContainsResultSupport {
         return template.withValues(replacements);
     }
 
-    static void requireCandidateLimit(int actual) {
-        if (actual > DEFAULT_CANDIDATE_LIMIT) {
-            throw new ProtectedSearchCandidateLimitExceededException(DEFAULT_CANDIDATE_LIMIT, actual);
-        }
-    }
 }

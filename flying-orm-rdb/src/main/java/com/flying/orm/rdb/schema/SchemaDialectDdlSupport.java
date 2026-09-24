@@ -347,22 +347,34 @@ final class SchemaDialectDdlSupport {
 
     String alterColumnTypeSql(RelationIdentity table, String column, String databaseType,
                               String columnDefinition, boolean nullable, String collation) {
+        return alterColumnTypeForRenderedTable(types.identifier(table), column, databaseType,
+                                               columnDefinition, nullable, collation);
+    }
+
+    String alterColumnTypeSql(String table, String column, String databaseType,
+                              String columnDefinition, boolean nullable, String collation) {
+        return alterColumnTypeForRenderedTable(types.identifier(table), column, databaseType,
+                                               columnDefinition, nullable, collation);
+    }
+
+    private String alterColumnTypeForRenderedTable(String table, String column, String databaseType,
+                                                   String columnDefinition, boolean nullable, String collation) {
         if (databaseStyle == SchemaDialect.GeneratedValueStyle.MYSQL) {
-            return "alter table " + types.identifier(table) + " modify column "
+            return "alter table " + table + " modify column "
                     + requireColumnDefinition(columnDefinition);
         }
         String safeType = SchemaDialectTypeSupport.requireDataType(databaseType, "alter column data type");
         if (databaseStyle == SchemaDialect.GeneratedValueStyle.SQL_SERVER) {
-            return "alter table " + types.identifier(table) + " alter column " + types.identifier(column)
+            return "alter table " + table + " alter column " + types.identifier(column)
                     + ' ' + safeType + (collation == null ? "" : " collate "
                         + SchemaDialectTypeSupport.sqlServerCollation(collation))
                     + (nullable ? " null" : " not null");
         }
         if (databaseStyle == SchemaDialect.GeneratedValueStyle.H2) {
-            return "alter table " + types.identifier(table) + " alter column " + types.identifier(column)
+            return "alter table " + table + " alter column " + types.identifier(column)
                     + " set data type " + safeType;
         }
-        return alterColumnTypeForRenderedTable(types.identifier(table), column, safeType);
+        return alterColumnTypeForRenderedTable(table, column, safeType);
     }
 
     private String alterColumnTypeForRenderedTable(String table, String column, String databaseType) {
@@ -430,6 +442,15 @@ final class SchemaDialectDdlSupport {
     }
 
     String alterColumnNullabilitySql(RelationIdentity table, String column,
+                                     String databaseType, String columnDefinition,
+                                     boolean nullable, String collation) {
+        if (databaseStyle == SchemaDialect.GeneratedValueStyle.SQL_SERVER) {
+            return alterColumnTypeSql(table, column, databaseType, columnDefinition, nullable, collation);
+        }
+        return alterColumnNullabilitySql(table, column, databaseType, columnDefinition, nullable);
+    }
+
+    String alterColumnNullabilitySql(String table, String column,
                                      String databaseType, String columnDefinition,
                                      boolean nullable, String collation) {
         if (databaseStyle == SchemaDialect.GeneratedValueStyle.SQL_SERVER) {

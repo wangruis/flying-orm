@@ -1,13 +1,10 @@
 package com.flying.orm.rdb.jdbc;
 
-import com.flying.orm.rdb.execution.ProtectedWriteWork;
-
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.List;
-import java.util.Map;
 
 /** Executes a bounded, verified JDBC batch for protected side-index tokens. */
 final class JdbcProtectedSideIndexDml {
@@ -46,8 +43,8 @@ final class JdbcProtectedSideIndexDml {
             return;
         }
         if (parameterSets.size() > MAX_TOKEN_BATCH_SIZE
-                || parameterSets.stream().mapToInt(List::size).sum()
-                > com.flying.orm.rdb.internal.protection.ProtectedReplacementBatchPlan.MAX_PARAMETERS) {
+                || (parameterSets.size() > 1 && parameterSets.stream().mapToLong(List::size).sum()
+                > com.flying.orm.rdb.internal.protection.ProtectedReplacementBatchPlan.MAX_PARAMETERS)) {
             throw new IllegalArgumentException("protected side index delete batch exceeds internal limit");
         }
         try (PreparedStatement statement = connection.prepareStatement(sql)) {
@@ -59,34 +56,6 @@ final class JdbcProtectedSideIndexDml {
             JdbcStatementControl.requireNotInterrupted(statement);
             requireDeleteCounts(statement.executeBatch(), parameterSets.size());
         }
-    }
-
-    static void insertTokens(Connection connection,
-                             ProtectedWriteWork work,
-                             Map<String, Object> owner,
-                             ProtectedWriteWork.FieldTokens field) throws SQLException {
-        int tokenCount = field.tokenCount();
-        for (int offset = 0; offset < tokenCount; offset += MAX_TOKEN_BATCH_SIZE) {
-            int limit = Math.min(tokenCount, offset + MAX_TOKEN_BATCH_SIZE);
-            try (PreparedStatement statement = connection.prepareStatement(work.insertSql())) {
-                executeExactBatch(statement, work, owner, field, offset, limit);
-            }
-        }
-    }
-
-    private static void executeExactBatch(PreparedStatement statement,
-                                          ProtectedWriteWork work,
-                                          Map<String, Object> owner,
-                                          ProtectedWriteWork.FieldTokens field,
-                                          int offset,
-                                          int limit) throws SQLException {
-        for (int index = offset; index < limit; index++) {
-            JdbcStatementControl.requireNotInterrupted(statement);
-            JdbcStatementBinder.bind(statement, work.sideIndexParameters(owner, field, index));
-            statement.addBatch();
-        }
-        JdbcStatementControl.requireNotInterrupted(statement);
-        requireExactCounts(statement.executeBatch(), limit - offset);
     }
 
     private static void requireExactCounts(int[] affectedRows, int expected) {

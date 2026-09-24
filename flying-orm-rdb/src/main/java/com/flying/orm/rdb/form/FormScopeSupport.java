@@ -71,6 +71,10 @@ final class FormScopeSupport {
         return guard.applyUpdateScope(form, values, where, effectiveScope);
     }
 
+    void validateTenantLock(DynamicForm form, OptimisticLockOptions lock, DataScope scope) {
+        guard.validateTenantLock(form, lock, scope);
+    }
+
     ConditionGroup batchUpdateWhere(DynamicForm form,
                                     BatchOptimisticUpdate update,
                                     DataScope effectiveScope) {

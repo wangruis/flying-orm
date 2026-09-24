@@ -1,6 +1,7 @@
 package com.flying.orm.core.sql.render;
 
 import com.flying.orm.core.internal.Names;
+import com.flying.orm.core.internal.value.BindableValueSnapshots;
 import com.flying.orm.core.internal.value.OwnedBindableValues;
 
 import com.flying.orm.core.condition.ConditionValueShape;
@@ -41,8 +42,6 @@ record RelationExistsTermHandler(String id,
                                  boolean negated,
                                  TermExtensionDescriptor extension) implements SqlTermHandler {
 
-    private static final int MAX_COLLECTION_VALUES = 1_000;
-
     @Override
     public ConditionValueShape shape() {
         return ConditionValueShape.SCALAR_OR_COLLECTION;
@@ -77,7 +76,7 @@ record RelationExistsTermHandler(String id,
              relationKeyColumn,
              relationValueColumn,
              negated,
-             TermExtensionDescriptor.filter(id, Set.of(), MAX_COLLECTION_VALUES, 1));
+             TermExtensionDescriptor.filter(id, Set.of(), Integer.MAX_VALUE, 1));
     }
 
     /**
@@ -153,8 +152,9 @@ record RelationExistsTermHandler(String id,
         List<?> sourceValues = values(safeTerm.value());
         OwnedBindableValues.Buffer values = OwnedBindableValues.buffer(sourceValues.size());
         for (Object value : sourceValues) {
-            values.add(SqlFragment.bindableParameter(
-                    SqlTermHandlerSupport.parameter(safeContext, value)));
+            // Custom term scalars are not necessarily owned, even when the codec returns its input.
+            values.add(BindableValueSnapshots.immutableValue(
+                    SqlFragment.bindableParameter(safeContext.parameter(value))));
         }
         String valueExpression = valueExpression(relationValue, values.size());
         String sql = (negated ? "not exists" : "exists")
@@ -206,11 +206,6 @@ record RelationExistsTermHandler(String id,
         if (value instanceof Iterable<?> iterable) {
             List<Object> values = new ArrayList<>();
             for (Object item : iterable) {
-                if (values.size() == MAX_COLLECTION_VALUES) {
-                    throw new IllegalArgumentException(
-                            "relation exists term must not contain more than "
-                                    + MAX_COLLECTION_VALUES + " values");
-                }
                 values.add(item);
             }
             requireNotEmpty(values);
@@ -218,11 +213,6 @@ record RelationExistsTermHandler(String id,
         }
         if (value.getClass().isArray()) {
             int length = Array.getLength(value);
-            if (length > MAX_COLLECTION_VALUES) {
-                throw new IllegalArgumentException(
-                        "relation exists term must not contain more than "
-                                + MAX_COLLECTION_VALUES + " values");
-            }
             List<Object> values = new ArrayList<>(length);
             for (int i = 0; i < length; i++) {
                 values.add(Array.get(value, i));

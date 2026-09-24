@@ -54,6 +54,29 @@ class R2dbcGeneratedKeyWriterLayoutTest {
     private static final SqlExecutionOptions OPTIONS = SqlExecutionOptions.safeDefaults();
 
     @Test
+    void readsCountAndKeyFromTheSameSegmentOnEverySubscription() {
+        Metadata metadata = new Metadata(R2dbcType.BIGINT, "key_", 1);
+        AtomicInteger consumptions = new AtomicInteger();
+        Fixture fixture = new Fixture(() -> List.of(result(Flux.just(
+                new CountAndKey(1L, row(metadata, 41L).row())), consumptions)));
+        Mono<SqlWriteResult> write = fixture.write(OPTIONS);
+
+        for (int subscription = 1; subscription <= 2; subscription++) {
+            SqlWriteResult actual = write.block();
+
+            assertEquals(1, actual.affectedRows());
+            assertEquals(1, actual.generatedKeys().size());
+            assertEquals(41L, actual.generatedKeys().getFirst().value(0));
+            assertEquals(subscription, consumptions.get());
+            assertEquals(subscription, fixture.executes);
+            assertEquals(subscription, fixture.closes);
+        }
+    }
+
+    private record CountAndKey(long value, Row row) implements Result.UpdateCount, Result.RowSegment {
+    }
+
+    @Test
     void skipsGeneratedKeySizingWhenTheByteBudgetIsDisabled() {
         for (SqlExecutionOptions options : List.of(OPTIONS, OPTIONS.withMaxRows(500))) {
             CountingText text = new CountingText("x".repeat(256));

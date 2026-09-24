@@ -2,7 +2,6 @@ package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.ConditionGroups;
-import com.flying.orm.core.condition.ConditionNode;
 import com.flying.orm.core.condition.StructuredConditionInput;
 import com.flying.orm.core.condition.StructuredConditionPolicy;
 import com.flying.orm.core.form.DynamicField;
@@ -15,6 +14,9 @@ import com.flying.orm.core.scope.ScopeAccessException;
 import com.flying.orm.core.scope.ScopeErrorCode;
 import com.flying.orm.core.scope.TenantScope;
 import com.flying.orm.rdb.form.spec.QuerySpec;
+import com.flying.orm.rdb.internal.condition.ConditionNodes;
+import com.flying.orm.rdb.lock.OptimisticLockMode;
+import com.flying.orm.rdb.lock.OptimisticLockOptions;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -121,7 +123,22 @@ final class FormScopeGuard {
         DataScope safeScope = Objects.requireNonNull(effectiveScope, "effective data scope must not be null");
         ConditionGroup businessWhere = requireBusinessWhere(safeUpdate.where());
         validateWritableTenantUpdateValues(form, safeUpdate.ownedValues(), safeScope);
+        validateTenantLock(form, safeUpdate.lock(), safeScope);
         return businessWhere;
+    }
+
+    /** 乐观锁的 SET 同样不能改变已声明的租户；普通内部版本字段不受字段写白名单限制。 */
+    void validateTenantLock(DynamicForm form, OptimisticLockOptions lock, DataScope scope) {
+        if (lock == null) {
+            return;
+        }
+        scope.tenantScope(lock.field()).ifPresent(tenant -> {
+            if (lock.mode() == OptimisticLockMode.INCREMENT) {
+                throw scopeError(ScopeErrorCode.TENANT_VALUE_MISMATCH, form, tenant.field(),
+                        "optimistic lock must not increment tenant field [" + tenant.field() + "]");
+            }
+            TenantValueGuard.requireMatching(form, tenant.field(), lock.nextValue(), tenant.value());
+        });
     }
 
     Map<String, Object> prepareWriteValues(DynamicForm form,
@@ -219,12 +236,7 @@ final class FormScopeGuard {
     }
 
     private static boolean containsBusinessPredicate(ConditionGroup group) {
-        for (ConditionNode child : group.children()) {
-            if (!(child instanceof ConditionGroup nested) || containsBusinessPredicate(nested)) {
-                return true;
-            }
-        }
-        return false;
+        return ConditionNodes.anyTerm(group, term -> true);
     }
 
     private static void requireTenantScope(DynamicForm form, DataScope scope) {

@@ -18,7 +18,7 @@ import java.util.Objects;
 import java.util.stream.Collectors;
 
 /**
- * 把 CONTAINS 逻辑令牌计划渲染成按密钥版本隔离的有界候选查询。
+ * 把 CONTAINS 逻辑令牌计划渲染成按密钥版本隔离的候选查询。
  *
  * <p>每个版本单独执行 group/having，避免轮换期间把两个版本的局部令牌拼成一次错误命中。</p>
  *
@@ -27,11 +27,6 @@ import java.util.stream.Collectors;
  * @version v1.0
  */
 final class ProtectedContainsSqlPlanner {
-
-    private static final int MAX_IN_LIST_VALUES = 1000;
-    private static final int MAX_SQL_PARAMETERS = 2100;
-    private static final String PARAMETER_LIMIT_MESSAGE =
-            "protected contains query exceeds the portable SQL parameter limit";
 
     private final FormSqlRenderSupport support;
     private final PaginationDialect pagination;
@@ -59,38 +54,32 @@ final class ProtectedContainsSqlPlanner {
         List<SqlRequest> requests = new ArrayList<>(safe.tokenGroups().size());
         for (ProtectedFieldRuntime.ContainsTokenGroup group : safe.tokenGroups()) {
             List<byte[]> tokens = group.tokens();
-            requireTokenCount(tokens.size());
             String markers = java.util.Collections.nCopies(tokens.size(), "?").stream()
                                           .collect(Collectors.joining(", "));
             List<Object> parameters = new ArrayList<>(tokens.size() + 2);
             parameters.add(safe.fieldTag());
             parameters.addAll(tokens);
             parameters.add(safe.distinctTokenCount());
-            requests.add(requireParameterCount(
-                    pagination.limit(base.formatted(markers), parameters, candidateLimit + 1)));
+            requests.add(pagination.limit(base.formatted(markers), parameters, candidateLimit + 1));
         }
         return List.copyOf(requests);
     }
 
     SqlRequest rows(ProtectedFieldRuntime.PreparedContainsQuery query,
-                    List<PageSort> sorts,
-                    int candidateLimit) {
-        return rows(query, sorts, null, candidateLimit);
+                    List<PageSort> sorts) {
+        return rows(query, sorts, null);
     }
 
     SqlRequest rows(ProtectedFieldRuntime.PreparedContainsQuery query,
-                    CursorPageQuery page,
-                    int candidateLimit) {
+                    CursorPageQuery page) {
         ProtectedFieldRuntime.PreparedContainsQuery safeQuery = Objects.requireNonNull(
                 query, "protected contains query must not be null");
         return rows(safeQuery, CursorPageNormalizer.normalize(
-                safeQuery.physicalForm(), Objects.requireNonNull(page, "cursor page query must not be null")),
-                    candidateLimit);
+                safeQuery.physicalForm(), Objects.requireNonNull(page, "cursor page query must not be null")));
     }
 
     SqlRequest rows(ProtectedFieldRuntime.PreparedContainsQuery query,
-                    CursorPageNormalizer.NormalizedCursorPage page,
-                    int candidateLimit) {
+                    CursorPageNormalizer.NormalizedCursorPage page) {
         ProtectedFieldRuntime.PreparedContainsQuery safeQuery = Objects.requireNonNull(
                 query, "protected contains query must not be null");
         CursorPageNormalizer.NormalizedCursorPage safePage = Objects.requireNonNull(
@@ -99,16 +88,14 @@ final class ProtectedContainsSqlPlanner {
                 .map(sort -> sort.direction() == CursorDirection.ASC
                         ? PageSort.asc(sort.field()) : PageSort.desc(sort.field()))
                 .toList();
-        return rows(safeQuery, sorts, safePage, candidateLimit);
+        return rows(safeQuery, sorts, safePage);
     }
 
     private SqlRequest rows(ProtectedFieldRuntime.PreparedContainsQuery query,
                             List<PageSort> sorts,
-                            CursorPageNormalizer.NormalizedCursorPage cursor,
-                            int candidateLimit) {
+                            CursorPageNormalizer.NormalizedCursorPage cursor) {
         ProtectedFieldRuntime.PreparedContainsQuery safe = Objects.requireNonNull(
                 query, "protected contains query must not be null");
-        requireCandidateLimit(candidateLimit);
         List<String> candidateColumns = candidateColumns(safe.primaryKeys().size());
         List<Object> parameters = new ArrayList<>();
         List<String> candidates = new ArrayList<>(safe.tokenGroups().size());
@@ -148,7 +135,8 @@ final class ProtectedContainsSqlPlanner {
                .append(')');
         }
         sql.append(orderBy);
-        return requireParameterCount(pagination.limit(sql.toString(), parameters, candidateLimit + 1));
+        // Execution options govern candidate rows and bytes; truncation here could hide matches or totals.
+        return new SqlRequest(sql.toString(), parameters);
     }
 
     /**
@@ -198,7 +186,6 @@ final class ProtectedContainsSqlPlanner {
                                      List<Object> parameters) {
         String tokenAlias = "fop_token";
         List<byte[]> tokens = group.tokens();
-        requireTokenCount(tokens.size());
         String markers = java.util.Collections.nCopies(tokens.size(), "?").stream()
                                       .collect(Collectors.joining(", "));
         String owners = java.util.stream.IntStream.range(0, query.primaryKeys().size())
@@ -248,22 +235,4 @@ final class ProtectedContainsSqlPlanner {
                 .toList();
     }
 
-    private static void requireCandidateLimit(int candidateLimit) {
-        if (candidateLimit < 1 || candidateLimit >= Integer.MAX_VALUE) {
-            throw new IllegalArgumentException("protected contains candidate limit must be positive and bounded");
-        }
-    }
-
-    private static void requireTokenCount(int tokenCount) {
-        if (tokenCount > MAX_IN_LIST_VALUES) {
-            throw new IllegalArgumentException(PARAMETER_LIMIT_MESSAGE);
-        }
-    }
-
-    private static SqlRequest requireParameterCount(SqlRequest request) {
-        if (request.parameters().size() > MAX_SQL_PARAMETERS) {
-            throw new IllegalArgumentException(PARAMETER_LIMIT_MESSAGE);
-        }
-        return request;
-    }
 }

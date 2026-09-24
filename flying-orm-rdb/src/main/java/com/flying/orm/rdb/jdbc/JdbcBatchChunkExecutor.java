@@ -124,7 +124,8 @@ final class JdbcBatchChunkExecutor {
                             protectedRows.rows().get(index), count, generatedKey);
                 } else if (!protectedRows.rows().isEmpty()) {
                     JdbcProtectedBatchSideIndex.completeGeneratedRow(
-                            connection, protectedRows.rows().get(index), count, generatedKey);
+                            connection, protectedRows.rows().get(index), count, generatedKey,
+                            protectedRows.maxBufferedBytes());
                 }
                 readyRows++;
             }

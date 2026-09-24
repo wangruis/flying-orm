@@ -9,9 +9,8 @@ import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.rdb.codec.ArrayValueCodec;
 import com.flying.orm.rdb.form.StructuredConditionCustomizer;
 import com.flying.orm.rdb.form.StructuredConditionResolver;
+import com.flying.orm.rdb.internal.condition.ConditionNodes;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
@@ -55,8 +54,8 @@ public final class ArrayStructuredConditions implements StructuredConditionResol
 
     @Override
     public StructuredConditionInput adapt(DynamicForm form, StructuredConditionInput input) {
-        return adaptNode(Objects.requireNonNull(form, "dynamic form must not be null"),
-                         Objects.requireNonNull(input, "structured condition input must not be null"));
+        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        return ConditionNodes.rewrite(input, term -> adaptTerm(safeForm, term));
     }
 
     @Override
@@ -68,28 +67,20 @@ public final class ArrayStructuredConditions implements StructuredConditionResol
         return safePolicy.withAdditionalTerms(GOVERNED_TERMS);
     }
 
-    private StructuredConditionInput adaptNode(DynamicForm form, StructuredConditionInput input) {
-        if (input.field() != null || input.operator() != null) {
-            String operator = normalize(input.operator());
-            if (!OPERATORS.contains(operator)) {
-                return input;
-            }
-            DynamicField field = form.field(Objects.requireNonNull(input.field(),
-                                                                    "array condition field must not be null"));
-            if (!field.databaseType().isArray()) {
-                throw new IllegalArgumentException("array operator requires an SQL array field: " + field.name());
-            }
-            Object value = ANY_EQUALS.equals(operator)
-                    ? ArrayValueCodec.writeElement(input.value(), field.databaseType())
-                    : ArrayConditionValue.of(arrayValues(input.value()), field.databaseType());
-            return new StructuredConditionInput(input.field(), operator, value, input.logic(), input.terms());
+    private StructuredConditionInput adaptTerm(DynamicForm form, StructuredConditionInput input) {
+        String operator = normalize(input.operator());
+        if (!OPERATORS.contains(operator)) {
+            return input;
         }
-
-        List<StructuredConditionInput> terms = new ArrayList<>(input.terms().size());
-        for (StructuredConditionInput term : input.terms()) {
-            terms.add(adaptNode(form, Objects.requireNonNull(term, "structured condition child must not be null")));
+        DynamicField field = form.field(Objects.requireNonNull(input.field(),
+                                                                "array condition field must not be null"));
+        if (!field.databaseType().isArray()) {
+            throw new IllegalArgumentException("array operator requires an SQL array field: " + field.name());
         }
-        return new StructuredConditionInput(input.field(), input.operator(), input.value(), input.logic(), terms);
+        Object value = ANY_EQUALS.equals(operator)
+                ? ArrayValueCodec.writeElement(input.value(), field.databaseType())
+                : ArrayConditionValue.of(arrayValues(input.value()), field.databaseType());
+        return new StructuredConditionInput(input.field(), operator, value, input.logic(), input.terms());
     }
 
     private Object arrayValues(Object value) {

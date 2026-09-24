@@ -1,6 +1,5 @@
 package com.flying.orm.rdb.aggregate;
 
-import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.ConditionNode;
 import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.condition.StructuredConditionInput;
@@ -26,6 +25,7 @@ import com.flying.orm.rdb.form.FormDataSqlRenderer;
 import com.flying.orm.rdb.form.StructuredConditionResolver;
 import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.internal.InternalApi;
+import com.flying.orm.rdb.internal.condition.ConditionNodes;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -236,12 +236,10 @@ public final class FormAggregatePlanner {
                                           FieldUseRequirements.Builder requirements) {
         StructuredConditionInput safeInput = Objects.requireNonNull(
                 input, "structured aggregate condition must not be null");
-        if (safeInput.field() != null && !safeInput.field().isBlank()) {
-            requirements.require(safeInput.field(), FieldUse.FILTER);
-        }
-        for (StructuredConditionInput child : safeInput.terms()) {
-            collectStructured(Objects.requireNonNull(
-                    child, "structured aggregate condition child must not be null"), requirements);
+        for (StructuredConditionInput current : ConditionNodes.preorder(safeInput)) {
+            if (current.field() != null && !current.field().isBlank()) {
+                requirements.require(current.field(), FieldUse.FILTER);
+            }
         }
     }
 
@@ -260,7 +258,10 @@ public final class FormAggregatePlanner {
                                         boolean governed,
                                         FormAggregateReadSupport reads) {
         ConditionNode safeNode = Objects.requireNonNull(node, "aggregate condition node must not be null");
-        if (safeNode instanceof TermCondition term) {
+        int nodes = 0;
+        for (ConditionNode current : ConditionNodes.preorder(safeNode)) {
+            nodes = Math.addExact(nodes, 1);
+            if (!(current instanceof TermCondition term)) continue;
             String field = term.field();
             if (targets == null) {
                 requirements.require(field, use);
@@ -275,17 +276,8 @@ public final class FormAggregatePlanner {
             if (governed) {
                 reads.approveTermExtension(term, use);
             }
-            return 1;
         }
-        if (safeNode instanceof ConditionGroup group) {
-            int nodes = 1;
-            for (ConditionNode child : group.children()) {
-                nodes = Math.addExact(nodes, collectCondition(
-                        child, use, requirements, targets, governed, reads));
-            }
-            return nodes;
-        }
-        throw new IllegalArgumentException("unsupported aggregate condition node");
+        return nodes;
     }
 
     private static void collectSorts(List<PageSort> sorts,
@@ -336,8 +328,8 @@ public final class FormAggregatePlanner {
                                          LogicalType sourceType,
                                          boolean sqlServerDialect) {
         return switch (function) {
-            case COUNT -> "count(" + field + ")";
-            case COUNT_DISTINCT -> "count(distinct " + field + ")";
+            case COUNT -> (sqlServerDialect ? "count_big" : "count") + "(" + field + ")";
+            case COUNT_DISTINCT -> (sqlServerDialect ? "count_big" : "count") + "(distinct " + field + ")";
             // SQL Server 会把整数 SUM/AVG 保留在源整数类型族。聚合前提升输入，
             // 同时避免 SUM 溢出和 AVG 整除截断；聚合后再 cast 已无法恢复丢失的事实。
             case SUM -> "sum(" + stableDecimalInput(field, sourceType, sqlServerDialect) + ")";

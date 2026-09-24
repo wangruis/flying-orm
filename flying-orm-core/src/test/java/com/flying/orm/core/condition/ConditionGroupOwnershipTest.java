@@ -13,7 +13,6 @@ import java.util.function.Supplier;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConditionGroupOwnershipTest {
@@ -54,7 +53,7 @@ class ConditionGroupOwnershipTest {
     }
 
     @Test
-    void trustedCombinationUsesCachedTreeSummariesInsteadOfWalkingSubtrees() {
+    void trustedCombinationDoesNotWalkSubtrees() {
         java.lang.management.ThreadMXBean standardBean = ManagementFactory.getThreadMXBean();
         assertTrue(standardBean instanceof com.sun.management.ThreadMXBean,
                    "the Java 21 runtime must expose per-thread allocation counters");
@@ -87,15 +86,15 @@ class ConditionGroupOwnershipTest {
     }
 
     @Test
-    void cachedSummaryStillRejectsACombinedTreeBeyondTheDepthBudget() {
+    void trustedCombinationAllowsTreesBeyondTheFormerDepthBudget() {
         ConditionGroup group = ConditionGroup.and().where("sequence", "=", 1).build();
         for (int depth = 2; depth < 63; depth++) {
             group = ConditionGroup.and().add(group).build();
         }
         ConditionGroup depthSixtyFourOr = ConditionGroup.or().add(group).build();
 
-        assertThrows(IllegalArgumentException.class,
-                     () -> ConditionGroups.and(depthSixtyFourOr, ConditionGroup.and().build()));
+        assertSame(depthSixtyFourOr,
+                   ConditionGroups.and(depthSixtyFourOr, ConditionGroup.and().build()).children().getFirst());
     }
 
     private static long allocatedBytes(com.sun.management.ThreadMXBean allocationBean,

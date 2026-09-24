@@ -26,8 +26,6 @@ import java.util.StringJoiner;
  */
 public final class PostgresqlVectorQueryRenderer {
 
-    private static final int MAX_LIMIT = 10_000;
-
     private static final String DISTANCE_LABEL = "_distance";
 
     private final FormDataSqlRenderer formRenderer;
@@ -56,8 +54,8 @@ public final class PostgresqlVectorQueryRenderer {
         if (field.databaseType().isArray() || field.databaseType().logicalType() != LogicalType.VECTOR) {
             throw new IllegalArgumentException("nearest query requires a VECTOR field: " + field.name());
         }
-        if (limit < 1 || limit > MAX_LIMIT) {
-            throw new IllegalArgumentException("vector query limit must be between 1 and " + MAX_LIMIT);
+        if (limit < 1) {
+            throw new IllegalArgumentException("vector query limit must be greater than or equal to 1");
         }
 
         List<String> safeProjections = Objects.requireNonNull(

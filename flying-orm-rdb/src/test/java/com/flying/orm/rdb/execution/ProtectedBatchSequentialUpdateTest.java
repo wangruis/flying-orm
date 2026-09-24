@@ -182,12 +182,12 @@ class ProtectedBatchSequentialUpdateTest {
         private List<Object[]> owners(String sql, List<Object> parameters) {
             List<Object[]> rows = new ArrayList<>();
             boolean slots = sql.contains("flying_owner_");
-            int width = slots ? 3 : 2;
+            int width = 2; // Only owner id and expected version are bound; slots are SQL literals.
             for (int offset = 0; offset < parameters.size(); offset += width) {
                 tokensBeforeOwnerReads.add(Set.copyOf(tokens));
                 long expected = ((Number) parameters.get(offset + width - 1)).longValue();
                 if (expected == version) {
-                    rows.add(slots ? new Object[]{1L, parameters.get(offset)} : new Object[]{1L});
+                    rows.add(slots ? new Object[]{1L, offset / width} : new Object[]{1L});
                 }
             }
             return rows;

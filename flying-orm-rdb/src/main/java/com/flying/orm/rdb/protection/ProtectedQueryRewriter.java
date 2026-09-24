@@ -9,6 +9,7 @@ import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.rdb.internal.condition.ConditionNodes;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -16,7 +17,7 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * 把显式保护搜索递归改写为隐藏盲索引条件。
+ * 把显式保护搜索改写为隐藏盲索引条件。
  *
  * @author wangr
  * @date 2026-08-10
@@ -117,11 +118,7 @@ final class ProtectedQueryRewriter {
     }
 
     private static boolean containsSearch(ConditionNode node) {
-        if (node instanceof TermCondition term) {
-            return ProtectedConditions.CONTAINS.equals(term.operator());
-        }
-        ConditionGroup group = (ConditionGroup) node;
-        return group.children().stream().anyMatch(ProtectedQueryRewriter::containsSearch);
+        return ConditionNodes.anyTerm(node, term -> ProtectedConditions.CONTAINS.equals(term.operator()));
     }
 
     private ConditionGroup rewriteGroup(DynamicForm form,
@@ -129,14 +126,7 @@ final class ProtectedQueryRewriter {
                                         String tenant,
                                         ValueCodecRegistry codecs) {
         ConditionGroup safeGroup = Objects.requireNonNull(group, "query where must not be null");
-        ConditionGroup.Builder builder = safeGroup.operator() == LogicalOperator.AND
-                ? ConditionGroup.and() : ConditionGroup.or();
-        for (ConditionNode node : safeGroup.children()) {
-            builder.add(node instanceof ConditionGroup nested
-                                ? rewriteGroup(form, nested, tenant, codecs)
-                                : rewriteTerm(form, (TermCondition) node, tenant, codecs));
-        }
-        return builder.build();
+        return ConditionNodes.rewrite(safeGroup, term -> rewriteTerm(form, term, tenant, codecs));
     }
 
     private TermCondition rewriteTerm(DynamicForm form,

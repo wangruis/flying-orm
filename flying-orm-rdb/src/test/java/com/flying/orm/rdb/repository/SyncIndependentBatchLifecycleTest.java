@@ -48,6 +48,49 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SyncIndependentBatchLifecycleTest {
 
     @Test
+    void asyncPreFailureCancelsInputBeforeOpeningAConnection() {
+        JdbcFixture fixture = new JdbcFixture();
+        IllegalStateException expected = new IllegalStateException("PRE failure");
+        AtomicInteger cancelled = new AtomicInteger();
+        SyncFormRepository<PayloadEntity> repository = fixture.repository(PayloadEntity.class)
+                .withListener(event -> Mono.error(expected));
+        Flux<PayloadEntity> source = Flux.just(new PayloadEntity(1), new PayloadEntity(2))
+                .publishOn(reactor.core.scheduler.Schedulers.parallel(), 1)
+                .doOnCancel(cancelled::incrementAndGet);
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> repository.insertBatch(source, options()));
+        assertSame(expected, failure);
+        assertEquals(1, cancelled.get());
+        assertEquals(0, fixture.acquired);
+        assertEquals(0, fixture.executions);
+    }
+
+    @Test
+    void asyncInputAndAsyncPreListenerRemainNonBlockingAndOrdered() {
+        for (Operation operation : Operation.values()) {
+            JdbcFixture fixture = new JdbcFixture();
+            List<String> events = new java.util.concurrent.CopyOnWriteArrayList<>();
+            Thread caller = Thread.currentThread();
+            SyncFormRepository<PayloadEntity> repository = fixture.repository(PayloadEntity.class)
+                    .withListener(event -> {
+                        if (event.phase() == EntityLifecyclePhase.PRE_PERSIST
+                                || event.phase() == EntityLifecyclePhase.PRE_UPDATE) {
+                            return Mono.<Void>fromRunnable(() -> events.add("pre:" + event.entity().id))
+                                    .subscribeOn(reactor.core.scheduler.Schedulers.parallel());
+                        }
+                        assertSame(caller, Thread.currentThread(), "JDBC completion remains on its caller thread");
+                        events.add("post:" + event.entity().id);
+                        return Mono.empty();
+                    });
+            Flux<PayloadEntity> source = Flux.just(new PayloadEntity(1), new PayloadEntity(2))
+                    .publishOn(reactor.core.scheduler.Schedulers.parallel(), 1);
+            assertEquals(2, execute(repository, operation, false, source, options()).successfulCount());
+            assertEquals(List.of("pre:1", "post:1", "pre:2", "post:2"), events);
+            fixture.assertClosed(2, 0, 0);
+        }
+    }
+
+    @Test
     void ordinaryUpdatePostsEverySparseSuccessfulEntityButNotZeroCountEntity() {
         assertSparseUpdatePosts(0, 0, false);
     }

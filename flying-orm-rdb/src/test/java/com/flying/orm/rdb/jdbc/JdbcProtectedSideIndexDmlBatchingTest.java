@@ -31,6 +31,46 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class JdbcProtectedSideIndexDmlBatchingTest {
 
     @Test
+    void executesSingleDeleteWiderThanTheInternalBatchParameterTarget() throws Exception {
+        var source = new org.h2.jdbcx.JdbcDataSource();
+        source.setURL("jdbc:h2:mem:wide_side_delete_" + java.util.UUID.randomUUID());
+        int count = 2001;
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            statement.execute("create table token_index(id bigint)");
+            statement.execute("insert into token_index values(7)");
+            JdbcProtectedSideIndexDml.deleteParameterSets(connection,
+                    "delete from token_index where id in ("
+                            + String.join(",", java.util.Collections.nCopies(count, "?")) + ")",
+                    List.of(java.util.Collections.nCopies(count, 7L)));
+            try (var result = statement.executeQuery("select count(*) from token_index")) {
+                result.next();
+                assertEquals(0, result.getLong(1));
+            }
+        }
+    }
+
+    @Test
+    void protectedBatchCompletionAcceptsWideTokenBindingsAsSeparateBatches() throws Exception {
+        List<String> fields = java.util.stream.IntStream.range(0, 2000).mapToObj(index -> "key_" + index).toList();
+        Map<String, Object> owner = new java.util.LinkedHashMap<>();
+        fields.forEach(field -> owner.put(field, 7L));
+        ProtectedWriteWork work = new ProtectedWriteWork(ProtectedWriteWork.Kind.INSERT,
+                new SqlRequest("insert into business_row values (?)", List.of(7L)), null, fields, owner,
+                "key_0 = ?", "delete from token_index where key_0 = ?",
+                "insert into token_index values ("
+                        + String.join(",", java.util.Collections.nCopies(fields.size() + 2, "?")) + ")",
+                List.of(new ProtectedWriteWork.FieldTokens("phone", List.of(new byte[]{1}, new byte[]{2}))));
+        SideIndexRecorder recorder = new SideIndexRecorder(2);
+        recorder.current.addAll(java.util.Collections.nCopies(fields.size() - 1, null));
+        new JdbcProtectedBatchSideIndex().complete(connection(recorder, false),
+                new JdbcProtectedBatchSideIndex.Prepared(
+                        List.of(new JdbcProtectedBatchSideIndex.RowState(work, List.of()))));
+        assertEquals(2, recorder.executeBatches.get());
+        assertEquals(2, recorder.addBatches.get());
+        assertEquals(fields.size() + 2, recorder.parameterSets.getFirst().size());
+    }
+
+    @Test
     void singleProtectedWriteBatchesAllTokensForOneOwnerField() {
         SideIndexRecorder recorder = new SideIndexRecorder(3);
         JdbcSqlExecutor executor = externalExecutor(connection(recorder, true));

@@ -319,9 +319,15 @@ public final class ReactiveSchemaClient {
 
     /** 执行调用方已经明确描述的动态表单变更集。 */
     public Mono<Long> migrate(DynamicFormChangeSet changeSet) {
+        return migrate(changeSet, null);
+    }
+
+    /** 使用已读取的物理快照保留变更集之外的列属性。 */
+    public Mono<Long> migrate(DynamicFormChangeSet changeSet, SchemaSnapshot snapshot) {
         DynamicFormChangeSet safeChangeSet = Objects.requireNonNull(
                 changeSet, "dynamic form change set must not be null");
-        return migrationExecutor.executeWithInvalidation(renderer.migrate(safeChangeSet),
+        return migrationExecutor.executeWithInvalidation(snapshot == null ? renderer.migrate(safeChangeSet)
+                                                                 : renderer.migrate(safeChangeSet, snapshot),
                                                           List.of(safeChangeSet.target().table()),
                                                           metadataInvalidator,
                                                           defaultExecutionOptions.sqlExecutionOptions());

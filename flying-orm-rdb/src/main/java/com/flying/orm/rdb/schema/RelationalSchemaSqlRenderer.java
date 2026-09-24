@@ -223,7 +223,17 @@ public final class RelationalSchemaSqlRenderer {
     }
 
     String columnDefinition(ColumnDefinition column, String charset, String collation) {
-        String type = dataType(column);
+        return columnDefinition(column, charset, collation, dataType(column), storageComment(column));
+    }
+
+    /** Restores observed storage without applying logical type mappings a second time. */
+    String restoredColumnDefinition(ColumnDefinition column, boolean physicalTypes, String storageComment) {
+        return columnDefinition(column, column.charset(), column.collation(),
+                SchemaDefinitionEquality.actualColumnDdlType(dialect, column, physicalTypes), storageComment);
+    }
+
+    private String columnDefinition(ColumnDefinition column, String charset, String collation,
+                                    String type, String storageComment) {
         StringBuilder sql = new StringBuilder(dialect.identifier(column.name()))
                 .append(' ').append(type);
         // 字符集和排序规则属于列类型；尤其 MySQL 的 CHARACTER SET 不能放到 NOT NULL 后面。
@@ -268,7 +278,6 @@ public final class RelationalSchemaSqlRenderer {
             }
             sql.append(" default ").append(defaultExpression);
         }
-        String storageComment = storageComment(column);
         if (dialect.inlineColumnComment() && storageComment != null) {
             sql.append(" comment ").append(dialect.commentLiteral(storageComment));
         }
@@ -464,7 +473,9 @@ public final class RelationalSchemaSqlRenderer {
         List<ColumnDefinition> identities = table.columns().stream()
                 .filter(column -> column.generation().strategy() == ValueGeneration.Strategy.IDENTITY)
                 .toList();
-        if (identities.size() > 1) {
+        if (identities.size() > 1
+                && dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.H2
+                && dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.POSTGRESQL) {
             throw new UnsupportedOperationException("a table cannot contain more than one identity column");
         }
         if (identities.isEmpty() || dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.MYSQL) {

@@ -8,14 +8,14 @@ Java 模型与条件 → 参数化 SQL → JDBC / R2DBC 执行 → 结果映射�
 | --- | --- | --- |
 | 动态表单 CRUD | `operator.dml().query(form) / insert / update / delete` | 运行时模型、类型转换、参数快照、非空写条件保护 |
 | 实体读写 | `clients.repository(Type.class)` | 注解映射、Lambda 字段、生成键、填充和生命周期 |
-| 投影与结果映射 | `select(...).fetchMap() / fetch(Type.class) / fetch(mapper)` | DynamicRow、bean、record、自定义 RowMapper；实体 `fetch()` 支持部分投影 |
+| 投影与结果映射 | `select(...).fetchMap() / fetch(Type.class) / fetch(mapper) / one(Type.class)` | DynamicRow、bean、record、自定义 RowMapper；实体 `fetch()` 支持部分投影 |
 | 条件 | `where(field, operator, value)`、`filter(input)` | AND/OR、NULL、集合、区间、可选条件、已注册业务语义 |
 | Scope 与字段治理 | `withDefaultDataScope`、`scope`、`from(form, policy, limits)` | 行范围取交集；投影、过滤、排序、分组等用途分别审核 |
-| 分页 | `page / cursorPage / keysetPage` | 页码与总数、稳定游标、复合可空 keyset、明确 NULL 顺序 |
+| 分页 | `page / cursorPage / keysetPage` | 页码与总数、稳定游标、复合可空 keyset、明确 NULL 顺序；动态查询可直接传 `Type.class` 映射 DTO |
 | JOIN / 自关联 | `dml().joinQuery`、`JoinQuerySpec` | 多来源、复合 ON、来源限定排序与分页；同表不同角色独立治理 |
 | 报表 | `query(form).aggregate(...)` | 分组、COUNT / COUNT DISTINCT / SUM / AVG / MIN / MAX、HAVING、类型化结果 |
 | 写入治理 | `update / delete`、`WriteSpec` | 租户、逻辑删除、乐观锁、字段权限、范围内写入 |
-| 批量 | `insertBatch / upsertBatch / updateBatch` | 有界缓冲、逐行乐观锁、范围内冲突更新、生成键、保护字段、执行证据 |
+| 批量 | `insertBatch / upsertBatch / updateBatch` | 有界缓冲、逐行乐观锁、范围内冲突更新、生成键、保护字段、执行证据；响应式 Repository 可直接接收实体流并沿用客户端预算 |
 | 多行同值更新 / 删除 | `update / delete + where(..., "in", ids)` | 一条范围操作，继续应用 Scope 与逻辑删除 |
 | 动态结构 | `operator.ddl()`、`clients.schema()` | 建表、加列、索引、差异计划、风险审核、执行前核验与回读 |
 | 读取已有结构 | `operator.metadata().readTable / readForm` | 表、列、索引与外键元数据，动态表单转换、显式缓存失效 |
@@ -47,6 +47,8 @@ PostgreSQL、MySQL、Oracle、SQL Server、H2 使用各自方言能力；不支�
 ## 配置与边界
 
 缓存、字段填充、ID 生成、扩展条件、日志、观测、批量预算和保护字段策略在客户端装配阶段配置。普通查询不需要操作内部 Runtime、Planner 或协调器。
+
+容量由开发者决定：分页无框架固定上限；条件、读取和批量使用可配置预算，内部不再叠加更小的固定门槛。加密检索不另设固定候选数、令牌数或密钥版本数量上限。参数绑定、字段治理、密码格式和目标数据库的实际约束仍然有效。
 
 JDBC 返回同步结果；R2DBC 返回原生 Flux/Mono，保留取消、背压与资源清理。不提供事务、分片、驱动或连接池管理，也不配置连接、事务及执行超时。外部 Connection 由上层获取/释放，ORM 清理自己的语句、结果与 LOB。
 

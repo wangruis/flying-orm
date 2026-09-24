@@ -1,6 +1,9 @@
 package com.flying.orm.rdb.protection;
 
 import com.flying.orm.core.codec.ValueCodecRegistry;
+import com.flying.orm.core.codec.ValueCodec;
+import com.flying.orm.core.protection.SensitiveDisplayMode;
+import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
@@ -22,6 +25,31 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ProtectedFieldReprotectionLookupBudgetTest {
+
+    @Test
+    void keyRotationDoesNotEncodeTheAlreadyEncodedPlaintextAgain() {
+        DynamicForm form = protectedForm("field");
+        ValueCodecRegistry codecs = ValueCodecRegistry.standard().withFirst(new ValueCodec() {
+            public boolean supports(Class<?> type) { return type == String.class; }
+            public Object write(Object value) { return "db:" + value; }
+            public Object read(Object value, Class<?> type) { return value.toString().substring(3); }
+        });
+        byte[] ciphertext;
+        try (ProtectedFieldRuntime old = ProtectedFieldRuntime.create(ProtectedFieldKeyRing.single("v1", key(1)))) {
+            ciphertext = (byte[]) old.prepareWrite(form, Map.of("field", "payload"), DataScope.none(), codecs)
+                    .values().get("field");
+        }
+        try (ProtectedFieldKeyRing keys = rotatingKeys();
+             ProtectedFieldRuntime current = ProtectedFieldRuntime.create(keys)) {
+            Map<String, Object> values = ProtectedFieldReprotection.create(keys).valuesNeedingReprotection(
+                    form, Map.of("field", ciphertext), DataScope.none(), codecs);
+            Map<String, Object> rotated = current.prepareWrite(form, values, DataScope.none(), codecs).values();
+            assertEquals("db:payload", current.transformResult(form, DynamicRow.copyOf(rotated),
+                    DataScope.none(), SensitiveDisplayMode.FULL, codecs).get("field"));
+            assertTrue(ProtectedFieldReprotection.create(keys).valuesNeedingReprotection(
+                    form, rotated, DataScope.none(), codecs).isEmpty());
+        }
+    }
 
     private static final int WIDE_ROW_WIDTH = 32;
     private static final String UNICODE_IGNORE_CASE_ALIAS = "F\u0130ELD";
@@ -83,7 +111,7 @@ class ProtectedFieldReprotectionLookupBudgetTest {
             assertEquals(Map.of("field", "trusted legacy"),
                     migration.valuesNeedingPlaintextMigration(
                             form, Map.of(UNICODE_IGNORE_CASE_ALIAS, "trusted legacy"), target));
-            assertEquals(Map.of("field", "old secret"),
+            assertRotatedValues(form, keys, Map.of("field", "old secret"),
                     migration.valuesNeedingReprotection(
                             form, Map.of(UNICODE_IGNORE_CASE_ALIAS, oldCiphertext),
                             DataScope.none(), ValueCodecRegistry.standard()));
@@ -110,7 +138,7 @@ class ProtectedFieldReprotectionLookupBudgetTest {
             assertAll(
                     () -> assertEquals(Map.of("field", "trusted legacy"),
                             migration.valuesNeedingPlaintextMigration(form, legacy, target)),
-                    () -> assertEquals(Map.of("field", "old secret"),
+                    () -> assertRotatedValues(form, keys, Map.of("field", "old secret"),
                             migration.valuesNeedingReprotection(
                                     form, physical, DataScope.none(), ValueCodecRegistry.standard())));
         }
@@ -233,6 +261,16 @@ class ProtectedFieldReprotectionLookupBudgetTest {
                                     .current("v2", key(2))
                                     .readable("v1", key(1))
                                     .build();
+    }
+
+    private static void assertRotatedValues(DynamicForm form, ProtectedFieldKeyRing keys,
+                                            Map<String, Object> expected, Map<String, Object> values) {
+        try (ProtectedFieldRuntime current = ProtectedFieldRuntime.create(keys)) {
+            Map<String, Object> rotated = current.prepareWrite(
+                    form, values, DataScope.none(), ValueCodecRegistry.standard()).values();
+            assertEquals(expected, current.transformResult(form, DynamicRow.copyOf(rotated), DataScope.none(),
+                    SensitiveDisplayMode.FULL, ValueCodecRegistry.standard()));
+        }
     }
 
     private static byte[] key(int value) {

@@ -21,6 +21,93 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SchemaLegacyPhysicalColumnRegressionTest {
 
     @Test
+    void sqlServerLogicalTypesStoredAsTextRetainCollationOnNullableChanges() {
+        for (String type : List.of("VARCHAR", "JSON", "OFFSET_TIME")) {
+            FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.sqlServer());
+            ColumnMetadata before = ColumnMetadata.of("code", type).withNullable(false);
+            DynamicField after = DynamicField.of("code", type).withNullable(true);
+            TableMetadata current = TableMetadata.builder("items").addColumn(before).build();
+            DynamicForm target = DynamicForm.builder("items", "items").addField(after).build();
+            SchemaSnapshot snapshot = sqlServerSnapshot(type);
+            SchemaMigrationPlan migration = renderer.migrationPlanner().migrateSafelyPlan(
+                    current, target, List.of(), List.of(), SchemaMigrationOptions.safe(), snapshot);
+            ReviewedSchemaMigrationPlan reviewed = SchemaMigrationReviewer.create(renderer).review(
+                    current, migration, SchemaMigrationReviewPolicy.allowBlocking(), snapshot);
+            assertTrue(migration.requests().getFirst().sql().contains("collate Latin1_General_100_BIN2"), type);
+            assertTrue(reviewed.rollback().requests().getFirst().sql().contains("collate Latin1_General_100_BIN2"), type);
+        }
+    }
+
+    @Test
+    void sqlServerReadsSourceCharacterFactsForRollbackToText() {
+        FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.sqlServer());
+        TableMetadata current = TableMetadata.builder("items")
+                .addColumn(ColumnMetadata.of("code", "VARCHAR").withNullable(false)).build();
+        DynamicForm target = DynamicForm.builder("items", "items")
+                .addField(DynamicField.of("code", "INTEGER").withNullable(false)).build();
+        java.util.concurrent.atomic.AtomicInteger reads = new java.util.concurrent.atomic.AtomicInteger();
+        com.flying.orm.rdb.metadata.ReactiveFormMetadataReader reader = new com.flying.orm.rdb.metadata.ReactiveFormMetadataReader() {
+            public reactor.core.publisher.Mono<DynamicForm> readForm(String id, String table) {
+                throw new AssertionError("unexpected form read");
+            }
+            public reactor.core.publisher.Mono<DynamicForm> readForm(String id, String schema, String table) {
+                throw new AssertionError("unexpected form read");
+            }
+            public reactor.core.publisher.Mono<SchemaSnapshot> readSnapshot(String table) {
+                reads.incrementAndGet();
+                return reactor.core.publisher.Mono.just(sqlServerSnapshot("VARCHAR"));
+            }
+        };
+        SchemaSnapshot snapshot = renderer.migrationPlanner().physicalSnapshot(
+                current, target, SchemaMigrationOptions.safe().allowColumnChange(), reader).block();
+        assertEquals(1, reads.get());
+        SchemaMigrationPlan migration = renderer.migrationPlanner().migrateSafelyPlan(
+                current, target, List.of(), List.of(), SchemaMigrationOptions.safe().allowColumnChange(), snapshot);
+        ReviewedSchemaMigrationPlan reviewed = SchemaMigrationReviewer.create(renderer).review(
+                current, migration, SchemaMigrationReviewPolicy.allowBlocking(), snapshot);
+        org.junit.jupiter.api.Assertions.assertFalse(migration.requests().getFirst().sql().contains("collate"));
+        assertTrue(reviewed.rollback().requests().getFirst().sql().contains("collate Latin1_General_100_BIN2"));
+    }
+
+    @Test
+    void directCharacterChangesAcceptExplicitPhysicalFacts() {
+        FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.sqlServer());
+        DynamicForm source = DynamicForm.builder("items", "items")
+                .addField(DynamicField.of("code", "VARCHAR").withLength(16).withNullable(false)).build();
+        DynamicForm target = DynamicForm.builder("items", "items")
+                .addField(DynamicField.of("code", "VARCHAR").withLength(32).withNullable(false)).build();
+        assertThrows(IllegalStateException.class, () -> renderer.migrate(source.diffTo(target)));
+        assertTrue(renderer.migrate(source.diffTo(target), sqlServerSnapshot("VARCHAR"))
+                .getFirst().sql().contains("collate Latin1_General_100_BIN2"));
+    }
+
+    private static SchemaSnapshot sqlServerSnapshot(String type) {
+        return SchemaSnapshot.builder(RelationIdentity.table("items")).tablePresent()
+                .physicalColumns(List.of(ColumnDefinition.builder("code", type).nullable(false)
+                        .collation("Latin1_General_100_BIN2").build())).build();
+    }
+
+    @Test
+    void sqlServerForwardAndRollbackPreservePhysicalCharacterCollation() {
+        FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.sqlServer());
+        TableMetadata current = current();
+        SchemaSnapshot snapshot = SchemaSnapshot.builder(RelationIdentity.of(null, "app", "items"))
+                .tablePresent()
+                .physicalColumns(List.of(ColumnDefinition.builder("code", "VARCHAR").length(16).nullable(false)
+                        .collation("Latin1_General_100_BIN2").comment("keep").build())).build();
+        SchemaMigrationPlan migration = renderer.migrationPlanner().migrateSafelyPlan(
+                current, target(), List.of(), List.of(), SchemaMigrationOptions.safe(), snapshot);
+        ReviewedSchemaMigrationPlan reviewed = SchemaMigrationReviewer.create(renderer).review(
+                current, migration, SchemaMigrationReviewPolicy.allowBlocking(), snapshot);
+        assertEquals(1, migration.requests().size());
+        assertEquals(1, reviewed.rollback().requests().size());
+        for (String sql : List.of(migration.requests().getFirst().sql(),
+                reviewed.rollback().requests().getFirst().sql())) {
+            assertTrue(sql.toLowerCase(Locale.ROOT).contains("collate Latin1_General_100_BIN2".toLowerCase(Locale.ROOT)), sql);
+        }
+    }
+
+    @Test
     void forwardAndRollbackKeepTheSamePhysicalDefaultCommentAndCollation() {
         FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.mysql());
         TableMetadata current = current();

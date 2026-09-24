@@ -197,6 +197,8 @@ final class PostgreSqlMetadataQueries {
                        and opc.opcdefault
                        and ix.indoption[ord.position] in (0, 3)
                        and ix.indcollation[ord.position] = a.attcollation
+                       and ci.reloptions is null
+                       and ci.reltablespace = 0
                        and not coalesce((to_jsonb(ix)->>'indnullsnotdistinct')::boolean, false))
                         as INDEX_REPRESENTABLE,
                    case when (ix.indoption[ord.position] & 1) = 1 then 'DESC' else 'ASC' end
@@ -212,6 +214,8 @@ final class PostgreSqlMetadataQueries {
                        when not opc.opcdefault then 'non-default operator class'
                         when ix.indoption[ord.position] not in (0, 3) then 'non-default null ordering'
                        when ix.indcollation[ord.position] <> a.attcollation then 'non-default collation'
+                       when ci.reloptions is not null then 'index storage options'
+                       when ci.reltablespace <> 0 then 'index tablespace'
                        when coalesce((to_jsonb(ix)->>'indnullsnotdistinct')::boolean, false)
                            then 'nulls-not-distinct uniqueness'
                        else null
@@ -256,7 +260,9 @@ final class PostgreSqlMetadataQueries {
                         when 'a' then 'NO_ACTION' when 'r' then 'RESTRICT'
                         when 'c' then 'CASCADE' when 'n' then 'SET_NULL'
                         when 'd' then 'SET_DEFAULT' end as ON_UPDATE,
-                    (not con.condeferrable and con.convalidated and con.confmatchtype = 's')
+                    (not con.condeferrable and con.convalidated and con.confmatchtype = 's'
+                        and (pg_catalog.to_jsonb(con)->>'confdelsetcols' is null
+                             or pg_catalog.to_jsonb(con)->'confdelsetcols' @> pg_catalog.to_jsonb(con.conkey)))
                         as CONSTRAINT_REPRESENTABLE
             from pg_catalog.pg_constraint con
             join pg_catalog.pg_class t
@@ -282,6 +288,11 @@ final class PostgreSqlMetadataQueries {
     private static final String BASE_TABLE_SQL = """
              select pg_catalog.obj_description(t.oid, 'pg_class') as TABLE_COMMENT,
                     case
+                        when exists (
+                            select 1 from pg_catalog.pg_constraint unsupported_constraint
+                            where unsupported_constraint.conrelid = t.oid
+                              and unsupported_constraint.contype = 'x'
+                        ) then false
                         when t.relkind = 'r' then not t.relispartition and not exists (
                             select 1 from pg_catalog.pg_inherits inheritance
                             where inheritance.inhrelid = t.oid or inheritance.inhparent = t.oid
@@ -306,6 +317,11 @@ final class PostgreSqlMetadataQueries {
                         else false
                     end as TABLE_REPRESENTABLE,
                     case
+                        when exists (
+                            select 1 from pg_catalog.pg_constraint unsupported_constraint
+                            where unsupported_constraint.conrelid = t.oid
+                              and unsupported_constraint.contype = 'x'
+                        ) then 'exclusion constraint'
                         when t.relispartition or exists (
                             select 1 from pg_catalog.pg_inherits inheritance
                             where inheritance.inhrelid = t.oid

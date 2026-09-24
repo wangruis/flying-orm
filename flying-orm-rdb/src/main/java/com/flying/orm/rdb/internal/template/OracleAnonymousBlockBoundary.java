@@ -27,6 +27,7 @@ final class OracleAnonymousBlockBoundary {
     private static final class FirstWord {
         private final String sql;
         private String value;
+        private boolean label;
 
         private FirstWord(String sql) {
             this.sql = sql;
@@ -37,6 +38,18 @@ final class OracleAnonymousBlockBoundary {
                 return;
             }
             for (int index = start; index < end; index++) {
+                if (label) {
+                    if (pair(sql, index, end, '>')) {
+                        label = false;
+                        index++;
+                    }
+                    continue;
+                }
+                if (pair(sql, index, end, '<')) {
+                    label = true;
+                    index++;
+                    continue;
+                }
                 if (isWordStart(sql.charAt(index))) {
                     int wordEnd = wordEnd(sql, index, end);
                     value = sql.substring(index, wordEnd).toUpperCase(Locale.ROOT);
@@ -56,6 +69,8 @@ final class OracleAnonymousBlockBoundary {
         private int parentheses;
         private boolean pendingEnd;
         private boolean endLabel;
+        private boolean optionalEndLabel;
+        private boolean label;
         private boolean completed;
 
         private BlockValidator(String sql) {
@@ -64,6 +79,17 @@ final class OracleAnonymousBlockBoundary {
 
         private void accept(SqlLexicalScanner.SegmentKind kind, int start, int end) {
             if (kind != SqlLexicalScanner.SegmentKind.CODE) {
+                if (!label && kind == SqlLexicalScanner.SegmentKind.DOUBLE_QUOTED) {
+                    if (pendingEnd) {
+                        boolean expressionEnd = "CASE".equals(scopes.peek());
+                        closeScope(scopes);
+                        pendingEnd = false;
+                        endLabel = !expressionEnd;
+                    } else if (endLabel) {
+                        if (!optionalEndLabel) throw multipleStatements();
+                        optionalEndLabel = false;
+                    }
+                }
                 return;
             }
             for (int index = start; index < end;) {
@@ -73,6 +99,16 @@ final class OracleAnonymousBlockBoundary {
                         throw multipleStatements();
                     }
                     index++;
+                } else if (label) {
+                    if (pair(sql, index, end, '>')) {
+                        label = false;
+                        index += 2;
+                    } else {
+                        index++;
+                    }
+                } else if (!pendingEnd && !endLabel && pair(sql, index, end, '<')) {
+                    label = true;
+                    index += 2;
                 } else if (current == ';') {
                     if (pendingEnd) {
                         closeScope(scopes);
@@ -82,6 +118,7 @@ final class OracleAnonymousBlockBoundary {
                         scopes.pop();
                     }
                     endLabel = false;
+                    optionalEndLabel = false;
                     completed = scopes.isEmpty();
                     index++;
                 } else if (isWordStart(current)) {
@@ -117,9 +154,11 @@ final class OracleAnonymousBlockBoundary {
                     closePendingEnd(scopes, word);
                     pendingEnd = false;
                     endLabel = true;
+                    optionalEndLabel = "LOOP".equals(word) || "CASE".equals(word);
                 }
             } else if (endLabel) {
-                throw multipleStatements();
+                if (!optionalEndLabel) throw multipleStatements();
+                optionalEndLabel = false;
             } else if ("END".equals(word)) {
                 pendingEnd = true;
             } else if ("DECLARE".equals(word)) {
@@ -141,7 +180,7 @@ final class OracleAnonymousBlockBoundary {
         }
 
         private void finish() {
-            if (!completed || pendingEnd || endLabel || !scopes.isEmpty()) {
+            if (!completed || pendingEnd || endLabel || label || !scopes.isEmpty()) {
                 throw multipleStatements();
             }
         }
@@ -186,7 +225,11 @@ final class OracleAnonymousBlockBoundary {
     }
 
     private static boolean isWordPart(char value) {
-        return Character.isLetterOrDigit(value) || value == '_';
+        return Character.isLetterOrDigit(value) || value == '_' || value == '$' || value == '#';
+    }
+
+    private static boolean pair(String sql, int index, int end, char value) {
+        return index + 1 < end && sql.charAt(index) == value && sql.charAt(index + 1) == value;
     }
 
     private static IllegalArgumentException multipleStatements() {

@@ -63,7 +63,7 @@ public final class ConditionValueNormalizer {
                          DEFAULT_MAX_STRING_LENGTH);
     }
 
-    /** 结构化条件可为每次请求设置更小的集合上限。 */
+    /** 调用方可为每次请求设置集合上限。 */
     public static Result normalize(ConditionValueShape shape,
                                    Object value,
                                    ConditionValuePolicy policy,
@@ -88,10 +88,6 @@ public final class ConditionValueNormalizer {
         ScalarConverter safeConverter = Objects.requireNonNull(converter, "condition scalar converter must not be null");
         if (maxCollectionSize < 1) {
             throw new IllegalArgumentException("condition max collection size must be positive");
-        }
-        if (maxCollectionSize > DEFAULT_MAX_COLLECTION_SIZE) {
-            throw new IllegalArgumentException(
-                    "condition max collection size must not exceed " + DEFAULT_MAX_COLLECTION_SIZE);
         }
         if (maxStringLength < 1) {
             throw new IllegalArgumentException("condition max string length must be positive");

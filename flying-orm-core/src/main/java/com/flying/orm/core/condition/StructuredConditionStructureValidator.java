@@ -14,9 +14,6 @@ import java.util.Set;
 /** 在扩展适配器执行前限制条件树以及外部容器值，避免包装或序列化绕过统一预算。 */
 final class StructuredConditionStructureValidator {
 
-    /** 扩展值可以合法超过普通 IN 上限，但前端原始图仍不能要求无界遍历。 */
-    private static final int MAX_RAW_VALUE_REFERENCES = 20_000;
-
     /** 正式内置的结构化集合 operator 在原始值图校验阶段共用集合容量预算。 */
     private static final Set<String> COLLECTION_VALUE_OPERATORS = Set.of(
             "array-contains", "array-contained-by", "array-overlaps", "json-contains");
@@ -29,35 +26,55 @@ final class StructuredConditionStructureValidator {
                                                                      "structured condition input must not be null");
         StructuredConditionPolicy safePolicy = Objects.requireNonNull(policy,
                                                                        "structured condition policy must not be null");
-        validateNode(safeInput,
-                     safePolicy,
-                     new ConditionCompilationBudget(),
-                     1,
-                     ConditionCompilationBudget.ROOT_PATH);
+        ConditionCompilationBudget budget = new ConditionCompilationBudget();
+        validateNode(safeInput, safePolicy, budget, ConditionCompilationBudget.Path.ROOT);
+        ArrayDeque<ConditionFrame> pending = new ArrayDeque<>();
+        pending.addLast(new ConditionFrame(safeInput.terms(), ConditionCompilationBudget.Path.ROOT));
+        while (!pending.isEmpty()) {
+            ConditionFrame frame = pending.getLast();
+            if (frame.nextChild == frame.children.size()) {
+                pending.removeLast();
+                continue;
+            }
+            int index = frame.nextChild++;
+            StructuredConditionInput child = frame.children.get(index);
+            ConditionCompilationBudget.Path childPath = frame.path.child(index);
+            if (child == null) {
+                String path = childPath.text();
+                throw StructuredConditionException.of(StructuredConditionErrorCode.INVALID_NODE_SHAPE,
+                        path, "structured condition child must not be null at " + path);
+            }
+            validateNode(child, safePolicy, budget, childPath);
+            if (!child.terms().isEmpty()) {
+                pending.addLast(new ConditionFrame(child.terms(), childPath));
+            }
+        }
     }
 
     private static void validateNode(StructuredConditionInput input,
                                      StructuredConditionPolicy policy,
                                      ConditionCompilationBudget budget,
-                                     int depth,
-                                     String path) {
-        budget.checkNode(depth, policy, path);
+                                     ConditionCompilationBudget.Path path) {
+        budget.checkNode(path, policy);
         validateName(input.field(),
                      policy,
                      StructuredConditionErrorCode.FIELD_NOT_ALLOWED,
-                     ConditionCompilationBudget.propertyPath(path, "field"),
+                     path, "field",
                      "structured condition field exceeds limit at ");
         validateName(input.operator(),
                      policy,
                      StructuredConditionErrorCode.OPERATOR_NOT_ALLOWED,
-                     ConditionCompilationBudget.propertyPath(path, "operator"),
+                     path, "operator",
                      "structured condition operator exceeds limit at ");
         validateName(input.logic(),
                      policy,
                      StructuredConditionErrorCode.LOGIC_NOT_ALLOWED,
-                     ConditionCompilationBudget.propertyPath(path, "logic"),
+                     path, "logic",
                      "structured condition logic exceeds limit at ");
-        String valuePath = path + ".value";
+        if (input.stableValue() == null && input.operator() == null) {
+            return;
+        }
+        ConditionCompilationBudget.Path valuePath = path.property("value");
         try {
             validateRawValue(input.stableValue(),
                              policy,
@@ -68,31 +85,33 @@ final class StructuredConditionStructureValidator {
         } catch (StructuredConditionException error) {
             throw error;
         } catch (RuntimeException failure) {
+            String location = valuePath.text();
             throw StructuredConditionException.of(StructuredConditionErrorCode.VALUE_SHAPE_NOT_ALLOWED,
-                                                  valuePath,
-                                                  "structured condition value shape is not allowed at " + valuePath);
-        }
-        List<StructuredConditionInput> children = input.terms();
-        for (int index = 0; index < children.size(); index++) {
-            String childPath = ConditionCompilationBudget.childConditionPath(path, index);
-            StructuredConditionInput child = children.get(index);
-            if (child == null) {
-                throw StructuredConditionException.of(StructuredConditionErrorCode.INVALID_NODE_SHAPE,
-                                                      childPath,
-                                                      "structured condition child must not be null at " + childPath);
-            }
-            // 策略把最大深度封顶在 64。递归深度固定有界，同时不会先为超大同级节点分配一整块栈内存。
-            validateNode(child, policy, budget, depth + 1, childPath);
+                                                  location,
+                                                  "structured condition value shape is not allowed at " + location);
         }
     }
 
     private static void validateName(String value,
                                      StructuredConditionPolicy policy,
                                      StructuredConditionErrorCode code,
-                                     String path,
+                                     ConditionCompilationBudget.Path path,
+                                     String property,
                                      String message) {
         if (value != null && value.length() > policy.maxStringLength()) {
-            throw StructuredConditionException.of(code, path, message + path);
+            String location = path.property(property).text();
+            throw StructuredConditionException.of(code, location, message + location);
+        }
+    }
+
+    private static final class ConditionFrame {
+        private final List<StructuredConditionInput> children;
+        private final ConditionCompilationBudget.Path path;
+        private int nextChild;
+
+        private ConditionFrame(List<StructuredConditionInput> children, ConditionCompilationBudget.Path path) {
+            this.children = children;
+            this.path = path;
         }
     }
 
@@ -102,13 +121,12 @@ final class StructuredConditionStructureValidator {
      */
     private static void validateRawValue(Object value,
                                          StructuredConditionPolicy policy,
-                                         String path,
+                                         ConditionCompilationBudget.Path path,
                                          boolean preserveScalarArray,
                                          boolean enforceCollectionSize) {
         ArrayDeque<ValueNode> pending = new ArrayDeque<>();
         IdentityHashMap<Object, Boolean> active = new IdentityHashMap<>();
         int nodes = 0;
-        int references = 0;
         if (value != null) {
             pending.addLast(new ValueNode(value, path, 1, false));
         }
@@ -144,12 +162,12 @@ final class StructuredConditionStructureValidator {
                                  node.path(),
                                  "structured condition value depth exceeds limit at ");
             }
-            nodes++;
-            if (nodes > policy.maxNodes()) {
+            if (nodes >= policy.maxNodes()) {
                 throw valueLimit(StructuredConditionErrorCode.NODE_COUNT_EXCEEDED,
                                  node.path(),
                                  "structured condition value node count exceeds limit at ");
             }
+            nodes++;
             pending.addLast(new ValueNode(current, node.path(), node.depth(), true));
             if (current.getClass().isArray()) {
                 int length = Array.getLength(current);
@@ -157,15 +175,13 @@ final class StructuredConditionStructureValidator {
                     requireCollectionSize(length, policy, node.path());
                 }
                 if (current.getClass().getComponentType().isPrimitive()) {
-                    // primitive 元素不含文本或子容器，只需保留引用预算，无需逐叶遍历。
-                    references = checkReferenceCount(references, length, node.path());
+                    // primitive 元素不含文本或子容器，无需逐叶遍历。
                     continue;
                 }
                 for (int index = length - 1; index >= 0; index--) {
-                    references = checkReferenceCount(references, 1, node.path());
                     addValue(pending,
                              Array.get(current, index),
-                             valuePath(node.path(), index),
+                             node.path().index(index),
                              node.depth() + 1);
                 }
             } else if (current instanceof Collection<?> collection) {
@@ -174,13 +190,12 @@ final class StructuredConditionStructureValidator {
                 }
                 int index = 0;
                 for (Object item : collection) {
-                    references = checkReferenceCount(references, 1, node.path());
                     if (enforceCollectionSize) {
                         requireCollectionSize(index + 1, policy, node.path());
                     }
                     addValue(pending,
                              item,
-                             valuePath(node.path(), index),
+                             node.path().index(index),
                              node.depth() + 1);
                     index++;
                 }
@@ -190,32 +205,21 @@ final class StructuredConditionStructureValidator {
                 }
                 int index = 0;
                 for (Map.Entry<?, ?> entry : map.entrySet()) {
-                    references = checkReferenceCount(references, 1, node.path());
-                    references = checkReferenceCount(references, 1, node.path());
                     if (enforceCollectionSize) {
                         requireCollectionSize(index + 1, policy, node.path());
                     }
                     addValue(pending,
                              entry.getValue(),
-                             valuePath(node.path(), index),
+                             node.path().index(index),
                              node.depth() + 1);
                     addValue(pending,
                              entry.getKey(),
-                             valuePath(node.path(), index) + ".key",
+                             node.path().index(index).property("key"),
                              node.depth() + 1);
                     index++;
                 }
             }
         }
-    }
-
-    private static int checkReferenceCount(int references, int count, String path) {
-        if (count > MAX_RAW_VALUE_REFERENCES - references) {
-            throw valueLimit(StructuredConditionErrorCode.NODE_COUNT_EXCEEDED,
-                             path,
-                             "structured condition value reference count exceeds limit at ");
-        }
-        return references + count;
     }
 
     private static boolean isStandardScalarArray(StructuredConditionInput input,
@@ -247,17 +251,15 @@ final class StructuredConditionStructureValidator {
         return value.getClass().isArray() || value instanceof Collection<?> || value instanceof Map<?, ?>;
     }
 
-    private static void addValue(ArrayDeque<ValueNode> pending, Object value, String path, int depth) {
+    private static void addValue(ArrayDeque<ValueNode> pending, Object value,
+                                 ConditionCompilationBudget.Path path, int depth) {
         if (value != null) {
             pending.addLast(new ValueNode(value, path, depth, false));
         }
     }
 
-    private static String valuePath(String path, int index) {
-        return path + '[' + index + ']';
-    }
-
-    private static void requireCollectionSize(int size, StructuredConditionPolicy policy, String path) {
+    private static void requireCollectionSize(int size, StructuredConditionPolicy policy,
+                                               ConditionCompilationBudget.Path path) {
         if (size > policy.maxCollectionSize()) {
             throw valueLimit(StructuredConditionErrorCode.VALUE_COLLECTION_TOO_LARGE,
                              path,
@@ -266,11 +268,12 @@ final class StructuredConditionStructureValidator {
     }
 
     private static StructuredConditionException valueLimit(StructuredConditionErrorCode code,
-                                                            String path,
+                                                            ConditionCompilationBudget.Path path,
                                                             String message) {
-        return StructuredConditionException.of(code, path, message + path);
+        String location = path.text();
+        return StructuredConditionException.of(code, location, message + location);
     }
 
-    private record ValueNode(Object value, String path, int depth, boolean exit) {
+    private record ValueNode(Object value, ConditionCompilationBudget.Path path, int depth, boolean exit) {
     }
 }

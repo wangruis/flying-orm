@@ -183,8 +183,10 @@ final class SyncFormOperations {
                                  AggregateSpec spec) {
         FormAggregatePlanner.Plan plan = aggregatePlan(configuration, spec);
         AggregateResultDecoder aggregateDecoder = new AggregateResultDecoder(plan);
+        FormResultDecoder.DecodedResultBudget budget =
+                new FormResultDecoder.DecodedResultBudget(plan.options().maxResultBytes());
         return executor.queryMapped(
-                plan.request(), plan.options(), aggregateDecoder::decode, 0);
+                plan.request(), plan.options(), row -> budget.accept(aggregateDecoder.decode(row)), 0);
     }
 
     private List<DynamicRow> select(GovernedPlanEnvelope<FormOperationPlanner.PlannedQuery> envelope) {
@@ -201,12 +203,11 @@ final class SyncFormOperations {
     private List<DynamicRow> select(FormOperationPlanner.PlannedQuery plan) {
         if (plan.contains()) {
             List<DynamicRow> rawRows = executor.query(plan.request(), plan.options());
-            ProtectedContainsResultSupport.requireCandidateLimit(rawRows.size());
-            List<DynamicRow> decoded = decoder.decodeRows(
+            List<DynamicRow> decoded = decoder.forContains().decodeRows(
                     plan.form(), rawRows, plan.options(), plan.scope(),
                     com.flying.orm.core.protection.SensitiveDisplayMode.FULL);
             return containsResults.finish(plan.form(), plan.containsQuery(), decoded,
-                                          plan.outputFields(), plan.displayMode());
+                                          plan.outputFields(), plan.displayMode(), plan.options());
         }
         return decoder.decodeRows(
                 plan.form(), executor.query(plan.request(), plan.options()), plan.options(),
@@ -395,10 +396,12 @@ final class SyncFormOperations {
         RowMapper<DynamicRow> rowDecoder = decoder.rowDecoder(
                 resultForm, options, com.flying.orm.core.scope.DataScope.none(),
                 SensitiveDisplayMode.FULL, decodingPlan);
+        FormResultDecoder.DecodedResultBudget budget =
+                new FormResultDecoder.DecodedResultBudget(options.maxResultBytes());
         return row -> {
             DynamicRow decoded = rowDecoder.map(row);
             DynamicRow transformed = resultPlan.direct()
-                    ? decoded : resultPlan.transform(decoded);
+                    ? decoded : budget.accept(resultPlan.transform(decoded));
             return governed
                     ? FieldUseGuard.applyJoinVisibility(renderer, spec, transformed, fieldUse)
                     : transformed;

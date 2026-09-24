@@ -1,5 +1,7 @@
 package com.flying.orm.core.sql.render;
 
+import com.flying.orm.core.codec.ValueCodec;
+import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.internal.value.OwnedBindableValues;
 import org.junit.jupiter.api.Test;
@@ -7,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.LinkedList;
 import java.util.Date;
+import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -15,6 +18,60 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
 class SqlRequestOwnershipTest {
+
+    @Test
+    void rendererOwnsBorrowedMutableCodecOutputBeforePublishingTheFragment() {
+        byte[] bytes = {1, 2, 3};
+        SqlRenderer renderer = SqlRenderer.builder().addDefaultTerms()
+                .valueCodecs(ValueCodecRegistry.standard().withFirst(new BinaryIdCodec())).build();
+        SqlFragment fragment = renderer.renderWhere(
+                renderer.conditions().where("id", "=", new BinaryId(bytes)).build());
+        SqlRequest request = new SqlRequest(
+                "select * from item where " + fragment.sql(), fragment.parameters());
+
+        bytes[0] = 9;
+
+        assertArrayEquals(new byte[]{1, 2, 3}, (byte[]) request.parameters().getFirst());
+        assertArrayEquals(new byte[]{1, 2, 3}, (byte[]) fragment.parameters().getFirst());
+        assertSame(OwnedBindableValues.ownedValues(fragment.parameters()),
+                   OwnedBindableValues.ownedValues(request.parameters()));
+    }
+
+    @Test
+    void relationRendererOwnsMutableValuesReturnedByAnIdentityCodec() {
+        ByteBuffer bytes = ByteBuffer.wrap(new byte[]{1, 2, 3});
+        SqlRenderer renderer = SqlRenderer.builder().addTerm(SqlTermHandler.relationExists(
+                "in-group", "item_group", "ig", "item_id", "group_id")).build();
+        SqlFragment fragment = renderer.renderWhere(
+                renderer.conditions().where("id", "in-group", bytes).build());
+        SqlRequest request = new SqlRequest(
+                "select * from item where " + fragment.sql(), fragment.parameters());
+
+        bytes.put(0, (byte) 9);
+
+        assertEquals(ByteBuffer.wrap(new byte[]{1, 2, 3}), request.parameters().getFirst());
+        assertEquals(ByteBuffer.wrap(new byte[]{1, 2, 3}), fragment.parameters().getFirst());
+    }
+
+    private record BinaryId(byte[] bytes) {
+    }
+
+    private static final class BinaryIdCodec implements ValueCodec {
+        @Override
+        public boolean supports(Class<?> targetType) {
+            return targetType == BinaryId.class;
+        }
+
+        @Override
+        public Object write(Object value) {
+            return ((BinaryId) value).bytes();
+        }
+
+        @Override
+        public Object read(Object value, Class<?> targetType) {
+            return new BinaryId((byte[]) value);
+        }
+    }
 
     @Test
     void internalExecutionCanReuseOwnedValuesWithoutTriggeringAnotherSnapshot() {

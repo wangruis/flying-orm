@@ -47,7 +47,7 @@ final class EntityOptimisticLocks {
 
     private static boolean supportsIncrement(EntityFieldMetadata field) {
         return switch (field.databaseType().logicalType()) {
-            case BIG_INTEGER, INTEGER, DECIMAL -> true;
+            case BIG_INTEGER, INTEGER, SMALL_INTEGER, DECIMAL -> true;
             default -> false;
         };
     }

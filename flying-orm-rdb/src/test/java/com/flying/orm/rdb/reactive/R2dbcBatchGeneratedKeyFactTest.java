@@ -9,10 +9,66 @@ import org.reactivestreams.Publisher;
 import reactor.core.publisher.*;
 import java.lang.reflect.Proxy;
 import java.util.List;
+import java.util.ArrayList;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 import static org.junit.jupiter.api.Assertions.*;
 
 class R2dbcBatchGeneratedKeyFactTest {
+    @Test @SuppressWarnings("unchecked")
+    void sharedCountAndKeySegmentPreservesBatchCountsAndKeyOffsets() {
+        ColumnMetadata column = proxy(ColumnMetadata.class, (p,m,a) -> switch(m.getName()) {
+            case "getName" -> "id";
+            case "getType" -> R2dbcType.BIGINT;
+            case "getJavaType" -> Long.class;
+            default -> null;
+        });
+        RowMetadata metadata = proxy(RowMetadata.class, (p,m,a) ->
+                m.getName().equals("getColumnMetadatas") ? List.of(column) : column);
+        AtomicInteger executes = new AtomicInteger();
+        AtomicInteger consumptions = new AtomicInteger();
+        Statement statement = proxy(Statement.class, (p,m,a) -> {
+            if (!m.getName().equals("execute")) return p;
+            long generatedId = 40L + executes.incrementAndGet();
+            Row row = proxy(Row.class, (rp,rm,ra) ->
+                    rm.getName().equals("getMetadata") ? metadata : generatedId);
+            Result result = proxy(Result.class, (resultProxy, method, arguments) -> {
+                Function<Result.Segment,Publisher<Object>> consume =
+                        (Function<Result.Segment,Publisher<Object>>) arguments[0];
+                return Flux.<Result.Segment>just(new CountAndKey(1L, row))
+                        .doOnSubscribe(ignored -> consumptions.incrementAndGet())
+                        .concatMap(segment -> Flux.from(consume.apply(segment)));
+            });
+            return Flux.just(result);
+        });
+        Connection connection = proxy(Connection.class, (p,m,a) -> {
+            if (m.getName().equals("createStatement")) return statement;
+            throw new AssertionError(m.getName());
+        });
+        List<Long> offsets = new ArrayList<>();
+        List<Object> keys = new ArrayList<>();
+        BatchWriteRequest request = new BatchWriteRequest(SqlStatementPlan.canonical(
+                "insert into sample(value) values (?)", SqlBindMarkerStyle.CANONICAL, 1),
+                List.of(Integer.class), Flux.just(new Object[]{1}, new Object[]{2}), BatchWriteOptions.of(2),
+                BatchRowCountPolicy.EXACTLY_ONE, BatchGeneratedKeys.required("id", (offset, value) -> {
+                    offsets.add(offset);
+                    keys.add(value.value(0));
+                }));
+
+        BatchExecutionEvidence actual = R2dbcSqlExecutor.create(
+                ConnectionAccessTestSupport.borrowed(connection), RdbDialect.h2()).writeBatch(request).block();
+
+        assertEquals(2, actual.successfulCount());
+        assertEquals(2, actual.affectedRows().value());
+        assertEquals(List.of(0L, 1L), offsets);
+        assertEquals(List.of(41L, 42L), keys);
+        assertEquals(2, executes.get());
+        assertEquals(2, consumptions.get());
+    }
+
+    private record CountAndKey(long value, Row row) implements Result.UpdateCount, Result.RowSegment {
+    }
+
     @Test void batchReadOptionsUseExactlyTheConfiguredCapacity() {
         for (long limit : List.of(1L, 32L * 1024 * 1024, 256L * 1024 * 1024)) {
             BatchWriteRequest request = new BatchWriteRequest(SqlStatementPlan.canonical(

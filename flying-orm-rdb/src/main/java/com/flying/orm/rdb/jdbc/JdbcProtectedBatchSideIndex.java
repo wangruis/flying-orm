@@ -122,10 +122,11 @@ final class JdbcProtectedBatchSideIndex {
     static void completeGeneratedRow(Connection connection,
                                      RowState state,
                                      long affectedRows,
-                                     DynamicRow generatedKey)
+                                     DynamicRow generatedKey,
+                                     long maxBufferedBytes)
             throws SQLException {
         if (state.work() != null && affectedRows > 0L) {
-            replace(connection, state, new SqlWriteResult(affectedRows, List.of(generatedKey)));
+            replace(connection, state, new SqlWriteResult(affectedRows, List.of(generatedKey)), maxBufferedBytes);
         }
     }
 
@@ -174,7 +175,8 @@ final class JdbcProtectedBatchSideIndex {
 
     private static void replace(Connection connection,
                                 RowState state,
-                                SqlWriteResult result)
+                                SqlWriteResult result,
+                                long maxBufferedBytes)
             throws SQLException {
         ProtectedWriteWork work = state.work();
         List<Map<String, Object>> owners = switch (work.kind()) {
@@ -194,8 +196,9 @@ final class JdbcProtectedBatchSideIndex {
                         statement.executeUpdate();
                     }
                 }
-                JdbcProtectedSideIndexDml.insertTokens(
-                        connection, work, owner, field);
+                TokenInsertBatch inserts = new TokenInsertBatch(connection, maxBufferedBytes);
+                inserts.add(work, owner, field);
+                inserts.flush();
             }
         }
     }
@@ -277,14 +280,13 @@ final class JdbcProtectedBatchSideIndex {
                 long bytes = com.flying.orm.rdb.batch.BatchMemoryBudget.estimateValueBytes(parameters);
                 if (!parameterSets.isEmpty() && (parameterSets.size()
                         == JdbcProtectedSideIndexDml.MAX_TOKEN_BATCH_SIZE
-                        || parameterCount + parameters.size()
+                        || (long) parameterCount + parameters.size()
                         > ProtectedReplacementBatchPlan.MAX_PARAMETERS
                         || saturatedAdd(bufferedBytes, bytes) > maxBufferedBytes)) {
                     flush();
                     sql = work.insertSql();
                 }
-                if (parameters.size() > ProtectedReplacementBatchPlan.MAX_PARAMETERS
-                        || bytes > maxBufferedBytes) {
+                if (bytes > maxBufferedBytes) {
                     throw new IllegalArgumentException(
                             "protected side-index token parameters exceed batch safety limits");
                 }

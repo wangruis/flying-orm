@@ -3,19 +3,19 @@ package com.flying.orm.rdb.protection;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 
-/** 解析和编码有界字段密文信封。 */
+/** 解析和编码版本化字段密文信封。 */
 final class ProtectedFieldEnvelope {
 
     static final int MAGIC = 0x464f5031;
     static final int NONCE_LENGTH = 12;
-    private static final int MAX_CIPHERTEXT_LENGTH = 1_048_592;
 
     private ProtectedFieldEnvelope() {
     }
 
     static byte[] encode(String keyVersion, byte[] nonce, byte[] ciphertext) {
         byte[] version = keyVersion.getBytes(StandardCharsets.US_ASCII);
-        ByteBuffer target = ByteBuffer.allocate(9 + version.length + nonce.length + ciphertext.length);
+        ByteBuffer target = ByteBuffer.allocate(Math.toIntExact(
+                9L + version.length + nonce.length + ciphertext.length));
         target.putInt(MAGIC).put((byte) version.length).put(version).put(nonce)
               .putInt(ciphertext.length).put(ciphertext);
         return target.array();
@@ -46,8 +46,7 @@ final class ProtectedFieldEnvelope {
 
     /** 校验完整信封形状，但只复制固定大小的版本和 nonce；版本探测不复制大密文。 */
     private static Header header(byte[] envelope) {
-        if (envelope == null || envelope.length < 9 + NONCE_LENGTH + 16
-                || envelope.length > MAX_CIPHERTEXT_LENGTH + 64) {
+        if (envelope == null || envelope.length < 9 + NONCE_LENGTH + 16) {
             throw new ProtectedFieldException();
         }
         ByteBuffer source = ByteBuffer.wrap(envelope);
@@ -64,8 +63,7 @@ final class ProtectedFieldEnvelope {
         byte[] nonce = new byte[NONCE_LENGTH];
         source.get(nonce);
         int ciphertextLength = source.getInt();
-        if (ciphertextLength < 16 || ciphertextLength > MAX_CIPHERTEXT_LENGTH
-                || source.remaining() != ciphertextLength) {
+        if (ciphertextLength < 16 || source.remaining() != ciphertextLength) {
             throw new ProtectedFieldException();
         }
         return new Header(new String(version, StandardCharsets.US_ASCII), nonce, ciphertextLength, source);

@@ -169,7 +169,10 @@ public record TimeScope(String field,
         }
         Object normalized = ConditionValueNormalizer.normalize(ConditionValueShape.SCALAR,
                                                                value,
-                                                               ConditionValuePolicy.REJECT_EMPTY)
+                                                               ConditionValuePolicy.REJECT_EMPTY,
+                                                               (scalar, index) -> scalar,
+                                                               Integer.MAX_VALUE,
+                                                               Integer.MAX_VALUE)
                                                     .value();
         return BindableValueSnapshots.logicalValue(normalized);
     }

@@ -32,6 +32,96 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class R2dbcProtectedSideIndexDmlBatchingTest {
 
     @Test
+    void preparedTokenInsertionsSplitOnTheExplicitByteBudgetForInsertAndReplacement() {
+        for (ProtectedWriteWork.Kind kind : List.of(ProtectedWriteWork.Kind.INSERT, ProtectedWriteWork.Kind.UPSERT)) {
+            ProtectedWriteWork insert = work();
+            ProtectedWriteWork work = new ProtectedWriteWork(kind, insert.writeRequest(), null, insert.ownerFields(),
+                    insert.knownOwner(), insert.ownerPredicateSql(), insert.deleteSql(), insert.insertSql(), insert.fields());
+            SideIndexRecorder recorder = new SideIndexRecorder(3);
+            R2dbcProtectedBatchSideIndex.Prepared prepared = new R2dbcProtectedBatchSideIndex.Prepared(
+                    List.of(new R2dbcProtectedBatchSideIndex.RowState(work, List.of())), 150L);
+            Mono<Void> completion = new R2dbcProtectedBatchSideIndex(R2dbcBindMarkers.from(RdbDialect.postgresql()))
+                    .complete(tokenBudgetConnection(recorder), prepared);
+            completion.block(Duration.ofSeconds(5));
+            assertEquals(3, recorder.executions.get(), kind.toString());
+            assertEquals(1, recorder.maxParameterSetsPerStatement.get(), kind.toString());
+            completion.block(Duration.ofSeconds(5));
+            assertEquals(6, recorder.executions.get(), "each subscription must have an independent token cursor");
+        }
+    }
+
+    @Test
+    void preparedTokenInsertionRejectsOneBindingLargerThanTheExplicitByteBudget() {
+        SideIndexRecorder recorder = new SideIndexRecorder(3);
+        R2dbcProtectedBatchSideIndex.Prepared prepared = new R2dbcProtectedBatchSideIndex.Prepared(
+                List.of(new R2dbcProtectedBatchSideIndex.RowState(work(), List.of())), 100L);
+        assertThrows(IllegalArgumentException.class, () ->
+                new R2dbcProtectedBatchSideIndex(R2dbcBindMarkers.from(RdbDialect.postgresql()))
+                        .complete(connection(recorder, false), prepared).block(Duration.ofSeconds(5)));
+        assertEquals(0, recorder.executions.get());
+    }
+
+    @Test
+    void generatedTokenBatchesPreserveThePreparedByteBudget() {
+        for (long budget : List.of(100L, 150L)) {
+            SideIndexRecorder recorder = new SideIndexRecorder(3);
+            R2dbcProtectedBatchSideIndex.RowState state = new R2dbcProtectedBatchSideIndex.RowState(work(), List.of());
+            R2dbcProtectedBatchSideIndex side = new R2dbcProtectedBatchSideIndex(R2dbcBindMarkers.from(RdbDialect.postgresql()));
+            R2dbcProtectedBatchSideIndex.GeneratedTokenBatch tokens = side.generatedTokenBatch(
+                    new R2dbcProtectedBatchSideIndex.Prepared(List.of(state), budget));
+            tokens.add(state, new R2dbcBatchGeneratedKeyWriter.GeneratedWrite(
+                    1L, com.flying.orm.rdb.result.DynamicRow.copyOf(Map.of("id", 7L))));
+            if (budget == 100L) {
+                assertThrows(IllegalArgumentException.class, () -> side.completeGeneratedRows(
+                        connection(recorder, false), tokens).block(Duration.ofSeconds(5)));
+                assertEquals(0, recorder.executions.get());
+            } else {
+                side.completeGeneratedRows(connection(recorder, false), tokens).block(Duration.ofSeconds(5));
+                assertEquals(3, recorder.executions.get());
+                assertEquals(1, recorder.maxParameterSetsPerStatement.get());
+            }
+        }
+    }
+
+    private static Connection tokenBudgetConnection(SideIndexRecorder recorder) {
+        return (Connection) Proxy.newProxyInstance(Connection.class.getClassLoader(), new Class<?>[]{Connection.class},
+                (proxy, method, arguments) -> {
+                    if (method.getName().equals("createStatement")) {
+                        return ((String) arguments[0]).startsWith("delete")
+                                ? businessStatement(true) : recorder.newStatement();
+                    }
+                    throw new UnsupportedOperationException(method.getName());
+                });
+    }
+
+    @Test
+    void executesWideInsertBindingsIndividuallyWithoutRejectingTheirWidth() {
+        int count = 2001;
+        SideIndexRecorder recorder = new SideIndexRecorder(2, count);
+        List<Object> parameters = java.util.Collections.nCopies(count, 7L);
+        R2dbcProtectedSideIndexDml.insertParameterSets(connection(recorder, false),
+                "insert into token_index values ("
+                        + String.join(",", java.util.Collections.nCopies(count, "?")) + ")",
+                List.of(parameters, parameters)).block(Duration.ofSeconds(5));
+        assertEquals(2, recorder.executions.get());
+        assertEquals(1, recorder.maxParameterSetsPerStatement.get());
+        assertEquals(List.of(parameters, parameters), recorder.parameterSets);
+    }
+
+    @Test
+    void executesSingleDeleteWiderThanTheInternalBatchParameterTarget() {
+        int count = 2001;
+        SideIndexRecorder recorder = new SideIndexRecorder(1, count);
+        List<Object> parameters = java.util.Collections.nCopies(count, 7L);
+        R2dbcProtectedSideIndexDml.deleteParameterSets(connection(recorder, false),
+                "delete from token_index where id in ("
+                        + String.join(",", java.util.Collections.nCopies(count, "?")) + ")",
+                List.of(parameters)).block(Duration.ofSeconds(5));
+        assertEquals(1, recorder.executions.get());
+        assertEquals(List.of(parameters), recorder.parameterSets);
+    }
+
+    @Test
     void singleProtectedWriteBatchesAllTokensForOneOwnerField() {
         SideIndexRecorder recorder = new SideIndexRecorder(3);
         Connection external = connection(recorder, true);

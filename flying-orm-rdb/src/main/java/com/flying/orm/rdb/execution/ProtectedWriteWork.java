@@ -36,9 +36,6 @@ public record ProtectedWriteWork(Kind kind,
                                  String insertSql,
                                  List<FieldTokens> fields) {
 
-    private static final int MAX_SAFE_BOUND_PARAMETERS = 2_000;
-    private static final long MAX_CAPTURED_OWNER_ROWS = 2_000L;
-
     public ProtectedWriteWork {
         kind = Objects.requireNonNull(kind, "protected write kind must not be null");
         writeRequest = Objects.requireNonNull(
@@ -70,27 +67,10 @@ public record ProtectedWriteWork(Kind kind,
                 .anyMatch(field -> !knownOwner.containsKey(field) || knownOwner.get(field) == null);
     }
 
-    /** 给 owner 预读施加统一容量上限；调用方更严格的限制保持不变。 */
+    /** owner 预读沿用调用方执行选项，不另设内部容量上限。 */
     public static SqlExecutionOptions ownerReadOptions(SqlExecutionOptions options) {
-        SqlExecutionOptions safeOptions = Objects.requireNonNull(
+        return Objects.requireNonNull(
                 options, "protected write execution options must not be null");
-        long maxRows = positiveMinimum(safeOptions.maxRows(), MAX_CAPTURED_OWNER_ROWS);
-        long maxResultBytes = positiveMinimum(
-                safeOptions.maxResultBytes(), SqlExecutionOptions.DEFAULT_MAX_RESULT_BYTES);
-        long maxLargeObjectBytes = positiveMinimum(
-                safeOptions.maxLargeObjectBytes(), SqlExecutionOptions.DEFAULT_MAX_LARGE_OBJECT_BYTES);
-        long maxLargeObjectChars = positiveMinimum(
-                safeOptions.maxLargeObjectChars(), SqlExecutionOptions.DEFAULT_MAX_LARGE_OBJECT_CHARS);
-        if (safeOptions.maxRows() == maxRows
-                && safeOptions.maxResultBytes() == maxResultBytes
-                && safeOptions.maxLargeObjectBytes() == maxLargeObjectBytes
-                && safeOptions.maxLargeObjectChars() == maxLargeObjectChars) {
-            return safeOptions;
-        }
-        return safeOptions.withMaxRows(maxRows)
-                          .withMaxResultBytes(maxResultBytes)
-                          .withMaxLargeObjectBytes(maxLargeObjectBytes)
-                          .withMaxLargeObjectChars(maxLargeObjectChars);
     }
 
     /** 返回 INSERT 唯一缺失、必须由数据库生成的 owner 字段。 */
@@ -198,10 +178,6 @@ public record ProtectedWriteWork(Kind kind,
             throw new IllegalArgumentException("protected update owners must not be empty");
         }
         List<Object> writeParameters = OwnedBindableValues.ownedValues(writeRequest.parameters());
-        long ownerParameterCount = Math.multiplyExact((long) owners.size(), ownerFields.size());
-        if (ownerParameterCount + writeParameters.size() > MAX_SAFE_BOUND_PARAMETERS) {
-            throw new IllegalArgumentException("protected update owner set exceeds safe parameter limit");
-        }
         String restriction = owners.stream()
                 .map(ignored -> "(" + ownerPredicateSql + ")")
                 .collect(java.util.stream.Collectors.joining(" or "));
@@ -298,7 +274,4 @@ public record ProtectedWriteWork(Kind kind,
         return Collections.unmodifiableMap(snapshot);
     }
 
-    private static long positiveMinimum(long configured, long fallback) {
-        return configured <= 0L ? fallback : Math.min(configured, fallback);
-    }
 }

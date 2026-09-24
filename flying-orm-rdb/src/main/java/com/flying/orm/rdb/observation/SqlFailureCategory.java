@@ -1,8 +1,11 @@
 package com.flying.orm.rdb.observation;
 
 import com.flying.orm.rdb.batch.BatchOptimisticLockException;
+import com.flying.orm.rdb.batch.BatchExecutionEvidence;
+import com.flying.orm.rdb.batch.BatchExecutionEvidenceException;
 import com.flying.orm.rdb.exception.RdbErrorKind;
 import com.flying.orm.rdb.exception.RdbException;
+import com.flying.orm.rdb.exception.RdbExceptionTranslator;
 import com.flying.orm.rdb.execution.SqlResultMemoryLimitExceededException;
 import com.flying.orm.rdb.execution.SqlRowLimitExceededException;
 import io.r2dbc.spi.R2dbcTimeoutException;
@@ -60,9 +63,17 @@ public enum SqlFailureCategory {
         boolean rowLimit = false;
         boolean memoryLimit = false;
         RdbException databaseFailure = null;
+        RdbErrorKind batchFailure = null;
         Throwable current = error;
         for (int depth = 0; current != null && depth <= 32; depth++) {
             optimisticLock |= current instanceof BatchOptimisticLockException;
+            if (current instanceof BatchExecutionEvidenceException batchException) {
+                BatchExecutionEvidence evidence = batchException.evidence();
+                optimisticLock |= !evidence.conflicts().isEmpty();
+                if (batchFailure == null && evidence.failure() != null) {
+                    batchFailure = evidence.failure().kind();
+                }
+            }
             timeout |= current instanceof TimeoutException
                     || current instanceof SQLTimeoutException
                     || current instanceof R2dbcTimeoutException;
@@ -89,7 +100,12 @@ public enum SqlFailureCategory {
         if (memoryLimit) {
             return RESULT_MEMORY_LIMIT;
         }
-        return databaseFailure == null ? UNKNOWN : fromKind(databaseFailure.kind());
+        if (databaseFailure != null) return fromKind(databaseFailure.kind());
+        if (batchFailure != null) return fromKind(batchFailure);
+        // Custom executors may expose an untranslated driver or cancellation failure.
+        // Reuse the database boundary classification without unwrapping business exceptions.
+        return error != null && RdbExceptionTranslator.translate(error) instanceof RdbException translated
+                ? fromKind(translated.kind()) : UNKNOWN;
     }
 
     static SqlFailureCategory fromKind(RdbErrorKind kind) {

@@ -68,7 +68,8 @@ final class R2dbcBatchWriterChunks {
                                     return Mono.<Void>empty();
                                 }
                                 Mono<Void> auxiliary = prepared.rows().isEmpty() ? Mono.empty()
-                                        : sideIndex.completeGeneratedRow(connection, prepared.rows().get(index), write);
+                                        : sideIndex.completeGeneratedRow(connection, prepared.rows().get(index), write,
+                                                prepared.maxBufferedBytes());
                                 // SQL success alone is not POST eligibility: keys and row-local work must finish.
                                 return auxiliary.doOnSuccess(ignored -> facts.rowReady());
                             }), 0).then(Mono.defer(() -> facts.hasConflicts()

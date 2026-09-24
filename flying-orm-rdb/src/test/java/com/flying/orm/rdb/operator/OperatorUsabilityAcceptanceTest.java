@@ -56,6 +56,8 @@ import java.util.function.Supplier;
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class OperatorUsabilityAcceptanceTest {
     private static final Duration WAIT = Duration.ofSeconds(10);
@@ -81,6 +83,9 @@ class OperatorUsabilityAcceptanceTest {
                 .protectedFields(ProtectedFieldKeyRing.single("test", new byte[32]))
                 .renderer(SqlRenderer.builder().addDefaultTerms()
                         .addTerm(SqlTermHandler.of("legacy-eq", ConditionValueShape.SCALAR,
+                                SqlTermHandler.equalsTo()::render))
+                        .addTerm(SqlTermHandler.of(TermExtensionDescriptor.filter(
+                                "same-org", Set.of(), 1, 1), ConditionValueShape.SCALAR,
                                 SqlTermHandler.equalsTo()::render))
                         .addTerm(SqlTermHandler.of(TermExtensionDescriptor.filter(
                                 "missing-cap", Set.of("missing-capability"), 1, 1),
@@ -233,6 +238,24 @@ class OperatorUsabilityAcceptanceTest {
                 .execute().block(WAIT));
         assertEquals("139****5678", sync.query(protectedForm).masked()
                 .where("phone", ProtectedConditions.EXACT, "13900005678").one().get("phone"));
+        PhoneView masked = new PhoneView(1, "139****5678");
+        assertEquals(masked, sync.query(protectedForm).select("id", "phone").masked().one(PhoneView.class));
+        assertEquals(masked, reactive.query(protectedForm).select("id", "phone").masked()
+                .one(PhoneView.class).block(WAIT));
+        assertEquals(List.of(masked), sync.query(protectedForm).select("id", "phone").masked()
+                .page(1, 10, PhoneView.class).rows());
+        assertEquals(List.of(masked), reactive.query(protectedForm).select("id", "phone").masked()
+                .page(1, 10, PhoneView.class).block(WAIT).rows());
+        CursorPageQuery cursor = CursorPageQuery.first(10, CursorSort.asc("id"));
+        assertEquals(List.of(masked), sync.query(protectedForm).select("id", "phone").masked()
+                .cursorPage(cursor, PhoneView.class).rows());
+        assertEquals(List.of(masked), reactive.query(protectedForm).select("id", "phone").masked()
+                .cursorPage(cursor, PhoneView.class).block(WAIT).rows());
+        KeysetPageQuery keyset = KeysetPageQuery.first(10, KeysetSort.asc("id", NullOrder.LAST));
+        assertEquals(List.of(masked), sync.query(protectedForm).select("id", "phone").masked()
+                .keysetPage(keyset, PhoneView.class).rows());
+        assertEquals(List.of(masked), reactive.query(protectedForm).select("id", "phone").masked()
+                .keysetPage(keyset, PhoneView.class).block(WAIT).rows());
         assertEquals(0, sync.query(protectedForm)
                 .where("phone", ProtectedConditions.EXACT, "13800001234").fetchMap().size());
         assertEquals(1L, sync.delete(protectedForm).where("id", 1).execute());
@@ -267,6 +290,102 @@ class OperatorUsabilityAcceptanceTest {
     }
 
     public record UserView(int id, String name) { }
+    public record PhoneView(int id, String phone) { }
+
+    @Test
+    void developerSelectedLargePagesWorkThroughJdbcAndR2dbc() {
+        List<Map<String, Object>> input = java.util.stream.IntStream.rangeClosed(1, 1201)
+                .mapToObj(id -> row(id, "User" + id, 7)).toList();
+        clients.syncOperator().dml().insertBatch(USERS, input);
+        Supplier<SyncQueryOperator> sync = () -> clients.syncOperator().dml().query(USERS).select("id", "name");
+        Supplier<QueryOperator> reactive = () -> clients.operator().dml().query(USERS).select("id", "name");
+        PageResult<UserView> page = sync.get().orderByAsc("id").page(1, 1200, UserView.class);
+        assertEquals(1200, page.rows().size());
+        assertEquals(1201, page.total());
+        assertEquals(page, reactive.get().orderByAsc("id").page(1, 1200, UserView.class).block(WAIT));
+        CursorPageQuery cursor = CursorPageQuery.first(1200, CursorSort.asc("id"));
+        assertEquals(1200, sync.get().cursorPage(cursor, UserView.class).rows().size());
+        assertTrue(sync.get().cursorPage(cursor, UserView.class).hasMore());
+        assertEquals(sync.get().cursorPage(cursor, UserView.class),
+                reactive.get().cursorPage(cursor, UserView.class).block(WAIT));
+        KeysetPageQuery keyset = KeysetPageQuery.first(1200, KeysetSort.asc("id", NullOrder.LAST));
+        assertEquals(1200, sync.get().keysetPage(keyset, UserView.class).rows().size());
+        assertTrue(sync.get().keysetPage(keyset, UserView.class).hasMore());
+        assertEquals(sync.get().keysetPage(keyset, UserView.class),
+                reactive.get().keysetPage(keyset, UserView.class).block(WAIT));
+    }
+
+    @Test
+    void typedTerminalsKeepScopeProjectionSortingAndSingleRowCardinality() {
+        clients.syncOperator().dml().insertBatch(USERS,
+                List.of(row(1, "Alice", 7), row(2, "Bob", 7), row(3, "Other", 8)));
+        DataScope scope = DataScope.orgOnly("org_id", 7);
+        Supplier<SyncQueryOperator> sync = () -> clients.syncOperator().withDefaultDataScope(scope)
+                .dml().query(USERS).select("id", "name");
+        Supplier<QueryOperator> reactive = () -> clients.operator().withDefaultDataScope(scope)
+                .dml().query(USERS).select("id", "name");
+        UserView alice = new UserView(1, "Alice");
+        assertEquals(alice, sync.get().where("id", 1).one(UserView.class));
+        assertEquals(alice, reactive.get().where("id", 1).one(UserView.class).block(WAIT));
+        assertNull(sync.get().where("id", 3).one(UserView.class));
+        assertNull(reactive.get().where("id", 3).one(UserView.class).block(WAIT));
+        assertThrows(IllegalStateException.class, () -> sync.get().one(UserView.class));
+        assertThrows(IndexOutOfBoundsException.class, () -> reactive.get().one(UserView.class).block(WAIT));
+        PageResult<UserView> page = sync.get().orderByDesc("id").page(1, 1, UserView.class);
+        assertEquals(2, page.total());
+        assertEquals(List.of(new UserView(2, "Bob")), page.rows());
+        assertEquals(page, reactive.get().orderByDesc("id").page(1, 1, UserView.class).block(WAIT));
+        CursorPageQuery cursor = CursorPageQuery.first(1, CursorSort.asc("id"));
+        assertEquals(List.of(alice), sync.get().cursorPage(cursor, UserView.class).rows());
+        assertEquals(sync.get().cursorPage(cursor, UserView.class),
+                reactive.get().cursorPage(cursor, UserView.class).block(WAIT));
+        KeysetPageQuery keyset = KeysetPageQuery.first(1, KeysetSort.asc("id", NullOrder.LAST));
+        assertEquals(List.of(alice), sync.get().keysetPage(keyset, UserView.class).rows());
+        assertEquals(sync.get().keysetPage(keyset, UserView.class),
+                reactive.get().keysetPage(keyset, UserView.class).block(WAIT));
+    }
+
+    @Test
+    void typedSingleRowAlsoWorksForTrustedTables() {
+        clients.syncOperator().dml().insert(USERS, row(1, "Alice", 7));
+        Supplier<SyncQueryOperator> sync = () -> clients.syncOperator().dml().query()
+                .from("users").select("id", "name");
+        Supplier<QueryOperator> reactive = () -> clients.operator().dml().query()
+                .from("users").select("id", "name");
+        assertEquals(new UserView(1, "Alice"), sync.get().one(UserView.class));
+        assertEquals(new UserView(1, "Alice"), reactive.get().one(UserView.class).block(WAIT));
+        assertNull(sync.get().where("id", 99).one(UserView.class));
+        assertNull(reactive.get().where("id", 99).one(UserView.class).block(WAIT));
+        clients.syncOperator().dml().insert(USERS, row(2, "Bob", 7));
+        assertThrows(IllegalStateException.class, () -> sync.get().one(UserView.class));
+        assertThrows(IndexOutOfBoundsException.class, () -> reactive.get().one(UserView.class).block(WAIT));
+    }
+
+    @Test
+    void entityBusinessConditionsUseTheSameWhereSignatureAcrossCommands() {
+        clients.syncOperator().dml().insertBatch(USERS,
+                List.of(row(1, "Alice", 7), row(2, "Bob", 7), row(3, "Other", 8)));
+        FlyingOrmClients scoped = clients.withDefaultDataScope(DataScope.orgOnly("org_id", 7));
+        assertEquals(List.of("Alice", "Bob"), scoped.repository(UserEntity.class).createQuery()
+                .where(UserEntity::getOrgId, "same-org", 7)
+                .or(group -> group.where(UserEntity::getName, "like", "A%")
+                        .where(UserEntity::getName, "=", "Bob"))
+                .orderByAsc(UserEntity::getId).fetch().map(UserEntity::getName).collectList().block(WAIT));
+        assertEquals(List.of("Alice", "Bob"), scoped.syncRepository(UserEntity.class).createQuery()
+                .where(UserEntity::getOrgId, "same-org", 7).orderByAsc(UserEntity::getId)
+                .fetch().stream().map(UserEntity::getName).toList());
+        assertEquals(1L, scoped.repository(UserEntity.class).createUpdate().set(UserEntity::getName, "changed")
+                .where(UserEntity::getId, "in", List.of(1, 3)).execute().block(WAIT));
+        assertEquals(1L, scoped.syncRepository(UserEntity.class).createUpdate().set(UserEntity::getName, "changed")
+                .where(UserEntity::getId, "in", List.of(2, 3)).execute());
+        assertEquals(1L, scoped.repository(UserEntity.class).createDelete()
+                .where(UserEntity::getId, "in", List.of(1, 3)).execute().block(WAIT));
+        assertEquals(1L, scoped.syncRepository(UserEntity.class).createDelete()
+                .where(UserEntity::getId, "in", List.of(2, 3)).execute());
+        assertEquals("Other", clients.syncOperator().dml().query(USERS).where("id", 3).one().get("name"));
+        assertThrows(IllegalArgumentException.class, () -> scoped.repository(UserEntity.class).createQuery()
+                .where(UserEntity::getId, "unknown-condition", 1).fetch().blockLast(WAIT));
+    }
 
     @Test
     void trustedTableSupportsBothClassAndCustomMapping() {
@@ -339,6 +458,10 @@ class OperatorUsabilityAcceptanceTest {
                 () -> assertThrows(failure, () -> sync.get().fetch(UserView.class)),
                 () -> assertThrows(failure, () -> sync.get().fetch(row -> row)),
                 () -> assertThrows(failure, () -> sync.get().one()),
+                () -> assertThrows(failure, () -> sync.get().one(UserView.class)),
+                () -> assertThrows(failure, () -> sync.get().page(1, 10, UserView.class)),
+                () -> assertThrows(failure, () -> sync.get().cursorPage(cursor, UserView.class)),
+                () -> assertThrows(failure, () -> sync.get().keysetPage(keyset, UserView.class)),
                 () -> assertThrows(failure, () -> sync.get().page(1, 10)),
                 () -> assertThrows(failure, () -> sync.get().cursorPage(cursor)),
                 () -> assertThrows(failure, () -> sync.get().keysetPage(keyset)),
@@ -347,6 +470,10 @@ class OperatorUsabilityAcceptanceTest {
                 () -> assertThrows(failure, () -> reactive.get().fetch(UserView.class).blockLast(WAIT)),
                 () -> assertThrows(failure, () -> reactive.get().fetch(row -> row).blockLast(WAIT)),
                 () -> assertThrows(failure, () -> reactive.get().one().block(WAIT)),
+                () -> assertThrows(failure, () -> reactive.get().one(UserView.class).block(WAIT)),
+                () -> assertThrows(failure, () -> reactive.get().page(1, 10, UserView.class).block(WAIT)),
+                () -> assertThrows(failure, () -> reactive.get().cursorPage(cursor, UserView.class).block(WAIT)),
+                () -> assertThrows(failure, () -> reactive.get().keysetPage(keyset, UserView.class).block(WAIT)),
                 () -> assertThrows(failure, () -> reactive.get().page(1, 10).block(WAIT)),
                 () -> assertThrows(failure, () -> reactive.get().cursorPage(cursor).block(WAIT)),
                 () -> assertThrows(failure, () -> reactive.get().keysetPage(keyset).block(WAIT)),

@@ -5,6 +5,9 @@ import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.page.CursorPageQuery;
 import com.flying.orm.core.page.CursorSort;
+import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetSort;
+import com.flying.orm.core.page.NullOrder;
 import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageResult;
 import com.flying.orm.core.page.PageSort;
@@ -17,6 +20,16 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JoinAndPageContractTest {
+
+    @Test
+    void explicitProjectionAliasIsNotLimitedByGeneratedAliasLength() {
+        JoinQuerySpec.Builder builder = JoinQuerySpec.builder(form("users", "id"));
+        String alias = "user_identifier_selected_by_application";
+        JoinQuerySpec query = builder.selectAs(builder.root(), "id", alias).build();
+        assertEquals(alias, query.projections().getFirst().alias());
+        assertThrows(IllegalArgumentException.class,
+                () -> new JoinProjection(new JoinFieldRef(builder.root(), "id"), "id;drop_table"));
+    }
 
     @Test
     void buildsOnlyTheDeclaredLightweightJoinTypesWithStableSources() {
@@ -43,19 +56,30 @@ class JoinAndPageContractTest {
     }
 
     @Test
-    void keepsOffsetAndCursorPaginationBoundsExplicit() {
-        PageQuery page = PageQuery.of(Integer.MAX_VALUE, PageQuery.MAX_SIZE, PageSort.asc("id"));
+    void acceptsDeveloperSelectedPageSizesWithoutAFrameworkCeiling() {
+        PageQuery page = PageQuery.of(Integer.MAX_VALUE, Integer.MAX_VALUE, PageSort.asc("id"));
         PageResult<String> result = PageResult.of(List.of("last"), Long.MAX_VALUE, page);
 
-        assertEquals((long) (Integer.MAX_VALUE - 1) * PageQuery.MAX_SIZE, page.offset());
+        assertEquals((long) (Integer.MAX_VALUE - 1) * Integer.MAX_VALUE, page.offset());
         assertTrue(result.totalPages() > 0);
         assertTrue(result.hasNext());
 
-        CursorPageQuery first = CursorPageQuery.first(
-                PageQuery.MAX_SIZE - 1, CursorSort.asc("id"));
-        assertTrue(first.firstPage());
-        assertThrows(IllegalArgumentException.class,
-                () -> CursorPageQuery.first(PageQuery.MAX_SIZE, CursorSort.asc("id")));
+        for (int size : new int[]{1000, 1001, 5000, Integer.MAX_VALUE}) {
+            assertEquals(size, PageQuery.of(1, size).size());
+            assertEquals(size, CursorPageQuery.first(size, CursorSort.asc("id")).size());
+            assertEquals(size, KeysetPageQuery.first(size, KeysetSort.asc("id", NullOrder.LAST)).size());
+        }
+    }
+
+    @Test
+    void paginationStillRejectsNonPositiveSizesAndPageNumbers() {
+        for (int size : new int[]{0, -1, Integer.MIN_VALUE}) {
+            assertThrows(IllegalArgumentException.class, () -> PageQuery.of(1, size));
+            assertThrows(IllegalArgumentException.class, () -> CursorPageQuery.first(size, CursorSort.asc("id")));
+            assertThrows(IllegalArgumentException.class,
+                    () -> KeysetPageQuery.first(size, KeysetSort.asc("id", NullOrder.LAST)));
+        }
+        assertThrows(IllegalArgumentException.class, () -> PageQuery.of(0, 10));
     }
 
     @Test

@@ -130,7 +130,7 @@ final class ProtectedSchemaMigrationPlanner {
                                                                    SchemaMigrationOptions options,
                                                                    SchemaMigrationReviewPolicy policy) {
         return reader.readTableForSchema(layout.table().table())
-                     .flatMap(current -> planner.physicalSnapshot(current, layout.table(), options, reader)
+                     .flatMap(current -> planner.reviewSnapshot(current, layout.table(), options, reader)
                              .map(java.util.Optional::of)
                              .defaultIfEmpty(java.util.Optional.empty())
                              .map(snapshot -> reviewer().review(current,
@@ -147,7 +147,7 @@ final class ProtectedSchemaMigrationPlanner {
                                                           SchemaMigrationReviewPolicy policy) {
         try {
             TableMetadata current = lookup.readTableForSchema(layout.table().table());
-            SchemaSnapshot snapshot = planner.physicalSnapshotJdbc(current, layout.table(), options, lookup);
+            SchemaSnapshot snapshot = planner.reviewSnapshotJdbc(current, layout.table(), options, lookup);
             return reviewer().review(current, migrateContainsPlan(layout, current, options, snapshot), policy, snapshot);
         } catch (IllegalArgumentException failure) {
             if (!SchemaMigrationPlanner.isTableNotFound(failure)) {

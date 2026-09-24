@@ -3,6 +3,11 @@ package com.flying.orm.rdb.operator;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.page.CursorPageQuery;
+import com.flying.orm.core.page.CursorSort;
+import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetSort;
+import com.flying.orm.core.page.NullOrder;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchExecutionEvidenceException;
@@ -100,6 +105,27 @@ class OperatorLifecycleAcceptanceTest {
         }
         assertEquals(2, reactiveAcquired.get());
         assertEquals(List.of(SignalType.ON_COMPLETE, SignalType.ON_COMPLETE), List.copyOf(reactiveReleased));
+    }
+
+    @Test
+    void typedTerminalsFreezeBuilderAndStayColdUntilEachSubscription() {
+        clients.syncOperator().dml().insertBatch(USERS, List.of(row(1, "Alice"), row(2, "Bob")));
+        QueryOperator query = clients.operator().dml().query(USERS).where("id", 1);
+        List<Mono<UserRow>> reads = List.of(
+                query.one(UserRow.class),
+                query.page(1, 10, UserRow.class).map(page -> page.rows().getFirst()),
+                query.cursorPage(CursorPageQuery.first(10, CursorSort.asc("id")), UserRow.class)
+                        .map(page -> page.rows().getFirst()),
+                query.keysetPage(KeysetPageQuery.first(10, KeysetSort.asc("id", NullOrder.LAST)), UserRow.class)
+                        .map(page -> page.rows().getFirst()));
+        query.where("id", 2);
+        assertEquals(0, reactiveAcquired.get());
+        for (Mono<UserRow> pending : reads) {
+            assertEquals("Alice", pending.block(WAIT).name());
+            assertEquals("Alice", pending.block(WAIT).name());
+        }
+        assertEquals(10, reactiveAcquired.get()); // 页码分页每次包含 count 与页数据两条查询。
+        assertEquals(reactiveAcquired.get(), reactiveReleased.size());
     }
 
     @Test

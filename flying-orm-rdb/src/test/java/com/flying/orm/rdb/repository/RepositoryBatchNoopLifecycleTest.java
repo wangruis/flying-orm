@@ -24,6 +24,48 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 class RepositoryBatchNoopLifecycleTest {
 
     @Test
+    void syncPreCallbacksAndSourceConsumptionFollowActualDemand() {
+        List<String> inputs = new ArrayList<>();
+        List<String> callbacks = new ArrayList<>();
+        List<String> outputs = new ArrayList<>();
+        SyncRepositoryLifecycleSupport<String> lifecycle = new SyncRepositoryLifecycleSupport<>(
+                metadata(), event -> Mono.fromRunnable(() -> callbacks.add(event.entity())), new SyncRepositoryAwaiter());
+        reactor.core.publisher.BaseSubscriber<String> subscriber = new reactor.core.publisher.BaseSubscriber<>() {
+            protected void hookOnSubscribe(org.reactivestreams.Subscription subscription) { request(1); }
+            protected void hookOnNext(String value) { outputs.add(value); }
+        };
+        Flux.from(lifecycle.beforeRows(Flux.just("one", "two").doOnNext(inputs::add),
+                EntityLifecyclePhase.PRE_PERSIST)).subscribe(subscriber);
+        assertEquals(List.of("one"), inputs);
+        assertEquals(List.of("one"), callbacks);
+        assertEquals(List.of("one"), outputs);
+        subscriber.request(1);
+        assertEquals(List.of("one", "two"), inputs);
+        assertEquals(inputs, callbacks);
+        assertEquals(inputs, outputs);
+        subscriber.cancel();
+    }
+
+    @Test
+    void cancellingAnAsyncPreCancelsBothTheCallbackAndTheSource() {
+        java.util.concurrent.atomic.AtomicInteger sourceCancelled = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicInteger preCancelled = new java.util.concurrent.atomic.AtomicInteger();
+        SyncRepositoryLifecycleSupport<String> lifecycle = new SyncRepositoryLifecycleSupport<>(
+                metadata(), event -> Mono.<Void>never().doOnCancel(preCancelled::incrementAndGet),
+                new SyncRepositoryAwaiter());
+        reactor.core.publisher.BaseSubscriber<String> subscriber = new reactor.core.publisher.BaseSubscriber<>() {
+            protected void hookOnSubscribe(org.reactivestreams.Subscription subscription) { request(1); }
+            protected void hookOnNext(String value) { org.junit.jupiter.api.Assertions.fail("PRE has not completed"); }
+        };
+        Flux.from(lifecycle.beforeRows(Flux.just("one", "two").doOnCancel(sourceCancelled::incrementAndGet),
+                EntityLifecyclePhase.PRE_PERSIST)).subscribe(subscriber);
+        subscriber.cancel();
+        subscriber.request(1);
+        assertEquals(1, sourceCancelled.get());
+        assertEquals(1, preCancelled.get());
+    }
+
+    @Test
     void reactiveNoopLifecyclePreservesDirectBatchDemand() {
         EntityMetadata<String> metadata = metadata();
         RepositoryEntityIdSupport<String> ids = RepositoryEntityIdSupport.create(metadata, IdGenerator.none());

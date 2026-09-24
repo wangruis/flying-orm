@@ -28,8 +28,6 @@ public record EncryptedFieldDefinition(Set<EncryptedSearchMode> searchModes,
                                        int maxNormalizedLength,
                                        int containsMinLength) {
 
-    private static final int MAX_NORMALIZED_LENGTH = 65_536;
-    private static final int MAX_SUFFIX_LENGTH_COUNT = 32;
     private static final Pattern EXTENSION_ID = Pattern.compile("[A-Za-z0-9._-]{1,32}");
 
     /** 完成不可变快照和跨属性校验。 */
@@ -50,13 +48,10 @@ public record EncryptedFieldDefinition(Set<EncryptedSearchMode> searchModes,
                                      .distinct()
                                      .sorted()
                                      .toList();
-        if (suffixLengths.size() > MAX_SUFFIX_LENGTH_COUNT) {
-            throw new IllegalArgumentException("encrypted suffix length count exceeds the safe limit");
-        }
         if (copiedModes.contains(EncryptedSearchMode.SUFFIX) != !suffixLengths.isEmpty()) {
             throw new IllegalArgumentException("suffix search requires declared suffix lengths");
         }
-        if (maxNormalizedLength < 1 || maxNormalizedLength > MAX_NORMALIZED_LENGTH) {
+        if (maxNormalizedLength < 1) {
             throw new IllegalArgumentException("protected normalized length is out of range");
         }
         if (suffixLengths.stream().anyMatch(length -> length > maxNormalizedLength)) {

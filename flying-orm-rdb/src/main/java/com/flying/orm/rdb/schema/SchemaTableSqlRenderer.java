@@ -139,6 +139,52 @@ final class SchemaTableSqlRenderer {
         return RelationalSchemaSqlRenderer.create(dialect).columnDefinition(replacement.build());
     }
 
+    boolean requiresPhysicalCollation(DynamicField field) {
+        if (dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.SQL_SERVER) {
+            return false;
+        }
+        // JSON、OFFSET_TIME 等逻辑类型也可能映射为字符存储，以最终 DDL 类型为准。
+        String type = dataType(field);
+        int length = type.indexOf('(');
+        String base = (length < 0 ? type : type.substring(0, length)).trim().toUpperCase(java.util.Locale.ROOT);
+        return switch (base) {
+            case "CHAR", "VARCHAR", "NCHAR", "NVARCHAR", "TEXT", "NTEXT" -> true;
+            default -> false;
+        };
+    }
+
+    private String preservedCollation(DynamicField target, ColumnDefinition physical) {
+        if (!requiresPhysicalCollation(target)) {
+            return null;
+        }
+        if (physical == null) {
+            throw new IllegalStateException(
+                    "rewriting a SQL Server character column requires a physical schema snapshot to preserve collation");
+        }
+        return physical.collation();
+    }
+
+    String alterColumnType(String table, DynamicField target, ColumnDefinition physical) {
+        String type = dataType(target);
+        if (physical != null) {
+            type = SchemaTypeMapping.preserveCharacterLengthUnit(dialect,
+                    SchemaDefinitionEquality.actualColumnType(dialect, physical), type);
+        }
+        return dialect.alterColumnTypeSql(table, target.name(), type,
+                replacementColumnDefinition(target, physical), target.nullable(), preservedCollation(target, physical));
+    }
+
+    boolean requiresPhysicalLengthUnit(DynamicField field) {
+        if (dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.ORACLE) return false;
+        String base = com.flying.orm.core.type.DatabaseType.of(dataType(field)).baseName();
+        return "CHAR".equals(base) || "VARCHAR2".equals(base);
+    }
+
+    String alterColumnNullability(String table, DynamicField target, ColumnDefinition physical) {
+        return dialect.alterColumnNullabilitySql(table, target.name(), dataType(target),
+                replacementColumnDefinition(target, physical), target.nullable(), preservedCollation(target, physical));
+    }
+
     private String columnDefinition(DynamicField field, boolean inlinePrimaryKey) {
         DynamicField safeField = Objects.requireNonNull(field, "dynamic field must not be null");
         String type = dataType(safeField);

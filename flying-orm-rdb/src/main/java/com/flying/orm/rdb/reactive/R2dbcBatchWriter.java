@@ -12,7 +12,6 @@ import com.flying.orm.rdb.observation.BatchExecutionObserver;
 import com.flying.orm.rdb.observation.SqlExecutionBackend;
 import com.flying.orm.rdb.observation.SqlExecutionObserver;
 import com.flying.orm.rdb.observation.SqlExecutionOperation;
-import com.flying.orm.rdb.observation.SqlFailureCategory;
 import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -143,10 +142,11 @@ final class R2dbcBatchWriter {
         VirtualMachineError fatal = findVirtualMachineError(error);
         if (fatal != null) return fatal;
         BatchExecutionEvidence.Failure safeFailure = BatchExecutionEvidence.Failure.from(error);
-        BatchExecutionState executionState = safeFailure.kind() == com.flying.orm.rdb.exception.RdbErrorKind.CANCELLED
-                ? BatchExecutionState.CANCELLED
-                : SqlFailureCategory.classify(error) == SqlFailureCategory.TIMEOUT
-                ? BatchExecutionState.TIMED_OUT : BatchExecutionState.FAILED;
+        BatchExecutionState executionState = switch (safeFailure.kind()) {
+            case CANCELLED -> BatchExecutionState.CANCELLED;
+            case TIMEOUT, LOCK_TIMEOUT -> BatchExecutionState.TIMED_OUT;
+            default -> BatchExecutionState.FAILED;
+        };
         BatchExecutionEvidence evidence = batchState.terminal(executionState, safeFailure);
         if (error instanceof EntityPostWriteException) {
             addSuppressedIfAcyclic(error, new BatchExecutionEvidenceException(

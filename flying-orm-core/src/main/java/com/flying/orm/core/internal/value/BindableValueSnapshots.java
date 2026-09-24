@@ -162,6 +162,7 @@ public final class BindableValueSnapshots {
         private final boolean freezeScalars;
         private final boolean logicalValues;
         private final IdentityHashMap<Object, Object> copies = new IdentityHashMap<>();
+        private IdentityHashMap<Object, Object> typedTextCopies;
 
         private SnapshotSession(boolean freezeScalars) {
             this(freezeScalars, false);
@@ -176,7 +177,16 @@ public final class BindableValueSnapshots {
             if (value == null) {
                 return null;
             }
-            Object existing = copies.get(value);
+            IdentityHashMap<Object, Object> snapshots = copies;
+            if (freezeScalars && !logicalValues && value instanceof CharSequence && !(value instanceof String)
+                    && arrayComponentType != null && !arrayComponentType.isAssignableFrom(String.class)) {
+                // 标量文本绑定为 String，强类型文本数组保留元素类型；两种表示不能共用副本。
+                if (typedTextCopies == null) {
+                    typedTextCopies = new IdentityHashMap<>();
+                }
+                snapshots = typedTextCopies;
+            }
+            Object existing = snapshots.get(value);
             if (existing != null) {
                 return existing;
             }
@@ -188,7 +198,7 @@ public final class BindableValueSnapshots {
             }
             Object result = logicalValues ? logicalScalar(value) : immutableScalar(value, arrayComponentType);
             if (result != value) {
-                copies.put(value, result);
+                snapshots.put(value, result);
             }
             return result;
         }

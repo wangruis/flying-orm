@@ -2,13 +2,12 @@ package com.flying.orm.rdb.internal.mapping;
 
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.core.condition.ConditionGroup;
-import com.flying.orm.core.condition.ConditionNode;
-import com.flying.orm.core.condition.LogicalOperator;
 import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.condition.TermHandler;
 import com.flying.orm.core.condition.TermRegistry;
 import com.flying.orm.core.internal.error.ThrowableGraph;
 import com.flying.orm.rdb.internal.InternalApi;
+import com.flying.orm.rdb.internal.condition.ConditionNodes;
 import com.flying.orm.rdb.mapping.EntityEnumStorage;
 import com.flying.orm.rdb.mapping.EntityFieldMetadata;
 import com.flying.orm.rdb.mapping.EntityFieldFiller;
@@ -17,6 +16,7 @@ import com.flying.orm.rdb.mapping.EntityMappingListener;
 import com.flying.orm.rdb.mapping.EntityMetadata;
 import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
 import com.flying.orm.rdb.mapping.MappingException;
+import com.flying.orm.rdb.protection.ProtectedConditions;
 
 import java.beans.IntrospectionException;
 import java.beans.Introspector;
@@ -105,28 +105,8 @@ public final class EntityValues<T> {
         if (conditionEncoders.isEmpty()) {
             return where;
         }
-        Objects.requireNonNull(where, "where condition must not be null");
-        List<ConditionNode> children = where.children();
-        List<ConditionNode> normalized = null;
-        for (int index = 0; index < children.size(); index++) {
-            ConditionNode child = children.get(index);
-            ConditionNode next = child instanceof ConditionGroup group
-                    ? normalizeCondition(group, terms) : normalizeTerm((TermCondition) child, terms);
-            if (normalized == null && next != child) {
-                normalized = new ArrayList<>(children.size());
-                normalized.addAll(children.subList(0, index));
-            }
-            if (normalized != null) {
-                normalized.add(next);
-            }
-        }
-        if (normalized == null) {
-            return where;
-        }
-        ConditionGroup.Builder builder = where.operator() == LogicalOperator.AND
-                ? ConditionGroup.and(terms) : ConditionGroup.or(terms);
-        normalized.forEach(builder::add);
-        return builder.build();
+        return ConditionNodes.rewrite(Objects.requireNonNull(where, "where condition must not be null"),
+                term -> normalizeTerm(term, terms));
     }
 
     /** Reuse the entity field's write representation for one Lambda DML assignment. */
@@ -160,6 +140,11 @@ public final class EntityValues<T> {
         UnaryOperator<Object> encoder = enumEncoder(term.field());
         if (encoder == null) {
             return value;
+        }
+        if (ProtectedConditions.EXACT.equals(term.operator())
+                || ProtectedConditions.SUFFIX.equals(term.operator())
+                || ProtectedConditions.CONTAINS.equals(term.operator())) {
+            return value instanceof Enum<?> ? encoder.apply(value) : value;
         }
         TermHandler standard = TermRegistry.standard().find(term.operator()).orElse(null);
         if (standard == null || terms.find(term.operator()).orElse(null) != standard) {

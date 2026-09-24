@@ -105,6 +105,34 @@ class SqlDialectBoundaryContractRegressionTest {
     }
 
     @Test
+    void oracleLabeledLoopsAndBlocksCompileWithoutOpeningASecondStatement() {
+        for (String sql : List.of(
+                "BEGIN <<outer_loop>> LOOP EXIT outer_loop; END LOOP outer_loop; END;",
+                "BEGIN <<loop$label#1>> LOOP EXIT loop$label#1; END LOOP loop$label#1; END;",
+                "BEGIN <<\"loop label\">> LOOP EXIT \"loop label\"; END LOOP \"loop label\"; END;",
+                "<<main>> BEGIN NULL; END main;",
+                "<<main>> DECLARE v NUMBER := 1; BEGIN NULL; END main;",
+                "<<\"main block\">> BEGIN NULL; END \"main block\";",
+                "BEGIN <<outer_case>> CASE WHEN 1 = 1 THEN NULL; END CASE outer_case; END;")) {
+            assertOracle(sql);
+            for (String suffix : List.of(" BEGIN NULL; END;", " SELECT 1 FROM dual")) {
+                assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.compileNative(
+                        sql + suffix, Map.of(), RdbDialect.oracle(), ValueCodecRegistry.standard()));
+                assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.compileNativeJdbc(
+                        sql + suffix, Map.of(), RdbDialect.oracle(), ValueCodecRegistry.standard()));
+            }
+        }
+        assertThrows(IllegalArgumentException.class, () -> assertOracle(
+                "BEGIN LOOP EXIT; END LOOP x y; END;"));
+    }
+
+    @Test
+    void oracleQuotedCaseAliasesAreNotBlockLabels() {
+        assertOracle("DECLARE v NUMBER; BEGIN SELECT CASE WHEN 1=1 THEN 1 ELSE 0 END \"value alias\" INTO v FROM dual; END;");
+        assertOracle("BEGIN FOR r IN (SELECT CASE WHEN 1=1 THEN 1 ELSE 0 END \"value alias\" FROM dual) LOOP NULL; END LOOP; END;");
+    }
+
+    @Test
     void oracleCaseExpressionInIfConditionCompilesOnBothPaths() {
         assertOracle("BEGIN IF CASE WHEN 1 = 1 THEN 1 ELSE 0 END = 1 THEN NULL; END IF; END;");
     }

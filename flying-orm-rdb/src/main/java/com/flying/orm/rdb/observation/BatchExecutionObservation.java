@@ -73,7 +73,7 @@ public record BatchExecutionObservation(BatchExecutionEventType eventType,
         SqlFailureCategory category = SqlFailureCategory.classify(failure);
         BatchExecutionState state = switch (category) {
             case CANCELLED -> BatchExecutionState.CANCELLED;
-            case TIMEOUT -> BatchExecutionState.TIMED_OUT;
+            case TIMEOUT, LOCK_TIMEOUT -> BatchExecutionState.TIMED_OUT;
             default -> BatchExecutionState.FAILED;
         };
         return new BatchExecutionObservation(BatchExecutionEventType.SUMMARY, request, state, 0,

@@ -115,10 +115,21 @@ public final class QueryOperator {
         return fetchMap().singleOrEmpty();
     }
 
+    /** 按实体/record 映射零或一行；多行会报错，不静默截断。 */
+    public <T> Mono<T> one(Class<T> type) {
+        return fetch(type).singleOrEmpty();
+    }
+
     /** 一基页码分页；复用表单分页内核及当前排序。 */
     public Mono<PageResult<DynamicRow>> page(int page, int size) {
         var query = command.governedQuery(null);
         return configuredClient(query).page(query.spec(), new PageQuery(page, size, query.spec().sorts()));
+    }
+
+    /** 按实体/record 映射分页结果，保留当前排序与字段治理。 */
+    public <T> Mono<PageResult<T>> page(int page, int size, Class<T> type) {
+        DmlQueryCommand.GovernedQuery query = command.governedQuery(null);
+        return configuredClient(query).page(query.spec(), new PageQuery(page, size, query.spec().sorts()), type);
     }
 
     /** 稳定游标分页，不额外查询总数。 */
@@ -127,10 +138,22 @@ public final class QueryOperator {
         return configuredClient(query).cursorPage(query.spec(), page);
     }
 
+    /** 按实体/record 映射稳定游标分页结果。 */
+    public <T> Mono<CursorPageResult<T>> cursorPage(CursorPageQuery page, Class<T> type) {
+        DmlQueryCommand.GovernedQuery query = command.governedQuery(null);
+        return configuredClient(query).cursorPage(query.spec(), page, type);
+    }
+
     /** 支持复合排序与可空字段的键集分页。 */
     public Mono<KeysetPageResult<DynamicRow>> keysetPage(KeysetPageQuery page) {
         var query = command.governedQuery(null);
         return configuredClient(query).keysetPage(query.spec(), page);
+    }
+
+    /** 按实体/record 映射复合排序与可空字段的键集分页结果。 */
+    public <T> Mono<KeysetPageResult<T>> keysetPage(KeysetPageQuery page, Class<T> type) {
+        DmlQueryCommand.GovernedQuery query = command.governedQuery(null);
+        return configuredClient(query).keysetPage(query.spec(), page, type);
     }
 
     /** 在当前条件与 Scope 下声明类型化报表聚合。 */

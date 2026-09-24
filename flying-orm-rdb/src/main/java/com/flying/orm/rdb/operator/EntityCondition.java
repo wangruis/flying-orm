@@ -52,12 +52,17 @@ public final class EntityCondition<T> {
 
     /** 添加严格等值条件。 */
     public EntityCondition<T> where(EntityProperty<T, ?> property, Object value) {
-        return term(property, "=", value);
+        return where(property, "=", value);
+    }
+
+    /** 追加标准或已注册的业务条件，连接方式由当前 AND/OR 组决定。 */
+    public EntityCondition<T> where(EntityProperty<T, ?> property, String operator, Object value) {
+        return term(property, operator, value);
     }
 
     /** 追加条件；在 OR 组内，各次调用以 OR 连接，在 AND 组内以 AND 连接。 */
     public EntityCondition<T> and(EntityProperty<T, ?> property, String operator, Object value) {
-        return term(property, operator, value);
+        return where(property, operator, value);
     }
 
     /** 添加自定义或标准 term，字段和值均不作为原始 SQL。 */

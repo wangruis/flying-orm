@@ -6,6 +6,7 @@ import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.rdb.batch.BatchMemoryBudget;
+import com.flying.orm.rdb.aggregate.AggregateRow;
 import com.flying.orm.rdb.codec.LargeObjectValueCodec;
 import com.flying.orm.rdb.codec.ArrayValueCodec;
 import com.flying.orm.rdb.codec.OffsetTimeValueCodec;
@@ -15,7 +16,6 @@ import com.flying.orm.rdb.json.JsonValueCodec;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
 import com.flying.orm.rdb.mapping.RowMapper;
 import com.flying.orm.rdb.observation.SqlStatementType;
-import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.vector.VectorValueCodec;
 import reactor.core.publisher.Flux;
@@ -26,6 +26,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.UnaryOperator;
 
 /**
  * 把数据库驱动返回的值整理成 flying-orm 对外承诺的 Java 值。
@@ -44,10 +45,28 @@ final class FormResultDecoder {
     private final FormDataSqlRenderer renderer;
 
     private final EntityModelRegistry entityModels;
+    private final boolean decodeProtectedValues;
 
     FormResultDecoder(FormDataSqlRenderer renderer, EntityModelRegistry entityModels) {
+        this(renderer, entityModels, true);
+    }
+
+    private FormResultDecoder(FormDataSqlRenderer renderer, EntityModelRegistry entityModels,
+                              boolean decodeProtectedValues) {
         this.renderer = Objects.requireNonNull(renderer, "form data sql renderer must not be null");
         this.entityModels = Objects.requireNonNull(entityModels, "entity model registry must not be null");
+        this.decodeProtectedValues = decodeProtectedValues;
+    }
+
+    /** CONTAINS 先复核编码后的明文；业务 codec 与脱敏由最终结果阶段处理。 */
+    FormResultDecoder forContains() {
+        return new FormResultDecoder(renderer, entityModels, false);
+    }
+
+    private UnaryOperator<DynamicRow> protection(DynamicForm form, DataScope scope,
+                                                 SensitiveDisplayMode displayMode) {
+        return decodeProtectedValues ? renderer.protection().resultOperation(form, scope, displayMode)
+                : renderer.protection().decryptOperation(form, scope)::transform;
     }
 
     /**
@@ -83,11 +102,9 @@ final class FormResultDecoder {
         if (!needsDecoding) {
             return row -> Objects.requireNonNull(row, "form row must not be null");
         }
-        ProtectedFieldRuntime.ResultOperation protection = renderer.protection().resultOperation(
-                form, scope, displayMode);
+        UnaryOperator<DynamicRow> protection = protection(form, scope, displayMode);
         return new RowMapper<>() {
-            private long totalBytes;
-            private long rowIndex;
+            private final DecodedResultBudget budget = new DecodedResultBudget(options.maxResultBytes());
 
             @Override
             public DynamicRow map(DynamicRow source) {
@@ -95,16 +112,8 @@ final class FormResultDecoder {
                 if (!decodingPlan.isEmpty()) {
                     row = decodeMaterializedRow(form, decodingPlan, row);
                 }
-                row = protection.transform(row);
-                if (options.maxResultBytes() > 0) {
-                    totalBytes = saturatedAdd(totalBytes, BatchMemoryBudget.estimateRowBytes(row));
-                    if (totalBytes == Long.MAX_VALUE || totalBytes > options.maxResultBytes()) {
-                        throw new SqlResultMemoryLimitExceededException(
-                                SqlStatementType.SELECT, options.maxResultBytes(), totalBytes, rowIndex);
-                    }
-                    rowIndex++;
-                }
-                return row;
+                row = protection.apply(row);
+                return budget.accept(row);
             }
         };
     }
@@ -166,12 +175,11 @@ final class FormResultDecoder {
         if (safeForm.protections().isEmpty()) {
             decodedRows = fieldDecodedRows;
         } else {
-            ProtectedFieldRuntime.ResultOperation protection = renderer.protection().resultOperation(
-                    safeForm, scope, displayMode);
+            UnaryOperator<DynamicRow> protection = protection(safeForm, scope, displayMode);
             Flux<DynamicRow> protectedRows = ReactiveProtectionCpuBoundary.sequence(
                     fieldDecodedRows, decodingPlan.requiresProtectionCpu(),
                     ReactiveProtectionCpuBoundary.QUERY_PREFETCH);
-            decodedRows = protectedRows.map(protection::transform);
+            decodedRows = protectedRows.map(protection);
         }
         return protectDecodedRows(decodedRows, safeOptions);
     }
@@ -217,31 +225,49 @@ final class FormResultDecoder {
      * 驱动执行器只能看到解码前的值。BLOB、CLOB 等值被读成 byte[] 或 String 后可能明显变大，
      * 所以解码结果还要独立过一次总量门禁。两个门禁约束的是前后两种表示，不会把同一份内存相加两次。
      */
-    private static Flux<DynamicRow> protectDecodedRows(Flux<DynamicRow> rows, SqlExecutionOptions options) {
+    static Flux<DynamicRow> protectDecodedRows(Flux<DynamicRow> rows, SqlExecutionOptions options) {
         if (options.maxResultBytes() == 0L) {
             return rows;
         }
         return Flux.defer(() -> {
-            DecodedResultBudget budget = new DecodedResultBudget();
-            return rows.handle((row, sink) -> {
-                long index = budget.rowIndex++;
-                long attemptedBytes = saturatedAdd(
-                        budget.totalBytes, BatchMemoryBudget.estimateRowBytes(row));
-                if (attemptedBytes == Long.MAX_VALUE || attemptedBytes > options.maxResultBytes()) {
-                    sink.error(new SqlResultMemoryLimitExceededException(
-                            SqlStatementType.SELECT, options.maxResultBytes(), attemptedBytes, index));
-                    return;
-                }
-                budget.totalBytes = attemptedBytes;
-                sink.next(row);
-            });
+            DecodedResultBudget budget = new DecodedResultBudget(options.maxResultBytes());
+            return rows.map(budget::accept);
         });
     }
 
-    /** Per-subscription state; Reactive Streams serializes signals delivered to {@code handle}. */
-    private static final class DecodedResultBudget {
+    /** 每次查询独立计费；普通读取、JOIN、CONTAINS 和聚合共用最终解码预算。 */
+    static final class DecodedResultBudget {
+        private final long maxBytes;
         private long totalBytes;
         private long rowIndex;
+
+        DecodedResultBudget(long maxBytes) {
+            this.maxBytes = maxBytes;
+        }
+
+        DynamicRow accept(DynamicRow row) {
+            if (maxBytes > 0) {
+                acceptBytes(BatchMemoryBudget.estimateRowBytes(row));
+            }
+            return row;
+        }
+
+        AggregateRow accept(AggregateRow row) {
+            if (maxBytes > 0) {
+                acceptBytes(BatchMemoryBudget.estimateValueBytes(row.values()));
+            }
+            return row;
+        }
+
+        private void acceptBytes(long bytes) {
+            long attemptedBytes = saturatedAdd(totalBytes, bytes);
+            if (attemptedBytes == Long.MAX_VALUE || attemptedBytes > maxBytes) {
+                throw new SqlResultMemoryLimitExceededException(
+                        SqlStatementType.SELECT, maxBytes, attemptedBytes, rowIndex);
+            }
+            totalBytes = attemptedBytes;
+            rowIndex++;
+        }
     }
 
     private static long saturatedAdd(long left, long right) {

@@ -33,13 +33,14 @@ final class StructuredConditionValueNormalizer {
     Object normalize(Object value,
                      DynamicField field,
                      StructuredConditionPolicy policy,
-                     String path,
+                     ConditionCompilationBudget.Path path,
                      String operator) {
         if (value instanceof StructuredConditionInput) {
+            String location = path.text();
             throw StructuredConditionException.field(StructuredConditionErrorCode.VALUE_SHAPE_NOT_ALLOWED,
-                                                       path,
+                                                       location,
                                                        field.name(),
-                                                       "structured condition value is invalid at " + path);
+                                                       "structured condition value is invalid at " + location);
         }
         ConditionValueShape shape = policy.valueShape(operator);
         try {
@@ -47,9 +48,7 @@ final class StructuredConditionValueNormalizer {
             ConditionValueNormalizer.ScalarConverter converter = !policy.usesFieldValue(operator)
                     || shape == ConditionValueShape.NONE
                     ? (scalar, index) -> scalar
-                    : (scalar, index) -> normalizeScalar(scalar,
-                                                         field,
-                                                         ConditionCompilationBudget.valuePath(path, index));
+                    : (scalar, index) -> normalizeScalar(scalar, field, path, index);
             return ConditionValueNormalizer.normalize(shape,
                                                       value,
                                                       ConditionValuePolicy.REJECT_EMPTY,
@@ -67,7 +66,7 @@ final class StructuredConditionValueNormalizer {
     }
 
     private StructuredConditionException structuredValueError(ConditionValueException.Error error,
-                                                               String path,
+                                                               ConditionCompilationBudget.Path path,
                                                                String field) {
         StructuredConditionErrorCode code = switch (error) {
             case NULL_VALUE -> StructuredConditionErrorCode.VALUE_NULL;
@@ -80,24 +79,27 @@ final class StructuredConditionValueNormalizer {
             case RANGE_TYPE_MISMATCH -> StructuredConditionErrorCode.VALUE_RANGE_TYPE_MISMATCH;
             case RANGE_ORDER_INVALID -> StructuredConditionErrorCode.VALUE_RANGE_ORDER_INVALID;
         };
+        String location = path.text();
         return StructuredConditionException.field(code,
-                                                  path,
+                                                  location,
                                                   field,
-                                                  "structured condition value is invalid at " + path);
+                                                  "structured condition value is invalid at " + location);
     }
 
-    private Object normalizeScalar(Object value, DynamicField field, String path) {
+    private Object normalizeScalar(Object value, DynamicField field,
+                                   ConditionCompilationBudget.Path path, int index) {
         Class<?> targetType = targetType(field);
         try {
             Object codecInput = StructuredConditionValueSnapshots.snapshot(value);
             return targetType == null
                     ? valueCodecs.write(codecInput) : valueCodecs.read(codecInput, targetType);
         } catch (RuntimeException failure) {
-            throw valueConversionFailed(field, path, failure);
+            throw valueConversionFailed(field, path.index(index).text(), failure);
         }
     }
 
-    private static void requireTextFieldForLike(String operator, DynamicField field, String path) {
+    private static void requireTextFieldForLike(String operator, DynamicField field,
+                                                ConditionCompilationBudget.Path path) {
         if ((operator.equals("like")
                 || operator.equals("not-like")
                 || operator.equals("like-ignore-case")
@@ -107,12 +109,14 @@ final class StructuredConditionValueNormalizer {
         }
     }
 
-    private static StructuredConditionException valueTypeMismatch(DynamicField field, String path) {
+    private static StructuredConditionException valueTypeMismatch(DynamicField field,
+                                                                   ConditionCompilationBudget.Path path) {
+        String location = path.text();
         return StructuredConditionException.field(StructuredConditionErrorCode.VALUE_TYPE_MISMATCH,
-                                                  path,
+                                                  location,
                                                   field.name(),
                                                   "structured condition value cannot be converted for field ["
-                                                          + field.name() + "] at " + path);
+                                                          + field.name() + "] at " + location);
     }
 
     private static StructuredConditionException valueConversionFailed(DynamicField field,

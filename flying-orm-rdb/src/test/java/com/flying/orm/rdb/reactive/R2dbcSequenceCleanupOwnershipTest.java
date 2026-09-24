@@ -8,6 +8,7 @@ import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlExecutionPhase;
 import com.flying.orm.rdb.execution.SqlExecutionSequence;
 import com.flying.orm.rdb.execution.SqlExecutionSequenceException;
+import com.flying.orm.rdb.execution.SqlExecutionSequenceResult;
 import io.r2dbc.spi.Blob;
 import io.r2dbc.spi.Connection;
 import io.r2dbc.spi.ConnectionFactory;
@@ -37,6 +38,7 @@ import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertSame;
@@ -62,6 +64,59 @@ class R2dbcSequenceCleanupOwnershipTest {
     private static final String MUTABLE_WRAPPER = "update sample set value = ? /* mutable-wrapper */";
 
     private static final String ORDINARY_AFTER = "update sample set value = ? /* ordinary-after */";
+
+    @Test
+    void emptySequenceCompletesWithoutAcquiringAConnection() {
+        Fixture fixture = new Fixture();
+        Mono<SqlExecutionSequenceResult> execution = assertDoesNotThrow(() ->
+                fixture.executor.executeInConnection(new SqlExecutionSequence(
+                        List.of(), List.of(), List.of()), SqlExecutionOptions.safeDefaults()));
+
+        for (int subscription = 0; subscription < 2; subscription++) {
+            SqlExecutionSequenceResult result = execution.block(Duration.ofSeconds(2));
+            assertTrue(result.workSteps().isEmpty());
+            assertEquals(0L, result.rowsUpdated());
+        }
+        assertEquals(0, fixture.connectionAcquisitions.get());
+        assertEquals(0, fixture.connectionCloses.get());
+        assertTrue(fixture.sqls().isEmpty());
+    }
+
+    @Test
+    void cleanupOnlySequenceExecutesOncePerSubscription() {
+        Fixture fixture = new Fixture();
+        Mono<SqlExecutionSequenceResult> execution = assertDoesNotThrow(() ->
+                fixture.executor.executeInConnection(new SqlExecutionSequence(
+                        List.of(), List.of(), List.of(request(CLEANUP, 1))),
+                        SqlExecutionOptions.safeDefaults()));
+        assertEquals(0, fixture.connectionAcquisitions.get());
+
+        for (int subscription = 1; subscription <= 2; subscription++) {
+            SqlExecutionSequenceResult result = execution.block(Duration.ofSeconds(2));
+            assertTrue(result.workSteps().isEmpty());
+            assertEquals(0L, result.rowsUpdated());
+            assertEquals(subscription, fixture.cleanupExecutions.get());
+            assertEquals(subscription, fixture.connectionAcquisitions.get());
+            assertEquals(subscription, fixture.connectionCloses.get());
+        }
+    }
+
+    @Test
+    void cleanupOnlyFailureRetainsCleanupPhaseAndReleasesConnection() {
+        Fixture fixture = new Fixture();
+        Mono<SqlExecutionSequenceResult> execution = assertDoesNotThrow(() ->
+                fixture.executor.executeInConnection(new SqlExecutionSequence(
+                        List.of(), List.of(), List.of(request(CLEANUP_FAILURE))),
+                        SqlExecutionOptions.safeDefaults()));
+
+        SqlExecutionSequenceException failure = assertThrows(SqlExecutionSequenceException.class,
+                () -> execution.block(Duration.ofSeconds(2)));
+        assertEquals(SqlExecutionPhase.CLEANUP, failure.phase());
+        assertEquals(0, failure.stepIndex());
+        assertTrue(failure.completedWorkSteps().isEmpty());
+        assertEquals(1, fixture.connectionAcquisitions.get());
+        assertEquals(1, fixture.connectionCloses.get());
+    }
 
     @Test
     void cleanupWrapperKeepsItsSnapshotWhenWorkFails() {
@@ -237,6 +292,8 @@ class R2dbcSequenceCleanupOwnershipTest {
 
         private final AtomicInteger connectionCloses = new AtomicInteger();
 
+        private final AtomicInteger connectionAcquisitions = new AtomicInteger();
+
         private final CountDownLatch workStarted = new CountDownLatch(1);
 
         private final CountDownLatch connectionClosed = new CountDownLatch(1);
@@ -272,7 +329,10 @@ class R2dbcSequenceCleanupOwnershipTest {
             return new ConnectionFactory() {
                 @Override
                 public Publisher<? extends Connection> create() {
-                    return Mono.just(connection);
+                    return Mono.fromSupplier(() -> {
+                        connectionAcquisitions.incrementAndGet();
+                        return connection;
+                    });
                 }
 
                 @Override

@@ -13,6 +13,8 @@ import com.flying.orm.rdb.sync.SyncSqlExecutor;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
 
 /**
  * 原生 JDBC 动态表单元数据 reader。
@@ -33,6 +35,7 @@ public final class JdbcFormMetadataReader implements MetadataCacheInvalidator {
     private final SchemaSnapshotCoverage coverage;
     private final BoundedCacheRegion<MetadataCacheKey, JdbcMetadataValue> metadata;
     private final MetadataCacheInvalidator dependentInvalidator;
+    private final AtomicLong invalidationGeneration = new AtomicLong();
 
     /** 返回当前方言查询集真实具备的结构覆盖范围；覆盖不完整时后续规划会安全停止自动 DDL。 */
     public SchemaSnapshotCoverage snapshotCoverage() {
@@ -85,7 +88,7 @@ public final class JdbcFormMetadataReader implements MetadataCacheInvalidator {
     }
 
     private DynamicForm readForm(MetadataCacheKey key) {
-        JdbcMetadataValue value = metadata.get(key, ignored -> new CachedForm(loadForm(key)));
+        JdbcMetadataValue value = cached(key, ignored -> new CachedForm(loadForm(key)));
         if (value instanceof CachedForm cachedForm) {
             return cachedForm.form();
         }
@@ -135,7 +138,7 @@ public final class JdbcFormMetadataReader implements MetadataCacheInvalidator {
     }
 
     private TableMetadata readTable(MetadataCacheKey key) {
-        JdbcMetadataValue value = metadata.get(key, ignored -> new CachedTable(loadTable(key)));
+        JdbcMetadataValue value = cached(key, ignored -> new CachedTable(loadTable(key)));
         if (value instanceof CachedTable cachedTable) {
             return cachedTable.table();
         }
@@ -225,17 +228,25 @@ public final class JdbcFormMetadataReader implements MetadataCacheInvalidator {
 
     @Override
     public void invalidateAll() {
+        invalidationGeneration.incrementAndGet();
         metadata.invalidateAll();
         dependentInvalidator.invalidateAll();
     }
 
     private void removeMatching(String schema, String table) {
-        metadata.invalidateIf(key -> sameTable(key, schema, table));
+        invalidationGeneration.incrementAndGet();
+        metadata.invalidateIf(key -> key.matchesInvalidation(schema, table));
     }
 
-    private static boolean sameTable(MetadataCacheKey key, String schema, String table) {
-        return key.table().equals(table)
-                && (schema == null || key.schema() == null || Objects.equals(key.schema(), schema));
+    private JdbcMetadataValue cached(MetadataCacheKey key,
+                                      Function<MetadataCacheKey, JdbcMetadataValue> loader) {
+        long generation = invalidationGeneration.get();
+        JdbcMetadataValue value = metadata.get(key, loader);
+        // 字典查询完成前条目尚未发布；跨失效的在途读取可返回原结果，但不能留下旧缓存。
+        if (generation != invalidationGeneration.get()) {
+            metadata.invalidate(key);
+        }
+        return value;
     }
 
     private List<DynamicRow> query(InformationSchemaFormMetadataReader.Query query,

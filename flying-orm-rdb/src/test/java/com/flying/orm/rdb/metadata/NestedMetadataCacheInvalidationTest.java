@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -145,6 +146,44 @@ class NestedMetadataCacheInvalidationTest {
     private static void assertColumns(ReactiveFormMetadataReader reader, int count) {
         assertEquals(count, reader.readForm("accounts", "public", "accounts").block().fields().size());
         assertEquals(count, reader.readTable("public", "accounts").block().columns().size());
+    }
+
+    @TestFactory
+    List<DynamicTest> invalidationDuringLoaderCreationCannotCacheOldMetadata() {
+        List<DynamicTest> tests = new ArrayList<>();
+        for (int mode = 0; mode < 3; mode++) {
+            Consumer<MetadataCacheInvalidator> invalidate = INVALIDATIONS.get(mode);
+            for (boolean table : List.of(false, true)) {
+                tests.add(DynamicTest.dynamicTest("mode=" + mode + "/table=" + table, () -> {
+                    AtomicReference<ReactiveFormMetadataCache> cacheRef = new AtomicReference<>();
+                    MutableReader source = new MutableReader() {
+                        @Override
+                        public Mono<DynamicForm> readForm(String id, String name) {
+                            reads++;
+                            DynamicForm captured = current;
+                            if (reads == 1) {
+                                current = form(true);
+                                // Reproduce invalidation after the reader captures the old structure,
+                                // but before it returns the loading Publisher to the cache.
+                                invalidate.accept(cacheRef.get());
+                            }
+                            return Mono.just(captured);
+                        }
+                    };
+                    ReactiveFormMetadataCache cache = ReactiveFormMetadataReaders.cached(source);
+                    cacheRef.set(cache);
+                    Mono<Integer> columns = table
+                            ? cache.readTable("public", "accounts").map(value -> value.columns().size())
+                            : cache.readForm("accounts", "public", "accounts")
+                                   .map(value -> value.fields().size());
+                    assertEquals(1, columns.block());
+                    assertEquals(2, columns.block(), "invalidation must prevent stale cache publication");
+                    assertEquals(2, columns.block());
+                    assertEquals(2, source.reads, "only the fresh load may be cached");
+                }));
+            }
+        }
+        return tests;
     }
 
     @TestFactory

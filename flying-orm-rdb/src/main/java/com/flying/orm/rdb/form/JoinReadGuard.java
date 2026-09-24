@@ -1,8 +1,6 @@
 package com.flying.orm.rdb.form;
 
-import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.ConditionNode;
-import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.join.JoinClause;
 import com.flying.orm.core.join.JoinFieldPair;
@@ -13,6 +11,7 @@ import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.join.JoinSource;
 import com.flying.orm.core.scope.FieldUse;
 import com.flying.orm.core.scope.FieldUseRequirements;
+import com.flying.orm.rdb.internal.condition.ConditionNodes;
 
 import java.util.Map;
 import java.util.Objects;
@@ -76,21 +75,14 @@ final class JoinReadGuard {
                                           Map<JoinSource, DynamicForm> readableForms,
                                           FieldUseRequirements.Builder requirements,
                                           FormDataSqlRenderer renderer) {
-        if (node instanceof TermCondition term) {
+        ConditionNodes.forEachTerm(node, term -> {
             JoinFieldRef field = new JoinFieldRef(source, term.field());
             requireField(field, readableForms);
             require(requirements, field, FieldUse.FILTER);
             if (renderer != null) {
                 FieldUseGuard.approveTermExtension(renderer, term, FieldUse.FILTER);
             }
-            return;
-        }
-        if (node instanceof ConditionGroup group) {
-            group.children().forEach(child ->
-                    validateCondition(child, source, readableForms, requirements, renderer));
-            return;
-        }
-        throw new IllegalArgumentException("unsupported join condition node");
+        });
     }
 
     private static void require(FieldUseRequirements.Builder requirements,

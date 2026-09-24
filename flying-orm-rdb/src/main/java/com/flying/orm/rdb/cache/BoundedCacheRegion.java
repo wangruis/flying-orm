@@ -53,7 +53,11 @@ public final class BoundedCacheRegion<K, V> {
             return Objects.requireNonNull(safeLoader.apply(safeKey), "cache loader must not return null");
         }
         WeightedValue<V> value = cache.get(safeKey, currentKey -> weighted(currentKey, safeLoader.apply(currentKey)));
-        return Objects.requireNonNull(value, "cache loader must not return null").value();
+        Objects.requireNonNull(value, "cache loader must not return null");
+        if (value.oversized()) {
+            cache.asMap().remove(safeKey, value);
+        }
+        return value.value();
     }
 
     public V getIfPresent(K key) {
@@ -61,7 +65,7 @@ public final class BoundedCacheRegion<K, V> {
             return null;
         }
         WeightedValue<V> value = cache.getIfPresent(Objects.requireNonNull(key, "cache key must not be null"));
-        return value == null ? null : value.value();
+        return value == null || value.oversized() ? null : value.value();
     }
 
     /** @return true 表示对象已进入缓存，false 表示区域关闭或对象过大。 */
@@ -72,8 +76,12 @@ public final class BoundedCacheRegion<K, V> {
             return false;
         }
         WeightedValue<V> weighted = weighted(safeKey, safeValue);
+        if (weighted.oversized()) {
+            cache.invalidate(safeKey);
+            return false;
+        }
         cache.put(safeKey, weighted);
-        return !weighted.oversized();
+        return true;
     }
 
     public void invalidate(K key) {
@@ -107,8 +115,8 @@ public final class BoundedCacheRegion<K, V> {
         if (oversized) {
             rejectedOversized.increment();
         }
-        // weight 大于总上限的条目由 Caffeine 返回给本次调用但不保留，不需要永久旁路 Map。
-        int caffeineWeight = oversized ? Math.toIntExact(policy.maximumWeight() + 1L) : weight;
+        // 超大加载结果由 get 返回后立即移除，临时零权重避免挤出其他缓存项。
+        int caffeineWeight = oversized ? 0 : weight;
         return new WeightedValue<>(safeValue, caffeineWeight, oversized);
     }
 

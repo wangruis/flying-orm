@@ -24,6 +24,7 @@ import com.flying.orm.rdb.schema.SchemaMigrationFailureCode;
 import com.flying.orm.rdb.schema.SchemaMigrationOptions;
 import com.flying.orm.rdb.schema.SchemaMigrationRejectedException;
 import com.flying.orm.rdb.schema.SchemaMigrationReviewPolicy;
+import com.flying.orm.rdb.schema.SchemaSnapshot;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
@@ -171,6 +172,12 @@ class EntitySchemaSynchronizerPlanningTest {
             SyncSqlExecutor syncExecutor = new SyncSqlExecutor() {
                 public List<DynamicRow> query(SqlRequest request) {
                     reads++;
+                    if (request.sql().equals("select table")) {
+                        Map<String, Object> table = new LinkedHashMap<>();
+                        table.put("TABLE_COMMENT", null);
+                        return List.of(DynamicRow.copyOf(table));
+                    }
+                    if (request.sql().equals("select empty")) return List.of();
                     return tables.get((String) request.parameters().getFirst()).columns().stream()
                                  .map(column -> DynamicRow.copyOf(Map.of(
                                          "COLUMN_NAME", column.name(), "DATA_TYPE", column.dataType(),
@@ -182,12 +189,24 @@ class EntitySchemaSynchronizerPlanningTest {
                     throw new AssertionError("schema DDL must not request generated keys");
                 }
             };
-            jdbcMetadata = new JdbcFormMetadataReader(syncExecutor, new InformationSchemaFormMetadataReader.Queries(
-                    (schema, table) -> new SqlRequest("select columns", List.of(table)), null, null, type -> type));
+            InformationSchemaFormMetadataReader.Query columns =
+                    (schema, table) -> new SqlRequest("select columns", List.of(table));
+            InformationSchemaFormMetadataReader.Query empty =
+                    (schema, table) -> new SqlRequest("select empty", List.of(table));
+            InformationSchemaFormMetadataReader.Queries queries = withLegacyColumn
+                    ? InformationSchemaFormMetadataReader.Queries.complete(columns, empty, empty, type -> type,
+                            (schema, table) -> new SqlRequest("select table", List.of(table)), empty, empty, empty,
+                            InformationSchemaFormMetadataReader.SnapshotDialect.H2)
+                    : new InformationSchemaFormMetadataReader.Queries(columns, null, null, type -> type);
+            jdbcMetadata = new JdbcFormMetadataReader(syncExecutor, queries);
             jdbc = JdbcSchemaClient.create(syncExecutor, RdbDialect.h2());
             reactiveMetadata = new ReactiveFormMetadataReader() {
                 public Mono<TableMetadata> readTable(String table) {
                     return Mono.fromSupplier(() -> { reads++; return tables.get(table); });
+                }
+                public Mono<SchemaSnapshot> readSnapshot(String table) {
+                    // 使用同一份纯内存字典事实；删列审批测试必须具备真实回退所需的完整属性。
+                    return Mono.fromSupplier(() -> jdbcMetadata.readSnapshot(table));
                 }
                 public Mono<DynamicForm> readForm(String formId, String table) {
                     return Mono.error(new AssertionError("schema review must read table metadata"));

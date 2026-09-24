@@ -267,6 +267,11 @@ public final class SchemaDialect {
         return ddl.alterColumnTypeSql(table, column, databaseType, columnDefinition, nullable, collation);
     }
 
+    String alterColumnTypeSql(String table, String column, String databaseType,
+                              String columnDefinition, boolean nullable, String collation) {
+        return ddl.alterColumnTypeSql(table, column, databaseType, columnDefinition, nullable, collation);
+    }
+
     /** MySQL 修改列类型时必须重放完整列定义，避免隐式丢失非空、生成策略或注释。 */
     String alterColumnTypeSql(String table,
                               String column,
@@ -293,6 +298,12 @@ public final class SchemaDialect {
     }
 
     String alterColumnNullabilitySql(RelationIdentity table, String column,
+                                     String databaseType, String columnDefinition,
+                                     boolean nullable, String collation) {
+        return ddl.alterColumnNullabilitySql(table, column, databaseType, columnDefinition, nullable, collation);
+    }
+
+    String alterColumnNullabilitySql(String table, String column,
                                      String databaseType, String columnDefinition,
                                      boolean nullable, String collation) {
         return ddl.alterColumnNullabilitySql(table, column, databaseType, columnDefinition, nullable, collation);

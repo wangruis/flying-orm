@@ -71,6 +71,147 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class EntitySchemaRepositoryContractTest {
 
     @TestFactory
+    Stream<DynamicTest> aggregatesHonorResultBudgetAfterTheExplicitCodec() {
+        return Stream.of(false, true).flatMap(reactive -> Stream.of(false, true).flatMap(grouped ->
+                Stream.of(0L, 1024L, 8192L).map(maxBytes -> DynamicTest.dynamicTest(
+                        "reactive=" + reactive + ",group=" + grouped + ",maxBytes=" + maxBytes, () -> {
+                    ValueCodec codec = new ValueCodec() {
+                        public boolean supports(Class<?> type) { return type == StringBuilder.class; }
+                        public Object read(Object value, Class<?> type) { return new StringBuilder(value.toString().repeat(2000)); }
+                    };
+                    EntitySchemaDescriptor<BudgetText> descriptor = EntitySchemaDescriptor.builder(BudgetText.class)
+                            .typeMappings(EntityTypeMappingRegistry.builder().register("coded-text", StringBuilder.class,
+                                    DatabaseType.of("VARCHAR"), codec).build()).build();
+                    CapturingExecutor executor = new CapturingExecutor(grouped ? row("g", "x", "total", 1L) : row("m", "x"));
+                    QuerySpec query = QuerySpec.of(descriptor.form(), ConditionGroup.and().build())
+                            .withExecutionOptions(com.flying.orm.rdb.execution.SqlExecutionOptions.safeDefaults()
+                                    .withMaxResultBytes(maxBytes));
+                    AggregateSpec spec = grouped ? AggregateSpec.builder(query).group(GroupSelection.of("text", "g"))
+                            .aggregate(AggregateExpression.count("text", "total")).build()
+                            : AggregateSpec.builder(query).aggregate(AggregateExpression.min(
+                                    "text", "m", LogicalType.TEXT, StringBuilder.class)).build();
+                    FlyingOrmClientBuilder builder = reactive ? FlyingOrmClientBuilder.reactive(executor, RdbDialect.h2())
+                            : FlyingOrmClients.builder(ConnectionAccessTestSupport.borrowed(executor.connection())).configuredDialect("h2");
+                    try (FlyingOrmClients clients = builder.entitySchema(descriptor).build()) {
+                        Mono<List<AggregateRow>> result = reactive ? clients.forms().aggregate(spec).collectList()
+                                : Mono.fromSupplier(() -> clients.syncForms().aggregate(spec));
+                        for (int subscription = 0; subscription < 3; subscription++) {
+                            if (maxBytes == 1024L) {
+                                assertThrows(com.flying.orm.rdb.execution.SqlResultMemoryLimitExceededException.class,
+                                        result::block);
+                            } else {
+                                assertEquals(1, result.block().size());
+                            }
+                        }
+                    }
+                }))));
+    }
+
+    @TableName("budget_text")
+    private record BudgetText(@TableColumn(databaseTypeId = "coded-text") StringBuilder text) { }
+
+    @Test
+    void explicitCodecSnapshotStillIsolatesKnownMutableValues() {
+        EntitySchemaDescriptor<VersionedText> descriptor = versionedTextDescriptor();
+        StringBuilder value = new StringBuilder("first");
+        Map<String, Object> snapshot = com.flying.orm.rdb.internal.value.FormValueSnapshots.snapshot(
+                descriptor.form(), Map.of("builder", value), field -> true);
+        value.append("-changed");
+        assertEquals("builder:first", new BuilderTextCodec().write(snapshot.get("builder")));
+    }
+
+    @TestFactory
+    Stream<DynamicTest> encryptedBatchKeepsExplicitContainerDomainTypes() {
+        return Stream.of(false, true).flatMap(upsert -> Stream.of(false, true).map(publisher ->
+                DynamicTest.dynamicTest("upsert=" + upsert + ",publisher=" + publisher, () -> {
+                    EntitySchemaDescriptor<ProtectedAccount> descriptor = EntitySchemaDescriptor.builder(ProtectedAccount.class)
+                            .typeMappings(EntityTypeMappingRegistry.builder().register("account-payload", AccountPayload.class,
+                                    DatabaseType.of("JSON"), new AccountPayloadCodec()).build()).build();
+                    CapturingExecutor executor = new CapturingExecutor();
+                    try (com.flying.orm.rdb.protection.ProtectedFieldKeyRing keys =
+                                 com.flying.orm.rdb.protection.ProtectedFieldKeyRing.single("v1", new byte[32]);
+                         FlyingOrmClients clients = FlyingOrmClientBuilder.reactive(executor, RdbDialect.postgresql())
+                                 .entitySchema(descriptor).protectedFields(keys).build()) {
+                        ReactiveFormRepository<ProtectedAccount> repository = clients.repository(ProtectedAccount.class);
+                        List<ProtectedAccount> entities = List.of(
+                                new ProtectedAccount(1L, new AccountPayload("first"), "secret"),
+                                new ProtectedAccount(2L, new AccountPayload("second"), "secret"));
+                        if (upsert) {
+                            if (publisher) repository.upsertBatch(Flux.fromIterable(entities)).block();
+                            else repository.upsertBatch(entities).block();
+                        } else {
+                            if (publisher) repository.insertBatch(Flux.fromIterable(entities)).block();
+                            else repository.insertBatch(entities).block();
+                        }
+                        assertEquals(2, executor.batchRows.size());
+                        assertEquals("db:first", executor.batchRows.get(0)[1]);
+                        assertEquals("db:second", executor.batchRows.get(1)[1]);
+                    }
+                })));
+    }
+
+    @TableName("protected_accounts")
+    private record ProtectedAccount(@TableId(type = IdType.INPUT) Long id,
+            @TableColumn(databaseTypeId = "account-payload") AccountPayload accountNumber,
+            @com.flying.orm.core.annotation.EncryptedField String secret) { }
+
+    @TestFactory
+    Stream<DynamicTest> explicitSmallintVersionsIncrementAcrossRepositoryAndLambdaUpdates() {
+        return Stream.of(false, true).flatMap(reactive -> Stream.of("single", "batch", "lambda")
+                .map(operation -> DynamicTest.dynamicTest("SMALLINT reactive=" + reactive + "/" + operation, () -> {
+                    ValueCodec codec = new ValueCodec() {
+                        public boolean supports(Class<?> type) { return Number.class.isAssignableFrom(type); }
+                        public Object read(Object value, Class<?> type) {
+                            return ValueCodecRegistry.standard().read(value, type);
+                        }
+                    };
+                    EntitySchemaDescriptor<SmallVersion> descriptor = EntitySchemaDescriptor.builder(SmallVersion.class)
+                            .typeMappings(EntityTypeMappingRegistry.builder()
+                                    .register("SMALLINT", Number.class, DatabaseType.of("SMALLINT"), codec).build())
+                            .build();
+                    assertEquals(LogicalType.SMALL_INTEGER, descriptor.form().field("version").databaseType().logicalType());
+                    CapturingExecutor executor = new CapturingExecutor();
+                    FlyingOrmClientBuilder builder = reactive
+                            ? FlyingOrmClientBuilder.reactive(executor, RdbDialect.h2())
+                            : FlyingOrmClients.builder(ConnectionAccessTestSupport.borrowed(executor.connection()))
+                                    .configuredDialect("h2");
+                    SmallVersion entity = new SmallVersion(1L, (short) 2, "updated");
+                    ConditionGroup where = ConditionGroup.and().where("id", "=", 1L).build();
+                    try (FlyingOrmClients clients = builder.entitySchema(descriptor).build()) {
+                        if (reactive) {
+                            switch (operation) {
+                                case "single" -> clients.repository(SmallVersion.class).update(entity, where).block();
+                                case "batch" -> clients.repository(SmallVersion.class).updateBatch(List.of(entity)).block();
+                                default -> clients.forms().entity(SmallVersion.class).update()
+                                        .set(SmallVersion::name, "updated").where(SmallVersion::id, 1L)
+                                        .optimisticLock((short) 2).execute().block();
+                            }
+                        } else {
+                            switch (operation) {
+                                case "single" -> clients.syncRepository(SmallVersion.class).update(entity, where);
+                                case "batch" -> clients.syncRepository(SmallVersion.class).updateBatch(List.of(entity));
+                                default -> clients.syncForms().entity(SmallVersion.class).update()
+                                        .set(SmallVersion::name, "updated").where(SmallVersion::id, 1L)
+                                        .optimisticLock((short) 2).execute();
+                            }
+                        }
+                        List<Object> parameters = operation.equals("batch")
+                                ? Arrays.asList(executor.batchRows.getFirst()) : executor.singleWrite.parameters();
+                        assertEquals(List.of("updated", 1L, (short) 2), parameters);
+                        if (!operation.equals("batch")) {
+                            org.junit.jupiter.api.Assertions.assertTrue(executor.singleWrite.sql().contains("+ 1"));
+                            org.junit.jupiter.api.Assertions.assertTrue(executor.singleWrite.sql().contains(" where "));
+                        }
+                    }
+                })));
+    }
+
+    @TableName("small_versions")
+    private record SmallVersion(@TableId(type = IdType.INPUT) Long id,
+                                @Version @TableColumn(databaseTypeId = "SMALLINT") Short version,
+                                String name) { }
+
+    @TestFactory
     Stream<DynamicTest> uuidRepositoriesKeepSchemaAndWriteValuesConsistent() {
         return Stream.of("h2", "postgresql", "mysql", "oracle", "sqlserver")
                 .flatMap(dialect -> Stream.of(false, true).flatMap(reactive ->

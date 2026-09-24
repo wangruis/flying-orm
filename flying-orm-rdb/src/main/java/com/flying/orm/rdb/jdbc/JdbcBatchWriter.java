@@ -59,7 +59,8 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
         var observation = observations.begin(request);
         var evidence = new BatchExecutionEvidence.Accumulator();
         JdbcBatchRows input = new JdbcBatchRows(
-                request.rows(), request.parameterCount(), request.options().maxRowBytes(), evidence);
+                request.rows(), request.parameterCount(), request.options().maxRowBytes(),
+                request.options().maxRows(), evidence);
         Connection connection = null;
         SqlRequest representative = null;
         Throwable failure = null;

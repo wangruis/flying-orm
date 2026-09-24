@@ -28,6 +28,7 @@ import java.util.Objects;
 public final class ProtectedOwnerBatchPlan {
 
     public static final int MAX_ROWS = 500;
+    /** Preferred combined statement width; a wider individual query is planned on its own. */
     public static final int MAX_PARAMETERS = 2_000;
     private static final String SLOT_COLUMN = "flying_orm_owner_slot";
     private static final long PLAN_OVERHEAD_BYTES = 64L;
@@ -176,29 +177,27 @@ public final class ProtectedOwnerBatchPlan {
                 }
                 String querySql = transportShape == null
                         ? SqlExecutionStatements.canonical(query, "") : transportShape;
+                // The slot is an internal ordinal, not user data; an integer literal is portable.
                 String branch = "select flying_owner_" + works.size()
-                        + ".*, cast(? as integer) as " + slotColumn
+                        + ".*, " + works.size() + " as " + slotColumn
                         + " from (" + querySql + ") flying_owner_" + works.size();
-                int addedParameters = 1 + queryParameters.size();
+                int addedParameters = queryParameters.size();
                 long branchBytes = saturatingAdd(
                         BatchMemoryBudget.estimateValueBytes(branch),
                         BatchMemoryBudget.estimateValueBytes(queryParameters));
                 boolean exceeds = !works.isEmpty() && (works.size() >= MAX_ROWS
-                        || parameters.size() + addedParameters > MAX_PARAMETERS
+                        || (long) parameters.size() + addedParameters > MAX_PARAMETERS
                         || saturatingAdd(estimatedBytes, branchBytes) > maxBufferedBytes);
                 if (exceeds) {
                     break;
                 }
-                if (works.isEmpty() && (addedParameters > MAX_PARAMETERS
-                        || saturatingAdd(estimatedBytes, branchBytes) > maxBufferedBytes)) {
+                if (works.isEmpty() && saturatingAdd(estimatedBytes, branchBytes) > maxBufferedBytes) {
                     throw new IllegalArgumentException("protected owner query exceeds batch safety limits");
                 }
                 if (!works.isEmpty()) {
                     sql.append(" union all ");
                 }
-                int slot = works.size();
                 sql.append(branch);
-                parameters.add(slot);
                 parameters.addAll(queryParameters);
                 indexes.add(cursor);
                 works.add(work);

@@ -4,6 +4,7 @@ import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.rdb.internal.InternalApi;
 
 import java.lang.reflect.Array;
 import java.util.Collections;
@@ -142,7 +143,8 @@ public final class ProtectedFieldReprotection {
      * @param physicalValues 可信迁移查询返回的物理字段和值
      * @param scope          与原写入相同的租户范围
      * @param codecs         统一值 codec
-     * @return 可直接交给普通更新规格的逻辑字段值；空 Map 表示无需重写
+     * @return 可直接交给普通更新规格的待重写值；值保留已编码标记，不应作为业务明文读取。
+     *         空 Map 表示无需重写
      */
     public Map<String, Object> valuesNeedingReprotection(DynamicForm form,
                                                           Map<String, Object> physicalValues,
@@ -168,10 +170,23 @@ public final class ProtectedFieldReprotection {
                 cipher.verify(envelope, ProtectedFieldValues.context(safeForm, field, tenant));
                 continue;
             }
-            result.put(field.name(), cipher.decrypt(
-                    envelope, ProtectedFieldValues.context(safeForm, field, tenant)));
+            result.put(field.name(), new PreparedText(cipher.decrypt(
+                    envelope, ProtectedFieldValues.context(safeForm, field, tenant))));
         }
         return Collections.unmodifiableMap(result);
+    }
+
+    /** 内部轮换载体；跳过业务 codec，但仍执行当前密钥加密和全部检索令牌生成。 */
+    @InternalApi
+    public record PreparedText(String text) {
+        public PreparedText {
+            Objects.requireNonNull(text, "prepared protected text must not be null");
+        }
+
+        @Override
+        public String toString() {
+            return "[protected text]";
+        }
     }
 
     private static final class ValueLookup {

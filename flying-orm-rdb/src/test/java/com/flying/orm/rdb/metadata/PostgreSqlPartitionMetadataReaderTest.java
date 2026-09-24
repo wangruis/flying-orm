@@ -59,6 +59,28 @@ class PostgreSqlPartitionMetadataReaderTest {
     }
 
     @Test
+    void exclusionConstraintsCannotDisappearFromACompleteSnapshot() {
+        for (String schema : new String[] {null, "jobs"}) {
+            String sql = PostgreSqlMetadataQueries.queries().tableQuery().create(schema, "job_events").sql();
+            String exclusionProbe = "where unsupported_constraint.conrelid = t.oid"
+                    + " and unsupported_constraint.contype = 'x'";
+            String normalized = sql.replaceAll("\\s+", " ");
+            assertTrue(normalized.contains(exclusionProbe));
+            assertTrue(normalized.contains(") then false"));
+            assertTrue(normalized.contains(") then 'exclusion constraint'"));
+        }
+        Map<String, Object> table = tableRow("TABLE_REPRESENTABLE", false,
+                "UNSUPPORTED_TABLE_REASON", "exclusion constraint", "TABLE_PARTITIONED", false);
+        JdbcFormMetadataReader jdbc = new JdbcFormMetadataReader(
+                new CountingSyncExecutor(table), PostgreSqlMetadataQueries.queries());
+        ReactiveFormMetadataReader reactive = new InformationSchemaFormMetadataReader(
+                new CountingReactiveExecutor(table), PostgreSqlMetadataQueries.queries());
+
+        assertThrows(IllegalStateException.class, () -> jdbc.readSnapshot("jobs", "job_events"));
+        assertThrows(IllegalStateException.class, () -> reactive.readSnapshot("jobs", "job_events").block());
+    }
+
+    @Test
     void catalogQueryCarriesTheSupportedParentFactAndDoesNotRejectItsChildren() {
         String sql = PostgreSqlMetadataQueries.queries()
                 .tableQuery().create("jobs", "job_events").sql();

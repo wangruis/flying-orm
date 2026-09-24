@@ -23,6 +23,55 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class JdbcFormMetadataReaderTest {
 
     @Test
+    void caseAliasesAreEvictedWithoutMergingTheirReadKeys() {
+        AtomicInteger queries = new AtomicInteger();
+        JdbcFormMetadataReader reader = cachedReader(new BudgetExecutor(queries));
+        reader.readForm("customers", "PUBLIC", "CUSTOMERS");
+        reader.readTable("PUBLIC", "CUSTOMERS");
+        reader.readTable("public", "customers");
+        assertEquals(5, queries.get(), "read identities remain case-sensitive");
+        reader.invalidate(RelationIdentity.of(null, "public", "customers"));
+        reader.readForm("customers", "PUBLIC", "CUSTOMERS");
+        reader.readTable("PUBLIC", "CUSTOMERS");
+        reader.readTable("public", "customers");
+        assertEquals(10, queries.get());
+    }
+
+    @Test
+    void loadingAcrossInvalidationDoesNotRetainStaleFormsOrTables() {
+        for (boolean table : List.of(false, true)) {
+            AtomicReference<JdbcFormMetadataReader> cached = new AtomicReference<>();
+            AtomicInteger loads = new AtomicInteger();
+            SyncSqlExecutor executor = new SyncSqlExecutor() {
+                public List<DynamicRow> query(SqlRequest request) {
+                    if (request.sql().contains("indexes")) return List.of();
+                    DynamicRow id = DynamicRow.copyOf(java.util.Map.of(
+                            "COLUMN_NAME", "id", "DATA_TYPE", "BIGINT", "PRIMARY_KEY", true));
+                    if (loads.incrementAndGet() == 1) {
+                        cached.get().invalidate("public", "customers");
+                        return List.of(id);
+                    }
+                    return List.of(id, DynamicRow.copyOf(java.util.Map.of(
+                            "COLUMN_NAME", "name", "DATA_TYPE", "VARCHAR", "PRIMARY_KEY", false)));
+                }
+                public long rowsUpdated(SqlRequest request) { throw new AssertionError("unexpected write"); }
+                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+                    throw new AssertionError("unexpected write");
+                }
+            };
+            JdbcFormMetadataReader reader = cachedReader(executor);
+            cached.set(reader);
+            java.util.function.IntSupplier columns = table
+                    ? () -> reader.readTable("public", "customers").columns().size()
+                    : () -> reader.readForm("customers", "public", "customers").fields().size();
+            assertEquals(1, columns.getAsInt());
+            assertEquals(2, columns.getAsInt(), "old loading result must not survive invalidation");
+            assertEquals(2, columns.getAsInt());
+            assertEquals(2, loads.get());
+        }
+    }
+
+    @Test
     void callerCanDisableFormAndTableCaching() {
         AtomicInteger queries = new AtomicInteger();
         JdbcFormMetadataReader reader = reader(new BudgetExecutor(queries), CacheRegionPolicy.disabled());

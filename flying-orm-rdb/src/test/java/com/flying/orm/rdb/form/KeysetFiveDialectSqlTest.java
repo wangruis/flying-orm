@@ -4,6 +4,8 @@ import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.page.CursorPosition;
+import com.flying.orm.core.page.CursorPageQuery;
+import com.flying.orm.core.page.CursorSort;
 import com.flying.orm.core.page.KeysetPageQuery;
 import com.flying.orm.core.page.KeysetSort;
 import com.flying.orm.core.page.NullOrder;
@@ -21,8 +23,33 @@ import java.util.Locale;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class KeysetFiveDialectSqlTest {
+
+    @Test
+    void largeCursorPagesKeepTheLookaheadRowWithoutIntegerWraparound() {
+        DynamicForm form = DynamicForm.builder("events", "events")
+                .addField(DynamicField.primaryKey("id", "BIGINT")).build();
+        QuerySpec query = QuerySpec.of(form, ConditionGroup.and().build());
+        for (RdbDialect dialect : List.of(RdbDialect.h2(), RdbDialect.mysql(), RdbDialect.postgresql(),
+                RdbDialect.oracle(), RdbDialect.sqlServer())) {
+            FormOperationPlanner planner = planner(dialect);
+            for (int size : new int[]{5000, Integer.MAX_VALUE - 1}) {
+                assertTrue(planner.cursorPage(query, CursorPageQuery.first(size, CursorSort.asc("id")))
+                        .request().parameters().stream().anyMatch(value -> value instanceof Number number
+                                && number.longValue() == (long) size + 1), dialect.name());
+                assertTrue(planner.keysetPage(query,
+                        KeysetPageQuery.first(size, KeysetSort.asc("id", NullOrder.LAST)))
+                        .request().parameters().stream().anyMatch(value -> value instanceof Number number
+                                && number.longValue() == (long) size + 1), dialect.name());
+            }
+            assertThrows(ArithmeticException.class, () -> planner.cursorPage(query,
+                    CursorPageQuery.first(Integer.MAX_VALUE, CursorSort.asc("id"))));
+            assertThrows(ArithmeticException.class, () -> planner.keysetPage(query,
+                    KeysetPageQuery.first(Integer.MAX_VALUE, KeysetSort.asc("id", NullOrder.LAST))));
+        }
+    }
 
     @Test
     void subsequentPagePreservesDeclaredColumnSpellingInEveryPredicate() {

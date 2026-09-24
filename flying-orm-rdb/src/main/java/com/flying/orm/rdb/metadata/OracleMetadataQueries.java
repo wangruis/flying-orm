@@ -52,10 +52,15 @@ final class OracleMetadataQueries {
                            then 'BOOLEAN'
                        else c.DATA_TYPE
                    end as DATA_TYPE,
-                   c.DATA_TYPE as PHYSICAL_DATA_TYPE,
+                   case when c.DATA_TYPE in ('CHAR', 'VARCHAR2') and c.CHAR_USED in ('B', 'C')
+                        then c.DATA_TYPE || '(' || c.CHAR_COL_DECL_LENGTH
+                             || case c.CHAR_USED when 'B' then ' BYTE)' else ' CHAR)' end
+                        else c.DATA_TYPE end as PHYSICAL_DATA_TYPE,
                    case when c.DATA_TYPE = 'RAW' then c.DATA_LENGTH
                         else c.CHAR_LENGTH end as CHARACTER_MAXIMUM_LENGTH,
-                   c.DATA_PRECISION as NUMERIC_PRECISION,
+                   case when c.DATA_TYPE = 'NUMBER' and c.DATA_PRECISION is null
+                             and c.DATA_SCALE is not null then 38
+                        else c.DATA_PRECISION end as NUMERIC_PRECISION,
                    c.DATA_SCALE as NUMERIC_SCALE,
                    case when c.DATA_TYPE like 'TIMESTAMP%' then c.DATA_SCALE end as TEMPORAL_PRECISION,
                    case

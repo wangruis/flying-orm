@@ -43,7 +43,7 @@ final class SchemaDefinitionEquality {
         return sameName(left.name(), right.name(), schemaDialect)
                 && sameColumnType(left, right, schemaDialect, physicalActualTypes)
                 && left.nullable() == right.nullable()
-                && sameDefault(left.defaultValue(), right.defaultValue())
+                && sameDefault(left.defaultValue(), right.defaultValue(), schemaDialect)
                 && Objects.equals(left.comment(), right.comment())
                 && sameGeneration(left.generation(), right.generation(), schemaDialect, relation)
                 // The left side is observed metadata; only explicitly desired options constrain it.
@@ -160,7 +160,8 @@ final class SchemaDefinitionEquality {
                     && Objects.equals(left.temporalPrecision(), right.temporalPrecision());
         }
         String actual = actualColumnType(schemaDialect, left);
-        return schemaDialect.sameDataType(actual, desiredColumnType(schemaDialect, right));
+        return schemaDialect.sameDataType(actual, SchemaTypeMapping.preserveCharacterLengthUnit(
+                schemaDialect, actual, desiredColumnType(schemaDialect, right)));
     }
 
     static String actualColumnType(SchemaDialect dialect, ColumnDefinition column) {
@@ -200,10 +201,6 @@ final class SchemaDefinitionEquality {
     }
 
     static String desiredColumnType(SchemaDialect dialect, ColumnDefinition column) {
-        return renderedType(dialect, column);
-    }
-
-    private static String renderedType(SchemaDialect dialect, ColumnDefinition column) {
         Integer precision = column.databaseType().isTemporal()
                 ? column.temporalPrecision() : column.precision();
         return dialect.dataType(
@@ -249,26 +246,35 @@ final class SchemaDefinitionEquality {
         return relation.schema().orElseThrow() + "." + actual;
     }
 
-    static boolean sameDefault(ColumnDefault left, ColumnDefault right) {
+    static boolean sameDefault(ColumnDefault left, ColumnDefault right, SchemaDialect dialect) {
         if (left.kind() != right.kind()) {
             return false;
         }
         return left.kind() != ColumnDefault.Kind.LITERAL
-                || sameLiteral(left.value().orElseThrow(), right.value().orElseThrow());
+                || sameLiteral(left.value().orElseThrow(), right.value().orElseThrow(), dialect);
     }
 
     private static boolean samePredicate(CheckPredicate left,
                                          CheckPredicate right,
                                          SchemaDialect schemaDialect) {
+        // Metadata restores the two comparisons emitted for a range as a Range node.
+        // A caller may express those same comparisons using the public logical AND model.
+        if (left instanceof CheckPredicate.Range range && right instanceof CheckPredicate.Logical) {
+            return samePredicate(rangeComparisons(range), right, schemaDialect);
+        }
+        if (right instanceof CheckPredicate.Range range && left instanceof CheckPredicate.Logical) {
+            return samePredicate(left, rangeComparisons(range), schemaDialect);
+        }
         if (left instanceof CheckPredicate.Comparison a && right instanceof CheckPredicate.Comparison b) {
             return sameName(a.column(), b.column(), schemaDialect)
-                    && a.operator() == b.operator() && sameLiteral(a.value(), b.value());
+                    && a.operator() == b.operator() && sameLiteral(a.value(), b.value(), schemaDialect);
         }
         if (left instanceof CheckPredicate.Range a && right instanceof CheckPredicate.Range b) {
             return sameName(a.column(), b.column(), schemaDialect)
                     && a.lowerInclusive() == b.lowerInclusive()
                     && a.upperInclusive() == b.upperInclusive()
-                    && sameLiteral(a.lower(), b.lower()) && sameLiteral(a.upper(), b.upper());
+                    && sameLiteral(a.lower(), b.lower(), schemaDialect)
+                    && sameLiteral(a.upper(), b.upper(), schemaDialect);
         }
         if (left instanceof CheckPredicate.In a && right instanceof CheckPredicate.In b) {
             if (!sameName(a.column(), b.column(), schemaDialect)
@@ -276,7 +282,7 @@ final class SchemaDefinitionEquality {
                 return false;
             }
             for (int index = 0; index < a.values().size(); index++) {
-                if (!sameLiteral(a.values().get(index), b.values().get(index))) {
+                if (!sameLiteral(a.values().get(index), b.values().get(index), schemaDialect)) {
                     return false;
                 }
             }
@@ -302,7 +308,29 @@ final class SchemaDefinitionEquality {
         return false;
     }
 
-    private static boolean sameLiteral(Object left, Object right) {
+    private static CheckPredicate rangeComparisons(CheckPredicate.Range range) {
+        return CheckPredicate.and(
+                CheckPredicate.compare(range.column(), range.lowerInclusive()
+                        ? CheckPredicate.ComparisonOperator.GREATER_THAN_OR_EQUAL
+                        : CheckPredicate.ComparisonOperator.GREATER_THAN, range.lower()),
+                CheckPredicate.compare(range.column(), range.upperInclusive()
+                        ? CheckPredicate.ComparisonOperator.LESS_THAN_OR_EQUAL
+                        : CheckPredicate.ComparisonOperator.LESS_THAN, range.upper()));
+    }
+
+    private static boolean sameLiteral(Object left, Object right, SchemaDialect dialect) {
+        if (dialect != null && switch (dialect.generatedValueStyle()) {
+            case MYSQL, ORACLE, SQL_SERVER -> true;
+            default -> false;
+        }) {
+            // These dialects render/store boolean literals as the exact numeric values 0 and 1.
+            // Do not use truthiness: e.g. 2 and 1.5 are different SQL literals from TRUE.
+            if (left instanceof Boolean flag && right instanceof Number) {
+                left = flag ? 1 : 0;
+            } else if (right instanceof Boolean flag && left instanceof Number) {
+                right = flag ? 1 : 0;
+            }
+        }
         if (left instanceof Number leftNumber && right instanceof Number rightNumber) {
             try {
                 return new BigDecimal(leftNumber.toString()).compareTo(new BigDecimal(rightNumber.toString())) == 0;
@@ -315,6 +343,11 @@ final class SchemaDefinitionEquality {
         }
         if (left instanceof OffsetDateTime leftOffset && right instanceof Instant rightInstant) {
             return leftOffset.toInstant().equals(rightInstant);
+        }
+        // PostgreSQL stores the instant; metadata displays it in the session time zone.
+        if (dialect != null && dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.POSTGRESQL
+                && left instanceof OffsetDateTime leftOffset && right instanceof OffsetDateTime rightOffset) {
+            return leftOffset.isEqual(rightOffset);
         }
         return Objects.equals(left, right);
     }

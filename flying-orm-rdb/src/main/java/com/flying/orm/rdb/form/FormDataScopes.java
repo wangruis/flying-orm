@@ -2,14 +2,11 @@ package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.ConditionGroups;
-import com.flying.orm.core.condition.ConditionNode;
-import com.flying.orm.core.condition.LogicalOperator;
 import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.rdb.internal.condition.ConditionNodes;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.Objects;
 
 /**
@@ -42,33 +39,10 @@ final class FormDataScopes {
 
     private static ConditionGroup unwrapTrustedValues(ConditionGroup group, DynamicForm form) {
         ConditionGroup safeGroup = Objects.requireNonNull(group, "condition group must not be null");
-        List<ConditionNode> children = safeGroup.children();
-        List<ConditionNode> unwrapped = null;
-        for (int index = 0; index < children.size(); index++) {
-            ConditionNode child = children.get(index);
-            ConditionNode next = unwrapTrustedValue(child, form);
-            if (unwrapped == null && next != child) {
-                unwrapped = new ArrayList<>(children.size());
-                unwrapped.addAll(children.subList(0, index));
-            }
-            if (unwrapped != null) {
-                unwrapped.add(next);
-            }
-        }
-        if (unwrapped == null) {
-            return safeGroup;
-        }
-        ConditionGroup.Builder builder = safeGroup.operator() == LogicalOperator.AND
-                ? ConditionGroup.and() : ConditionGroup.or();
-        unwrapped.forEach(builder::add);
-        return builder.build();
+        return ConditionNodes.rewrite(safeGroup, term -> unwrapTrustedValue(term, form));
     }
 
-    private static ConditionNode unwrapTrustedValue(ConditionNode child, DynamicForm form) {
-        if (child instanceof ConditionGroup nested) {
-            return unwrapTrustedValues(nested, form);
-        }
-        TermCondition term = (TermCondition) child;
+    private static TermCondition unwrapTrustedValue(TermCondition term, DynamicForm form) {
         Object value = term.value();
         return value instanceof TrustedScopeValue trusted
                 && (form == null || form.findField(term.field()).isPresent())
@@ -77,20 +51,8 @@ final class FormDataScopes {
     }
 
     private static ConditionGroup trustedScope(DynamicForm form, ConditionGroup group) {
-        ConditionGroup.Builder builder = group.operator() == LogicalOperator.AND
-                ? ConditionGroup.and() : ConditionGroup.or();
-        for (ConditionNode child : group.children()) {
-            if (child instanceof ConditionGroup nested) {
-                builder.add(trustedScope(form, nested));
-                continue;
-            }
-            TermCondition term = (TermCondition) child;
-            builder.add(form.findField(term.field()).isPresent()
-                                ? term
-                                : TermCondition.of(term.field(), term.operator(),
-                                                   new TrustedScopeValue(term.value())));
-        }
-        return builder.build();
+        return ConditionNodes.rewrite(group, term -> form.findField(term.field()).isPresent()
+                ? term : TermCondition.of(term.field(), term.operator(), new TrustedScopeValue(term.value())));
     }
 
     /** 仅由服务端 DataScope 合并边界创建，防止可信条件与业务条件共用无差别的缺字段放行。 */

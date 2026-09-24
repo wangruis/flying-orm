@@ -6,6 +6,10 @@ import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.ValueGeneration;
+import com.flying.orm.core.page.PageQuery;
+import com.flying.orm.core.page.PageResult;
+import com.flying.orm.core.page.CursorPageQuery;
+import com.flying.orm.core.page.CursorSort;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.core.protection.MaskedFieldDefinition;
@@ -171,15 +175,15 @@ class FormConvergenceCharacterizationTest {
     }
 
     @Test
-    void containsCandidateLimitFailsBeforeAttemptingToDecodeInvalidCiphertext() {
+    void containsAcceptsMoreThanOneThousandCandidatesOnBothClients() {
         DynamicForm form = protectedForm();
         try (ProtectedFieldRuntime runtime = ProtectedFieldRuntime.create(
                 ProtectedFieldKeyRing.single("v1", new byte[32]))) {
             FormDataSqlRenderer renderer = renderer(ValueCodecRegistry.standard()).withProtectedFields(runtime);
             QuerySpec spec = QuerySpec.of(form, ConditionGroup.and()
                     .add(ProtectedConditions.contains("secret", "pha")).build());
-            List<DynamicRow> candidates = Collections.nCopies(1001,
-                    DynamicRow.copyOf(Map.of("id", 1L, "secret", "not ciphertext", "note", "private")));
+            List<DynamicRow> candidates = Collections.nCopies(1002,
+                    encryptedRow(runtime, form, 1L, "alphabet"));
             for (boolean reactive : List.of(false, true)) {
                 for (boolean governed : List.of(false, true)) {
                     Fixture fixture = new Fixture(renderer, candidates);
@@ -187,13 +191,66 @@ class FormConvergenceCharacterizationTest {
                             .allow("secret", FieldUse.FILTER).visibility("id", FieldVisibility.FULL)
                             .visibility("secret", FieldVisibility.FULL).visibility("note", FieldVisibility.HIDDEN)
                             .build() : null;
-                    ProtectedSearchCandidateLimitExceededException failure = assertThrows(
-                            ProtectedSearchCandidateLimitExceededException.class,
-                            () -> fixture.select(reactive, spec, policy));
-                    assertEquals(1000, failure.limit());
-                    assertEquals(1001, failure.actual());
+                    assertEquals(1002, fixture.select(reactive, spec, policy).size());
+                    assertFalse(fixture.lastRequest.sql().contains(" limit "), fixture.lastRequest.sql());
                     assertEquals(1, fixture.queries);
                 }
+            }
+        }
+    }
+
+    @Test
+    void containsPaginationKeepsLargeEmptyPageIndexesWithinTheResult() {
+        try (ProtectedFieldRuntime runtime = ProtectedFieldRuntime.create(
+                ProtectedFieldKeyRing.single("v1", new byte[32]))) {
+            DynamicForm form = protectedForm();
+            FormDataSqlRenderer renderer = renderer(ValueCodecRegistry.standard()).withProtectedFields(runtime);
+            Fixture fixture = new Fixture(renderer, List.of(encryptedRow(runtime, form, 1L, "alphabet")));
+            QuerySpec query = QuerySpec.of(form, ConditionGroup.and()
+                    .add(ProtectedConditions.contains("secret", "pha")).build());
+            PageQuery page = PageQuery.of(2, Integer.MAX_VALUE);
+            SyncFormClient sync = fixture.syncClient();
+            ReactiveFormClient reactive = ReactiveFormClient.create(fixture.reactive, renderer);
+            try {
+                PageResult<DynamicRow> expected = PageResult.of(List.of(), 1, page);
+                assertAll(
+                        () -> assertEquals(expected, sync.page(query, page)),
+                        () -> assertEquals(expected, reactive.page(query, page).block()));
+            } finally {
+                sync.entityModels().close();
+                reactive.entityModels().close();
+            }
+        }
+    }
+
+    @Test
+    void containsPagesVerifyAllCandidatesBeforeComputingTheResult() {
+        try (ProtectedFieldRuntime runtime = ProtectedFieldRuntime.create(
+                ProtectedFieldKeyRing.single("v1", new byte[32]))) {
+            DynamicForm form = protectedForm();
+            FormDataSqlRenderer renderer = renderer(ValueCodecRegistry.standard()).withProtectedFields(runtime);
+            Fixture fixture = new Fixture(renderer,
+                    Collections.nCopies(1002, encryptedRow(runtime, form, 1L, "alphabet")));
+            QuerySpec query = QuerySpec.of(form, ConditionGroup.and()
+                    .add(ProtectedConditions.contains("secret", "pha")).build());
+            SyncFormClient sync = fixture.syncClient();
+            ReactiveFormClient reactive = ReactiveFormClient.create(fixture.reactive, renderer);
+            PageQuery page = PageQuery.of(2, 1000);
+            CursorPageQuery cursor = CursorPageQuery.first(1001, CursorSort.asc("id"));
+            try {
+                for (PageResult<DynamicRow> result : List.of(sync.page(query, page), reactive.page(query, page).block())) {
+                    assertEquals(1002, result.total());
+                    assertEquals(2, result.rows().size());
+                }
+                assertFalse(fixture.lastRequest.sql().contains(" limit "), fixture.lastRequest.sql());
+                for (var result : List.of(sync.cursorPage(query, cursor), reactive.cursorPage(query, cursor).block())) {
+                    assertEquals(1001, result.rows().size());
+                    assertTrue(result.hasMore());
+                }
+                assertFalse(fixture.lastRequest.sql().contains(" limit "), fixture.lastRequest.sql());
+            } finally {
+                sync.entityModels().close();
+                reactive.entityModels().close();
             }
         }
     }
@@ -230,6 +287,7 @@ class FormConvergenceCharacterizationTest {
         private final FormDataSqlRenderer renderer;
         private final List<DynamicRow> rows;
         private int queries;
+        private SqlRequest lastRequest;
         private int writes;
         private String generatedColumn;
         private Fixture(FormDataSqlRenderer renderer, List<DynamicRow> rows) {
@@ -237,7 +295,7 @@ class FormConvergenceCharacterizationTest {
             this.rows = rows;
         }
         private final SyncSqlExecutor sync = new SyncSqlExecutor() {
-            public List<DynamicRow> query(SqlRequest request) { queries++; return rows; }
+            public List<DynamicRow> query(SqlRequest request) { queries++; lastRequest = request; return rows; }
             public long rowsUpdated(SqlRequest request) { throw new AssertionError("unexpected write"); }
             public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
                 writes++; return new SqlWriteResult(1, List.of());
@@ -249,7 +307,7 @@ class FormConvergenceCharacterizationTest {
         };
         private final ReactiveSqlExecutor reactive = new ReactiveSqlExecutor() {
             public Flux<DynamicRow> query(SqlRequest request) {
-                return Flux.defer(() -> { queries++; return Flux.fromIterable(rows); });
+                return Flux.defer(() -> { queries++; lastRequest = request; return Flux.fromIterable(rows); });
             }
             public Mono<Long> rowsUpdated(SqlRequest request) { return Mono.error(new AssertionError("unexpected write")); }
             public Mono<SqlWriteResult> rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {

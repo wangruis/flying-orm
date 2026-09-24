@@ -10,9 +10,13 @@ import com.flying.orm.core.page.CursorPosition;
 import com.flying.orm.core.page.CursorSort;
 import com.flying.orm.core.param.ParameterConditionSpec;
 import com.flying.orm.core.scope.TenantScope;
+import com.flying.orm.core.sql.render.SqlRequest;
+import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestFactory;
 
 import java.lang.management.ManagementFactory;
+import java.lang.reflect.Array;
 import java.nio.ByteBuffer;
 import java.nio.CharBuffer;
 import java.sql.Timestamp;
@@ -35,6 +39,38 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class BindableValueSnapshotsTest {
 
     private static final int SCALAR_FAST_PATH_ITERATIONS = 10_000;
+
+    @TestFactory
+    List<DynamicTest> sharedTextKeepsScalarAndTypedArrayRepresentationsSeparate() {
+        List<DynamicTest> tests = new ArrayList<>();
+        for (Class<?> type : List.of(StringBuilder.class, StringBuffer.class, CharBuffer.class)) {
+            for (boolean scalarFirst : List.of(true, false)) {
+                tests.add(DynamicTest.dynamicTest(type.getSimpleName() + " scalarFirst=" + scalarFirst, () -> {
+                    CharSequence source = type == StringBuilder.class ? new StringBuilder("text")
+                            : type == StringBuffer.class ? new StringBuffer("text")
+                            : CharBuffer.wrap(new char[]{'t', 'e', 'x', 't'});
+                    Object array = Array.newInstance(type, 2);
+                    Array.set(array, 0, source);
+                    Array.set(array, 1, source);
+                    List<Object> values = scalarFirst ? List.of(source, array) : List.of(array, source);
+                    List<Object> snapshot = BindableValueSnapshots.immutableValues(values);
+                    SqlRequest request = new SqlRequest("select ?, ?", values);
+                    if (source instanceof StringBuilder text) text.setCharAt(0, 'X');
+                    else if (source instanceof StringBuffer text) text.setCharAt(0, 'X');
+                    else ((CharBuffer) source).put(0, 'X');
+                    for (List<Object> copied : List.of(snapshot, request.parameters())) {
+                        assertEquals("text", copied.get(scalarFirst ? 0 : 1));
+                        Object typed = copied.get(scalarFirst ? 1 : 0);
+                        assertEquals(type, typed.getClass().getComponentType());
+                        assertEquals("text", Array.get(typed, 0).toString());
+                        assertSame(Array.get(typed, 0), Array.get(typed, 1));
+                        assertNotSame(source, Array.get(typed, 0));
+                    }
+                }));
+            }
+        }
+        return tests;
+    }
 
     @Test
     void mixedStandardTextRangeKeepsItsExistingOrderingAndBinding() {

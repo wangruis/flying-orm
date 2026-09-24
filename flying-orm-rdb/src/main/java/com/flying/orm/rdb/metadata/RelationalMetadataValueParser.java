@@ -112,7 +112,7 @@ final class RelationalMetadataValueParser {
             return ColumnDefault.currentTimestamp();
         }
 
-        String literal = stripPostgresqlLiteralCast(value, dialect);
+        String literal = stripPostgresqlLiteralCast(value, databaseType, dialect);
         if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE) {
             var temporal = ORACLE_TEMPORAL_LITERAL.matcher(literal);
             if (temporal.matches()) {
@@ -271,6 +271,7 @@ final class RelationalMetadataValueParser {
 
     private static String stripPostgresqlLiteralCast(
             String value,
+            DatabaseType type,
             InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
         if (dialect != InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL) {
             return value;
@@ -279,6 +280,7 @@ final class RelationalMetadataValueParser {
             int end = quotedStringEnd(value, 0);
             String suffix = value.substring(end + 1).trim();
             if (suffix.isEmpty() || isPostgresqlLiteralCastSuffix(suffix)) {
+                validateDefaultCasts(value.substring(0, end + 1), suffix, type);
                 return value.substring(0, end + 1);
             }
             return value;
@@ -287,7 +289,102 @@ final class RelationalMetadataValueParser {
         if (cast < 0 || !isPostgresqlLiteralCastSuffix(value.substring(cast))) {
             return value;
         }
-        return value.substring(0, cast).trim();
+        String literal = stripOuterParentheses(value.substring(0, cast).trim());
+        validateDefaultCasts(literal, value.substring(cast), type);
+        return literal;
+    }
+
+    private static void validateDefaultCasts(String literal, String suffix, DatabaseType type) {
+        if (suffix.isEmpty()) return;
+        Object value = isQuotedString(literal) ? convertString(unquoteString(literal), type.logicalType())
+                : type.logicalType().numeric() ? number(literal, type)
+                : "true".equalsIgnoreCase(literal) ? Boolean.TRUE
+                : "false".equalsIgnoreCase(literal) ? Boolean.FALSE : literal;
+        requireLosslessCasts(value, type, java.util.Arrays.stream(suffix.split("::"))
+                .filter(cast -> !cast.isBlank()).toList());
+    }
+
+    /** 目录中的强转只有在字面量及比较语义不变时才能省略；不执行任意数据库表达式。 */
+    private static void requireLosslessCasts(Object value, DatabaseType type, List<String> declarations) {
+        List<String> casts = declarations.stream().map(declaration -> {
+            String cast = declaration.trim().toLowerCase(Locale.ROOT).replaceAll("\\s+", " ");
+            return cast.startsWith("pg_catalog.") ? cast.substring("pg_catalog.".length()) : cast;
+        }).toList();
+        int floatingWidth = 0;
+        for (String cast : casts) {
+            int width = switch (cast) {
+                case "real", "float4" -> 32;
+                case "double precision", "float8" -> 64;
+                default -> 0;
+            };
+            if (floatingWidth != 0 && width != floatingWidth) throw unsupported();
+            floatingWidth = width;
+        }
+        for (int index = 0; index < casts.size(); index++) {
+            String cast = casts.get(index);
+            if (isLosslessCast(value, type, cast)) continue;
+            // 自身浮点类型的字面量允许二进制舍入，但后续转回 numeric 等类型不能被静默抹去。
+            if (sameFloatingType(type, cast)
+                    && casts.subList(index, casts.size()).stream().allMatch(next -> sameFloatingType(type, next))) {
+                try {
+                    double number = Double.parseDouble(value.toString());
+                    if (Double.isFinite(number) && (!cast.equals("real") && !cast.equals("float4")
+                            || Float.isFinite((float) number))) return;
+                } catch (NumberFormatException invalid) {
+                    throw unsupported();
+                }
+            }
+            throw unsupported();
+        }
+    }
+
+    private static boolean sameFloatingType(DatabaseType type, String cast) {
+        return !type.isArray() && switch (cast) {
+            case "real", "float4" -> type.baseName().equals("REAL") || type.baseName().equals("FLOAT4");
+            case "double precision", "float8" -> type.baseName().equals("DOUBLE PRECISION")
+                    || type.baseName().equals("DOUBLE") || type.baseName().equals("FLOAT8");
+            default -> false;
+        };
+    }
+
+    private static boolean isLosslessCast(Object value, DatabaseType type, String cast) {
+        boolean safe;
+        try {
+            if (type.logicalType().numeric() && !type.isArray()) {
+                BigDecimal number = new BigDecimal(value.toString());
+                safe = switch (cast) {
+                    case "numeric", "decimal", "dec" -> true;
+                    case "smallint", "int2" -> { number.shortValueExact(); yield true; }
+                    case "integer", "int", "int4" -> { number.intValueExact(); yield true; }
+                    case "bigint", "int8" -> { number.longValueExact(); yield true; }
+                    case "real", "float4" -> new BigDecimal((double) number.floatValue()).compareTo(number) == 0;
+                    case "double precision", "float8" -> new BigDecimal(number.doubleValue()).compareTo(number) == 0;
+                    default -> false;
+                };
+            } else {
+                safe = !type.isArray() && switch (cast) {
+                    case "text", "varchar", "character varying" -> Parser.binaryTextType(type) && value instanceof String;
+                    case "bpchar" -> value instanceof String && switch (type.baseName()) {
+                        case "CHAR", "CHARACTER", "BPCHAR", "PG_CATALOG.BPCHAR" -> true;
+                        default -> false;
+                    };
+                    case "boolean", "bool" -> type.logicalType() == LogicalType.BOOLEAN
+                            && (value instanceof Boolean || "true".equals(value) || "false".equals(value));
+                    case "date" -> type.logicalType() == LogicalType.DATE && value instanceof LocalDate;
+                    case "time", "time without time zone" -> type.logicalType() == LogicalType.TIME && value instanceof LocalTime;
+                    case "timetz", "time with time zone" -> type.logicalType() == LogicalType.OFFSET_TIME && value instanceof OffsetTime;
+                    case "timestamp", "timestamp without time zone" -> type.logicalType() == LogicalType.TIMESTAMP && value instanceof LocalDateTime;
+                    case "timestamptz", "timestamp with time zone" -> type.logicalType() == LogicalType.OFFSET_TIMESTAMP && value instanceof OffsetDateTime;
+                    case "uuid" -> type.logicalType() == LogicalType.UUID && value instanceof UUID;
+                    case "interval" -> type.logicalType() == LogicalType.INTERVAL;
+                    case "json", "jsonb", "bytea", "xml" -> type.baseName().equalsIgnoreCase(cast);
+                    default -> false;
+                };
+            }
+        } catch (ArithmeticException | NumberFormatException invalid) {
+            return false;
+        }
+        return safe;
     }
 
     private static boolean isPostgresqlLiteralCastSuffix(String value) {
@@ -551,9 +648,16 @@ final class RelationalMetadataValueParser {
         }
 
         private Object literal(DatabaseType type) {
+            List<String> casts = new ArrayList<>();
+            Object value = literal(type, casts);
+            requireLosslessCasts(value, type, casts);
+            return value;
+        }
+
+        private Object literal(DatabaseType type, List<String> casts) {
             Object value;
             if (match(TokenType.LEFT_PAREN)) {
-                value = literal(type);
+                value = literal(type, casts);
                 expect(TokenType.RIGHT_PAREN);
             } else {
                 Token token = current;
@@ -572,7 +676,7 @@ final class RelationalMetadataValueParser {
                     && binaryTextType(type)) {
                 textCasts(type, false);
             } else {
-                skipCasts();
+                literalCasts(casts);
             }
             return value;
         }
@@ -607,14 +711,12 @@ final class RelationalMetadataValueParser {
             };
         }
 
-        private void skipCasts() {
+        private void literalCasts(List<String> casts) {
             while (match(TokenType.CAST)) {
-                if (current.type() != TokenType.IDENTIFIER) {
-                    throw unsupported();
-                }
-                do {
-                    advance();
-                } while (current.type() == TokenType.IDENTIFIER);
+                if (dialect != InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL) throw unsupported();
+                StringBuilder cast = new StringBuilder(expect(TokenType.IDENTIFIER).text());
+                while (current.type() == TokenType.IDENTIFIER) cast.append(' ').append(expect(TokenType.IDENTIFIER).text());
+                casts.add(cast.toString());
             }
         }
 

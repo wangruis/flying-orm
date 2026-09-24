@@ -189,7 +189,7 @@ final class FormReadPlanSupport {
         if (contains.isPresent()) {
             FormQueryShapeGuard.requireContainsShape(spec);
             SqlRequest request = planner.renderer.protection().contains.rows(
-                    contains.orElseThrow(), sorts, ProtectedContainsResultSupport.DEFAULT_CANDIDATE_LIMIT);
+                    contains.orElseThrow(), sorts);
             return new FormOperationPlanner.PlannedQuery(
                     spec.form(), request, executionOptions(planner, spec),
                     read.scope(), displayMode,
@@ -273,8 +273,7 @@ final class FormReadPlanSupport {
         if (contains.isPresent()) {
             FormQueryShapeGuard.requireContainsShape(spec);
             SqlRequest request = planner.renderer.protection().contains.rows(
-                    contains.orElseThrow(), effectivePage.sorts(),
-                    ProtectedContainsResultSupport.DEFAULT_CANDIDATE_LIMIT);
+                    contains.orElseThrow(), effectivePage.sorts());
             return new FormOperationPlanner.PlannedPage(
                     spec.form(), null, request, effectivePage,
                     executionOptions(planner, spec), read.scope(),
@@ -318,7 +317,7 @@ final class FormReadPlanSupport {
         if (contains.isPresent()) {
             FormQueryShapeGuard.requireContainsShape(spec);
             SqlRequest request = planner.renderer.protection().contains.rows(
-                    contains.orElseThrow(), normalized, ProtectedContainsResultSupport.DEFAULT_CANDIDATE_LIMIT);
+                    contains.orElseThrow(), normalized);
             return new FormOperationPlanner.PlannedCursorPage(
                     spec.form(), request, normalized,
                     executionOptions(planner, spec), read.scope(),

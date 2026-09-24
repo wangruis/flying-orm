@@ -34,7 +34,7 @@ class StructuredConditionRawPrimitiveArrayTest {
     }
 
     @Test
-    void sharedPrimitiveArraysChargeEachOccurrenceAndKeepReferenceFailureOrdering() {
+    void sharedPrimitiveArraysDoNotHideStringValidationBehindAnImplicitReferenceBudget() {
         int[] sharedAtLimit = new int[9_999];
         assertDoesNotThrow(() -> validateRaw(new Object[] {sharedAtLimit, sharedAtLimit}));
 
@@ -44,10 +44,8 @@ class StructuredConditionRawPrimitiveArrayTest {
                 () -> validateRaw(new Object[] {sharedAboveLimit, sharedAboveLimit, "too-long"},
                                   rawPolicy().withMaxStringLength(3)));
 
-        assertEquals(StructuredConditionErrorCode.NODE_COUNT_EXCEEDED, error.code());
-        assertEquals("conditions.value[1]", error.path());
-        assertEquals("structured condition value reference count exceeds limit at conditions.value[1]",
-                     error.getMessage());
+        assertEquals(StructuredConditionErrorCode.VALUE_TOO_LONG, error.code());
+        assertEquals("conditions.value[2]", error.path());
     }
 
     @Test

@@ -4,6 +4,7 @@ import static com.flying.orm.core.internal.error.ThrowableGraph.addSuppressedIfA
 import static com.flying.orm.core.internal.error.ThrowableGraph.findVirtualMachineError;
 
 import com.flying.orm.rdb.execution.BatchRowSnapshotter;
+import com.flying.orm.rdb.batch.BatchMemoryLimitExceededException;
 import com.flying.orm.rdb.execution.ProtectedBatchRows;
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscriber;
@@ -26,6 +27,7 @@ final class JdbcBatchRows implements Subscriber<Object[]>, AutoCloseable {
     private final Publisher<Object[]> publisher;
     private final int parameterCount;
     private final long maxRowBytes;
+    private final long maxRows;
     private final com.flying.orm.rdb.batch.BatchExecutionEvidence.Accumulator evidence;
     private long acceptedCount;
     private final ReentrantLock lock = new ReentrantLock();
@@ -40,11 +42,11 @@ final class JdbcBatchRows implements Subscriber<Object[]>, AutoCloseable {
     private boolean closed;
 
     JdbcBatchRows(Publisher<Object[]> publisher, int parameterCount, long maxRowBytes) {
-        this(publisher, parameterCount, maxRowBytes,
+        this(publisher, parameterCount, maxRowBytes, 0,
                 new com.flying.orm.rdb.batch.BatchExecutionEvidence.Accumulator());
     }
 
-    JdbcBatchRows(Publisher<Object[]> publisher, int parameterCount, long maxRowBytes,
+    JdbcBatchRows(Publisher<Object[]> publisher, int parameterCount, long maxRowBytes, long maxRows,
                   com.flying.orm.rdb.batch.BatchExecutionEvidence.Accumulator evidence) {
         this.publisher = Objects.requireNonNull(publisher, "batch row publisher must not be null");
         if (parameterCount < 0 || maxRowBytes <= 0L) {
@@ -52,12 +54,8 @@ final class JdbcBatchRows implements Subscriber<Object[]>, AutoCloseable {
         }
         this.parameterCount = parameterCount;
         this.maxRowBytes = maxRowBytes;
+        this.maxRows = maxRows;
         this.evidence = Objects.requireNonNull(evidence, "batch evidence accumulator must not be null");
-    }
-
-    long acceptedCount() {
-        lock.lock();
-        try { return acceptedCount; } finally { lock.unlock(); }
     }
 
     /**
@@ -136,6 +134,10 @@ final class JdbcBatchRows implements Subscriber<Object[]>, AutoCloseable {
             } else {
                 requested = false;
                 try {
+                    if (maxRows > 0 && acceptedCount >= maxRows) {
+                        throw new BatchMemoryLimitExceededException("rows", maxRows,
+                                Math.addExact(acceptedCount, 1L));
+                    }
                     evidence.accept(1L);
                     acceptedCount = Math.addExact(acceptedCount, 1L);
                     // BatchWriteRequest 约定 onNext 后整行所有权转移；这里只校验形状并记录预算。

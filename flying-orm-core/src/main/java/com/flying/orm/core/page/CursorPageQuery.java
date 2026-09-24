@@ -20,8 +20,8 @@ import java.util.Objects;
 public record CursorPageQuery(int size, List<CursorSort> sorts, List<Object> cursor) {
 
     public CursorPageQuery {
-        if (size < 1 || size >= PageQuery.MAX_SIZE) {
-            throw new IllegalArgumentException("cursor page size must be between 1 and " + (PageQuery.MAX_SIZE - 1));
+        if (size < 1) {
+            throw new IllegalArgumentException("cursor page size must be greater than or equal to 1");
         }
         sorts = List.copyOf(Objects.requireNonNull(sorts, "cursor sorts must not be null"));
         cursor = snapshotCursor(Objects.requireNonNull(cursor, "cursor values must not be null"));

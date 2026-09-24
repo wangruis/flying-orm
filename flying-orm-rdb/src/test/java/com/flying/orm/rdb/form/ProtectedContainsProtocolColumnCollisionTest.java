@@ -86,10 +86,10 @@ class ProtectedContainsProtocolColumnCollisionTest {
                 var query = renderer.protection().prepareContainsQuery(form, form, where, DataScope.none())
                         .orElseThrow();
                 var requests = List.of(renderer.protection().containsCandidates(query, 10).getFirst(),
-                        renderer.protection().contains.rows(query, List.of(), 10),
+                        renderer.protection().contains.rows(query, List.of()),
                         renderer.protection().contains.rows(query,
                                 CursorPageQuery.after(10, List.of(1L, 1L, 1L, 1L),
-                                        CursorSort.asc(owners.getFirst())), 10));
+                                        CursorSort.asc(owners.getFirst()))));
                 for (var candidate : requests) {
                     assertTrue(candidate.sql().contains("\"" + tag + "\" = ?"), candidate.sql());
                     assertTrue(candidate.sql().contains("\"" + token + "\" in ("), candidate.sql());

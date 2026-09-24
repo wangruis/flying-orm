@@ -1,6 +1,9 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.TermCondition;
+import com.flying.orm.core.codec.ValueCodecRegistry;
+import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.page.CursorPageQuery;
 import com.flying.orm.core.page.PageQuery;
@@ -10,14 +13,18 @@ import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.core.internal.value.OwnedBindableValues;
+import com.flying.orm.core.internal.value.BindableValueSnapshots;
 import com.flying.orm.rdb.dialect.PaginationDialect;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.internal.binding.SqlNullParameter;
+import com.flying.orm.rdb.internal.condition.ConditionNodes;
+import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
 import com.flying.orm.rdb.lock.LockingReadDialect;
 import com.flying.orm.rdb.lock.OptimisticLockOptions;
 import com.flying.orm.rdb.lock.ReadLock;
 import com.flying.orm.rdb.protection.ProtectedContainsLayout;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
+import com.flying.orm.rdb.protection.ProtectedFieldReprotection;
 import com.flying.orm.rdb.result.DynamicRow;
 
 import java.util.LinkedHashMap;
@@ -25,6 +32,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.HashMap;
+import java.util.function.UnaryOperator;
 
 /**
  * 集中维护受保护字段与普通表单 SQL 渲染器之间的包内协作。
@@ -42,6 +51,7 @@ final class FormProtectionSqlSupport {
     private final FormQuerySqlRenderer queries;
     private final FormWriteSqlRenderer writes;
     private final ProtectedFieldRuntime protectedFields;
+    private final ValueCodecRegistry protectedCodecs;
     final ProtectedContainsSqlPlanner contains;
 
     FormProtectionSqlSupport(FormSqlRenderSupport support,
@@ -54,6 +64,8 @@ final class FormProtectionSqlSupport {
         this.writes = Objects.requireNonNull(writes, "form write SQL renderer must not be null");
         this.protectedFields = Objects.requireNonNull(
                 protectedFields, "protected field runtime must not be null");
+        this.protectedCodecs = support.customFieldCodecs.isEmpty() ? support.valueCodecs
+                : FormEncodedConditionValue.registerWith(support.valueCodecs);
         this.contains = new ProtectedContainsSqlPlanner(this.support, pagination);
     }
 
@@ -88,7 +100,7 @@ final class FormProtectionSqlSupport {
         return new WriteOperation(
                 safeForm,
                 safePhysicalForm,
-                protectedFields.writeOperation(safeForm, safePhysicalForm, scope, support.valueCodecs),
+                protectedFields.writeOperation(safeForm, safePhysicalForm, scope, protectedCodecs),
                 layout == null ? null : new SideIndexPlan(safeForm, layout));
     }
 
@@ -130,7 +142,7 @@ final class FormProtectionSqlSupport {
             if (!protectsValues) {
                 return new FormPreparedWrite(physicalForm, safeValues);
             }
-            ProtectedFieldRuntime.PreparedWrite prepared = values.prepare(safeValues);
+            ProtectedFieldRuntime.PreparedWrite prepared = values.prepare(encodeProtectedValues(form, safeValues));
             return new FormPreparedWrite(prepared.physicalForm(), prepared.ownedValues());
         }
 
@@ -154,7 +166,8 @@ final class FormProtectionSqlSupport {
                 throw new IllegalArgumentException(
                         "protected contains update must not change primary key");
             }
-            List<ProtectedFieldRuntime.ContainsFieldTokens> tokens = values.containsTokens(canonical);
+            List<ProtectedFieldRuntime.ContainsFieldTokens> tokens = values.containsTokens(
+                    encodeProtectedValues(form, canonical));
             if (tokens.isEmpty()) {
                 return Optional.empty();
             }
@@ -258,8 +271,9 @@ final class FormProtectionSqlSupport {
                                                       DataScope scope,
                                                       List<String> visibleFields) {
         return protectedFields.prepareQuery(
-                form, physicalForm, FormDataScopes.unwrapTrustedValues(physicalForm, where, scope),
-                scope, support.valueCodecs, visibleFields);
+                form, physicalForm, encodeProtectedConditions(form,
+                        FormDataScopes.unwrapTrustedValues(physicalForm, where, scope)),
+                scope, protectedCodecs, visibleFields);
     }
 
     Optional<ProtectedFieldRuntime.PreparedContainsQuery> prepareContainsQuery(DynamicForm form,
@@ -271,8 +285,50 @@ final class FormProtectionSqlSupport {
             return Optional.empty();
         }
         return protectedFields.prepareContainsQuery(
-                safeForm, visibleForm, FormDataScopes.unwrapTrustedValues(safeForm, where, scope), scope,
-                support.valueCodecs);
+                safeForm, visibleForm, encodeProtectedConditions(safeForm,
+                        FormDataScopes.unwrapTrustedValues(safeForm, where, scope)), scope, protectedCodecs);
+    }
+
+    private Map<String, Object> encodeProtectedValues(DynamicForm form, Map<String, Object> values) {
+        if (support.customFieldCodecs.isEmpty()) {
+            return values;
+        }
+        Map<String, Object> encoded = null;
+        for (Map.Entry<String, Object> entry : values.entrySet()) {
+            Object value = encodeProtectedValue(form, entry.getKey(), entry.getValue());
+            if (value != entry.getValue()) {
+                if (encoded == null) encoded = new LinkedHashMap<>(values);
+                encoded.put(entry.getKey(), value);
+            }
+        }
+        return encoded == null ? values : encoded;
+    }
+
+    private ConditionGroup encodeProtectedConditions(DynamicForm form, ConditionGroup where) {
+        if (support.customFieldCodecs.isEmpty()) {
+            return where;
+        }
+        return ConditionNodes.rewrite(where, term -> {
+            Object original = term.value();
+            Object encoded = encodeProtectedValue(form, term.field(), original);
+            return encoded == original ? term : TermCondition.of(term.field(), term.operator(), encoded);
+        });
+    }
+
+    private Object encodeProtectedValue(DynamicForm form, String name, Object value) {
+        if (value == null || value instanceof ProtectedFieldReprotection.PreparedText
+                || form.protections().encrypted(name).isEmpty()) {
+            return value;
+        }
+        EntityTypeMappingRegistry.Mapping mapping = support.customFieldMapping(form.field(name));
+        if (mapping == null) {
+            return value;
+        }
+        try {
+            return new FormEncodedConditionValue(mapping.codec().write(BindableValueSnapshots.logicalValue(value)));
+        } catch (RuntimeException failure) {
+            throw new IllegalArgumentException("encrypted field value cannot be encoded");
+        }
     }
 
     /** 字段出现即需要维护侧索引；null 也必须捕获 owner 以删除旧 token。 */
@@ -364,13 +420,70 @@ final class FormProtectionSqlSupport {
                          DynamicRow row,
                          DataScope scope,
                          SensitiveDisplayMode displayMode) {
-        return protectedFields.transformResult(form, row, scope, displayMode, support.valueCodecs);
+        return resultOperation(form, scope, displayMode).apply(row);
     }
 
-    ProtectedFieldRuntime.ResultOperation resultOperation(DynamicForm form,
-                                                          DataScope scope,
-                                                          SensitiveDisplayMode displayMode) {
-        return protectedFields.resultOperation(form, scope, displayMode, support.valueCodecs);
+    UnaryOperator<DynamicRow> resultOperation(DynamicForm form,
+                                               DataScope scope,
+                                               SensitiveDisplayMode displayMode) {
+        Map<String, EntityTypeMappingRegistry.Mapping> mappings = encryptedMappings(form);
+        if (mappings.isEmpty()) {
+            return protectedFields.resultOperation(form, scope, displayMode, support.valueCodecs)::transform;
+        }
+        ProtectedFieldRuntime.ResultOperation decrypt = decryptOperation(form, scope);
+        UnaryOperator<DynamicRow> display = displayOperation(form, displayMode, mappings);
+        return row -> display.apply(decrypt.transform(row));
+    }
+
+    ProtectedFieldRuntime.ResultOperation decryptOperation(DynamicForm form, DataScope scope) {
+        return protectedFields.resultOperation(form, scope, SensitiveDisplayMode.FULL, support.valueCodecs);
+    }
+
+    UnaryOperator<DynamicRow> displayOperation(DynamicForm form, SensitiveDisplayMode displayMode) {
+        return displayOperation(form, displayMode, encryptedMappings(form));
+    }
+
+    private Map<String, EntityTypeMappingRegistry.Mapping> encryptedMappings(DynamicForm form) {
+        if (support.customFieldCodecs.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, EntityTypeMappingRegistry.Mapping> mappings = new HashMap<>();
+        for (String name : form.protections().encryptedFields().keySet()) {
+            EntityTypeMappingRegistry.Mapping mapping = support.customFieldMapping(form.field(name));
+            if (mapping != null) mappings.put(name, mapping);
+        }
+        return mappings;
+    }
+
+    private UnaryOperator<DynamicRow> displayOperation(
+            DynamicForm form, SensitiveDisplayMode displayMode,
+            Map<String, EntityTypeMappingRegistry.Mapping> mappings) {
+        if (mappings.isEmpty()) {
+            return row -> protectedFields.maskResult(form, row, displayMode);
+        }
+        return row -> {
+            Map<Integer, EntityTypeMappingRegistry.Mapping> columns = row.mappingBinding(mappings, () -> {
+                Map<Integer, EntityTypeMappingRegistry.Mapping> bound = new HashMap<>();
+                for (int index = 0; index < row.columnCount(); index++) {
+                    DynamicField field = form.findField(row.columnName(index)).orElse(null);
+                    EntityTypeMappingRegistry.Mapping mapping = field == null ? null : mappings.get(field.normalizedName());
+                    if (mapping != null) bound.put(index, mapping);
+                }
+                return bound;
+            });
+            Map<Integer, Object> values = new HashMap<>(columns.size());
+            columns.forEach((index, mapping) -> {
+                Object value = row.value(index);
+                if (value != null) {
+                    try {
+                        values.put(index, mapping.codec().read(value, mapping.javaType()));
+                    } catch (RuntimeException failure) {
+                        throw new IllegalArgumentException("encrypted field value cannot be decoded");
+                    }
+                }
+            });
+            return protectedFields.maskResult(form, row.withValues(values), displayMode);
+        };
     }
 
     boolean matchesContains(DynamicForm form,

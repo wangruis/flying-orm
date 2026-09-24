@@ -21,7 +21,7 @@ class JdbcProtectedRowReplacementTest {
     @Test void rowReplacementClosesDeleteBeforeExactTokenInsert() throws SQLException {
         List<String> events = new ArrayList<>();
         JdbcProtectedBatchSideIndex.completeGeneratedRow(connection(events, null), state(), 1,
-                DynamicRow.copyOf(Map.of("id", 7L)));
+                DynamicRow.copyOf(Map.of("id", 7L)), Long.MAX_VALUE);
         assertEquals(List.of("delete", "delete-close", "insert", "insert-close"), events);
     }
 
@@ -30,7 +30,7 @@ class JdbcProtectedRowReplacementTest {
         SQLException closeFailure = new SQLException("delete close failed");
         SQLException failure = assertThrows(SQLException.class, () ->
                 JdbcProtectedBatchSideIndex.completeGeneratedRow(connection(events, closeFailure), state(), 1,
-                        DynamicRow.copyOf(Map.of("id", 7L))));
+                        DynamicRow.copyOf(Map.of("id", 7L)), Long.MAX_VALUE));
         assertSame(closeFailure, failure);
         assertEquals(List.of("delete", "delete-close"), events);
     }

@@ -12,6 +12,21 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 class CachedReactiveFormMetadataReaderInvalidationTest {
 
     @Test
+    void caseAliasesAreEvictedWithoutMergingTheirReadKeys() {
+        CountingReader delegate = new CountingReader();
+        CachedReactiveFormMetadataReader cache = CachedReactiveFormMetadataReader.create(delegate);
+        cache.readForm("accounts", "PUBLIC", "ACCOUNTS").block();
+        cache.readTable("PUBLIC", "ACCOUNTS").block();
+        cache.readTable("public", "accounts").block();
+        assertEquals(3, delegate.loads.get(), "read identities remain case-sensitive");
+        cache.invalidate(RelationIdentity.of(null, "public", "accounts"));
+        cache.readForm("accounts", "PUBLIC", "ACCOUNTS").block();
+        cache.readTable("PUBLIC", "ACCOUNTS").block();
+        cache.readTable("public", "accounts").block();
+        assertEquals(6, delegate.loads.get());
+    }
+
+    @Test
     void unqualifiedRelationIdentityInvalidatesQualifiedFormAndTableEntries() {
         CountingReader delegate = new CountingReader();
         CachedReactiveFormMetadataReader cache = CachedReactiveFormMetadataReader.create(delegate);

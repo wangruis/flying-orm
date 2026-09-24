@@ -33,13 +33,12 @@ final class SyncFormPageResultSupport {
                                        SensitiveDisplayMode displayMode) {
         if (plan.contains()) {
             List<DynamicRow> rawRows = executor.query(plan.dataRequest(), plan.options());
-            ProtectedContainsResultSupport.requireCandidateLimit(rawRows.size());
-            List<DynamicRow> decoded = decoder.decodeRows(
+            List<DynamicRow> decoded = decoder.forContains().decodeRows(
                     plan.form(), rawRows, plan.options(), plan.scope(), SensitiveDisplayMode.FULL);
             List<DynamicRow> verified = containsResults.finish(
-                    plan.form(), plan.containsQuery(), decoded, plan.outputFields(), displayMode);
+                    plan.form(), plan.containsQuery(), decoded, plan.outputFields(), displayMode, plan.options());
             int from = (int) Math.min(plan.page().offset(), verified.size());
-            int to = Math.min(from + plan.page().size(), verified.size());
+            int to = (int) Math.min((long) from + plan.page().size(), verified.size());
             return PageResult.of(verified.subList(from, to), verified.size(), plan.page());
         }
         List<DynamicRow> countRows = executor.query(plan.countRequest(), plan.options());
@@ -61,11 +60,10 @@ final class SyncFormPageResultSupport {
             SensitiveDisplayMode displayMode) {
         if (plan.contains()) {
             List<DynamicRow> rawRows = executor.query(plan.request(), plan.options());
-            ProtectedContainsResultSupport.requireCandidateLimit(rawRows.size());
-            List<DynamicRow> decoded = decoder.decodeRows(
+            List<DynamicRow> decoded = decoder.forContains().decodeRows(
                     plan.form(), rawRows, plan.options(), plan.scope(), SensitiveDisplayMode.FULL);
             List<DynamicRow> verified = containsResults.finish(
-                    plan.form(), plan.containsQuery(), decoded, plan.outputFields(), displayMode);
+                    plan.form(), plan.containsQuery(), decoded, plan.outputFields(), displayMode, plan.options());
             return FormCursorResults.from(verified, plan.page());
         }
         List<DynamicRow> rows = decoder.decodeRows(

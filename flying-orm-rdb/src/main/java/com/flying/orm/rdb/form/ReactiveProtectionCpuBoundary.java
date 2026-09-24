@@ -1,9 +1,8 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
-import com.flying.orm.core.condition.ConditionNode;
-import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.rdb.internal.condition.ConditionNodes;
 import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -67,18 +66,8 @@ final class ReactiveProtectionCpuBoundary {
         if (safeForm.protections().encryptedFields().isEmpty()) {
             return false;
         }
-        for (ConditionNode child : safeWhere.children()) {
-            if (child instanceof ConditionGroup group && usesEncryptedCondition(safeForm, group)) {
-                return true;
-            }
-            if (child instanceof TermCondition term
-                    && safeForm.findField(term.field())
-                               .flatMap(found -> safeForm.protections().encrypted(found.name()))
-                               .isPresent()) {
-                return true;
-            }
-        }
-        return false;
+        return ConditionNodes.anyTerm(safeWhere, term -> safeForm.findField(term.field())
+                .flatMap(found -> safeForm.protections().encrypted(found.name())).isPresent());
     }
 
     static boolean usesEncryptedScope(DynamicForm form, com.flying.orm.core.scope.DataScope scope) {

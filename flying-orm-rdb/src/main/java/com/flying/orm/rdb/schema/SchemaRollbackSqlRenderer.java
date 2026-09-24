@@ -6,6 +6,7 @@ import com.flying.orm.core.metadata.ColumnDefinition;
 import com.flying.orm.core.metadata.IndexMetadata;
 import com.flying.orm.core.sql.render.SqlRequest;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -25,9 +26,20 @@ final class SchemaRollbackSqlRenderer {
         return new SqlRequest("drop table " + tables.identifier(table), List.of());
     }
 
-    SqlRequest rollbackAddColumn(String table, ColumnMetadata column) {
-        return new SqlRequest(dialect.addColumnSql(
-                table, tables.columnDefinition(SchemaMigrationSupport.toDynamicField(column))), List.of());
+    List<SqlRequest> rollbackAddColumn(String table, ColumnMetadata column,
+                                       ColumnDefinition physical, boolean physicalTypes) {
+        String comment = physical == null ? tables.storageComment(column)
+                : SchemaColumnCommentCodec.encode(
+                        dialect, column.databaseType(), physical.generation(), physical.comment());
+        String definition = physical == null
+                ? tables.columnDefinition(SchemaMigrationSupport.toDynamicField(column))
+                : RelationalSchemaSqlRenderer.create(dialect)
+                        .restoredColumnDefinition(physical, physicalTypes, comment);
+        List<SqlRequest> requests = new ArrayList<>();
+        requests.add(new SqlRequest(dialect.addColumnSql(table, definition), List.of()));
+        dialect.columnCommentSql(table, column.name(), comment)
+                .ifPresent(sql -> requests.add(new SqlRequest(sql, List.of())));
+        return List.copyOf(requests);
     }
 
     SqlRequest rollbackDropColumn(String table, String column) {
@@ -42,10 +54,7 @@ final class SchemaRollbackSqlRenderer {
     SqlRequest rollbackColumnType(String table, String currentColumn, ColumnMetadata column,
                                   ColumnDefinition physical) {
         DynamicField field = toField(column, currentColumn);
-        return new SqlRequest(dialect.alterColumnTypeSql(table,
-                                                         currentColumn,
-                                                         tables.dataType(field),
-                                                         tables.replacementColumnDefinition(field, physical)),
+        return new SqlRequest(tables.alterColumnType(table, field, physical),
                               List.of());
     }
 
@@ -57,11 +66,7 @@ final class SchemaRollbackSqlRenderer {
     SqlRequest rollbackColumnNullability(String table, String currentColumn, ColumnMetadata column,
                                          ColumnDefinition physical) {
         DynamicField field = toField(column, currentColumn);
-        return new SqlRequest(dialect.alterColumnNullabilitySql(table,
-                                                                 currentColumn,
-                                                                 tables.dataType(field),
-                                                                 tables.replacementColumnDefinition(field, physical),
-                                                                 column.nullable()),
+        return new SqlRequest(tables.alterColumnNullability(table, field, physical),
                               List.of());
     }
 

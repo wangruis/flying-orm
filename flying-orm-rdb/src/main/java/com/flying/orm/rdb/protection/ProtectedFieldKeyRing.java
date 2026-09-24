@@ -10,7 +10,7 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
- * 保存一个 current 主密钥和最多三个只读旧版本。
+ * 保存一个 current 主密钥和开发者配置的只读旧版本。
  *
  * <p>构造时复制上层提供的密钥，关闭时清零 ORM 持有的副本。该类型不负责读取配置或连接外部密钥系统。</p>
  *
@@ -21,7 +21,6 @@ import java.util.regex.Pattern;
 public final class ProtectedFieldKeyRing implements AutoCloseable {
 
     private static final int MASTER_KEY_LENGTH = 32;
-    private static final int MAX_READABLE_KEYS = 4;
     private static final Pattern VERSION = Pattern.compile("[A-Za-z0-9._-]{1,16}");
 
     private final String currentVersion;
@@ -180,9 +179,6 @@ public final class ProtectedFieldKeyRing implements AutoCloseable {
             try {
                 if (currentVersion == null) {
                     throw new IllegalStateException("protected field current key is required");
-                }
-                if (keys.size() > MAX_READABLE_KEYS) {
-                    throw new IllegalArgumentException("protected field key ring contains too many versions");
                 }
                 return new ProtectedFieldKeyRing(currentVersion, keys, uniqueSearchKey);
             } finally {

@@ -134,7 +134,8 @@ class ContainsProjectionLayoutTest {
             List<DynamicRow> result = fixture.support.finish(fixture.form, fixture.query,
                     List.of(row(1L, "alphabet", "first"), row(2L, "goodbye", "false positive"),
                             row(3L, "alphabet soup", "third")),
-                    List.of("secret", "id"), SensitiveDisplayMode.MASKED);
+                    List.of("secret", "id"), SensitiveDisplayMode.MASKED,
+                    com.flying.orm.rdb.execution.SqlExecutionOptions.safeDefaults());
             assertEquals(List.of(1L, 3L), result.stream().map(value -> value.get("id")).toList());
             assertEquals(List.of("********", "*************"),
                     result.stream().map(value -> value.get("secret")).toList());
@@ -249,7 +250,8 @@ class ContainsProjectionLayoutTest {
                 .prepareContainsQuery(form, form, where, DataScope.none()).orElseThrow();
 
         private List<DynamicRow> finish(List<DynamicRow> rows, List<String> fields) {
-            return support.finish(form, query, rows, fields, SensitiveDisplayMode.FULL);
+            return support.finish(form, query, rows, fields, SensitiveDisplayMode.FULL,
+                    com.flying.orm.rdb.execution.SqlExecutionOptions.safeDefaults());
         }
 
         @Override

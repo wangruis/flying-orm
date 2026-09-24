@@ -31,7 +31,7 @@ class NativeTemporalConditionTest {
                                                  DynamicField.of("observed_at",
                                                                  "TIMESTAMP(6) WITH LOCAL TIME ZONE"),
                                                  StructuredConditionPolicy.defaults(),
-                                                 "$value",
+                                                 ConditionCompilationBudget.Path.root("$value"),
                                                  "=");
 
         assertEquals(local, normalized);
@@ -44,7 +44,7 @@ class NativeTemporalConditionTest {
         Object normalized = normalizer.normalize(local,
                                                  DynamicField.of("local_occurrence", "TIMESTAMP(6)"),
                                                  StructuredConditionPolicy.defaults(),
-                                                 "$value",
+                                                 ConditionCompilationBudget.Path.root("$value"),
                                                  "=");
 
         assertEquals(local, normalized);
@@ -70,7 +70,7 @@ class NativeTemporalConditionTest {
                 List.of(laterLocalRepresentation, earlierLocalRepresentation),
                 DynamicField.of("observed_at", "TIMESTAMPTZ"),
                 StructuredConditionPolicy.defaults(),
-                "$value",
+                ConditionCompilationBudget.Path.root("$value"),
                 "between"));
     }
 
@@ -104,7 +104,7 @@ class NativeTemporalConditionTest {
                 List.of(laterLocalRepresentation, earlierLocalRepresentation),
                 DynamicField.of("daily_cutoff", "TIME WITH TIME ZONE"),
                 StructuredConditionPolicy.defaults(),
-                "$value",
+                ConditionCompilationBudget.Path.root("$value"),
                 "between"));
     }
 
@@ -115,7 +115,7 @@ class NativeTemporalConditionTest {
         Object normalized = normalizer.normalize(value.toString(),
                                                  DynamicField.of("daily_cutoff", "OFFSET_TIME"),
                                                  StructuredConditionPolicy.defaults(),
-                                                 "$value",
+                                                 ConditionCompilationBudget.Path.root("$value"),
                                                  "=");
 
         assertEquals(value, normalized);
@@ -129,7 +129,7 @@ class NativeTemporalConditionTest {
             Object normalized = normalizer.normalize(value.toString(),
                                                      DynamicField.of("legacy_created_at", dataType),
                                                      StructuredConditionPolicy.defaults(),
-                                                     "$value",
+                                                     ConditionCompilationBudget.Path.root("$value"),
                                                      "=");
 
             assertEquals(value, normalized, dataType);
@@ -143,7 +143,7 @@ class NativeTemporalConditionTest {
         Object normalized = normalizer.normalize(value.toString(),
                                                  DynamicField.of("legacy_created_at", "SMALLDATETIME"),
                                                  StructuredConditionPolicy.defaults(),
-                                                 "$value",
+                                                 ConditionCompilationBudget.Path.root("$value"),
                                                  "=");
 
         assertEquals(value, normalized);
@@ -156,7 +156,7 @@ class NativeTemporalConditionTest {
         Object normalized = normalizer.normalize(value.toString(),
                                                  DynamicField.of("id", "UUID"),
                                                  StructuredConditionPolicy.defaults(),
-                                                 "$value",
+                                                 ConditionCompilationBudget.Path.root("$value"),
                                                  "=");
 
         assertEquals(value, normalized);
@@ -169,7 +169,7 @@ class NativeTemporalConditionTest {
                 () -> normalizer.normalize("not-an-integer",
                                            DynamicField.of("amount", "INTEGER"),
                                            StructuredConditionPolicy.defaults(),
-                                           "$value",
+                                           ConditionCompilationBudget.Path.root("$value"),
                                            "="));
 
         assertEquals(StructuredConditionErrorCode.VALUE_CONVERSION_FAILED, error.code());

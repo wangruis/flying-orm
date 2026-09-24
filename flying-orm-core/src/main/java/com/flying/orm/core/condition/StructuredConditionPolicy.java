@@ -25,12 +25,8 @@ import java.util.Set;
 public final class StructuredConditionPolicy {
 
     private static final int DEFAULT_MAX_DEPTH = 8;
-    /** 条件编译阶段会按树结构递归，硬上限防止错误配置把安全阈值放大成线程栈风险。 */
-    private static final int MAX_DEPTH_LIMIT = 64;
     private static final int DEFAULT_MAX_NODES = 100;
-    private static final int MAX_NODES_LIMIT = 10_000;
     private static final int DEFAULT_MAX_COLLECTION_SIZE = 1_000;
-    private static final int MAX_COLLECTION_SIZE_LIMIT = 1_000;
     private static final int DEFAULT_MAX_STRING_LENGTH = 4_096;
 
     private final Map<String, String> operators;
@@ -192,14 +188,14 @@ public final class StructuredConditionPolicy {
     }
 
     /**
-     * 设置条件树最大深度。为了保证递归编译不会耗尽线程栈，最大只能设为 64。
+     * 设置条件树最大深度。调用方根据业务规模和运行环境确定预算。
      *
      * @param maxDepth 最大深度
      * @return 新策略
      */
     public StructuredConditionPolicy withMaxDepth(int maxDepth) {
         return copy(operators, allowedFields, deniedFields, fieldOperators,
-                    requireDepth(maxDepth), maxNodes, maxCollectionSize, maxStringLength);
+                    requirePositive(maxDepth, "structured condition max depth"), maxNodes, maxCollectionSize, maxStringLength);
     }
 
     /**
@@ -211,7 +207,7 @@ public final class StructuredConditionPolicy {
     public StructuredConditionPolicy withMaxNodes(int maxNodes) {
         return copy(operators, allowedFields, deniedFields, fieldOperators,
                     maxDepth,
-                    requireAtMost(maxNodes, MAX_NODES_LIMIT, "structured condition max nodes"),
+                    requirePositive(maxNodes, "structured condition max nodes"),
                     maxCollectionSize,
                     maxStringLength);
     }
@@ -226,9 +222,7 @@ public final class StructuredConditionPolicy {
         return copy(operators, allowedFields, deniedFields, fieldOperators,
                     maxDepth,
                     maxNodes,
-                    requireAtMost(maxCollectionSize,
-                                  MAX_COLLECTION_SIZE_LIMIT,
-                                  "structured condition max collection size"),
+                    requirePositive(maxCollectionSize, "structured condition max collection size"),
                     maxStringLength);
     }
 
@@ -373,19 +367,4 @@ public final class StructuredConditionPolicy {
         return value;
     }
 
-    private static int requireAtMost(int value, int limit, String name) {
-        int positive = requirePositive(value, name);
-        if (positive > limit) {
-            throw new IllegalArgumentException(name + " must not exceed " + limit);
-        }
-        return positive;
-    }
-
-    private static int requireDepth(int value) {
-        int depth = requirePositive(value, "structured condition max depth");
-        if (depth > MAX_DEPTH_LIMIT) {
-            throw new IllegalArgumentException("structured condition max depth must not exceed " + MAX_DEPTH_LIMIT);
-        }
-        return depth;
-    }
 }

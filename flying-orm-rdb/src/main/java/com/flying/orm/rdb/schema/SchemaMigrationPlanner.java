@@ -92,7 +92,7 @@ final class SchemaMigrationPlanner {
         SchemaMigrationReviewPolicy safePolicy = Objects.requireNonNull(reviewPolicy,
                                                                          "migration review policy must not be null");
         return safeReader.readTableForSchema(safeForm.table())
-                         .flatMap(current -> physicalSnapshot(current, safeForm, safeOptions, safeReader)
+                         .flatMap(current -> reviewSnapshot(current, safeForm, safeOptions, safeReader)
                                  .map(java.util.Optional::of)
                                  .defaultIfEmpty(java.util.Optional.empty())
                                  .flatMap(snapshot -> protectedSchemas.reviewExistingReactive(
@@ -147,7 +147,7 @@ final class SchemaMigrationPlanner {
                 reviewPolicy, "migration review policy must not be null");
         try {
             TableMetadata current = safeReader.readTableForSchema(safeForm.table());
-            SchemaSnapshot snapshot = physicalSnapshotJdbc(current, safeForm, safeOptions, safeReader);
+            SchemaSnapshot snapshot = reviewSnapshotJdbc(current, safeForm, safeOptions, safeReader);
             SchemaMigrationPlan primary = migrateSafelyPlan(
                     current, safeForm, indexes, foreignKeys, safeOptions, snapshot);
             return protectedSchemas.reviewExistingJdbc(
@@ -185,7 +185,12 @@ final class SchemaMigrationPlanner {
     }
 
     List<SqlRequest> migrate(DynamicFormChangeSet changeSet) {
+        return migrate(changeSet, null);
+    }
+
+    List<SqlRequest> migrate(DynamicFormChangeSet changeSet, SchemaSnapshot snapshot) {
         DynamicFormChangeSet changes = Objects.requireNonNull(changeSet, "dynamic form change set must not be null");
+        RelationalTableDefinition physical = SchemaTableSqlRenderer.physicalColumns(snapshot);
         // 变更集已保证 source 和 target 指向同一物理关系，这里只校验一次目标身份。
         SchemaMigrationSupport.requireLegacyRelation(changes.target());
         if (!changes.source().protections().isEmpty() || !changes.target().protections().isEmpty()) {
@@ -221,10 +226,8 @@ final class SchemaMigrationPlanner {
                 throw new IllegalArgumentException("the configured dialect cannot alter the column comment safely");
             }
             if (shapeChanged || commentChanged && commentInFullDefinition) {
-                requests.add(new SqlRequest(dialect.alterColumnTypeSql(rawTable,
-                                                                        target.name(),
-                                                                        tables.dataType(target),
-                                                                        tables.replacementColumnDefinition(target, null)), List.of()));
+                requests.add(new SqlRequest(tables.alterColumnType(rawTable, target,
+                        physical == null ? null : physical.column(change.source().name())), List.of()));
             }
             if (commentChanged && !commentInFullDefinition) {
                 requests.add(new SqlRequest(separateCommentChange.orElseThrow(), List.of()));
@@ -298,10 +301,13 @@ final class SchemaMigrationPlanner {
     Mono<SchemaSnapshot> physicalSnapshot(TableMetadata current, DynamicForm target,
                                           SchemaMigrationOptions options, ReactiveFormMetadataReader reader) {
         return needsPhysicalSnapshot(current, target, options)
-                ? reader.readSnapshot(target.table())
-                        .switchIfEmpty(Mono.error(new IllegalStateException(
-                                "rewriting an existing column requires a physical schema snapshot")))
+                ? requiredPhysicalSnapshot(reader, target.table())
                 : Mono.empty();
+    }
+
+    private Mono<SchemaSnapshot> requiredPhysicalSnapshot(ReactiveFormMetadataReader reader, String table) {
+        return reader.readSnapshot(table).switchIfEmpty(Mono.error(new IllegalStateException(
+                "rewriting an existing column requires a physical schema snapshot")));
     }
 
     SchemaSnapshot physicalSnapshotJdbc(TableMetadata current, DynamicForm target,
@@ -311,7 +317,9 @@ final class SchemaMigrationPlanner {
 
     private boolean needsPhysicalSnapshot(TableMetadata current, DynamicForm target,
                                            SchemaMigrationOptions options) {
-        if (!dialect.rewritesFullColumnDefinition()) {
+        if (!dialect.rewritesFullColumnDefinition()
+                && dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.SQL_SERVER
+                && dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.ORACLE) {
             return false;
         }
         for (DynamicField field : target.fields()) {
@@ -322,10 +330,17 @@ final class SchemaMigrationPlanner {
                     || column.primaryKey() != field.primaryKey()) {
                 continue;
             }
+            if (!dialect.rewritesFullColumnDefinition() && !tables.requiresPhysicalCollation(field)
+                    && !tables.requiresPhysicalCollation(SchemaMigrationSupport.toDynamicField(column))
+                    && !tables.requiresPhysicalLengthUnit(field)
+                    && !tables.requiresPhysicalLengthUnit(SchemaMigrationSupport.toDynamicField(column))) {
+                continue;
+            }
             // Only fetch physical facts for changes SchemaColumnShapeChange will execute.
             boolean temporalChanged = SchemaMigrationSupport.logicalTemporalTypeChanged(
                     column.databaseType(), field.databaseType());
             if (column.nullable() != field.nullable()) {
+                if (dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.ORACLE) continue;
                 if (!temporalChanged
                         && SchemaMigrationSupport.sameStorageShape(column, field, tables)
                         && (field.nullable() || options.columnChangeAllowed())) {
@@ -348,11 +363,34 @@ final class SchemaMigrationPlanner {
                     }
                 }
             }
-            if (!Objects.equals(tables.storageComment(column), tables.storageComment(field))) {
+            if (dialect.rewritesFullColumnDefinition()
+                    && !Objects.equals(tables.storageComment(column), tables.storageComment(field))) {
                 return true;
             }
         }
         return false;
+    }
+
+    Mono<SchemaSnapshot> reviewSnapshot(TableMetadata current, DynamicForm target,
+                                        SchemaMigrationOptions options, ReactiveFormMetadataReader reader) {
+        return needsReviewSnapshot(current, target, options)
+                ? requiredPhysicalSnapshot(reader, target.table()) : Mono.empty();
+    }
+
+    SchemaSnapshot reviewSnapshotJdbc(TableMetadata current, DynamicForm target,
+                                      SchemaMigrationOptions options, JdbcFormMetadataReader reader) {
+        return needsReviewSnapshot(current, target, options) ? reader.readSnapshot(target.table()) : null;
+    }
+
+    private boolean needsReviewSnapshot(TableMetadata current, DynamicForm target, SchemaMigrationOptions options) {
+        if (needsPhysicalSnapshot(current, target, options)) return true;
+        if (!options.dropColumnAllowed()) {
+            return false;
+        }
+        // 只有审核需要生成删列回退；普通 plan 不为尚未执行的回退读取字典。
+        return current.columns().stream().anyMatch(column -> !column.primaryKey()
+                && target.findField(column.name()).isEmpty()
+                && SchemaMigrationSupport.renameTargetForSource(options.columnRenames(), column.name()) == null);
     }
 
     SchemaMigrationPlan migrateSafelyPlan(TableMetadata current,
@@ -439,7 +477,6 @@ final class SchemaMigrationPlanner {
                                                          safeOptions,
                                                          primaryKeyChanged,
                                                          physical == null ? null : physical.column(lookupName)),
-                        dialect,
                         tables).apply();
                 if (storageApplied) {
                     tables.addMissingComment(requests, safeTarget.table(), column, field,

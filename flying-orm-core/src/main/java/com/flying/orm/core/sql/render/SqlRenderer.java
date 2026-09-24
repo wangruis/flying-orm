@@ -10,6 +10,7 @@ import com.flying.orm.core.internal.Names;
 import com.flying.orm.core.internal.condition.ConditionExecutionViews;
 import com.flying.orm.core.internal.value.OwnedBindableValues;
 
+import java.util.ArrayDeque;
 import java.util.Objects;
 import java.util.function.UnaryOperator;
 
@@ -222,7 +223,7 @@ public final class SqlRenderer implements SqlRenderContext {
                                structureIdentifierRenderer);
     }
 
-    private boolean renderNode(ConditionNode node, RenderAccumulator accumulator,
+    private boolean renderTerm(ConditionNode node, RenderAccumulator accumulator,
                                UnaryOperator<String> correlatedFields,
                                UnaryOperator<String> outerQualifiers) {
         // AST 目前只有叶子 term 和逻辑分组。遇到未知实现立即失败，不能悄悄漏掉安全条件。
@@ -238,9 +239,6 @@ public final class SqlRenderer implements SqlRenderContext {
                         accumulator);
             }
             return appendTerm(term, handler.render(term, this), accumulator);
-        }
-        if (node instanceof ConditionGroup group) {
-            return renderGroup(group, true, accumulator, correlatedFields, outerQualifiers);
         }
         throw new IllegalArgumentException("unsupported condition node: " + node.getClass().getName());
     }
@@ -264,33 +262,64 @@ public final class SqlRenderer implements SqlRenderContext {
             return false;
         }
 
-        String delimiter = group.operator() == LogicalOperator.AND ? " and " : " or ";
-        int groupSqlStart = accumulator.sqlLength();
-        int groupParameterStart = accumulator.parameterCount();
+        ArrayDeque<RenderFrame> pending = new ArrayDeque<>();
+        pending.addLast(new RenderFrame(group, nested, accumulator.sqlLength(), accumulator.parameterCount()));
         if (nested) {
             accumulator.appendSql("(");
         }
-        boolean rendered = false;
-        for (ConditionNode child : group.children()) {
+        while (!pending.isEmpty()) {
+            RenderFrame frame = pending.getLast();
+            if (frame.index == frame.group.children().size()) {
+                if (!frame.rendered) {
+                    accumulator.rollback(frame.sqlStart, frame.parameterStart);
+                } else if (frame.nested) {
+                    accumulator.appendSql(")");
+                }
+                pending.removeLast();
+                if (pending.isEmpty()) {
+                    return frame.rendered;
+                }
+                if (frame.rendered) {
+                    pending.getLast().rendered = true;
+                }
+                continue;
+            }
+            ConditionNode child = frame.group.children().get(frame.index++);
+            if (child instanceof ConditionGroup childGroup && childGroup.children().isEmpty()) {
+                continue;
+            }
             int childSqlStart = accumulator.sqlLength();
             int childParameterStart = accumulator.parameterCount();
-            if (rendered) {
-                accumulator.appendSql(delimiter);
+            if (frame.rendered) {
+                accumulator.appendSql(frame.group.operator() == LogicalOperator.AND ? " and " : " or ");
             }
-            if (renderNode(child, accumulator, correlatedFields, outerQualifiers)) {
-                rendered = true;
+            if (child instanceof ConditionGroup childGroup) {
+                // 回退点包含父组分隔符，整棵空子树不会留下括号或连接词。
+                pending.addLast(new RenderFrame(childGroup, true, childSqlStart, childParameterStart));
+                accumulator.appendSql("(");
+            } else if (renderTerm(child, accumulator, correlatedFields, outerQualifiers)) {
+                frame.rendered = true;
             } else {
                 accumulator.rollback(childSqlStart, childParameterStart);
             }
         }
-        if (!rendered) {
-            accumulator.rollback(groupSqlStart, groupParameterStart);
-            return false;
+        return false;
+    }
+
+    private static final class RenderFrame {
+        private final ConditionGroup group;
+        private final boolean nested;
+        private final int sqlStart;
+        private final int parameterStart;
+        private int index;
+        private boolean rendered;
+
+        private RenderFrame(ConditionGroup group, boolean nested, int sqlStart, int parameterStart) {
+            this.group = group;
+            this.nested = nested;
+            this.sqlStart = sqlStart;
+            this.parameterStart = parameterStart;
         }
-        if (nested) {
-            accumulator.appendSql(")");
-        }
-        return true;
     }
 
     /** 一次 render 调用独占的 SQL 与参数累加器。 */

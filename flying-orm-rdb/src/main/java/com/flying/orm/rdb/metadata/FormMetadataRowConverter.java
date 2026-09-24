@@ -194,7 +194,7 @@ final class FormMetadataRowConverter {
                 .uniqueConstraints(uniqueConstraints)
                 .indexes(mergeIndexes(indexProjection.indexes(), uniqueProjection.indexes()))
                 .foreignKeys(toForeignKeyDefinitions(identity, foreignKeyRows))
-                .checks(toCheckConstraints(checkRows, projection.semanticTypes(), dialect));
+                .checks(toCheckConstraints(checkRows, projection.expressionTypes(), dialect));
         applyTableFacts(snapshot, tableRows, dialect);
         PrimaryKeyDefinition primaryKey = toPrimaryKey(primaryKeyRows);
         if (primaryKey == null) {
@@ -216,6 +216,7 @@ final class FormMetadataRowConverter {
                 ? safeTypeMapper : snapshotTypeMapper;
         List<ColumnDefinition> columns = new ArrayList<>(rows.size());
         Map<String, DatabaseType> semanticTypes = new LinkedHashMap<>();
+        Map<String, DatabaseType> expressionTypes = new LinkedHashMap<>();
         for (Map<String, Object> row : rows) {
             requireRepresentable(row, "COLUMN_REPRESENTABLE", "UNSUPPORTED_COLUMN_REASON",
                                  "column", text(row, "COLUMN_NAME"));
@@ -248,14 +249,21 @@ final class FormMetadataRowConverter {
             }
             DatabaseType semanticDatabaseType = DatabaseType.of(semanticType);
             semanticTypes.put(text(row, "COLUMN_NAME"), semanticDatabaseType);
+            // 通用类型映射可折叠 CHAR/BYTEA；目录表达式仍必须按原生底层类型解释，域类型亦然。
+            DatabaseType expressionType = dialect == InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL
+                    ? DatabaseType.of(semanticSource) : semanticDatabaseType;
+            if (expressionType.logicalType() == com.flying.orm.core.type.LogicalType.OTHER) {
+                expressionType = semanticDatabaseType;
+            }
+            expressionTypes.put(text(row, "COLUMN_NAME"), expressionType);
             applyTypeArguments(column, databaseType, row, dialect);
             if (!generation.generated()) {
                 column.defaultValue(RelationalMetadataValueParser.columnDefault(
-                        nullableRawText(row, "COLUMN_DEFAULT"), semanticDatabaseType, dialect));
+                        nullableRawText(row, "COLUMN_DEFAULT"), expressionType, dialect));
             }
             columns.add(column.build());
         }
-        return new ColumnProjection(columns, semanticTypes);
+        return new ColumnProjection(columns, semanticTypes, expressionTypes);
     }
 
     static String postgresqlPhysicalType(Map<String, Object> row,
@@ -747,7 +755,8 @@ final class FormMetadataRowConverter {
     }
 
     private record ColumnProjection(List<ColumnDefinition> columns,
-                                    Map<String, DatabaseType> semanticTypes) { }
+                                    Map<String, DatabaseType> semanticTypes,
+                                    Map<String, DatabaseType> expressionTypes) { }
 
     private static void requireRepresentable(Map<String, Object> row,
                                              String flag,

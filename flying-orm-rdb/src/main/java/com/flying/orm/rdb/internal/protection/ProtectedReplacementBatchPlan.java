@@ -27,6 +27,7 @@ import java.util.Set;
 public final class ProtectedReplacementBatchPlan {
 
     public static final int MAX_OPERATIONS = 500;
+    /** Preferred combined binding count; a wider individual replacement occupies its own segment. */
     public static final int MAX_PARAMETERS = 2_000;
     private static final long OPERATION_OVERHEAD_BYTES = 48L;
 
@@ -119,15 +120,14 @@ public final class ProtectedReplacementBatchPlan {
                         || replacement && !deleteSql.equals(insertion.work().deleteSql());
                 boolean exceeds = !insertions.isEmpty() && (incompatible
                         || insertions.size() >= MAX_OPERATIONS
-                        || parameterCount + addedParameters > MAX_PARAMETERS
+                        || (long) parameterCount + addedParameters > MAX_PARAMETERS
                         || saturatingAdd(bytes, addedBytes) > maxBufferedBytes
                         || replacement && keys.contains(operation.key()));
                 if (exceeds) {
                     pending = operation;
                     break;
                 }
-                if (insertions.isEmpty() && (addedParameters > MAX_PARAMETERS
-                        || saturatingAdd(bytes, addedBytes) > maxBufferedBytes)) {
+                if (insertions.isEmpty() && saturatingAdd(bytes, addedBytes) > maxBufferedBytes) {
                     throw new IllegalArgumentException(
                             "protected side-index replacement exceeds batch safety limits");
                 }

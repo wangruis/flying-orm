@@ -44,6 +44,7 @@ public final class DatabaseType {
             "(?:pg_catalog\\.)?interval(?:" + INTERVAL_PRECISION + "| " + INTERVAL_FIELDS + ")?";
     private static final Pattern SAFE_DECLARATION = Pattern.compile(
             "(?:" + TIME_ZONE_NAME
+                    + "|(?:char|varchar2)\\(\\d+ (?:byte|char)\\)"
                     + "|" + INTERVAL_NAME
                     + "|" + MULTI_WORD_NAME + "(?:" + ARGUMENTS + ")?"
                     + "|" + SIMPLE_NAME + "(?:" + ARGUMENTS + ")?"

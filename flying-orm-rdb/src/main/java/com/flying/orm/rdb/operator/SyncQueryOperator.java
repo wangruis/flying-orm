@@ -111,7 +111,20 @@ public final class SyncQueryOperator {
 
     /** 查询零或一行；多行会报错，不静默截断。 */
     public DynamicRow one() {
-        List<DynamicRow> rows = mapped(row -> row, 2);
+        return single(mapped(row -> row, 2));
+    }
+
+    /** 按实体/record 映射零或一行；多行会报错，沿用表单读取限制与保护。 */
+    public <T> T one(Class<T> type) {
+        if (!command.governed()) {
+            return single(mapped(formClient.entityModels().rawRowMapper(
+                    type, formClient.entityRenderer().valueCodecs()), 2));
+        }
+        DmlQueryCommand.GovernedQuery query = command.governedQuery(null);
+        return configuredClient(query).selectOne(query.spec(), type);
+    }
+
+    private static <T> T single(List<T> rows) {
         if (rows.size() > 1) { throw new IllegalStateException("query expected zero or one row"); }
         return rows.isEmpty() ? null : rows.getFirst();
     }
@@ -130,16 +143,34 @@ public final class SyncQueryOperator {
         return configuredClient(query).page(query.spec(), new PageQuery(page, size, query.spec().sorts()));
     }
 
+    /** 按实体/record 映射分页结果，保留当前排序与字段治理。 */
+    public <T> PageResult<T> page(int page, int size, Class<T> type) {
+        DmlQueryCommand.GovernedQuery query = command.governedQuery(null);
+        return configuredClient(query).page(query.spec(), new PageQuery(page, size, query.spec().sorts()), type);
+    }
+
     /** 稳定游标分页，不额外查询总数。 */
     public CursorPageResult<DynamicRow> cursorPage(CursorPageQuery page) {
         var query = command.governedQuery(null);
         return configuredClient(query).cursorPage(query.spec(), page);
     }
 
+    /** 按实体/record 映射稳定游标分页结果。 */
+    public <T> CursorPageResult<T> cursorPage(CursorPageQuery page, Class<T> type) {
+        DmlQueryCommand.GovernedQuery query = command.governedQuery(null);
+        return configuredClient(query).cursorPage(query.spec(), page, type);
+    }
+
     /** 支持复合排序与可空字段的键集分页。 */
     public KeysetPageResult<DynamicRow> keysetPage(KeysetPageQuery page) {
         var query = command.governedQuery(null);
         return configuredClient(query).keysetPage(query.spec(), page);
+    }
+
+    /** 按实体/record 映射复合排序与可空字段的键集分页结果。 */
+    public <T> KeysetPageResult<T> keysetPage(KeysetPageQuery page, Class<T> type) {
+        DmlQueryCommand.GovernedQuery query = command.governedQuery(null);
+        return configuredClient(query).keysetPage(query.spec(), page, type);
     }
 
     /** 在当前条件与 Scope 下声明类型化报表聚合。 */

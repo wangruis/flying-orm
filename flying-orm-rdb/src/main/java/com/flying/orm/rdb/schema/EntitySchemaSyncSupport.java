@@ -3,6 +3,7 @@ package com.flying.orm.rdb.schema;
 import com.flying.orm.core.metadata.ColumnDefinition;
 import com.flying.orm.core.metadata.IndexDefinition;
 import com.flying.orm.core.metadata.PrimaryKeyDefinition;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
 import com.flying.orm.rdb.mapping.EntityMetadata;
@@ -23,7 +24,7 @@ final class EntitySchemaSyncSupport {
     static List<EntitySchemaTarget> targets(EntityModelRegistry models, Collection<Class<?>> entityTypes) {
         Collection<Class<?>> safeTypes = Objects.requireNonNull(entityTypes, "entity types must not be null");
         LinkedHashMap<Class<?>, EntitySchemaTarget> byType = new LinkedHashMap<>();
-        LinkedHashMap<String, Class<?>> byTable = new LinkedHashMap<>();
+        LinkedHashMap<RelationIdentity, Class<?>> byTable = new LinkedHashMap<>();
         for (Class<?> type : safeTypes) {
             Class<?> safeType = Objects.requireNonNull(type, "entity type must not be null");
             if (byType.containsKey(safeType)) {
@@ -31,7 +32,7 @@ final class EntitySchemaSyncSupport {
             }
             // 先完成全部实体的严格关系编译，再让任意元数据 reader 或 DDL 执行器接触数据库。
             EntitySchemaDescriptor<?> descriptor = models.schemaDescriptor(safeType);
-            String tableKey = normalizeTable(descriptor.metadata().table());
+            RelationIdentity tableKey = descriptor.table().identity();
             Class<?> previous = byTable.putIfAbsent(tableKey, safeType);
             if (previous != null) {
                 throw new IllegalArgumentException("multiple entity types map to the same table '"

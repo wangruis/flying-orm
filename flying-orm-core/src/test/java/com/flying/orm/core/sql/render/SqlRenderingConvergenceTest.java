@@ -164,7 +164,7 @@ class SqlRenderingConvergenceTest {
             assertEquals(handler.id(), descriptor.id());
             assertEquals(FieldUse.FILTER, descriptor.fieldUse());
             assertEquals(Set.of(), descriptor.requiredCapabilities());
-            assertEquals(1_000, descriptor.maxParameters());
+            assertEquals(Integer.MAX_VALUE, descriptor.maxParameters());
             assertEquals(1, descriptor.complexityCost());
         }
     }

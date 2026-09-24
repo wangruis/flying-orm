@@ -353,12 +353,13 @@ final class RelationalSchemaEvolutionSqlRenderer {
                 : SchemaColumnCommentCodec.encode(dialect, logicalActualType, actual.generation(), actual.comment());
         String desiredStorageComment = renderer.storageComment(desired);
         String actualType = SchemaDefinitionEquality.actualColumnDdlType(dialect, actual, physicalActualTypes);
-        String desiredType = SchemaDefinitionEquality.desiredColumnType(dialect, desired);
+        String desiredType = SchemaTypeMapping.preserveCharacterLengthUnit(dialect, actualType,
+                SchemaDefinitionEquality.desiredColumnType(dialect, desired));
         boolean typeChanged = !SchemaDefinitionEquality.sameColumnType(
                 actual, desired, dialect, physicalActualTypes);
         boolean nullableChanged = actual.nullable() != desired.nullable();
         boolean defaultChanged = !SchemaDefinitionEquality.sameDefault(
-                actual.defaultValue(), desired.defaultValue())
+                actual.defaultValue(), desired.defaultValue(), dialect)
                 || desired.defaultConstraintName() != null
                     && !desired.defaultConstraintName().equals(actual.defaultConstraintName());
         boolean commentChanged = !Objects.equals(actualStorageComment, desiredStorageComment);

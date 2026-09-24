@@ -83,6 +83,11 @@ Flux<UserView> views = dml.query(users)
     .orderByAsc("id")
     .fetch(UserView.class);
 
+Mono<UserView> one = dml.query(users)
+    .select("id", "name")
+    .where("id", 1L)
+    .one(UserView.class);
+
 Flux<Long> ids = dml.query(users)
     .select("id")
     .where("status", "ACTIVE")
@@ -95,7 +100,7 @@ Flux<DynamicRow> organizations = dml.query(users)
     .fetchMap();
 ```
 
-DTO 的属性/record 组件应与投影匹配；单列可能为 NULL 时不要从 Reactor 映射器返回 null，应显式包装结果或先过滤。
+DTO 的属性/record 组件应与投影匹配；`one(Type.class)` 无匹配时为空，多行时报错。单列可能为 NULL 时不要从 Reactor 映射器返回 null，应显式包装结果或先过滤。
 
 ### 业务语义条件
 
@@ -116,6 +121,11 @@ FlyingOrmClients clients = FlyingOrmClients.builder(access)
 Flux<DynamicRow> rows = clients.operator().dml().query(users)
     .where("id", "user-in-org", orgId)
     .fetchMap();
+
+// 实体字段使用同一种条件写法。
+Flux<User> entities = clients.repository(User.class).createQuery()
+    .where(User::getId, "user-in-org", orgId)
+    .fetch();
 ```
 
 这里检索 `user_org` 中属于指定机构的用户。关联表和字段由服务端注册，`orgId` 是绑定参数；扩展处理器是可信后端代码，不能交给前端注册。
@@ -159,6 +169,20 @@ Flux<DynamicRow> result = scoped.dml().query()
 
 这个策略没有允许 `status` 过滤，因此携带该字段的输入会被拒绝。也可使用 `from(form, policy, limits)` 显式指定查询形状预算。
 
+条件规模按需配置，下面的数字只是应用示例，不是框架上限：
+
+```java
+StructuredConditionPolicy inputPolicy = StructuredConditionPolicy.defaults()
+    .withMaxDepth(128)
+    .withMaxNodes(20000)
+    .withMaxCollectionSize(5000)
+    .withMaxStringLength(16384);
+
+Flux<DynamicRow> rows = scoped.dml().query(users)
+    .filter(input, inputPolicy)
+    .fetchMap();
+```
+
 ## 分页
 
 ### 页码：需要总数
@@ -168,9 +192,15 @@ Mono<PageResult<DynamicRow>> page = dml.query(users)
     .where("status", "ACTIVE")
     .orderByDesc("id")
     .page(1, 20);
+
+Mono<PageResult<UserView>> views = dml.query(users)
+    .select("id", "name")
+    .where("status", "ACTIVE")
+    .orderByDesc("id")
+    .page(1, 20, UserView.class);
 ```
 
-页码从 1 开始，执行总数与页数据查询。跨语句一致性由上层数据库环境决定。
+页码从 1 开始，执行总数与页数据查询。三种分页的 `size` 均由开发者指定正整数，不设 1000/999 等框架固定上限；执行仍遵循开发者配置的行数和内存预算。游标与 keyset 为判定下一页会多取一行，`size + 1` 须能由现有 `int` 参数表示。跨语句一致性由上层数据库环境决定。
 
 ### 游标：稳定非空排序
 
@@ -180,6 +210,10 @@ Mono<CursorPageResult<DynamicRow>> first = dml.query(users)
 
 Mono<CursorPageResult<DynamicRow>> next = dml.query(users)
     .cursorPage(CursorPageQuery.after(20, List.of(lastId), CursorSort.asc("id")));
+
+Mono<CursorPageResult<UserView>> views = dml.query(users)
+    .select("id", "name")
+    .cursorPage(CursorPageQuery.first(20, CursorSort.asc("id")), UserView.class);
 ```
 
 ### Keyset：复合排序、可空字段
@@ -192,9 +226,14 @@ Mono<KeysetPageResult<DynamicRow>> first = dml.query(users).keysetPage(KeysetPag
 Mono<KeysetPageResult<DynamicRow>> next = dml.query(users).keysetPage(KeysetPageQuery.after(
     20, previous.nextPosition(),
     KeysetSort.asc("name", NullOrder.LAST), KeysetSort.asc("id", NullOrder.LAST)));
+
+Mono<KeysetPageResult<UserView>> views = dml.query(users)
+    .select("id", "name")
+    .keysetPage(KeysetPageQuery.first(20,
+        KeysetSort.asc("name", NullOrder.LAST), KeysetSort.asc("id", NullOrder.LAST)), UserView.class);
 ```
 
-保持条件、Scope 与排序一致，原样回传完整 `nextPosition`，不要自己截取排序值。游标可包含敏感排序值，跨信任边界时由上层签名或加密。游标与 keyset 不额外查询总数。
+保持条件、Scope 与排序一致，原样回传完整 `nextPosition`，不要自己截取排序值。游标与 keyset 的排序只在分页参数内声明，不再调用 `orderByAsc/Desc`。游标可包含敏感排序值，跨信任边界时由上层签名或加密。游标与 keyset 不额外查询总数。
 
 ## 报表与聚合
 
@@ -294,7 +333,7 @@ Mono<Long> update = repository.createUpdate()
 Mono<Long> deleted = repository.createDelete().in(User::getId, List.of(1L, 2L)).execute();
 ```
 
-投影 `fetch()` 返回部分实体；Bean 未选择的属性保留构造器和字段初始化值，record 未选择的组件使用 Java 默认值。旧 `execute()/one()/page()` 保留完整实体约束；动态投影可用 `executeRows()`。实体也支持 `or`、`andGroup`、`between`、`isNull`、`isNotNull` 和 `and(property, operator, value)`。
+投影 `fetch()` 返回部分实体；Bean 未选择的属性保留构造器和字段初始化值，record 未选择的组件使用 Java 默认值。旧 `execute()/one()/page()` 保留完整实体约束；动态投影可用 `executeRows()`。实体也支持 `or`、`andGroup`、`between`、`isNull`、`isNotNull` 和 `where(property, operator, value)`；原有 `and(property, operator, value)` 仍可使用。
 
 ## 写入与批量
 
@@ -341,6 +380,15 @@ Mono<BatchExecutionEvidence> result = dml.updateBatch(users, updates);
 ```
 
 每行携带自己的条件和预期版本，冲突不会伪装成成功。实体 Repository 也提供 `insertBatch`、`upsertBatch`、`updateBatch`，保留生成键回填和实体生命周期处理。
+
+```java
+Flux<User> input = Flux.fromIterable(entityList); // entityList 为待写入的 List<User>
+Mono<BatchExecutionEvidence> inserted = repository.insertBatch(input);
+Mono<BatchExecutionEvidence> upserted = repository.upsertBatch(input);
+Mono<BatchExecutionEvidence> updated = repository.updateBatch(input);
+```
+
+以上三种操作按需选择；更新实体须带主键及预期 `@Version`。直接传入实体流即可沿用客户端批量预算，订阅后才消费输入；需要本次覆盖配置时再传 `BatchWriteOptions`。
 
 ### 批量预算与结果
 
@@ -435,7 +483,7 @@ Flux<DynamicRow> contains = dml.query(contacts)
     .where("phone", ProtectedConditions.CONTAINS, "0000").fetchMap();
 ```
 
-未配置显式字段可见性策略时，`declaredDisplay()` 遵循字段声明，`masked()` 对已声明脱敏的字段使用脱敏展示。配置 `FieldUsePolicy` 后，以其可见性规则为准：需要脱敏应设置 `FieldVisibility.MASKED`，不能用 `.masked()` 覆盖策略中的 `FULL`。`showSensitive()` 只应在应用已经授权后调用。普通 `=` / `like` 不是加密检索的替代品。CONTAINS 保留候选验证和资源预算，不通过无限扫描实现。
+未配置显式字段可见性策略时，`declaredDisplay()` 遵循字段声明，`masked()` 对已声明脱敏的字段使用脱敏展示。配置 `FieldUsePolicy` 后，以其可见性规则为准：需要脱敏应设置 `FieldVisibility.MASKED`，不能用 `.masked()` 覆盖策略中的 `FULL`。`showSensitive()` 只应在应用已经授权后调用。普通 `=` / `like` 不是加密检索的替代品。CONTAINS 复核候选后再计算结果和分页；候选读取遵循本次 `SqlExecutionOptions`，不另设固定候选数上限，也不静默截断。
 
 ## 模板、原生 SQL 与锁定读取
 

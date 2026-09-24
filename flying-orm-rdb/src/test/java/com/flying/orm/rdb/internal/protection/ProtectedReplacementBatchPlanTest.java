@@ -10,8 +10,29 @@ import java.util.Map;
 import java.util.stream.StreamSupport;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ProtectedReplacementBatchPlanTest {
+
+    @Test
+    void wideOwnerReplacementUsesIndividualSegmentsAndStillHonorsTheByteBudget() {
+        List<String> fields = java.util.stream.IntStream.range(0, ProtectedReplacementBatchPlan.MAX_PARAMETERS)
+                .mapToObj(index -> "key_" + index).toList();
+        Map<String, Object> owner = new java.util.LinkedHashMap<>();
+        fields.forEach(field -> owner.put(field, 7L));
+        var work = new ProtectedWriteWork(ProtectedWriteWork.Kind.UPSERT,
+                new SqlRequest("update business_row set value_col = ?", List.of("value")),
+                null, fields, owner, "key_0 = ?", "delete from token_index where key_0 = ?",
+                "insert into token_index values (?)",
+                List.of(new ProtectedWriteWork.FieldTokens("phone", List.of(new byte[]{1}))));
+        var rows = List.of(row(work), row(work));
+        var segments = StreamSupport.stream(
+                ProtectedReplacementBatchPlan.segments(rows, Long.MAX_VALUE).spliterator(), false).toList();
+        assertEquals(List.of(1, 1), segments.stream().map(segment -> segment.insertions().size()).toList());
+        assertEquals(fields.size() + 1, segments.getFirst().deleteParameterSets().getFirst().size());
+        assertThrows(IllegalArgumentException.class,
+                () -> ProtectedReplacementBatchPlan.segments(rows, 1L).iterator().next());
+    }
 
     @Test
     void repeatedOwnerFieldStartsANewDeleteThenInsertSegment() {

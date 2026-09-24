@@ -21,9 +21,8 @@ public record KeysetPageQuery(int size,
                               CursorPosition position) {
 
     public KeysetPageQuery {
-        if (size < 1 || size >= PageQuery.MAX_SIZE) {
-            throw new IllegalArgumentException(
-                    "keyset page size must be between 1 and " + (PageQuery.MAX_SIZE - 1));
+        if (size < 1) {
+            throw new IllegalArgumentException("keyset page size must be greater than or equal to 1");
         }
         sorts = List.copyOf(Objects.requireNonNull(sorts, "keyset sorts must not be null"));
         if (sorts.isEmpty()) {

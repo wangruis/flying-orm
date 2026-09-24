@@ -13,6 +13,7 @@ import com.flying.orm.core.internal.value.OwnedBindableValues;
 
 import java.lang.reflect.Array;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Function;
@@ -55,10 +56,10 @@ public final class ConditionExecutionViews {
                                                  List<ConditionNode> children,
                                                  Function<TermCondition, Object> ownedValueReader) {
         StableEncoder shape = StableDigest.sha256(SHAPE_DOMAIN);
-        ArrayList<Object> parameters = new ArrayList<>();
         Mask mask = new Mask();
-        appendGroup(shape, Objects.requireNonNull(operator, "logical operator must not be null"),
-                    Objects.requireNonNull(children, "condition children must not be null"), parameters,
+        List<Object> parameters = appendGroup(shape,
+                    Objects.requireNonNull(operator, "logical operator must not be null"),
+                    Objects.requireNonNull(children, "condition children must not be null"),
                     Objects.requireNonNull(ownedValueReader, "owned condition value reader must not be null"),
                     mask);
         return new ConditionExecutionView(
@@ -80,18 +81,26 @@ public final class ConditionExecutionViews {
         return mask;
     }
 
-    private static void appendGroup(StableEncoder shape,
+    private static List<Object> appendGroup(StableEncoder shape,
                                     LogicalOperator operator,
                                     List<ConditionNode> children,
-                                    List<Object> parameters,
                                     Function<TermCondition, Object> ownedValueReader,
                                     Mask mask) {
+        List<Object> parameters = new ArrayList<>();
+        List<List<Object>> segments = null;
         shape.marker("GROUP_START").text("OPERATOR", operator.name());
         for (ConditionNode child : children) {
             if (child instanceof ConditionGroup group) {
                 ConditionExecutionView nested = of(group);
                 shape.marker("NESTED_GROUP").text("SHAPE", nested.shapeDigest());
-                parameters.addAll(nested.parameterSources());
+                if (nested.parameterCount() != 0) {
+                    if (segments == null) segments = new ArrayList<>();
+                    if (!parameters.isEmpty()) {
+                        segments.add(Collections.unmodifiableList(parameters));
+                        parameters = new ArrayList<>();
+                    }
+                    segments.add(nested.parameterSources());
+                }
                 mask.required |= nested.requiredStandardTermMask();
                 mask.cacheable = mask.cacheable && nested.structurallyCacheable();
             } else if (child instanceof TermCondition term) {
@@ -101,6 +110,9 @@ public final class ConditionExecutionViews {
             }
         }
         shape.marker("GROUP_END");
+        if (segments == null) return Collections.unmodifiableList(parameters);
+        if (!parameters.isEmpty()) segments.add(Collections.unmodifiableList(parameters));
+        return ConditionExecutionView.concatenate(segments);
     }
 
     private static void appendTerm(StableEncoder shape,

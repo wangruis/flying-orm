@@ -70,7 +70,8 @@ final class SchemaMigrationReviewer {
         SchemaMigrationReviewPolicy safePolicy = Objects.requireNonNull(policy,
                                                                         "migration review policy must not be null");
         SchemaRollbackPlan baseRollback = safeMigration.tableExists()
-                ? rollbackExisting(safeCurrent, safeMigration, safePolicy.columnRenames(), physical)
+                ? rollbackExisting(safeCurrent, safeMigration, safePolicy.columnRenames(), physical,
+                        snapshot != null && snapshot.physicalColumnTypes())
                 : rollbackCreated(safeMigration);
         List<SqlRequest> rollbackRequests = new ArrayList<>();
         List<String> additionalTables = new ArrayList<>(safeMigration.additionalCreatedTables());
@@ -126,11 +127,15 @@ final class SchemaMigrationReviewer {
     private SchemaRollbackPlan rollbackExisting(TableMetadata current,
                                                 SchemaMigrationPlan migration,
                                                 Map<String, String> renames,
-                                                RelationalTableDefinition physical) {
+                                                RelationalTableDefinition physical,
+                                                boolean physicalTypes) {
         List<SqlRequest> rollback = new ArrayList<>();
         List<SqlRequest> indexRestores = new ArrayList<>();
         List<SchemaRollbackGap> gaps = new ArrayList<>();
         String table = migration.target().table();
+        boolean primaryKeyChangeSkipped = migration.skippedChanges().stream()
+                                                   .anyMatch(change -> change.kind()
+                                                           == SkippedSchemaChange.Kind.CHANGE_PRIMARY_KEY);
 
         // 正向最后做索引。回滚先删除正向新增或重建的索引，原索引要等列结构和列名恢复后再创建。
         rollbackIndexes(current, migration, table, renames, rollback, indexRestores, gaps);
@@ -149,8 +154,9 @@ final class SchemaMigrationReviewer {
             DynamicField target = targetsByCurrentName.get(source.name());
             ColumnDefinition physicalColumn = physical == null ? null : physical.column(source.name());
             if (target == null) {
-                if (!skipped(migration, SkippedSchemaChange.Kind.DROP_COLUMN, source.name())) {
-                    rollback.add(renderer.rollbackAddColumn(table, source));
+                if (!(primaryKeyChangeSkipped && source.primaryKey())
+                        && !skipped(migration, SkippedSchemaChange.Kind.DROP_COLUMN, source.name())) {
+                    rollback.addAll(rollbackRenderer.rollbackAddColumn(table, source, physicalColumn, physicalTypes));
                     gaps.add(new SchemaRollbackGap(SchemaRollbackGap.Kind.DATA_CANNOT_BE_RESTORED,
                                                    source.name(),
                                                    "the column structure can be recreated, but dropped row values need a backup"));
@@ -197,9 +203,6 @@ final class SchemaMigrationReviewer {
         }
 
         // 只调整复合主键顺序时，各列的 primaryKey 标志没有变化，也必须保留审批和人工处理边界。
-        boolean primaryKeyChangeSkipped = migration.skippedChanges().stream()
-                                                   .anyMatch(change -> change.kind()
-                                                           == SkippedSchemaChange.Kind.CHANGE_PRIMARY_KEY);
         boolean primaryKeyGapPresent = gaps.stream().anyMatch(gap -> gap.kind()
                 == SchemaRollbackGap.Kind.PRIMARY_KEY_REQUIRES_REVIEW);
         if (primaryKeyChangeSkipped && !primaryKeyGapPresent) {
@@ -215,9 +218,7 @@ final class SchemaMigrationReviewer {
         for (DynamicField target : reversedTarget) {
             String sourceName = renameSource(renames, target.name());
             boolean existing = current.findColumn(sourceName == null ? target.name() : sourceName).isPresent();
-            boolean primaryKeySkipped = target.primaryKey()
-                    && migration.skippedChanges().stream()
-                                .anyMatch(change -> change.kind() == SkippedSchemaChange.Kind.CHANGE_PRIMARY_KEY);
+            boolean primaryKeySkipped = target.primaryKey() && primaryKeyChangeSkipped;
             if (existing) {
                 retainedFields.add(target);
             } else if (!primaryKeySkipped) {
