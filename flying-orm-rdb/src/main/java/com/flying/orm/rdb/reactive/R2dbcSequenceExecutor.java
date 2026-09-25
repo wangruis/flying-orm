@@ -106,15 +106,15 @@ final class R2dbcSequenceExecutor {
     private Mono<Void> finishSequence(SequenceResource resource, List<SqlRequest> cleanup,
                                       List<List<Object>> cleanupParameters, SqlExecutionOptions options,
                                       Throwable primary) {
-        reactor.core.publisher.SignalType terminal = primary instanceof CancellationException
-                ? reactor.core.publisher.SignalType.CANCEL
-                : primary == null ? reactor.core.publisher.SignalType.ON_COMPLETE
-                : reactor.core.publisher.SignalType.ON_ERROR;
         return executeSequenceCleanup(resource, cleanup, cleanupParameters, options)
                 .materialize().flatMap(signal -> {
                     Throwable cleanupError = signal.getThrowable();
                     Throwable error = cleanupError == null ? primary
                             : R2dbcExecutionSession.merge(primary, cleanupError);
+                    reactor.core.publisher.SignalType terminal = primary instanceof CancellationException
+                            ? reactor.core.publisher.SignalType.CANCEL
+                            : error == null ? reactor.core.publisher.SignalType.ON_COMPLETE
+                            : reactor.core.publisher.SignalType.ON_ERROR;
                     return executionSession.release(resource.resources, SqlExecutionOperation.UPDATE,
                             terminal, error).then(error != null && error != primary
                                     ? Mono.<Void>error(error).hide() : Mono.empty());

@@ -235,7 +235,7 @@ final class FormMetadataRowConverter {
             DatabaseType databaseType = DatabaseType.of(largeObjectLength != null
                     && largeObjectLength > Integer.MAX_VALUE
                     ? mappedType + "(" + largeObjectLength + ")" : mappedType);
-            ValueGeneration generation = generation(row);
+            ValueGeneration generation = generation(row, true);
             ColumnDefinition.Builder column = ColumnDefinition.builder(text(row, "COLUMN_NAME"), databaseType)
                     .length(largeObjectLength != null && largeObjectLength <= Integer.MAX_VALUE
                             ? largeObjectLength.intValue() : null)
@@ -252,6 +252,11 @@ final class FormMetadataRowConverter {
             // 通用类型映射可折叠 CHAR/BYTEA；目录表达式仍必须按原生底层类型解释，域类型亦然。
             DatabaseType expressionType = dialect == InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL
                     ? DatabaseType.of(semanticSource) : semanticDatabaseType;
+            if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL
+                    && databaseType.isTemporal()) {
+                // MySQL 字典中的时间字面量没有偏移；保留物理本地时间，不猜测会话时区。
+                expressionType = databaseType;
+            }
             if (expressionType.logicalType() == com.flying.orm.core.type.LogicalType.OTHER) {
                 expressionType = semanticDatabaseType;
             }
@@ -355,7 +360,7 @@ final class FormMetadataRowConverter {
         }
     }
 
-    private static ValueGeneration generation(Map<String, Object> row) {
+    private static ValueGeneration generation(Map<String, Object> row, boolean requireSequenceFacts) {
         if (bool(row, "IS_IDENTITY")) {
             return ValueGeneration.identity(
                     generationLong(row, "GENERATION_START", 1L),
@@ -367,16 +372,18 @@ final class FormMetadataRowConverter {
         if (sequence == null) {
             return ValueGeneration.none();
         }
-        String declaredSequenceText = optionalText(row, "GENERATION_SEQUENCE_NAME");
-        String declaredSequence = declaredSequenceText == null ? null : sequenceIdentifier(
-                declaredSequenceText, optionalText(row, "RESOLUTION_SCHEMA"));
-        if (declaredSequence != null && !declaredSequence.equals(sequence)) {
-            throw new IllegalStateException(
-                    "sequence generation metadata does not match the column default");
+        if (requireSequenceFacts) {
+            String declaredSequenceText = optionalText(row, "GENERATION_SEQUENCE_NAME");
+            String declaredSequence = declaredSequenceText == null ? null : sequenceIdentifier(
+                    declaredSequenceText, optionalText(row, "RESOLUTION_SCHEMA"));
+            if (declaredSequence != null && !declaredSequence.equals(sequence)) {
+                throw new IllegalStateException(
+                        "sequence generation metadata does not match the column default");
+            }
+            requireSequenceOption(row, "GENERATION_START");
+            requireSequenceOption(row, "GENERATION_INCREMENT");
+            requireSequenceOption(row, "GENERATION_CACHE");
         }
-        requireSequenceOption(row, "GENERATION_START");
-        requireSequenceOption(row, "GENERATION_INCREMENT");
-        requireSequenceOption(row, "GENERATION_CACHE");
         return ValueGeneration.sequence(
                 sequence,
                 generationLong(row, "GENERATION_START", 1L),
@@ -778,20 +785,12 @@ final class FormMetadataRowConverter {
                 ? DynamicField.primaryKey(name, dataType)
                 : DynamicField.of(name, dataType).withNullable(nullable(row));
         field = applyTypeArguments(field, row);
-        field = applyGeneration(field, row);
+        ValueGeneration generation = generation(row, false);
+        if (generation.generated()) {
+            field = field.withGeneration(generation);
+        }
         String comment = optionalText(row, "REMARKS");
         return comment == null ? field : field.withComment(comment);
-    }
-
-    private static DynamicField applyGeneration(DynamicField field, Map<String, Object> row) {
-        if (bool(row, "IS_IDENTITY")) {
-            return field.withGeneration(ValueGeneration.identity());
-        }
-        String sequenceName = sequenceName(optionalText(row, "GENERATION_EXPRESSION"),
-                                           optionalText(row, "RESOLUTION_SCHEMA"));
-        return sequenceName == null
-                ? field
-                : field.withGeneration(ValueGeneration.sequence(sequenceName));
     }
 
     /** 只识别 flying-orm 会生成的三类 sequence 默认值；其他数据库表达式保持普通字段语义。 */

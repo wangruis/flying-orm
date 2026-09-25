@@ -8,6 +8,7 @@ import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.sql.render.SqlRenderer;
+import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.form.FormDataSqlRenderer;
@@ -20,10 +21,49 @@ import java.math.BigDecimal;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class AggregateFiveDialectSqlTest {
+
+    @Test
+    void postgresqlUuidExtremaUseStableOrderingAndKeepUuidHavingAndResults() {
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql());
+        DynamicForm form = DynamicForm.builder("events", "events")
+                .addField(DynamicField.of("id", "UUID")).build();
+        AggregateExpression<UUID> minimum = AggregateExpression.min("id", "first", LogicalType.UUID, UUID.class);
+        AggregateExpression<UUID> maximum = AggregateExpression.max("id", "last", LogicalType.UUID, UUID.class);
+        UUID boundary = UUID.fromString("80000000-0000-0000-0000-000000000001");
+        AggregateSpec spec = AggregateSpec.builder(QuerySpec.of(form, ConditionGroup.and().build()))
+                .aggregate(minimum).aggregate(maximum)
+                .having(AggregateHaving.of(ConditionGroup.and().where("last", ">", boundary).build())).build();
+        FormAggregatePlanner.Plan plan = new FormAggregatePlanner(renderer,
+                StructuredConditionResolver.defaults(renderer.valueCodecs()), DataScope.none(),
+                SqlExecutionOptions.safeDefaults(), FieldUsePolicy.unrestricted(), QueryShapeLimits.defaults())
+                .plan(spec);
+
+        assertEquals("select cast(min(cast(\"id\" as text) collate \"C\") as uuid) as \"first\", "
+                + "cast(max(cast(\"id\" as text) collate \"C\") as uuid) as \"last\" from \"events\" "
+                + "having cast(max(cast(\"id\" as text) collate \"C\") as uuid) > ?", plan.request().sql());
+        assertEquals(List.of(boundary), plan.request().parameters());
+        UUID first = UUID.fromString("00000000-0000-0000-0000-000000000001");
+        UUID last = UUID.fromString("ffffffff-ffff-ffff-ffff-ffffffffffff");
+        Map<String, Object> columns = new LinkedHashMap<>();
+        columns.put("first", first);
+        columns.put("last", last);
+        AggregateRow row = new AggregateResultDecoder(plan).decode(DynamicRow.copyOf(columns));
+        assertEquals(first, row.get(minimum));
+        assertEquals(last, row.get(maximum));
+        Map<String, Object> nulls = new LinkedHashMap<>();
+        nulls.put("first", null);
+        nulls.put("last", null);
+        AggregateRow empty = new AggregateResultDecoder(plan).decode(DynamicRow.copyOf(nulls));
+        assertNull(empty.get(minimum));
+        assertNull(empty.get(maximum));
+    }
 
     @Test
     void rendersTheSameTypedShapeWithDialectIdentifiers() {

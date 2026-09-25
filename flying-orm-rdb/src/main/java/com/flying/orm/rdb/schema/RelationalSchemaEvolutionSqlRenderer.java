@@ -78,15 +78,7 @@ final class RelationalSchemaEvolutionSqlRenderer {
                 ColumnDefinition column = (ColumnDefinition) operation.actual();
                 requireObjectName(operation, column.name());
                 if (dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.SQL_SERVER) {
-                    if (column.defaultConstraintName() != null) {
-                        // 同一条 ALTER 删除已回读的默认约束和所属列，不在执行中临时查询或猜名称。
-                        yield request(dialect.dropConstraintSql(operation.relation(), column.defaultConstraintName())
-                                + ", column " + dialect.identifier(column.name()));
-                    }
-                    if (column.defaultValue().kind() != ColumnDefault.Kind.NONE
-                            || column.generation().strategy() == ValueGeneration.Strategy.SEQUENCE) {
-                        throw RelationalSchemaSqlRenderer.unsupported(operation.kind());
-                    }
+                    yield request(sqlServerDropColumnSql(dialect, dialect.relationIdentifier(operation.relation()), column));
                 }
                 yield request(dialect.dropColumnSql(operation.relation(), column.name()));
             }
@@ -101,6 +93,20 @@ final class RelationalSchemaEvolutionSqlRenderer {
             }
             default -> throw new IllegalArgumentException("operation does not drop a schema object");
         };
+    }
+
+    /** 同一条 ALTER 删除已知默认约束和所属列；旧迁移入口与规范关系入口共用此规则。 */
+    static String sqlServerDropColumnSql(SchemaDialect dialect, String renderedTable, ColumnDefinition column) {
+        String prefix = "alter table " + renderedTable + " drop ";
+        if (column.defaultConstraintName() != null) {
+            return prefix + "constraint " + dialect.identifier(column.defaultConstraintName())
+                    + ", column " + dialect.identifier(column.name());
+        }
+        if (column.defaultValue().kind() != ColumnDefault.Kind.NONE
+                || column.generation().strategy() == ValueGeneration.Strategy.SEQUENCE) {
+            throw RelationalSchemaSqlRenderer.unsupported(SchemaOperation.Kind.DROP_COLUMN);
+        }
+        return prefix + "column " + dialect.identifier(column.name());
     }
 
     List<SqlRequest> changeConstraint(SchemaOperation operation,

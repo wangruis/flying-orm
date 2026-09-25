@@ -311,10 +311,15 @@ public final class RelationalSchemaSqlRenderer {
                         "oracle cannot render a current-time default for text-backed TIME storage");
                 default -> "current_time";
             };
-            case CURRENT_TIMESTAMP -> "current_timestamp"
-                    + (dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.MYSQL
-                    && column.temporalPrecision() != null && column.temporalPrecision() > 0
-                    ? "(" + column.temporalPrecision() + ')' : "");
+            case CURRENT_TIMESTAMP -> {
+                if (dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.MYSQL) {
+                    List<String> arguments = DatabaseType.of(dataType(column)).arguments();
+                    if (!arguments.isEmpty() && !"0".equals(arguments.getFirst())) {
+                        yield "current_timestamp(" + arguments.getFirst() + ')';
+                    }
+                }
+                yield "current_timestamp";
+            }
         };
     }
     private String primaryKey(PrimaryKeyDefinition primaryKey) {

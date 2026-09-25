@@ -42,11 +42,6 @@ final class SchemaRollbackSqlRenderer {
         return List.copyOf(requests);
     }
 
-    SqlRequest rollbackDropColumn(String table, String column) {
-        return new SqlRequest("alter table " + tables.identifier(table)
-                                      + " drop column " + tables.identifier(column), List.of());
-    }
-
     SqlRequest rollbackColumnType(String table, String currentColumn, ColumnMetadata column) {
         return rollbackColumnType(table, currentColumn, column, null);
     }

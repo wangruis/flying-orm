@@ -50,6 +50,7 @@ public final class FormAggregatePlanner {
     private final FieldUsePolicy fieldUsePolicy;
     private final QueryShapeLimits shapeLimits;
     private final boolean sqlServerDialect;
+    private final boolean postgresqlDialect;
 
     public FormAggregatePlanner(FormDataSqlRenderer renderer,
                                 StructuredConditionResolver resolver,
@@ -65,6 +66,7 @@ public final class FormAggregatePlanner {
         this.shapeLimits = Objects.requireNonNull(
                 shapeLimits, "aggregate query shape limits must not be null");
         this.sqlServerDialect = reads.sqlServerDialect();
+        this.postgresqlDialect = reads.postgresqlDialect();
     }
 
     /** 完成 SQL 前校验并返回可由同步/响应式执行器直接消费的不可变计划。 */
@@ -134,7 +136,7 @@ public final class FormAggregatePlanner {
             AggregateTypeSupport.requireAggregateContract(aggregate, field, reads);
             String expression = renderFunction(
                     aggregate.function(), reads.identifier(field.name()),
-                    field.databaseType().logicalType(), sqlServerDialect);
+                    field.databaseType().logicalType());
             select.add(expression + " as " + reads.identifier(aggregate.alias()));
             aggregateFields.add(field);
             DynamicField result = resultField(aggregate, field);
@@ -149,7 +151,7 @@ public final class FormAggregatePlanner {
                 correlatedExpressions.put(FieldIdentity.of(aggregate.alias()).key(),
                         renderFunction(
                                 aggregate.function(), outerQualifier + "." + reads.identifier(field.name()),
-                                field.databaseType().logicalType(), sqlServerDialect));
+                                field.databaseType().logicalType()));
             }
             requirements.require(field.name(), FieldUse.AGGREGATE);
         }
@@ -323,10 +325,16 @@ public final class FormAggregatePlanner {
     }
 
     /** 渲染已经通过类型契约校验的聚合表达式。 */
-    private static String renderFunction(AggregateFunction function,
-                                         String field,
-                                         LogicalType sourceType,
-                                         boolean sqlServerDialect) {
+    private String renderFunction(AggregateFunction function,
+                                  String field,
+                                  LogicalType sourceType) {
+        if (postgresqlDialect && sourceType == LogicalType.UUID
+                && (function == AggregateFunction.MIN || function == AggregateFunction.MAX)) {
+            // PostgreSQL 无内置 UUID MIN/MAX；规范十六进制文本按 C 排序等价于 UUID 字节序。
+            // 转回 UUID，保持结果类型与 HAVING 参数比较一致；NULL 仍由聚合原生忽略。
+            String name = function == AggregateFunction.MIN ? "min" : "max";
+            return "cast(" + name + "(cast(" + field + " as text) collate \"C\") as uuid)";
+        }
         return switch (function) {
             case COUNT -> (sqlServerDialect ? "count_big" : "count") + "(" + field + ")";
             case COUNT_DISTINCT -> (sqlServerDialect ? "count_big" : "count") + "(distinct " + field + ")";

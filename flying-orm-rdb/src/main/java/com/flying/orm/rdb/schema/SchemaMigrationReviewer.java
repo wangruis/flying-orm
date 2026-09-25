@@ -222,7 +222,7 @@ final class SchemaMigrationReviewer {
             if (existing) {
                 retainedFields.add(target);
             } else if (!primaryKeySkipped) {
-                rollback.add(renderer.rollbackDropColumn(table, target.name()));
+                rollback.add(renderer.tableRenderer().dropAddedColumn(table, target));
                 addedFields.add(target);
             }
         }

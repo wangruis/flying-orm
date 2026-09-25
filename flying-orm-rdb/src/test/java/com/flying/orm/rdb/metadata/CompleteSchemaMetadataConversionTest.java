@@ -31,6 +31,29 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CompleteSchemaMetadataConversionTest {
 
     @Test
+    void mysqlTimestampLiteralsRetainDictionaryLocalTimeWithoutInventingAnOffset() {
+        InformationSchemaFormMetadataReader.Queries queries = MySqlMetadataQueries.queries();
+        java.time.LocalDateTime literal = java.time.LocalDateTime.parse("2026-09-24T10:15:30.123456");
+        SchemaSnapshot snapshot = FormMetadataRowConverter.toCompleteSchemaSnapshot(
+                RelationIdentity.table("events"),
+                List.of(row("COLUMN_NAME", "created_at", "DATA_TYPE", "timestamp",
+                        "PHYSICAL_DATA_TYPE", "timestamp(6)", "TEMPORAL_PRECISION", 6,
+                        "NULLABLE", true, "COLUMN_DEFAULT", "2026-09-24 10:15:30.123456")),
+                List.of(row("TABLE_COMMENT", null)), List.of(), List.of(), List.of(), List.of(),
+                List.of(row("CONSTRAINT_NAME", "ck_created_at", "CHECK_REPRESENTABLE", true,
+                        "CHECK_EXPRESSION", "(`created_at` >= '2026-09-24 10:15:30.123456')")),
+                queries.typeMapper(), queries.snapshotTypeMapper(),
+                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL);
+
+        RelationalTableDefinition table = snapshot.completeTable().orElseThrow();
+        assertEquals(ColumnDefault.literal(literal), table.columns().getFirst().defaultValue());
+        assertEquals(CheckPredicate.compare("created_at",
+                CheckPredicate.ComparisonOperator.GREATER_THAN_OR_EQUAL, literal),
+                table.checks().getFirst().predicate());
+        assertEquals("TIMESTAMP(6)", table.columns().getFirst().databaseType().declaration());
+    }
+
+    @Test
     void doesNotTreatFixedWidthCheckOperandsAsVariableWidthText() {
         InformationSchemaFormMetadataReader.Queries queries = PostgreSqlMetadataQueries.queries();
         assertThrows(IllegalStateException.class, () -> FormMetadataRowConverter.toCompleteSchemaSnapshot(

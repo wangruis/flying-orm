@@ -24,6 +24,26 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class AggregateAliasUniquenessTest {
 
     @Test
+    void relationHavingKeepsPostgresqlUuidExtremumExpressionQualified() {
+        DynamicForm form = DynamicForm.builder("events", "events")
+                .addField(DynamicField.of("id", "UUID")).build();
+        SqlRenderer conditions = SqlRenderer.builder().addDefaultTerms()
+                .addTerm(com.flying.orm.core.sql.render.SqlTermHandler.relationExists(
+                        "member-of", "membership", "m", "owner_id", "group_id")).build();
+        AggregateSpec spec = AggregateSpec.builder(QuerySpec.of(form, ConditionGroup.and().build()))
+                .aggregate(AggregateExpression.max("id", "maximum",
+                        com.flying.orm.core.type.LogicalType.UUID, java.util.UUID.class))
+                .having(AggregateHaving.of(ConditionGroup.and(conditions.terms())
+                        .where("maximum", "member-of", 2L).build())).build();
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(conditions, RdbDialect.postgresql());
+        String sql = new FormAggregatePlanner(renderer, StructuredConditionResolver.defaults(), DataScope.none(),
+                SqlExecutionOptions.safeDefaults(), FieldUsePolicy.unrestricted(), QueryShapeLimits.defaults())
+                .plan(spec).request().sql();
+        assertTrue(sql.contains("\"m\".\"owner_id\" = "
+                + "cast(max(cast(\"events\".\"id\" as text) collate \"C\") as uuid)"), sql);
+    }
+
+    @Test
     void relationHavingQualifiesGroupAndAggregateSources() {
         DynamicForm form = DynamicForm.builder("orders", "orders")
                 .addField(DynamicField.primaryKey("id", "BIGINT")).build();

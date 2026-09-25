@@ -285,7 +285,9 @@ final class SchemaTypeComparison {
     static boolean safeWidening(String current, String target) {
         DatabaseType currentType = DatabaseType.of(current).requireSafe("current data type");
         DatabaseType targetType = DatabaseType.of(target).requireSafe("target data type");
-        if (currentType.logicalType() == LogicalType.INTERVAL
+        // 只有容量/精度参数才具有单调扩宽语义；向量维度、扩展类型参数不能按大小推断。
+        LogicalType meaning = currentType.logicalType();
+        if (!(meaning.numeric() || meaning.textual() || meaning.binary() || meaning.temporal())
                 || currentType.equals(targetType)
                 || !SchemaTypeMapping.characterLengthUnit(currentType).equals(
                         SchemaTypeMapping.characterLengthUnit(targetType))

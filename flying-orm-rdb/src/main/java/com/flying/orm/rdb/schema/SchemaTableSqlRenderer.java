@@ -2,6 +2,7 @@ package com.flying.orm.rdb.schema;
 
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.internal.hash.StableDigest;
 import com.flying.orm.core.metadata.ColumnMetadata;
 import com.flying.orm.core.metadata.ColumnDefinition;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
@@ -22,6 +23,9 @@ import java.util.stream.Collectors;
  * 以后增加字段类型或索引写法时，不会把迁移计划代码一起搅乱。</p>
  */
 final class SchemaTableSqlRenderer {
+
+    private static final StableDigest.Domain ADDED_DEFAULT_NAME_DOMAIN =
+            StableDigest.domain("legacy-added-column-default/v1");
 
     private final SchemaDialect dialect;
     private final SchemaSequenceSqlRenderer sequences;
@@ -95,6 +99,36 @@ final class SchemaTableSqlRenderer {
 
     String columnDefinition(DynamicField field) {
         return columnDefinition(field, true);
+    }
+
+    String addedColumnDefinition(String table, DynamicField field) {
+        return columnDefinition(field, true, addedDefaultConstraintName(table, field));
+    }
+
+    SqlRequest dropAddedColumn(String table, DynamicField field) {
+        String defaultName = addedDefaultConstraintName(table, field);
+        ColumnDefinition physical = defaultName == null ? null
+                : ColumnDefinition.builder(field.name(), field.databaseType())
+                        .generation(field.generation()).defaultConstraintName(defaultName).build();
+        return dropColumn(table, field.name(), physical);
+    }
+
+    SqlRequest dropColumn(String table, String column, ColumnDefinition physical) {
+        String sql = dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.SQL_SERVER
+                && physical != null
+                ? RelationalSchemaEvolutionSqlRenderer.sqlServerDropColumnSql(dialect, identifier(table), physical)
+                : "alter table " + identifier(table) + " drop column " + identifier(column);
+        return new SqlRequest(sql, List.of());
+    }
+
+    private String addedDefaultConstraintName(String table, DynamicField field) {
+        if (dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.SQL_SERVER
+                || field.generation().strategy() != ValueGeneration.Strategy.SEQUENCE) {
+            return null;
+        }
+        // 仅新加列使用可重复生成的名称；已有列始终使用数据库实际回读的名称。
+        return "df_" + StableDigest.sha256(ADDED_DEFAULT_NAME_DOMAIN)
+                .text("TABLE", table).text("COLUMN", field.name()).finishHex();
     }
 
     static RelationalTableDefinition physicalColumns(SchemaSnapshot snapshot) {
@@ -186,9 +220,16 @@ final class SchemaTableSqlRenderer {
     }
 
     private String columnDefinition(DynamicField field, boolean inlinePrimaryKey) {
+        return columnDefinition(field, inlinePrimaryKey, null);
+    }
+
+    private String columnDefinition(DynamicField field, boolean inlinePrimaryKey, String defaultConstraintName) {
         DynamicField safeField = Objects.requireNonNull(field, "dynamic field must not be null");
         String type = dataType(safeField);
         String sql = identifier(safeField.name()) + " " + type;
+        if (defaultConstraintName != null) {
+            sql += " constraint " + identifier(defaultConstraintName);
+        }
         sql += dialect.generatedValueClause(safeField.generation(), type);
         if (safeField.primaryKey() && inlinePrimaryKey) {
             if (dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.SQL_SERVER) {

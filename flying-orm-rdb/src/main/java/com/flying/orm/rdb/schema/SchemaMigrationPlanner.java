@@ -197,11 +197,10 @@ final class SchemaMigrationPlanner {
             throw new IllegalArgumentException("protected fields require a reviewed schema migration plan");
         }
         String rawTable = changes.target().table();
-        String table = tables.identifier(rawTable);
         List<SqlRequest> requests = new ArrayList<>();
         tables.addSequenceCreates(requests, changes.addedFields(), changes.source().fields(), true);
         for (DynamicField field : changes.addedFields()) {
-            requests.add(new SqlRequest(dialect.addColumnSql(rawTable, tables.columnDefinition(field)), List.of()));
+            requests.add(new SqlRequest(dialect.addColumnSql(rawTable, tables.addedColumnDefinition(rawTable, field)), List.of()));
             tables.addColumnComment(requests, changes.target().table(), field);
         }
         addUniqueIndexesForAddedFields(requests, changes);
@@ -234,8 +233,8 @@ final class SchemaMigrationPlanner {
             }
         }
         for (DynamicField field : changes.removedFields()) {
-            requests.add(new SqlRequest("alter table " + table + " drop column " + tables.identifier(field.name()),
-                                        List.of()));
+            requests.add(tables.dropColumn(rawTable, field.name(),
+                    physical == null ? null : physical.column(field.name())));
         }
         return List.copyOf(requests);
     }
@@ -317,6 +316,15 @@ final class SchemaMigrationPlanner {
 
     private boolean needsPhysicalSnapshot(TableMetadata current, DynamicForm target,
                                            SchemaMigrationOptions options) {
+        if (dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.SQL_SERVER
+                && options.dropColumnAllowed()
+                && current.columns().stream().anyMatch(column -> !column.primaryKey()
+                        && target.findField(column.name()).isEmpty()
+                        && SchemaMigrationSupport.renameTargetForSource(
+                                options.columnRenames(), column.name()) == null)) {
+            // SQL Server 删除列前还需删除绑定的 DEFAULT；该名称必须在规划时从字典冻结。
+            return true;
+        }
         if (!dialect.rewritesFullColumnDefinition()
                 && dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.SQL_SERVER
                 && dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.ORACLE) {
@@ -387,7 +395,7 @@ final class SchemaMigrationPlanner {
         if (!options.dropColumnAllowed()) {
             return false;
         }
-        // 只有审核需要生成删列回退；普通 plan 不为尚未执行的回退读取字典。
+        // 除 SQL Server 正向删除 DEFAULT 的需要外，只有审核为删列回退读取字典。
         return current.columns().stream().anyMatch(column -> !column.primaryKey()
                 && target.findField(column.name()).isEmpty()
                 && SchemaMigrationSupport.renameTargetForSource(options.columnRenames(), column.name()) == null);
@@ -410,7 +418,6 @@ final class SchemaMigrationPlanner {
         SchemaMigrationOptions safeOptions = Objects.requireNonNull(options,
                                                                      "schema migration options must not be null");
         String rawTable = safeTarget.table();
-        String table = tables.identifier(rawTable);
         List<SqlRequest> requests = new ArrayList<>();
         List<SkippedSchemaChange> skipped = new ArrayList<>();
 
@@ -483,7 +490,7 @@ final class SchemaMigrationPlanner {
                             physical == null ? null : physical.column(lookupName));
                 }
             } else if (!primaryKeyChanged || !field.primaryKey()) {
-                requests.add(new SqlRequest(dialect.addColumnSql(rawTable, tables.columnDefinition(field)), List.of()));
+                requests.add(new SqlRequest(dialect.addColumnSql(rawTable, tables.addedColumnDefinition(rawTable, field)), List.of()));
                 tables.addColumnComment(requests, safeTarget.table(), field);
             }
         }
@@ -497,10 +504,11 @@ final class SchemaMigrationPlanner {
                           skipped,
                           safeCurrent,
                           matchedCurrentColumnNames,
-                          table,
+                          rawTable,
                           safeOptions,
                           primaryKeyChanged,
-                          dependencyDrops.blockedColumns());
+                          dependencyDrops.blockedColumns(),
+                          physical);
         indexChanges.addChanges(requests, skipped, safeCurrent, safeTarget, safeIndexes, safeOptions,
                                 dependencyDrops.droppedIndexes());
         SchemaForeignKeyPlanner.addChanges(skipped, safeCurrent, safeForeignKeys, safeOptions.columnRenames());
@@ -529,7 +537,8 @@ final class SchemaMigrationPlanner {
                                    String table,
                                    SchemaMigrationOptions options,
                                    boolean primaryKeyChanged,
-                                   Set<String> blockedColumns) {
+                                   Set<String> blockedColumns,
+                                   RelationalTableDefinition physical) {
         for (ColumnMetadata column : current.columns()) {
             if (!matchedCurrentColumnNames.contains(column.name())
                     && SchemaMigrationSupport.renameTargetForSource(options.columnRenames(), column.name()) == null) {
@@ -542,8 +551,8 @@ final class SchemaMigrationPlanner {
                             column.name(),
                             "dependent index removal or rebuild is not approved"));
                 } else if (options.dropColumnAllowed()) {
-                    requests.add(new SqlRequest("alter table " + table + " drop column " + tables.identifier(column.name()),
-                                                List.of()));
+                    requests.add(tables.dropColumn(table, column.name(),
+                            physical == null ? null : physical.column(column.name())));
                 } else {
                     skipped.add(new SkippedSchemaChange(SkippedSchemaChange.Kind.DROP_COLUMN,
                                                         column.name(),

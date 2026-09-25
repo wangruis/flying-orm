@@ -106,6 +106,10 @@ public final class FormDataSqlRenderer {
         return "sqlserver".equals(support.dialectName);
     }
 
+    boolean postgresqlDialect() {
+        return "postgresql".equals(support.dialectName);
+    }
+
     /** 聚合内部桥接复用普通查询已经确立的稳定时间排序约束。 */
     void requireStableOffsetTimeOrdering(DynamicField field) {
         support.requireStableOffsetTimeOrdering(field);

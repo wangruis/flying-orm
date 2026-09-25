@@ -23,6 +23,7 @@ import org.reactivestreams.Publisher;
 import reactor.core.Disposable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.SignalType;
 import reactor.core.publisher.Sinks;
 
 import java.lang.reflect.InvocationHandler;
@@ -98,6 +99,7 @@ class R2dbcSequenceCleanupOwnershipTest {
             assertEquals(subscription, fixture.cleanupExecutions.get());
             assertEquals(subscription, fixture.connectionAcquisitions.get());
             assertEquals(subscription, fixture.connectionCloses.get());
+            assertEquals(SignalType.ON_COMPLETE, fixture.releaseSignals.getLast());
         }
     }
 
@@ -116,6 +118,7 @@ class R2dbcSequenceCleanupOwnershipTest {
         assertTrue(failure.completedWorkSteps().isEmpty());
         assertEquals(1, fixture.connectionAcquisitions.get());
         assertEquals(1, fixture.connectionCloses.get());
+        assertEquals(List.of(SignalType.ON_ERROR), fixture.releaseSignals);
     }
 
     @Test
@@ -133,6 +136,7 @@ class R2dbcSequenceCleanupOwnershipTest {
 
         assertAll(
                 () -> assertEquals(SqlExecutionPhase.WORK, failure.phase()),
+                () -> assertEquals(List.of(SignalType.ON_ERROR), fixture.releaseSignals),
                 () -> assertArrayEquals(new byte[]{1, 2}, fixture.cleanupBytes()),
                 fixture::assertCleanupOnceAndOwnedConnectionClosed);
     }
@@ -158,6 +162,7 @@ class R2dbcSequenceCleanupOwnershipTest {
         }
 
         assertAll(
+                () -> assertEquals(List.of(SignalType.CANCEL), fixture.releaseSignals),
                 () -> assertArrayEquals(new byte[]{3, 4}, fixture.cleanupBytes()),
                 fixture::assertCleanupOnceAndOwnedConnectionClosed);
     }
@@ -195,6 +200,7 @@ class R2dbcSequenceCleanupOwnershipTest {
         assertEquals(SqlExecutionPhase.CLEANUP, failure.phase());
         assertEquals(1, failure.stepIndex());
         assertEquals(1, failure.completedWorkSteps().size());
+        assertEquals(List.of(SignalType.ON_ERROR), fixture.releaseSignals);
         fixture.assertCleanupOnceAndOwnedConnectionClosed();
     }
 
@@ -310,7 +316,16 @@ class R2dbcSequenceCleanupOwnershipTest {
 
         private RuntimeException driverFailure;
 
-        private final R2dbcSqlExecutor executor = R2dbcSqlExecutor.create(com.flying.orm.rdb.execution.ConnectionAccessTestSupport.reactive(factory()), RdbDialect.h2());
+        private final List<SignalType> releaseSignals = new ArrayList<>();
+
+        private final R2dbcConnectionAccess access =
+                com.flying.orm.rdb.execution.ConnectionAccessTestSupport.reactive(factory());
+
+        private final R2dbcSqlExecutor executor = R2dbcSqlExecutor.create(
+                R2dbcConnectionAccess.of(access::getConnection, (signal, connection, request) -> {
+                    releaseSignals.add(signal);
+                    return access.releaseConnection(signal, connection, request);
+                }), RdbDialect.h2());
 
         private ConnectionFactory factory() {
             Connection connection = proxy(Connection.class, (proxy, method, arguments) -> switch (method.getName()) {

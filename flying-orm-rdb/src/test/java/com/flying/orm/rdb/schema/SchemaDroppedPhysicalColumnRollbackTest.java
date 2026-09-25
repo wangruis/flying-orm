@@ -41,19 +41,23 @@ class SchemaDroppedPhysicalColumnRollbackTest {
                             .tablePresent().physicalColumns(List.of(
                                     ColumnDefinition.builder("id", "INTEGER").build(),
                                     ColumnDefinition.builder("code", "INTEGER")
-                                            .defaultValue(ColumnDefault.literal(7)).build())).build();
+                                            .defaultValue(ColumnDefault.literal(7))
+                                            .defaultConstraintName("sqlserver".equals(dialect.name())
+                                                    ? "df_items_code" : null).build())).build();
                     AtomicInteger reads = new AtomicInteger();
                     ReactiveFormMetadataReader reader = reader(source, snapshot, reads);
                     SchemaMigrationOptions options = SchemaMigrationOptions.safe().allowDropColumn();
 
                     planner.plan(target, List.of(), List.of(), reader, options).block();
-                    assertEquals(0, reads.get(), "plain forward plans need no rollback snapshot");
+                    int forwardReads = "sqlserver".equals(dialect.name()) ? 1 : 0;
+                    assertEquals(forwardReads, reads.get(),
+                            "SQL Server forward drops must observe their default constraint names");
                     ReviewedSchemaMigrationPlan reviewed = planner.review(target, List.of(), List.of(), reader,
                             options, SchemaMigrationReviewPolicy.allowBlocking()).block();
                     assertTrue(reviewed.rollback().requests().stream().map(SqlRequest::sql)
                             .map(sql -> sql.toLowerCase(Locale.ROOT)).anyMatch(sql -> sql.contains("default 7")),
                             reviewed.rollback().requests().toString());
-                    assertEquals(1, reads.get());
+                    assertEquals(forwardReads + 1, reads.get());
                     assertThrows(IllegalStateException.class, () -> planner.review(target, List.of(), List.of(),
                             reader(source, null, reads), options, SchemaMigrationReviewPolicy.allowBlocking()).block());
                 }));

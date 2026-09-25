@@ -92,6 +92,11 @@ public final class FormAggregateReadSupport {
         return renderer.sqlServerDialect();
     }
 
+    /** PostgreSQL UUID 聚合适配同样只读取装配时的方言事实。 */
+    public boolean postgresqlDialect() {
+        return renderer.postgresqlDialect();
+    }
+
     /** MIN/MAX 与结果别名排序复用普通查询的稳定 OFFSET_TIME 排序约束。 */
     @InternalApi
     public void requireStableOffsetTimeOrdering(DynamicField field) {

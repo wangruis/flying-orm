@@ -34,7 +34,8 @@ class R2dbcFatalRecoveryTest {
                                     new SqlExecutionSequence(List.of(), List.of(work), List.of(cleanup)),
                                     SqlExecutionOptions.safeDefaults()));
                             assertEquals(2, h.executions);
-                            assertEquals(List.of(workFails ? SignalType.ON_ERROR : SignalType.ON_COMPLETE), h.releases);
+                            assertEquals(List.of(workFails || !releaseFails
+                                    ? SignalType.ON_ERROR : SignalType.ON_COMPLETE), h.releases);
                             assertSame(fatal, actual);
                         }))));
     }

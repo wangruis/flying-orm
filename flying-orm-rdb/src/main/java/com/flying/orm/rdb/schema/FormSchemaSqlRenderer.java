@@ -175,10 +175,6 @@ public final class FormSchemaSqlRenderer {
         return tables.dropSequences(fields, retainedFields);
     }
 
-    SqlRequest rollbackDropColumn(String table, String column) {
-        return rollback.rollbackDropColumn(table, column);
-    }
-
     SqlRequest rollbackColumnType(String table,
                                   String currentColumn,
                                   com.flying.orm.core.metadata.ColumnMetadata column) {
