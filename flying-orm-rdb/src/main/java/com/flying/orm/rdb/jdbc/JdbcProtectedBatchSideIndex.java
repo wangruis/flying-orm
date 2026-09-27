@@ -32,8 +32,7 @@ final class JdbcProtectedBatchSideIndex {
 
     Prepared prepare(Connection connection,
                      BatchWriteRequest request,
-                     List<ProtectedBatchRows.RowView> rows,
-                     JdbcBatchEvidenceSupport.Counts evidence)
+                     List<ProtectedBatchRows.RowView> rows)
             throws SQLException {
         if (rows.stream().noneMatch(row -> row.work() != null)) {
             return new Prepared(List.of(), request.options().maxBufferedBytes());
@@ -45,7 +44,7 @@ final class JdbcProtectedBatchSideIndex {
         SqlExecutionOptions options = ownerReadOptions(request);
         for (ProtectedOwnerBatchPlan plan : ProtectedOwnerBatchPlan.plans(
                 rows, request.options().maxBufferedBytes())) {
-            readOwners(connection, plan, states, options, evidence);
+            readOwners(connection, plan, states, options);
         }
         return new Prepared(states, request.options().maxBufferedBytes());
     }
@@ -133,15 +132,11 @@ final class JdbcProtectedBatchSideIndex {
     private static void readOwners(Connection connection,
                                    ProtectedOwnerBatchPlan plan,
                                    List<RowState> states,
-                                   SqlExecutionOptions options,
-                                   JdbcBatchEvidenceSupport.Counts evidence) throws SQLException {
+                                   SqlExecutionOptions options) throws SQLException {
         boolean[] matched = new boolean[plan.size()];
         try (PreparedStatement statement = connection.prepareStatement(plan.sql())) {
             JdbcStatementBinder.bind(statement, plan.parameters());
             JdbcStatementControl.requireNotInterrupted(statement);
-            if (evidence != null) {
-                evidence.markDatabaseWorkAttempted();
-            }
             try (ResultSet resultSet = statement.executeQuery()) {
                 JdbcDynamicRowFactory rowFactory = JdbcDynamicRowFactory.from(resultSet, options);
                 while (true) {

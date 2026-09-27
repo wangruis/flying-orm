@@ -44,7 +44,7 @@ final class JdbcBatchChunkExecutor {
             throw new IllegalArgumentException("jdbc batch chunk must not be empty");
         }
         JdbcProtectedBatchSideIndex.Prepared protectedRows = protectedSideIndex.prepare(
-                safeConnection, safeRequest, safeRows, evidence);
+                safeConnection, safeRequest, safeRows);
         if (safeRequest.generatedKeys().required()) {
             executeReturningGeneratedKeys(safeConnection, safeRequest, startOffset,
                                                  safeRows, protectedRows, evidence);
@@ -63,7 +63,6 @@ final class JdbcBatchChunkExecutor {
                 statement.addBatch();
             }
             JdbcStatementControl.requireNotInterrupted(statement);
-            markDatabaseWorkAttempted(evidence);
             JdbcBatchEvidenceSupport.executeBusinessBatch(
                     statement, evidence, startOffset, safeRows.size());
             evidence.requireSuccessful();
@@ -111,7 +110,7 @@ final class JdbcBatchChunkExecutor {
             for (int index = 0; index < rows.size(); index++) {
                 JdbcStatementBinder.bindOwned(statement, rows.get(index));
                 JdbcStatementControl.requireNotInterrupted(statement);
-                markDatabaseWorkAttempted(evidence);
+                evidence.startBusinessExecution(1);
                 long count = executeUpdate(statement);
                 record(evidence, startOffset + index, count);
                 JdbcStatementControl.requireNotInterrupted(statement);
@@ -267,7 +266,6 @@ final class JdbcBatchChunkExecutor {
                 statement.addBatch();
             }
             JdbcStatementControl.requireNotInterrupted(statement);
-            markDatabaseWorkAttempted(evidence);
             int[] counts = JdbcBatchEvidenceSupport.executeBusinessBatch(
                     statement, evidence, startOffset + offset, limit - offset);
             if (counts == null || counts.length != limit - offset) {
@@ -315,12 +313,5 @@ final class JdbcBatchChunkExecutor {
             evidence.record(inputOffset, count);
         }
     }
-
-    private static void markDatabaseWorkAttempted(JdbcBatchEvidenceSupport.Counts evidence) {
-        if (evidence != null) {
-            evidence.markDatabaseWorkAttempted();
-        }
-    }
-
 
 }

@@ -66,7 +66,7 @@ class JdbcProtectedBatchSideIndexBatchingTest {
             rows.add(ProtectedBatchRows.decode(new Object[]{"plain", (long) index}, 2));
         }
         JdbcProtectedBatchSideIndex.Prepared prepared = new JdbcProtectedBatchSideIndex().prepare(
-                null, request(), rows, null);
+                null, request(), rows);
 
         assertEquals(List.of(), prepared.rows());
     }
@@ -80,7 +80,7 @@ class JdbcProtectedBatchSideIndexBatchingTest {
         }
 
         new JdbcProtectedBatchSideIndex().prepare(
-                recorder.connection(), request(), rows, null);
+                recorder.connection(), request(), rows);
 
         assertEquals(1, recorder.preparedStatements.get(),
                      "owner pre-read Statements must be bounded by the chunk, not multiplied by rows");

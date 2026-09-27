@@ -28,6 +28,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class R2dbcBatchChunkerTest {
 
     @Test
+    void defaultBatchCanStreamBeyondFormerTotalRowLimit() {
+        BatchWriteRequest request = request(
+                Flux.range(0, 100_001).map(value -> new Object[]{value}),
+                BatchWriteOptions.defaults());
+        assertEquals(201L, R2dbcBatchChunker.chunks(request).count().block());
+    }
+
+    @Test
     void snapshotsRowsAndKeepsGlobalOffsetsAcrossChunks() {
         Object[] first = {"one"};
         BatchWriteRequest request = com.flying.orm.rdb.batch.BatchWriteRequests.request(

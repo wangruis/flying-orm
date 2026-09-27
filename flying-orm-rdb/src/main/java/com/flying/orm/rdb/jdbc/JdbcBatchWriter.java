@@ -64,7 +64,7 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
         Connection connection = null;
         SqlRequest representative = null;
         Throwable failure = null;
-        boolean attempted = false;
+        boolean unconfirmedExecution = false;
         boolean completed = false;
         try {
             long offset = 0;
@@ -96,7 +96,7 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
                     } catch (Throwable error) {
                         executionFailure = error;
                     } finally {
-                        attempted |= counts.databaseWorkAttempted();
+                        unconfirmedExecution |= counts.hasUnconfirmedBusinessExecution();
                         counts.finish(evidence, successful);
                     }
                     if (executionFailure != null) {
@@ -133,7 +133,7 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
         JdbcBatchSupport.rethrowTryWithResourcesVirtualMachineError(failure);
         BatchExecutionEvidence before = evidence.snapshot(BatchExecutionState.UNKNOWN, null);
         BatchExecutionEvidence result = evidence.snapshot(
-                JdbcBatchEvidenceSupport.failureState(failure, before.successfulCount() > 0, attempted),
+                JdbcBatchEvidenceSupport.failureState(failure, before.successfulCount() > 0, unconfirmedExecution),
                 BatchExecutionEvidence.Failure.from(failure));
         observation.completed(result);
         if (failure instanceof EntityPostWriteException post) {

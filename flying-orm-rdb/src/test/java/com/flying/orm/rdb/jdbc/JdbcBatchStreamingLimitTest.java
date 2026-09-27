@@ -22,6 +22,23 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class JdbcBatchStreamingLimitTest {
 
     @Test
+    void defaultBatchCanStreamBeyondFormerTotalRowLimit() throws Exception {
+        BatchWriteRequest request = com.flying.orm.rdb.batch.BatchWriteRequests.request(
+                "insert into samples(value) values (?)", 1, List.of(Integer.class),
+                SqlBindMarkerStyle.CANONICAL,
+                Flux.range(0, 100_001).map(value -> new Object[]{value}),
+                BatchWriteOptions.defaults());
+        int count = 0;
+        try (JdbcBatchRows rows = rows(request)) {
+            List<ProtectedBatchRows.RowView> chunk;
+            while (!(chunk = JdbcBatchSupport.readBuffer(rows, request)).isEmpty()) {
+                count += chunk.size();
+            }
+        }
+        assertEquals(100_001, count);
+    }
+
+    @Test
     void rejectedRowsDoNotEnterEvidenceButAcceptedUnexecutedTailDoes() {
         for (int maximum : new int[]{1, 2, 3}) {
             JdbcBatchEvidenceTestSupport.State state = new JdbcBatchEvidenceTestSupport.State();

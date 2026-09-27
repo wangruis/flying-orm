@@ -23,7 +23,6 @@ final class R2dbcBatchEvidenceCounts {
     private boolean unitKnown = true;
     private long unitAffected;
     private int completed;
-    private boolean attempted;
     private boolean strictUnknown;
     private boolean businessInFlight;
     private boolean lastRowMatchesPolicy;
@@ -38,11 +37,9 @@ final class R2dbcBatchEvidenceCounts {
         this.trackReadyRows = trackReadyRows;
     }
 
-    synchronized void markDatabaseWorkAttempted() { attempted = true; }
-    synchronized boolean databaseWorkAttempted() { return attempted; }
+    synchronized boolean hasUnconfirmedBusinessExecution() { return businessInFlight; }
 
     synchronized void startBusinessExecution() {
-        attempted = true;
         businessInFlight = true;
     }
 

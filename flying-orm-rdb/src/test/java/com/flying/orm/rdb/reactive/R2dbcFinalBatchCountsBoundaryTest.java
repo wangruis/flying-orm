@@ -8,9 +8,9 @@ import org.junit.jupiter.api.Test;
 import static org.junit.jupiter.api.Assertions.*;
 
 class R2dbcFinalBatchCountsBoundaryTest {
-    @Test void ownerReadAttemptIsNotAnUnfinishedBusinessWrite() {
+    @Test void noBusinessExecutionHasNoUnknownWriteResult() {
         var counts = new R2dbcBatchEvidenceCounts(2, 0, BatchRowCountPolicy.EXACTLY_ONE, true);
-        counts.markDatabaseWorkAttempted();
+        assertFalse(counts.hasUnconfirmedBusinessExecution());
         var evidence = snapshot(counts, 2);
         assertTrue(evidence.affectedRows().isKnown());
         assertEquals(0, evidence.affectedRows().value());

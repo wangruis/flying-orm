@@ -136,6 +136,37 @@ class R2dbcExternalBatchExecutionEvidenceTest {
 
         assertEquals(0, executions.get());
         assertEquals(0, failure.evidence().successfulCount());
+        assertEquals(BatchExecutionState.FAILED, failure.evidence().state());
+    }
+
+    @Test
+    void connectionLossDuringExecutionDoesNotClaimDefiniteFailure() {
+        assertUncertainExecution(new io.r2dbc.spi.R2dbcNonTransientResourceException(
+                "connection lost after dispatch", "08006", 0));
+    }
+
+    @Test
+    void unclassifiedExecutionFailureDoesNotClaimDefiniteFailure() {
+        assertUncertainExecution(new IllegalStateException("execution result unavailable"));
+    }
+
+    private static void assertUncertainExecution(Throwable error) {
+        Connection connection = externalPerRowConnectionThatFailsFirst(error);
+        R2dbcSqlExecutor executor = R2dbcSqlExecutor.create(
+                com.flying.orm.rdb.execution.ConnectionAccessTestSupport.borrowed(connection), RdbDialect.h2());
+        BatchWriteRequest request = com.flying.orm.rdb.batch.BatchWriteRequests.request(
+                "insert into sample(value_col) values (?)", 1, List.of(Integer.class),
+                SqlBindMarkerStyle.CANONICAL, Flux.<Object[]>just(new Object[]{1}),
+                BatchWriteOptions.of(1), BatchRowCountPolicy.EXACTLY_ONE);
+
+        BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
+                () -> executor.writeBatchEvidence(request).block(Duration.ofSeconds(2)));
+
+        assertEquals(BatchExecutionState.UNKNOWN, failure.evidence().state());
+        assertEquals(1L, failure.evidence().inputCount());
+        assertEquals(0L, failure.evidence().successfulCount());
+        assertEquals(0L, failure.evidence().failedCount());
+        assertFalse(failure.evidence().affectedRows().isKnown());
     }
 
     private static BatchWriteRequest request() {

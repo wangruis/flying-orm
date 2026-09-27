@@ -6,6 +6,7 @@ import com.flying.orm.rdb.batch.BatchExecutionEvidenceException;
 import com.flying.orm.rdb.batch.BatchExecutionState;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
+import com.flying.orm.rdb.exception.RdbErrorKind;
 import com.flying.orm.rdb.lifecycle.EntityPostWriteException;
 import com.flying.orm.rdb.observation.BatchExecutionObservation;
 import com.flying.orm.rdb.observation.BatchExecutionObserver;
@@ -160,6 +161,7 @@ final class R2dbcBatchWriter {
     private static final class BatchState {
         private final BatchExecutionEvidence.Accumulator facts = new BatchExecutionEvidence.Accumulator();
         private R2dbcBatchEvidenceCounts active;
+        private boolean unconfirmedExecution;
 
         private void accept(long count) {
             facts.accept(count);
@@ -174,6 +176,7 @@ final class R2dbcBatchWriter {
                 return;
             }
             active = null;
+            unconfirmedExecution |= window.hasUnconfirmedBusinessExecution();
             window.appendTo(facts, windowComplete);
         }
 
@@ -186,12 +189,17 @@ final class R2dbcBatchWriter {
                 BatchExecutionState state,
                 BatchExecutionEvidence.Failure failure) {
             if (active != null) {
+                unconfirmedExecution |= active.hasUnconfirmedBusinessExecution();
                 active.appendTo(facts, false);
                 active = null;
             }
             BatchExecutionEvidence snapshot = facts.snapshot(state, failure);
             if (state == BatchExecutionState.FAILED && snapshot.successfulCount() > 0) {
                 return facts.snapshot(BatchExecutionState.PARTIAL, failure);
+            }
+            if (state == BatchExecutionState.FAILED && unconfirmedExecution && failure != null
+                    && (failure.kind() == RdbErrorKind.CONNECTION || failure.kind() == RdbErrorKind.UNKNOWN)) {
+                return facts.snapshot(BatchExecutionState.UNKNOWN, failure);
             }
             return snapshot;
         }

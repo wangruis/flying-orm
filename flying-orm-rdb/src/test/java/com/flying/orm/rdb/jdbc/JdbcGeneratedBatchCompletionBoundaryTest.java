@@ -4,6 +4,7 @@ import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.core.sql.render.SqlStatementPlan;
 import com.flying.orm.rdb.batch.BatchExecutionEvidenceException;
+import com.flying.orm.rdb.batch.BatchExecutionState;
 import com.flying.orm.rdb.batch.BatchGeneratedKeys;
 import com.flying.orm.rdb.batch.BatchRowCountPolicy;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
@@ -31,6 +32,31 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JdbcGeneratedBatchCompletionBoundaryTest {
+
+    @TestFactory
+    List<DynamicTest> knownConflictsDistinguishBindingFromUnconfirmedExecution() {
+        List<DynamicTest> tests = new ArrayList<>();
+        for (long count : new long[]{0, 2}) {
+            for (boolean bindingFails : new boolean[]{false, true}) {
+                tests.add(DynamicTest.dynamicTest("count=" + count + "/bindingFails=" + bindingFails, () -> {
+                    Fixture fixture = new Fixture(false, false);
+                    fixture.updateCount = count;
+                    fixture.strictCounts = true;
+                    if (bindingFails) fixture.bindingFailureAt = 1;
+                    else fixture.executionFailureAt = 1;
+                    BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
+                            () -> JdbcBatchWriter.create(fixture.access(), RdbDialect.h2())
+                                    .writeBatch(fixture.request()));
+                    assertEquals(bindingFails ? BatchExecutionState.FAILED : BatchExecutionState.UNKNOWN,
+                            failure.evidence().state());
+                    assertEquals(1, failure.evidence().failedCount());
+                    assertEquals(bindingFails, failure.evidence().affectedRows().isKnown());
+                    assertEquals(bindingFails ? 1 : 2, fixture.executedRows);
+                }));
+            }
+        }
+        return tests;
+    }
 
     @TestFactory
     List<DynamicTest> priorCompletedRowsDependOnStatementClosureNotSuppressedDiagnostics() {
@@ -87,6 +113,10 @@ class JdbcGeneratedBatchCompletionBoundaryTest {
         private int keyResultCloses;
         private int statementCloses;
         private int releases;
+        private int bindingFailureAt = -1;
+        private int executionFailureAt = -1;
+        private long updateCount = 1;
+        private boolean strictCounts;
 
         private Fixture(boolean keyReadFails, boolean statementCloseFails) {
             this.keyReadFails = keyReadFails;
@@ -100,7 +130,7 @@ class JdbcGeneratedBatchCompletionBoundaryTest {
             return new BatchWriteRequest(SqlStatementPlan.canonical(
                     "insert into samples(label) values (?)", SqlBindMarkerStyle.CANONICAL, 1),
                     List.of(String.class), Flux.just(new Object[]{"first"}, new Object[]{"second"}),
-                    BatchWriteOptions.of(2), BatchRowCountPolicy.ANY,
+                    BatchWriteOptions.of(2), strictCounts ? BatchRowCountPolicy.EXACTLY_ONE : BatchRowCountPolicy.ANY,
                     BatchGeneratedKeys.required("id", (offset, row) -> {
                         if (offset == 1L && !keyReadFails) throw (RuntimeException) primary;
                         assertEquals(offset + 1L, row.value(0));
@@ -129,10 +159,14 @@ class JdbcGeneratedBatchCompletionBoundaryTest {
 
         private PreparedStatement statement() {
             return proxy(PreparedStatement.class, (self, method, arguments) -> switch (method.getName()) {
-                case "setObject" -> null;
+                case "setObject" -> {
+                    if (executedRows == bindingFailureAt) throw primary;
+                    yield null;
+                }
                 case "executeLargeUpdate" -> {
                     executedRows++;
-                    yield 1L;
+                    if (executedRows - 1 == executionFailureAt) throw primary;
+                    yield updateCount;
                 }
                 case "getGeneratedKeys" -> keys(executedRows);
                 case "close" -> {

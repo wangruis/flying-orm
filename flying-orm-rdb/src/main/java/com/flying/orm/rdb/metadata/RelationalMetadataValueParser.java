@@ -6,12 +6,15 @@ import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.core.type.LogicalType;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
 import java.time.OffsetTime;
+import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeFormatterBuilder;
 import java.util.ArrayList;
 import java.util.HexFormat;
 import java.util.List;
@@ -19,6 +22,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -37,6 +41,10 @@ final class RelationalMetadataValueParser {
     private static final Pattern MYSQL_TEMPORAL_KEYWORD_PRECISION = Pattern.compile(
             "(?i)^(CURRENT_TIME|CURTIME|CURRENT_TIMESTAMP)\\s*\\(\\s*\\d+\\s*\\)$");
     private static final Pattern ORACLE_TEMPORAL_LITERAL = Pattern.compile("(?i)(DATE|TIMESTAMP)\\s*'([^']*)'");
+    private static final Pattern H2_TYPED_LITERAL = Pattern.compile(
+            "(?i)(DATE|TIME(?:STAMP)?(?:\\s+WITH\\s+TIME\\s+ZONE)?|UUID)\\s*'([^']*)'");
+    private static final DateTimeFormatter H2_OFFSET_TIME = new DateTimeFormatterBuilder()
+            .append(DateTimeFormatter.ISO_LOCAL_TIME).appendOffset("+HH:mm:ss", "Z").toFormatter(Locale.ROOT);
     private static final Pattern SQL_SERVER_TEMPORAL_CAST = Pattern.compile(
             "(?i)^CAST\\(\\s*(?:CURRENT_TIMESTAMP|GETDATE\\(\\))\\s+AS\\s+(DATE|TIME)\\s*\\)$");
     private static final Pattern SQL_SERVER_TEMPORAL_CONVERT = Pattern.compile(
@@ -45,8 +53,8 @@ final class RelationalMetadataValueParser {
     private static final Pattern H2_NUMERIC_LITERAL_CAST = Pattern.compile(
             "(?i)(?<![a-z0-9_])CAST\\(\\s*"
                     + "([+-]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][+-]?\\d+)?)"
-                    + "\\s+AS\\s+(?:NUMERIC|DECIMAL)"
-                    + "(?:\\s*\\(\\s*\\d+\\s*(?:,\\s*\\d+\\s*)?\\))?\\s*\\)"
+                    + "\\s+AS\\s+(NUMERIC|DECIMAL|BIGINT|DECFLOAT)"
+                    + "(?:\\s*\\(\\s*(\\d+)\\s*(?:,\\s*(\\d+)\\s*)?\\))?\\s*\\)"
                     + "(?![a-z0-9_])");
 
     private RelationalMetadataValueParser() {
@@ -120,6 +128,13 @@ final class RelationalMetadataValueParser {
                         temporal.group(1), temporal.group(2), databaseType));
             }
         }
+        if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.H2) {
+            Matcher typed = H2_TYPED_LITERAL.matcher(literal);
+            if (typed.matches()) {
+                return ColumnDefault.literal(h2TypedLiteral(
+                        h2LiteralToken(typed.group(1)), typed.group(2), databaseType));
+            }
+        }
         if (isQuotedString(literal)) {
             return ColumnDefault.literal(convertString(unquoteString(literal), databaseType.logicalType()));
         }
@@ -189,6 +204,36 @@ final class RelationalMetadataValueParser {
             }
         }
         throw new IllegalStateException("typed Oracle schema literal cannot be represented safely");
+    }
+
+    private static TokenType h2LiteralToken(String keyword) {
+        return switch (keyword.toUpperCase(Locale.ROOT).replaceAll("\\s+", " ")) {
+            case "DATE" -> TokenType.DATE_LITERAL;
+            case "TIME" -> TokenType.TIME_LITERAL;
+            case "TIME WITH TIME ZONE" -> TokenType.OFFSET_TIME_LITERAL;
+            case "TIMESTAMP" -> TokenType.TIMESTAMP_LITERAL;
+            case "TIMESTAMP WITH TIME ZONE" -> TokenType.OFFSET_TIMESTAMP_LITERAL;
+            case "UUID" -> TokenType.UUID_LITERAL;
+            default -> throw unsupported();
+        };
+    }
+
+    /** H2 会把 CHECK 常量转换成列类型，并以带类型前缀的字面量写回字典。 */
+    private static Object h2TypedLiteral(TokenType token, String value, DatabaseType type) {
+        LogicalType literalType = switch (token) {
+            case DATE_LITERAL -> LogicalType.DATE;
+            case TIME_LITERAL -> LogicalType.TIME;
+            case OFFSET_TIME_LITERAL -> LogicalType.OFFSET_TIME;
+            case TIMESTAMP_LITERAL -> LogicalType.TIMESTAMP;
+            case OFFSET_TIMESTAMP_LITERAL -> LogicalType.OFFSET_TIMESTAMP;
+            case UUID_LITERAL -> LogicalType.UUID;
+            default -> throw unsupported();
+        };
+        if (type.isArray() || type.logicalType() != literalType) {
+            throw new IllegalStateException("typed H2 schema literal cannot be represented safely");
+        }
+        return literalType == LogicalType.OFFSET_TIME
+                ? OffsetTime.parse(value, H2_OFFSET_TIME) : convertString(value, literalType);
     }
 
     private static Object number(String value, DatabaseType type) {
@@ -449,8 +494,13 @@ final class RelationalMetadataValueParser {
         IDENTIFIER,
         STRING,
         DATE_LITERAL,
+        TIME_LITERAL,
+        OFFSET_TIME_LITERAL,
         TIMESTAMP_LITERAL,
+        OFFSET_TIMESTAMP_LITERAL,
+        UUID_LITERAL,
         NUMBER,
+        NUMERIC_CAST_LITERAL,
         TRUE,
         FALSE,
         NULL,
@@ -598,6 +648,10 @@ final class RelationalMetadataValueParser {
             if (match(TokenType.IN)) {
                 return CheckPredicate.in(column, parenthesizedValues(type));
             }
+            if (match(TokenType.NOT)) {
+                expect(TokenType.IN);
+                return CheckPredicate.not(CheckPredicate.in(column, parenthesizedValues(type)));
+            }
             CheckPredicate.ComparisonOperator operator = comparisonOperator(current.type());
             advance();
             if (operator == CheckPredicate.ComparisonOperator.EQUAL && match(TokenType.ANY)) {
@@ -664,9 +718,16 @@ final class RelationalMetadataValueParser {
                 advance();
                 value = switch (token.type()) {
                     case STRING -> convertString(token.text(), type.logicalType());
-                    case DATE_LITERAL -> oracleTemporalLiteral("DATE", token.text(), type);
-                    case TIMESTAMP_LITERAL -> oracleTemporalLiteral("TIMESTAMP", token.text(), type);
+                    case DATE_LITERAL, TIME_LITERAL, OFFSET_TIME_LITERAL,
+                         TIMESTAMP_LITERAL, OFFSET_TIMESTAMP_LITERAL, UUID_LITERAL ->
+                            dialect == InformationSchemaFormMetadataReader.SnapshotDialect.H2
+                                    ? h2TypedLiteral(token.type(), token.text(), type)
+                                    : oracleTemporalLiteral(token.type() == TokenType.DATE_LITERAL
+                                            ? "DATE" : "TIMESTAMP", token.text(), type);
                     case NUMBER -> checkNumber(token.text(), type, dialect);
+                    // H2 compares floating columns with numeric casts as DECFLOAT, not rounded doubles.
+                    case NUMERIC_CAST_LITERAL -> type.logicalType() == LogicalType.FLOAT
+                            ? new BigDecimal(token.text()) : checkNumber(token.text(), type, dialect);
                     case TRUE -> true;
                     case FALSE -> false;
                     default -> throw unsupported();
@@ -834,6 +895,15 @@ final class RelationalMetadataValueParser {
                 return new Token(TokenType.END, "");
             }
             char value = source.charAt(index);
+            if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.H2
+                    && (value == 'D' || value == 'd' || value == 'T' || value == 't'
+                        || value == 'U' || value == 'u')) {
+                Matcher typed = H2_TYPED_LITERAL.matcher(source).region(index, source.length());
+                if (typed.lookingAt()) {
+                    index = typed.end();
+                    return new Token(h2LiteralToken(typed.group(1)), typed.group(2));
+                }
+            }
             if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE
                     && (value == 'D' || value == 'd' || value == 'T' || value == 't')) {
                 var temporal = ORACLE_TEMPORAL_LITERAL.matcher(source).region(index, source.length());
@@ -846,10 +916,11 @@ final class RelationalMetadataValueParser {
             if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.H2
                     && (value == 'C' || value == 'c')) {
                 // H2 会给数值常量补 CAST；只识别当前词法位置，不改写字符串或引号内的标识符。
-                var cast = H2_NUMERIC_LITERAL_CAST.matcher(source).region(index, source.length());
+                Matcher cast = H2_NUMERIC_LITERAL_CAST.matcher(source).region(index, source.length());
                 if (cast.lookingAt()) {
+                    requireLosslessH2NumericCast(cast);
                     index = cast.end();
-                    return new Token(TokenType.NUMBER, cast.group(1));
+                    return new Token(TokenType.NUMERIC_CAST_LITERAL, cast.group(1));
                 }
             }
             if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER) {
@@ -1034,6 +1105,34 @@ final class RelationalMetadataValueParser {
             while (index < source.length() && Character.isWhitespace(source.charAt(index))) {
                 index++;
             }
+        }
+    }
+
+    private static void requireLosslessH2NumericCast(Matcher cast) {
+        BigDecimal value = new BigDecimal(cast.group(1));
+        String type = cast.group(2).toUpperCase(Locale.ROOT);
+        try {
+            if ("BIGINT".equals(type)) {
+                if (cast.group(3) != null) throw unsupported();
+                value.longValueExact();
+            } else if (cast.group(3) != null) {
+                int precision = Integer.parseInt(cast.group(3));
+                if ("DECFLOAT".equals(type)) {
+                    if (cast.group(4) != null || value.stripTrailingZeros().precision() > precision) {
+                        throw unsupported();
+                    }
+                } else {
+                    int scale = cast.group(4) == null ? 0 : Integer.parseInt(cast.group(4));
+                    if (value.setScale(scale, RoundingMode.UNNECESSARY).precision() > precision) {
+                        throw unsupported();
+                    }
+                }
+            } else if (!"DECFLOAT".equals(type)) {
+                // H2 NUMERIC/DECIMAL without an explicit scale use scale zero.
+                value.toBigIntegerExact();
+            }
+        } catch (ArithmeticException | NumberFormatException lossy) {
+            throw unsupported();
         }
     }
 

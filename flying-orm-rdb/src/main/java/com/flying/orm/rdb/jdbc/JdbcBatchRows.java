@@ -138,11 +138,12 @@ final class JdbcBatchRows implements Subscriber<Object[]>, AutoCloseable {
                         throw new BatchMemoryLimitExceededException("rows", maxRows,
                                 Math.addExact(acceptedCount, 1L));
                     }
+                    // BatchWriteRequest 约定 onNext 后整行所有权转移；这里只校验形状并记录预算。
+                    ProtectedBatchRows.RowView admitted = BatchRowSnapshotter.snapshotView(
+                            safeRow, parameterCount, maxRowBytes, "row bytes");
                     evidence.accept(1L);
                     acceptedCount = Math.addExact(acceptedCount, 1L);
-                    // BatchWriteRequest 约定 onNext 后整行所有权转移；这里只校验形状并记录预算。
-                    nextRow = BatchRowSnapshotter.snapshotView(
-                            safeRow, parameterCount, maxRowBytes, "row bytes");
+                    nextRow = admitted;
                 } catch (Throwable error) {
                     failure = error;
                     terminalFailure = error;

@@ -17,7 +17,7 @@ import java.util.function.Supplier;
  * 执行已经冻结精确 SQL 的审核计划，并在 SQL 前后读取同一结构事实边界。
  *
  * <p>本执行器不渲染、不重排，也不把影响行数当成结构收敛。执行前指纹漂移以零 SQL 返回，执行后
- * 必须先失效缓存、再按原兼容模式重新比较；异常摘要只保留类型，不携带 SQL、参数或驱动消息。</p>
+ * 必须先失效缓存、再按执行后的兼容边界重新比较；异常摘要只保留类型，不携带 SQL、参数或驱动消息。</p>
  *
  * @author wangr
  * @version v3.2
@@ -272,6 +272,9 @@ final class VerifiedSchemaPlanExecutor {
                                                         String beforeFingerprint,
                                                         SchemaSnapshot after) {
         String afterFingerprint = SchemaSnapshotFingerprint.of(after);
+        // Safe additions are allowed during planning, but must no longer be pending after execution.
+        SchemaCompatibilityMode verificationMode = plan.compatibilityMode() == SchemaCompatibilityMode.SAFE_INCREMENTAL
+                ? SchemaCompatibilityMode.ROLLING_COMPATIBLE : plan.compatibilityMode();
         SchemaCompatibilityReport verification;
         try {
             verification = target.state() == ReviewedSchemaPlan.TargetState.PRESENT
@@ -279,14 +282,14 @@ final class VerifiedSchemaPlanExecutor {
                             target.desiredTable(),
                             after,
                             plan.database().capabilities(),
-                            plan.compatibilityMode(),
+                            verificationMode,
                             plan.database().dialectId(),
                             plan.comparisonDialect())
                     : SchemaDiffer.diffAbsent(
                             target.identity(),
                             after,
                             plan.database().capabilities(),
-                            plan.compatibilityMode(),
+                            verificationMode,
                             plan.comparisonDialect());
         } catch (RuntimeException failure) {
             return SchemaExecutionReport.of(

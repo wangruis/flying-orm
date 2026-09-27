@@ -96,7 +96,7 @@ final class SchemaTypeComparison {
             case "dec", "decimal", "numeric" -> "numeric";
             case "real", "float4" -> "real";
             case "double precision", "float8" -> "double precision";
-            case "float" -> postgresqlFloat(arguments);
+            case "float" -> binaryFloat(arguments);
             case "boolean", "bool" -> "boolean";
             case "varchar", "character varying", "national character varying" -> "varchar";
             case "char", "character", "nchar" -> "char";
@@ -131,7 +131,7 @@ final class SchemaTypeComparison {
                 || base.startsWith("interval ");
     }
 
-    private static String postgresqlFloat(List<String> arguments) {
+    private static String binaryFloat(List<String> arguments) {
         if (arguments.isEmpty()) {
             return "double precision";
         }
@@ -233,20 +233,48 @@ final class SchemaTypeComparison {
     static String h2Comparable(String value) {
         String type = canonical(value);
         DatabaseType parsed = DatabaseType.of(type).requireSafe("data type");
-        if (parsed.arguments().isEmpty()
-                && ("TEXT".equals(parsed.baseName())
-                    || "VARCHAR".equals(parsed.baseName())
-                    || "CHARACTER VARYING".equals(parsed.baseName()))) {
-            return "character varying(1000000000)";
+        if ("TIME WITHOUT TIME ZONE".equals(parsed.baseName())
+                || "TIMESTAMP WITHOUT TIME ZONE".equals(parsed.baseName())) {
+            return type.replace(" without time zone", "");
         }
+        List<String> arguments = parsed.arguments();
         String normalized = switch (parsed.baseName()) {
-            case "VARCHAR" -> "character varying";
-            case "BINARY LARGE OBJECT" -> "blob";
+            case "INT2" -> "smallint";
+            case "INT", "INT4", "MEDIUMINT" -> "integer";
+            case "INT8" -> "bigint";
+            case "FLOAT4" -> "real";
+            case "DOUBLE", "FLOAT8" -> "double precision";
+            case "FLOAT" -> binaryFloat(arguments);
+            case "BOOL" -> "boolean";
+            case "VARCHAR", "VARCHAR2", "NVARCHAR", "NVARCHAR2", "NATIONAL CHARACTER VARYING",
+                    "CHARACTER VARYING", "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT", "NTEXT" ->
+                    "character varying";
+            case "CHAR", "NCHAR", "CHARACTER" -> "character";
+            case "VARBINARY", "BINARY VARYING", "LONGVARBINARY", "RAW", "LONG RAW", "BYTEA" ->
+                    "binary varying";
+            case "BINARY" -> "binary";
+            case "BINARY LARGE OBJECT", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB", "IMAGE" -> "blob";
             case "CHARACTER LARGE OBJECT" -> "clob";
-            case "DECIMAL" -> "numeric";
+            case "DEC", "DECIMAL", "NUMERIC" -> "numeric";
             default -> null;
         };
-        return normalized == null ? type : normalized + type.substring(parsed.baseName().length());
+        if (normalized == null) return type;
+        if ("FLOAT".equals(parsed.baseName()) && !"float".equals(normalized)) {
+            arguments = List.of();
+        } else if (arguments.isEmpty()) {
+            arguments = switch (normalized) {
+                case "character varying", "binary varying" -> List.of("1000000000");
+                case "character", "binary" -> List.of("1");
+                case "numeric" -> List.of("100000");
+                default -> arguments;
+            };
+        } else if ("numeric".equals(normalized) && arguments.size() == 2
+                && "0".equals(arguments.get(1))) {
+            arguments = List.of(arguments.getFirst());
+        }
+        String suffix = arguments.isEmpty() ? "" : "(" + String.join(",", arguments) + ")";
+        return normalized + suffix + (parsed.unsigned() ? " unsigned" : "")
+                + (parsed.zerofill() ? " zerofill" : "") + "[]".repeat(parsed.arrayDimensions());
     }
 
     private String comparableOracleNumeric(String type) {

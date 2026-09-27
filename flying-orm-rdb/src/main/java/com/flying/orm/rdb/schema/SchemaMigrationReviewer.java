@@ -182,13 +182,12 @@ final class SchemaMigrationReviewer {
                     }
                 } else {
                     rollback.add(rollbackRenderer.rollbackColumnType(table, currentName, source, physicalColumn));
-                    if (SchemaMigrationSupport.safeWidening(
-                            source, target, renderer.tableRenderer())) {
-                        gaps.add(new SchemaRollbackGap(
-                                SchemaRollbackGap.Kind.DATA_CANNOT_BE_RESTORED,
-                                source.name(),
-                                "values written after widening must fit the original type before rollback"));
-                    }
+                    gaps.add(new SchemaRollbackGap(
+                            SchemaRollbackGap.Kind.DATA_CANNOT_BE_RESTORED,
+                            source.name(),
+                            SchemaMigrationSupport.safeWidening(source, target, renderer.tableRenderer())
+                                    ? "values written after widening must fit the original type before rollback"
+                                    : "restoring the column type cannot recover values lost or changed by conversion"));
                 }
             }
             if (target != null && hasColumnCommentChange(migration, table, source, target, physicalColumn)) {

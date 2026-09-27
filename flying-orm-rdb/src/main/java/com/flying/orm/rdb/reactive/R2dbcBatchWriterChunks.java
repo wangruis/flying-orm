@@ -24,7 +24,7 @@ final class R2dbcBatchWriterChunks {
     Mono<Void> execute(Connection connection, BatchWriteRequest request, BatchChunk window,
                        String sql, Supplier<R2dbcLargeObjectScope> lobs,
                        R2dbcBatchEvidenceCounts facts) {
-        return sideIndex.prepare(connection, request, window, lobs, facts)
+        return sideIndex.prepare(connection, request, window, lobs)
                 .flatMap(prepared -> {
                     if (request.generatedKeys().required()) {
                         return generated(connection, request, window, sql, lobs, facts, prepared);

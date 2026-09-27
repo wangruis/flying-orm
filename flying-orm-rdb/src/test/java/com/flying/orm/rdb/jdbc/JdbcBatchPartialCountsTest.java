@@ -7,6 +7,55 @@ import java.util.List;
 import static org.junit.jupiter.api.Assertions.*;
 
 class JdbcBatchPartialCountsTest {
+    @Test void completeFailuresAreNotUnknownExecutions() {
+        for (int count : new int[]{0, 2, Statement.EXECUTE_FAILED}) {
+            for (boolean driverThrows : new boolean[]{false, true}) {
+                JdbcBatchEvidenceTestSupport.State state = new JdbcBatchEvidenceTestSupport.State();
+                if (driverThrows) state.failure(new BatchUpdateException("failed", "HY000", 0,
+                        new int[]{count, count}));
+                else state.outcome(count, count);
+                BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
+                        () -> state.writer().writeBatch(strictRequest(2)));
+                assertEquals(BatchExecutionState.FAILED, failure.evidence().state());
+                assertEquals(2, failure.evidence().failedCount());
+                assertEquals(count >= 0, failure.evidence().affectedRows().isKnown());
+            }
+        }
+    }
+
+    @Test void confirmedFailureDoesNotHideAnUnreportedTail() {
+        for (int count : new int[]{0, Statement.EXECUTE_FAILED}) {
+            for (boolean driverThrows : new boolean[]{false, true}) {
+                JdbcBatchEvidenceTestSupport.State state = new JdbcBatchEvidenceTestSupport.State();
+                if (driverThrows) state.failure(new BatchUpdateException("partial", "08006", 0,
+                        new int[]{count}));
+                else state.outcome(count);
+                BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
+                        () -> state.writer().writeBatch(strictRequest(2)));
+                assertEquals(BatchExecutionState.UNKNOWN, failure.evidence().state());
+                assertEquals(1, failure.evidence().failedCount());
+                assertFalse(failure.evidence().affectedRows().isKnown());
+            }
+        }
+    }
+
+    @Test void connectionLostDuringExecutionCannotProveFailure() {
+        JdbcBatchEvidenceTestSupport.State state = new JdbcBatchEvidenceTestSupport.State()
+                .failure(new SQLException("connection lost", "08006"));
+        BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
+                () -> state.writer().writeBatch(strictRequest(2)));
+        assertEquals(BatchExecutionState.UNKNOWN, failure.evidence().state());
+        assertEquals(0, failure.evidence().failedCount());
+        assertEquals(0, failure.evidence().successfulCount());
+    }
+
+    private static BatchWriteRequest strictRequest(int size) {
+        BatchWriteRequest request = JdbcBatchEvidenceTestSupport.request(
+                Flux.range(0, size).map(index -> new Object[]{index}), size);
+        return new BatchWriteRequest(request.statement(), request.parameterTypes(), request.rows(),
+                request.options(), BatchRowCountPolicy.EXACTLY_ONE, request.generatedKeys());
+    }
+
     @Test void preservesProvableBatchUpdateExceptionCounts() {
         var state = new JdbcBatchEvidenceTestSupport.State().failure(new BatchUpdateException(
                 "partial", "23000", 0, new int[]{1, Statement.SUCCESS_NO_INFO, Statement.EXECUTE_FAILED, 1}));

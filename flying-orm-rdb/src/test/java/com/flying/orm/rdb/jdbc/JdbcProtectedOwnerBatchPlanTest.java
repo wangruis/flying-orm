@@ -82,7 +82,7 @@ class JdbcProtectedOwnerBatchPlanTest {
                     row(updateWork("select id from business_row where id = ?", List.of(2L))));
 
             JdbcProtectedBatchSideIndex.Prepared prepared = new JdbcProtectedBatchSideIndex().prepare(
-                    connection, request(), rows, null);
+                    connection, request(), rows);
 
             assertEquals(Map.of("id", 1L), prepared.rows().get(0).owners().getFirst());
             assertEquals(Map.of("id", 2L), prepared.rows().get(1).owners().getFirst());
@@ -97,7 +97,7 @@ class JdbcProtectedOwnerBatchPlanTest {
 
             SQLException error = assertThrows(SQLException.class, () ->
                     new JdbcProtectedBatchSideIndex().prepare(
-                            connection, request(), rows, null));
+                            connection, request(), rows));
 
             assertEquals("21000", error.getSQLState());
         }

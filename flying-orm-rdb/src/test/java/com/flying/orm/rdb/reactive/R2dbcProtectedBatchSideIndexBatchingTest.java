@@ -73,7 +73,7 @@ class R2dbcProtectedBatchSideIndexBatchingTest {
         R2dbcBatchWriterChunks.BatchChunk chunk = new R2dbcBatchWriterChunks.BatchChunk(0, 0L, rows, 0L);
         R2dbcProtectedBatchSideIndex.Prepared prepared = new R2dbcProtectedBatchSideIndex(
                 R2dbcBindMarkers.from(RdbDialect.postgresql())).prepare(null, request(), chunk,
-                        () -> { throw new AssertionError("plain chunk must not acquire LOB state"); }, null)
+                        () -> { throw new AssertionError("plain chunk must not acquire LOB state"); })
                 .block(Duration.ofSeconds(5));
 
         assertEquals(List.of(), prepared.rows());
@@ -91,7 +91,7 @@ class R2dbcProtectedBatchSideIndexBatchingTest {
                 0, 0, rows, 0L);
 
         new R2dbcProtectedBatchSideIndex(R2dbcBindMarkers.from(RdbDialect.postgresql()))
-                .prepare(connection, request(), chunk, R2dbcLargeObjectScope::new, null)
+                .prepare(connection, request(), chunk, R2dbcLargeObjectScope::new)
                 .block(Duration.ofSeconds(5));
 
         assertEquals(1, recorder.statements.get(),

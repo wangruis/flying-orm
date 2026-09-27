@@ -34,11 +34,10 @@ final class R2dbcBatchChunker {
 
     static Flux<R2dbcBatchWriterChunks.BatchChunk> chunks(BatchWriteRequest request,
                                                            LongConsumer acceptedRows) {
-        return chunks(request, rows(request, acceptedRows));
+        return chunks(request, rows(request), acceptedRows);
     }
 
-    static Flux<Object[]> rows(BatchWriteRequest request, LongConsumer acceptedRows) {
-        LongConsumer safeAcceptedRows = requireNonNull(acceptedRows, "accepted row tracker must not be null");
+    private static Flux<Object[]> rows(BatchWriteRequest request) {
         long maxRows = request.options().maxRows();
         return Flux.from(request.rows())
                 .onErrorMap(BatchExecutionEvidenceException.class, R2dbcBatchRowSourceFailure::new)
@@ -49,7 +48,6 @@ final class R2dbcBatchChunker {
                     } else {
                         Object[] stableRow = R2dbcParameterValues.stabilizeBatchParameters(
                                 tuple.getT2(), request.parameterCount());
-                        safeAcceptedRows.accept(1L);
                         sink.next(stableRow);
                     }
                 });
@@ -57,7 +55,14 @@ final class R2dbcBatchChunker {
 
     static Flux<R2dbcBatchWriterChunks.BatchChunk> chunks(BatchWriteRequest request,
                                                            Flux<Object[]> preparedRows) {
+        return chunks(request, preparedRows, ignored -> { });
+    }
+
+    private static Flux<R2dbcBatchWriterChunks.BatchChunk> chunks(BatchWriteRequest request,
+                                                                   Flux<Object[]> preparedRows,
+                                                                   LongConsumer acceptedRows) {
         Flux<Object[]> safeRows = requireNonNull(preparedRows, "prepared rows must not be null");
+        LongConsumer safeAcceptedRows = requireNonNull(acceptedRows, "accepted row tracker must not be null");
         return Flux.defer(() -> {
             long perChunkLimit = request.options().maxBufferedBytes();
             long maxRowBytes = request.options().maxRowBytes();
@@ -68,6 +73,7 @@ final class R2dbcBatchChunker {
                         IndexedRow row = IndexedRow.from(
                                 tuple.getT1(), tuple.getT2(), request.parameterCount(),
                                 maxRowBytes);
+                        safeAcceptedRows.accept(1L);
                         return row;
                     })
                     .handle((row, sink) -> {

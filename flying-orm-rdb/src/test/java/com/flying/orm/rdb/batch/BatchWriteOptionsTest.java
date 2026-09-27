@@ -7,7 +7,7 @@ class BatchWriteOptionsTest {
     @Test
     void defaultsRetainBoundedBatchCapacity() {
         assertEquals(500, BatchWriteOptions.defaults().bufferSize());
-        assertEquals(100_000, BatchWriteOptions.defaults().maxRows());
+        assertEquals(0, BatchWriteOptions.defaults().maxRows());
         assertEquals(32L * 1024 * 1024, BatchWriteOptions.defaults().maxBufferedBytes());
         assertEquals(10_000, BatchMemoryLimits.defaults().maxBufferSize());
         assertEquals(256L * 1024 * 1024, BatchMemoryLimits.defaults().maxBufferedBytes());

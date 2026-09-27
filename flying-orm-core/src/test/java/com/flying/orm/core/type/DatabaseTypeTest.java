@@ -78,6 +78,16 @@ class DatabaseTypeTest {
     }
 
     @Test
+    void recognizesBinaryVaryingWithoutAcceptingSqlSuffixes() {
+        DatabaseType type = DatabaseType.of("BINARY VARYING(12)");
+        assertTrue(type.safeDeclaration());
+        assertEquals(LogicalType.BINARY, type.logicalType());
+        assertEquals(List.of("12"), type.arguments());
+        assertFalse(DatabaseType.of("BINARY VARYING(12); DROP TABLE t").safeDeclaration());
+        assertFalse(DatabaseType.of("BINARY VARYING(12) INVALID").safeDeclaration());
+    }
+
+    @Test
     void acceptsPostgreSqlIntervalFieldsAndFractionalSecondPrecision() {
         for (String declaration : List.of(
                 "INTERVAL", "INTERVAL(3)", "INTERVAL YEAR", "INTERVAL YEAR TO MONTH",

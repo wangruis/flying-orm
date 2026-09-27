@@ -83,6 +83,7 @@ class JdbcBatchAdmissionBudgetTest {
                 BatchMemoryLimitExceededException.class, failure.getCause());
         assertEquals(128, limit.limit());
         assertEquals(BatchMemoryBudget.estimateRowBytes(new Object[]{new byte[950]}), limit.actual());
+        assertEquals(0, failure.evidence().inputCount());
         assertEquals(1, cancelled.get());
         assertEquals(0, state.acquired.get());
         assertEquals(0, state.closed.get());

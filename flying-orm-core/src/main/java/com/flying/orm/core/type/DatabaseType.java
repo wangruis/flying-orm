@@ -28,7 +28,7 @@ public final class DatabaseType {
     private static final String SIMPLE_NAME = "[a-z_][a-z0-9_]*(?:\\.[a-z_][a-z0-9_]*)?";
     private static final String MULTI_WORD_NAME =
             "(?:double precision|character varying|national character varying|bit varying|long raw"
-                    + "|binary large object|character large object)";
+                    + "|binary varying|binary large object|character large object)";
     private static final String TIME_ZONE_NAME =
             "time(?:stamp)?(?:" + ARGUMENTS + ")? (?:with(?: local)?|without) time zone";
     private static final String INTERVAL_SECOND = "second(?:" + INTERVAL_PRECISION + ")?";
@@ -260,7 +260,7 @@ public final class DatabaseType {
                     "LONGTEXT", "CLOB", "NCLOB", "BPCHAR", "NTEXT", "CHARACTER LARGE OBJECT" -> LogicalType.TEXT;
             case "BINARY", "VARBINARY", "LONGVARBINARY", "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB",
                     "MYSQL_BINARY", "MYSQL_BLOB", "BYTEA", "RAW", "LONG RAW", "IMAGE",
-                    "PROTECTED_BINARY", "PROTECTED_HASH", "BINARY LARGE OBJECT" ->
+                    "PROTECTED_BINARY", "PROTECTED_HASH", "BINARY VARYING", "BINARY LARGE OBJECT" ->
                     LogicalType.BINARY;
             case "DATE" -> LogicalType.DATE;
             case "TIME", "TIME WITHOUT TIME ZONE" -> LogicalType.TIME;

@@ -8,7 +8,8 @@ package com.flying.orm.rdb.batch;
  */
 public record BatchWriteOptions(int bufferSize, long maxRows, long maxBufferedBytes, long maxRowBytes) {
     public static final int DEFAULT_BUFFER_SIZE = 500;
-    public static final long DEFAULT_MAX_ROWS = 100_000L;
+    /** 默认只约束每个输入窗口的内存；总行数由调用方按需限制。 */
+    public static final long DEFAULT_MAX_ROWS = 0L;
     public static final long DEFAULT_MAX_BUFFERED_BYTES = 32L * 1024 * 1024;
 
     public BatchWriteOptions {

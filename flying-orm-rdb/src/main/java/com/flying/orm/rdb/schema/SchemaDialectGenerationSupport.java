@@ -181,6 +181,7 @@ final class SchemaDialectGenerationSupport {
         boolean supported = switch (style) {
             case POSTGRESQL, H2 -> switch (base) {
                 case "SMALLINT", "INTEGER", "BIGINT", "INT2", "INT4", "INT8" -> true;
+                case "INT", "MEDIUMINT" -> style == SchemaDialect.GeneratedValueStyle.H2;
                 default -> false;
             };
             case MYSQL -> switch (base) {

@@ -19,18 +19,19 @@ import java.util.List;
 final class JdbcBatchEvidenceSupport {
     private JdbcBatchEvidenceSupport() {}
 
-    static BatchExecutionState failureState(Throwable failure, boolean hasSuccess, boolean attempted) {
+    static BatchExecutionState failureState(Throwable failure, boolean hasSuccess, boolean unconfirmedExecution) {
         if (hasSuccess) return BatchExecutionState.PARTIAL;
         return switch (BatchExecutionEvidence.Failure.from(failure).kind()) {
             case TIMEOUT, LOCK_TIMEOUT -> BatchExecutionState.TIMED_OUT;
             case CANCELLED -> BatchExecutionState.CANCELLED;
-            case CONNECTION, UNKNOWN -> attempted ? BatchExecutionState.UNKNOWN : BatchExecutionState.FAILED;
+            case CONNECTION, UNKNOWN -> unconfirmedExecution ? BatchExecutionState.UNKNOWN : BatchExecutionState.FAILED;
             default -> BatchExecutionState.FAILED;
         };
     }
 
     static int[] executeBusinessBatch(PreparedStatement statement, Counts evidence,
                                      long offset, int size) throws SQLException {
+        evidence.startBusinessExecution(size);
         try {
             int[] result = statement.executeBatch();
             evidence.record(result, offset, size);
@@ -50,7 +51,7 @@ final class JdbcBatchEvidenceSupport {
         private final List<BatchRowConflict> conflicts = new ArrayList<>();
         private long affectedRows;
         private boolean known = true;
-        private boolean attempted;
+        private int unconfirmedBusinessRows;
         private boolean unverifiable;
         private int completionLimit;
         private BitSet incompleteRows;
@@ -82,6 +83,10 @@ final class JdbcBatchEvidenceSupport {
             } else {
                 successes.set(relative);
             }
+            if (unconfirmedBusinessRows > 0
+                    && (count >= 0 || count == Statement.SUCCESS_NO_INFO || count == Statement.EXECUTE_FAILED)) {
+                unconfirmedBusinessRows--;
+            }
         }
 
         void record(int[] counts, long offset, int size) {
@@ -112,8 +117,12 @@ final class JdbcBatchEvidenceSupport {
             if (unverifiable) throw new SQLException("jdbc driver cannot verify exact batch row counts", "0A000");
         }
 
-        void markDatabaseWorkAttempted() { attempted = true; }
-        boolean databaseWorkAttempted() { return attempted; }
+        // Executions are sequential; failed/incomplete units stop before any later synthetic owner count.
+        void startBusinessExecution(int size) {
+            unconfirmedBusinessRows += size;
+        }
+
+        boolean hasUnconfirmedBusinessExecution() { return unconfirmedBusinessRows > 0; }
         void completedRows(int count) { completionLimit = count; }
 
         void completedPlainRows(List<ProtectedBatchRows.RowView> rows) {
@@ -134,7 +143,7 @@ final class JdbcBatchEvidenceSupport {
         }
 
         void finish(BatchExecutionEvidence.Accumulator evidence, boolean success) {
-            if (attempted && successes.cardinality() + failures.cardinality() < inputCount) known = false;
+            if (hasUnconfirmedBusinessExecution()) known = false;
             BatchAffectedRows rows = known ? BatchAffectedRows.known(affectedRows) : BatchAffectedRows.unknown();
             if (success && successes.cardinality() == inputCount && failures.isEmpty()) {
                 evidence.succeeded(inputCount, rows);

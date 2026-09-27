@@ -42,6 +42,21 @@ class R2dbcOrdinaryBatchConnectionTest {
         assertTrue(h.releases.isEmpty());
     }
 
+    @Test void rejectedRowIsNotReportedAsAcceptedInput() {
+        Harness h = new Harness(index -> Flux.just(1L));
+        BatchWriteRequest request = BatchWriteRequests.request(
+                "insert into sample(value) values (?)", 1, List.of(byte[].class),
+                SqlBindMarkerStyle.CANONICAL, Flux.<Object[]>just(new Object[]{new byte[950]}),
+                BatchWriteOptions.of(2).withMemoryLimits(1, 4096).withMaxRowBytes(128));
+
+        BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
+                () -> h.executor().writeBatch(request).block());
+
+        assertInstanceOf(BatchMemoryLimitExceededException.class, failure.getCause());
+        assertEquals(0, failure.evidence().inputCount());
+        assertEquals(0, h.gets);
+    }
+
     @Test void absentAndNegativeCountsStillProveSuccessfulSqlWithUnknownRows() {
         for (Publisher<Long> counts : List.of(Flux.<Long>empty(), Flux.just(-1L))) {
             Harness h = new Harness(index -> counts);
@@ -59,6 +74,7 @@ class R2dbcOrdinaryBatchConnectionTest {
         assertEquals(2, failure.evidence().inputCount());
         assertEquals(0, failure.evidence().successfulCount());
         assertEquals(0, failure.evidence().failedCount());
+        assertEquals(BatchExecutionState.UNKNOWN, failure.evidence().state());
         assertEquals(List.of(SignalType.ON_ERROR), h.releases);
     }
 
@@ -69,6 +85,38 @@ class R2dbcOrdinaryBatchConnectionTest {
         assertArrayEquals(new long[]{0, 2, 4}, failure.evidence().successfulOffsets().toArray());
         assertArrayEquals(new long[]{1, 3}, failure.evidence().failedOffsets().toArray());
         assertEquals(2, failure.evidence().conflicts().size());
+    }
+
+    @Test void completedStrictConflictsAreDefiniteFailures() {
+        for (long count : new long[]{0, 2}) {
+            Harness h = new Harness(index -> Flux.just(count));
+            BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
+                    () -> h.executor().writeBatch(request(2, 2, BatchRowCountPolicy.EXACTLY_ONE)).block());
+            assertEquals(BatchExecutionState.FAILED, failure.evidence().state());
+            assertEquals(2, failure.evidence().failedCount());
+            assertTrue(failure.evidence().affectedRows().isKnown());
+        }
+    }
+
+    @Test void knownConflictDoesNotHideAnUnconfirmedExecution() {
+        Harness h = new Harness(index -> index == 0 ? Flux.just(0L)
+                : Flux.concat(Flux.just(0L), Flux.error(new IllegalStateException("driver"))));
+        BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
+                () -> h.executor().writeBatch(request(2, 2, BatchRowCountPolicy.EXACTLY_ONE)).block());
+        assertEquals(BatchExecutionState.UNKNOWN, failure.evidence().state());
+        assertEquals(1, failure.evidence().failedCount());
+        assertFalse(failure.evidence().affectedRows().isKnown());
+    }
+
+    @Test void failureBeforeNextStatementDoesNotEraseConfirmedConflict() {
+        Harness h = new Harness(index -> Flux.just(0L));
+        h.failBeforeExecutionAt = 1;
+        BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
+                () -> h.executor().writeBatch(request(2, 2, BatchRowCountPolicy.EXACTLY_ONE)).block());
+        assertEquals(BatchExecutionState.FAILED, failure.evidence().state());
+        assertEquals(1, failure.evidence().failedCount());
+        assertEquals(1, h.executions);
+        assertTrue(failure.evidence().affectedRows().isKnown());
     }
 
     @Test void postFailureStaysPrimaryRunsCompletedWindowAndStopsNextWindow() {
@@ -108,6 +156,7 @@ class R2dbcOrdinaryBatchConnectionTest {
         assertEquals(2, error.evidence().inputCount());
         assertTrue(h.releases.isEmpty());
         assertEquals(0, h.executions);
+        assertEquals(BatchExecutionState.FAILED, error.evidence().state());
     }
 
     @Test void stalledExecutionDoesNotPrefetchAnotherWindowAndCancelReleasesOnce() {

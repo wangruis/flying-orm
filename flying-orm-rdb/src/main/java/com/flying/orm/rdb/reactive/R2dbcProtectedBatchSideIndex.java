@@ -48,7 +48,7 @@ final class R2dbcProtectedBatchSideIndex {
     Mono<Prepared> prepare(Connection connection,
                            BatchWriteRequest request,
                            R2dbcBatchWriterChunks.BatchChunk chunk,
-                           Supplier<R2dbcLargeObjectScope> largeObjects, R2dbcBatchEvidenceCounts evidence) {
+                           Supplier<R2dbcLargeObjectScope> largeObjects) {
         return Mono.defer(() -> {
             if (chunk.rows().stream().noneMatch(row -> row.work() != null)) {
                 return Mono.just(new Prepared(List.of(), request.options().maxBufferedBytes()));
@@ -63,7 +63,7 @@ final class R2dbcProtectedBatchSideIndex {
                     chunk.rows(), request.options().maxBufferedBytes());
             return Flux.fromIterable(plans)
                        .concatMap(plan -> readOwners(
-                               connection, plan, states, options, largeObjects, evidence), 1)
+                               connection, plan, states, options, largeObjects), 1)
                        .then(Mono.fromSupplier(() -> new Prepared(
                                states, request.options().maxBufferedBytes())));
         });
@@ -205,13 +205,10 @@ final class R2dbcProtectedBatchSideIndex {
                                   ProtectedOwnerBatchPlan plan,
                                   List<RowState> states,
                                   SqlExecutionOptions options,
-                                  Supplier<R2dbcLargeObjectScope> largeObjects, R2dbcBatchEvidenceCounts evidence) {
+                                  Supplier<R2dbcLargeObjectScope> largeObjects) {
         Statement statement = statement(
                 connection, plan.sql(), SqlBindMarkerStyle.CANONICAL, plan.parameters());
         boolean[] matched = new boolean[plan.size()];
-        if (evidence != null) {
-            evidence.markDatabaseWorkAttempted();
-        }
         return Flux.from(statement.execute())
                    .concatMap(result -> R2dbcExecutionSession.mapRows(result, options, largeObjects), 1)
                    .doOnNext(row -> {

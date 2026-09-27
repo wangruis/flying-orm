@@ -118,8 +118,7 @@ class SchemaDialectLiteralReadbackTest {
         assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.checkPredicate(
                 "\"value\" > DATE '2026-09-05'", Map.of("value", DatabaseType.of("VARCHAR")), oracle));
         for (var dialect : List.of(InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL,
-                InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER,
-                InformationSchemaFormMetadataReader.SnapshotDialect.H2)) {
+                InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER)) {
             assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.columnDefault(
                     "DATE '2026-09-05'", DatabaseType.of("DATE"), dialect));
             assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.checkPredicate(
