@@ -1,6 +1,8 @@
 package com.flying.orm.rdb.mapping;
 
 import com.flying.orm.core.codec.ValueCodecRegistry;
+import com.flying.orm.core.condition.TermCondition;
+import com.flying.orm.core.condition.TermRegistry;
 import com.flying.orm.rdb.cache.BoundedCacheRegion;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.cache.OrmCacheSnapshot;
@@ -166,6 +168,61 @@ public final class EntityModelRegistry implements AutoCloseable {
         }
         return (EntityMetadata<T>) model(ModelKey.metadata(safeType),
                                          ignored -> EntityMetadataResolver.createUncached(safeType));
+    }
+
+    /**
+     * 按实体属性名构建一个标准条件，供查询、分页、更新和删除共用。
+     *
+     * <p>标量枚举按实体的 {@code @EnumValue} 或默认枚举规则转换；IN、BETWEEN 等多值条件逐项转换。
+     * 空值和值形状遵循标准条件规则，例如 IS NULL 接受 null，等值条件拒绝 null。
+     * 返回的条件已使用映射后的数据库列名和值，可通过 {@code ConditionGroup.Builder.add} 组合。</p>
+     *
+     * @param type 实体类型
+     * @param propertyName 实体属性名，也接受实体元数据支持的列名
+     * @param operator 标准条件运算符
+     * @param value 原始条件值
+     * @return 完成实体字段和值映射的条件节点
+     */
+    public TermCondition condition(Class<?> type, String propertyName, String operator, Object value) {
+        return condition(type, propertyName, operator, value, TermRegistry.standard());
+    }
+
+    /**
+     * 使用执行链的运算符注册表构建实体条件。
+     *
+     * <p>自定义运算符保留自己声明的值语义，转换规则与实体 DSL 一致。
+     * 应传入实际 SQL renderer 的同一份 term 注册表，确保条件构建与执行使用相同语义。
+     * 返回的条件仍交给表单执行链完成字段 codec、方言转换和参数绑定。</p>
+     *
+     * @param type 实体类型
+     * @param propertyName 实体属性名，也接受实体元数据支持的列名
+     * @param operator 标准或已注册的条件运算符
+     * @param value 原始条件值
+     * @param terms 实际执行链使用的条件运算符注册表
+     * @return 完成实体字段和值映射的条件节点
+     */
+    public TermCondition condition(Class<?> type, String propertyName, String operator, Object value,
+                                    TermRegistry terms) {
+        EntityFieldMetadata field = metadata(type).field(propertyName);
+        Object mapped = entityValues(type).normalizeConditionValue(field.columnName(), operator, value, terms);
+        return TermCondition.of(field.columnName(), operator, mapped);
+    }
+
+    /**
+     * 按实体映射转换局部 SET 的单个赋值，普通 Getter 和绑定 Getter 的返回值均可直接传入。
+     *
+     * <p>枚举转换复用实体 DSL 的同一份写值计划，null 保持 null；仅处理传入值，不读取其他属性或触发字段填充。
+     * 返回值用于 {@code WriteSpec} 的赋值 Map，后续字段 codec、加密和方言转换仍由表单执行链处理。
+     * 本方法只做映射，字段可写性、版本更新规则和数据范围由调用方使用的写入入口落实。</p>
+     *
+     * @param type 实体类型
+     * @param propertyName 实体属性名，也接受实体元数据支持的列名
+     * @param value 原始赋值，允许 null
+     * @return 完成实体映射的赋值
+     */
+    public Object writeValue(Class<?> type, String propertyName, Object value) {
+        EntityFieldMetadata field = metadata(type).field(propertyName);
+        return entityValues(type).normalizeWriteValue(field.columnName(), value);
     }
 
     /**

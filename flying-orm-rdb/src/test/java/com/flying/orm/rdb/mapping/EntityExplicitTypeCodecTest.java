@@ -26,6 +26,17 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class EntityExplicitTypeCodecTest {
 
     @Test
+    void publicPropertyValuesLeaveFieldCodecEncodingToFormExecution() {
+        EntityTypeMappingRegistry mappings = textMappings(new CountingTextCodec());
+        try (EntityModelRegistry models = textModels(mappings)) {
+            assertEquals("active", models.writeValue(TextRecord.class, "member", TextMember.ACTIVE));
+            assertEquals("active", models.condition(TextRecord.class, "member", "=", TextMember.ACTIVE).value());
+            CharSequence text = new StringBuilder("payload");
+            assertSame(text, models.writeValue(TextRecord.class, "text", text));
+        }
+    }
+
+    @Test
     void rawPlansDecodeRecordBeanAndEnumMembersOnceIncludingNullResults() {
         CountingTextCodec codec = new CountingTextCodec();
         EntityTypeMappingRegistry mappings = textMappings(codec);

@@ -335,6 +335,32 @@ Mono<Long> deleted = repository.createDelete().in(User::getId, List.of(1L, 2L)).
 
 投影 `fetch()` 返回部分实体；Bean 未选择的属性保留构造器和字段初始化值，record 未选择的组件使用 Java 默认值。旧 `execute()/one()/page()` 保留完整实体约束；动态投影可用 `executeRows()`。实体也支持 `or`、`andGroup`、`between`、`isNull`、`isNotNull` 和 `where(property, operator, value)`；原有 `and(property, operator, value)` 仍可使用。
 
+### 按实体属性名转换条件和局部赋值
+
+封装层只有属性名和值时，使用当前客户端的 `EntityModelRegistry`。例如 `Account.state` 使用 [注解示例](ANNOTATIONS.md#枚举加密与脱敏) 中的 `UserStatus`，并映射到 `state_code` 列：
+
+```java
+EntityModelRegistry models = forms.entityModels();
+EntityMetadata<Account> metadata = models.metadata(Account.class);
+String column = metadata.field("state").columnName();
+
+// ACTIVE 转为 @EnumValue 声明的 "A"；同一条件用于查询、分页、更新和删除。
+ConditionGroup where = ConditionGroup.and()
+    .add(models.condition(Account.class, "state", "=", UserStatus.ACTIVE))
+    .build();
+QuerySpec query = QuerySpec.of(metadata.toDynamicForm(), where);
+Flux<Account> rows = forms.select(query, Account.class);
+Mono<PageResult<Account>> page = forms.page(query, PageQuery.of(1, 20), Account.class);
+
+// account.getState() 返回 DISABLED 时转换为 "D"；显式 null 仍保留。
+Map<String, Object> values = new LinkedHashMap<>();
+values.put(column, models.writeValue(Account.class, "state", account.getState()));
+Mono<Long> updated = forms.update(WriteSpec.update(metadata.toDynamicForm(), values, where));
+Mono<Long> deleted = forms.delete(WriteSpec.delete(metadata.toDynamicForm(), where));
+```
+
+绑定 Getter 可先取值，例如 `Supplier<UserStatus> getter = account::getState`，再将 `getter.get()` 传入 `writeValue`。`condition` 同时支持 `in`、`between` 等多值条件；自定义运算符使用带 `TermRegistry` 的重载，传实际 renderer 的 `terms()`。转换后的值继续走表单执行链；封装层保留字段可写性、乐观锁和 Scope 的原有检查。
+
 ## 写入与批量
 
 ### 单条插入、范围更新、逻辑删除
