@@ -18,6 +18,12 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class EntityMappingEventSnapshotTest {
 
     @Test
+    void valueReaderDoesNotKeepATestOnlyListenerDispatcher() {
+        assertThrows(NoSuchMethodException.class, () -> EntityValues.class.getDeclaredMethod(
+                "read", Object.class, EntityMappingListener.class));
+    }
+
+    @Test
     void snapshotsOnlyTheTopLevelMapAndKeepsNestedValuesByReference() {
         List<Object> nested = new ArrayList<>(List.of("value"));
         byte[] payload = new byte[]{1, 2, 3};
@@ -54,16 +60,16 @@ class EntityMappingEventSnapshotTest {
     void listenerFailureRemainsThePrimaryFailureWithoutMiningItsWrapper() {
         SyntheticVirtualMachineError nestedFatal = new SyntheticVirtualMachineError();
         CompletionException listenerFailure = new CompletionException(nestedFatal);
-        EntityValues<TestEntity> values = EntityValues.createUncached(TestEntity.class);
+        EntityMappingListener listener = EntityMappingListener.compose(new EntityMappingListener() {
+            @Override
+            public void beforeWrite(EntityMappingEvent ignored) {
+                throw listenerFailure;
+            }
+        });
 
         CompletionException actual = assertThrows(
                 CompletionException.class,
-                () -> values.read(new TestEntity(1L), new EntityMappingListener() {
-                    @Override
-                    public void beforeWrite(EntityMappingEvent ignored) {
-                        throw listenerFailure;
-                    }
-                }));
+                () -> listener.beforeWrite(event(Map.of("id", 1L))));
 
         assertSame(listenerFailure, actual);
     }

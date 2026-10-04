@@ -6,7 +6,6 @@ import com.flying.orm.core.internal.value.OwnedBindableValues;
 import com.flying.orm.rdb.batch.BatchMemoryBudget;
 import com.flying.orm.rdb.execution.ProtectedBatchRows;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
-import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.internal.plan.SqlExecutionStatements;
 import com.flying.orm.rdb.result.DynamicRow;
 
@@ -24,12 +23,11 @@ import java.util.Objects;
  * @author wangr
  * @version v1.0
  */
-@InternalApi
 public final class ProtectedOwnerBatchPlan {
 
-    public static final int MAX_ROWS = 500;
+    private static final int MAX_ROWS = 500;
     /** Preferred combined statement width; a wider individual query is planned on its own. */
-    public static final int MAX_PARAMETERS = 2_000;
+    private static final int MAX_PARAMETERS = 2_000;
     private static final String SLOT_COLUMN = "flying_orm_owner_slot";
     private static final long PLAN_OVERHEAD_BYTES = 64L;
 

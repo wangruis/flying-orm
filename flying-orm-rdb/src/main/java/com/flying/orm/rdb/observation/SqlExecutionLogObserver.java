@@ -1,7 +1,6 @@
 package com.flying.orm.rdb.observation;
 
 import com.flying.orm.core.sql.render.SqlRequest;
-import com.flying.orm.rdb.internal.InternalApi;
 
 import java.util.List;
 import java.util.Objects;
@@ -82,7 +81,6 @@ public final class SqlExecutionLogObserver
     }
 
     @Override
-    @InternalApi
     public void onResourceCleanup(ResourceCleanupObservation observation) {
         ResourceCleanupObservation safeObservation = Objects.requireNonNull(
                 observation, "resource cleanup observation must not be null");

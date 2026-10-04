@@ -68,7 +68,7 @@ class R2dbcProtectedBatchSideIndexBatchingTest {
     void ordinaryChunkDoesNotPreparePerRowProtectionState() {
         List<ProtectedBatchRows.RowView> rows = new ArrayList<>();
         for (int index = 0; index < 500; index++) {
-            rows.add(ProtectedBatchRows.decode(new Object[]{"plain", (long) index}, 2));
+            rows.add(ProtectedBatchRows.admit(new Object[]{"plain", (long) index}, 2, Long.MAX_VALUE, "test bytes"));
         }
         R2dbcBatchWriterChunks.BatchChunk chunk = new R2dbcBatchWriterChunks.BatchChunk(0, 0L, rows, 0L);
         R2dbcProtectedBatchSideIndex.Prepared prepared = new R2dbcProtectedBatchSideIndex(
@@ -293,8 +293,8 @@ class R2dbcProtectedBatchSideIndexBatchingTest {
 
     private static ProtectedBatchRows.RowView row(ProtectedWriteWork work) {
         Object[] parameters = work.writeRequest().parameters().toArray();
-        return ProtectedBatchRows.decode(
-                ProtectedBatchRows.extend(parameters, work), parameters.length);
+        return ProtectedBatchRows.admit(
+                ProtectedBatchRows.extend(parameters, work), parameters.length, Long.MAX_VALUE, "test bytes");
     }
 
     private static ProtectedWriteWork updateWork(long ownerId) {

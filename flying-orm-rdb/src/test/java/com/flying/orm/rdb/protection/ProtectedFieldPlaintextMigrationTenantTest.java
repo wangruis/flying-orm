@@ -27,7 +27,8 @@ class ProtectedFieldPlaintextMigrationTenantTest {
             Map<String, Object> pending = migration.valuesNeedingPlaintextMigration(form,
                     Map.of("secret", "trusted legacy"), Map.of(), scope, codecs);
             assertEquals(Map.of("secret", "trusted legacy"), pending);
-            Map<String, Object> target = runtime.prepareWrite(form, pending, scope, codecs).values();
+            Map<String, Object> target = runtime.writeOperation(
+                    form, ProtectedFormLayout.physical(form), scope, codecs).prepare(pending).values();
 
             assertTrue(migration.valuesNeedingPlaintextMigration(form,
                     Map.of("secret", "trusted legacy"), target, scope, codecs).isEmpty());
@@ -40,8 +41,8 @@ class ProtectedFieldPlaintextMigrationTenantTest {
         ValueCodecRegistry codecs = ValueCodecRegistry.standard();
         try (ProtectedFieldKeyRing keys = ProtectedFieldKeyRing.single("v1", new byte[32]);
              ProtectedFieldRuntime runtime = ProtectedFieldRuntime.create(keys)) {
-            Map<String, Object> target = runtime.prepareWrite(form, Map.of("secret", "tenant seven"),
-                    DataScope.tenant("tenant_id", 7L), codecs).values();
+            Map<String, Object> target = runtime.writeOperation(form, ProtectedFormLayout.physical(form),
+                    DataScope.tenant("tenant_id", 7L), codecs).prepare(Map.of("secret", "tenant seven")).values();
 
             assertThrows(ProtectedFieldException.class,
                     () -> ProtectedFieldReprotection.create(keys).valuesNeedingPlaintextMigration(form, Map.of(), target,

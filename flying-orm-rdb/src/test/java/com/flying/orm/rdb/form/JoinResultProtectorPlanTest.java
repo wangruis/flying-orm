@@ -12,6 +12,7 @@ import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.protection.ProtectedFieldKeyRing;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
+import com.flying.orm.rdb.protection.ProtectedFormLayout;
 import com.flying.orm.rdb.result.DynamicRow;
 import org.junit.jupiter.api.Test;
 
@@ -144,8 +145,9 @@ class JoinResultProtectorPlanTest {
             FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
                     SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.h2())
                     .withProtectedFields(runtime);
-            Object ciphertext = runtime.prepareWrite(
-                    people, Map.of("phone", "13800138000"), DataScope.none(), renderer.valueCodecs())
+            Object ciphertext = runtime.writeOperation(
+                    people, ProtectedFormLayout.physical(people), DataScope.none(), renderer.valueCodecs())
+                                       .prepare(Map.of("phone", "13800138000"))
                                        .ownedValues()
                                        .get("phone");
             Map<String, Object> values = new LinkedHashMap<>();

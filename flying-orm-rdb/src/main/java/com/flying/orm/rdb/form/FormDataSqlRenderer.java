@@ -91,8 +91,7 @@ public final class FormDataSqlRenderer {
      *
      * @return 不可变的条件渲染器
      */
-    @InternalApi
-    public SqlRenderer conditionRenderer() {
+    SqlRenderer conditionRenderer() {
         return support.conditionRenderer;
     }
 

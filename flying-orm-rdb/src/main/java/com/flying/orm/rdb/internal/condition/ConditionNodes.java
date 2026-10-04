@@ -5,7 +5,6 @@ import com.flying.orm.core.condition.ConditionNode;
 import com.flying.orm.core.condition.LogicalOperator;
 import com.flying.orm.core.condition.StructuredConditionInput;
 import com.flying.orm.core.condition.TermCondition;
-import com.flying.orm.rdb.internal.InternalApi;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -25,7 +24,6 @@ import java.util.function.UnaryOperator;
  * @author wangr
  * @version v4.1.1
  */
-@InternalApi
 public final class ConditionNodes {
 
     private ConditionNodes() {

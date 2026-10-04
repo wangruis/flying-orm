@@ -2,7 +2,6 @@ package com.flying.orm.rdb.internal.plan;
 
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.core.sql.render.SqlStatementPlan;
-import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.internal.dialect.DatabaseProduct;
 
 import java.util.Objects;
@@ -13,7 +12,6 @@ import java.util.Objects;
  * @author wangr
  * @version v1.0
  */
-@InternalApi
 public final class SqlExecutionStatements {
 
     private SqlExecutionStatements() {

@@ -164,7 +164,8 @@ public interface SyncSqlExecutor {
         return rowsUpdatedReturningKeys(request, options);
     }
 
-    /** 在同一条上层连接上完成受保护字段业务写入和辅助关系维护。 */
+    /** ORM 内部工作单元，在同一条上层连接上完成受保护字段业务写入和辅助关系维护。 */
+    @InternalApi
     default SqlWriteResult protectedWrite(ProtectedWriteWork work, SqlExecutionOptions options) {
         Objects.requireNonNull(work, "protected write work must not be null");
         Objects.requireNonNull(options, "sql execution options must not be null");

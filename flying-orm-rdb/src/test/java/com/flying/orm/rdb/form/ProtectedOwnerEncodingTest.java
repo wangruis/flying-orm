@@ -211,7 +211,8 @@ class ProtectedOwnerEncodingTest {
 
         private Mono<BatchExecutionEvidence> batch(BatchWriteRequest request) {
             return Flux.from(request.rows()).doOnNext(row -> accept(
-                    ProtectedBatchRows.work(row, request.parameterCount()))).count().map(count -> {
+                    ProtectedBatchRows.admit(row, request.parameterCount(), Long.MAX_VALUE, "test bytes").work()))
+                    .count().map(count -> {
                         BatchExecutionEvidence.Accumulator facts = new BatchExecutionEvidence.Accumulator();
                         facts.accept(count);
                         facts.succeeded(count, BatchAffectedRows.known(count));

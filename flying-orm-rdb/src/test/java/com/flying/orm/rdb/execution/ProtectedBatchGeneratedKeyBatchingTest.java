@@ -63,7 +63,7 @@ class ProtectedBatchGeneratedKeyBatchingTest {
                             List.of(new ProtectedWriteWork.FieldTokens("secret",
                                     IntStream.range(0, 120).mapToObj(index -> new byte[4]).toList())));
                     Object[] row = ProtectedBatchRows.extend(new Object[]{"cipher"}, work);
-                    assertTrue(ProtectedBatchRows.estimateRowBytes(row, 1) < 8_000L);
+                    assertTrue(ProtectedBatchRows.admit(row, 1, 8_000L, "test bytes").estimatedBytes() < 8_000L);
                     BatchWriteRequest request = BatchWriteRequests.request(
                             base.writeRequest().sql(), 1, List.of(String.class), SqlBindMarkerStyle.CANONICAL,
                             Flux.<Object[]>just(row), new BatchWriteOptions(1, 1, 8_000L, 8_000L),

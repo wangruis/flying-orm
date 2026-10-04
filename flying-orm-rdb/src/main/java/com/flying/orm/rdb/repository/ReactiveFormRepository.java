@@ -11,9 +11,12 @@ import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.aggregate.AggregateRow;
 import com.flying.orm.rdb.aggregate.AggregateSpec;
 import com.flying.orm.rdb.form.ReactiveFormClient;
+import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.lifecycle.ReactiveEntityListener;
 import com.flying.orm.rdb.internal.mapping.EntityValues;
 import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.mapping.EntityQueryDefaults;
+import com.flying.orm.rdb.lock.LockingReadSpec;
 import com.flying.orm.rdb.lock.ReadLock;
 import com.flying.orm.rdb.operator.EntityDmlDeleteOperator;
 import com.flying.orm.rdb.operator.EntityDmlOperator;
@@ -33,8 +36,8 @@ import java.util.Objects;
  * 逻辑删除、乐观锁、批量 SQL 执行事实、执行保护和异常分类继续统一走 {@link ReactiveFormClient}。</p>
  *
  * <p>内部职责已经分开：单实体写入由 {@link ReactiveRepositoryEntityWriter} 负责，批量协调由
- * {@link ReactiveRepositoryBatchCoordinator} 负责，查询规格和分页结果由 {@link ReactiveRepositoryReadMapper}
- * 负责，生命周期顺序由 {@link ReactiveRepositoryLifecycleSupport} 负责。本门面只保留使用者入口，
+ * {@link ReactiveRepositoryBatchCoordinator} 负责，查询直接复用实体查询规格和表单客户端，
+ * 生命周期顺序由 {@link ReactiveRepositoryLifecycleSupport} 负责。本门面只保留使用者入口，
  * 带 Scope、乐观锁和执行选项的组合由实体操作符及写入协作者表达。</p>
  *
  * <p>Repository 创建后不可变，可以并发共享。所有 Mono/Flux 都是惰性的；真正的实体转换、连接获取和 SQL
@@ -55,7 +58,8 @@ public final class ReactiveFormRepository<T> {
     private final ReactiveEntityListener<T> listener;
     private final ReactiveRepositoryEntityWriter<T> entityWriter;
     private final ReactiveRepositoryBatchOperations<T> batchOperations;
-    private final ReactiveRepositoryReadMapper<T> readMapper;
+    private final EntityMetadata<T> metadata;
+    private final ReactiveRepositoryLifecycleSupport<T> lifecycle;
 
     private ReactiveFormRepository(ReactiveFormClient client,
                                    DynamicForm form,
@@ -67,18 +71,17 @@ public final class ReactiveFormRepository<T> {
         this.entityType = Objects.requireNonNull(type, "repository type must not be null");
         this.entityValues = Objects.requireNonNull(entityValues, "repository entity values must not be null");
         this.listener = listener;
-        EntityMetadata<T> metadata = client.entityModels().metadata(entityType);
+        this.metadata = client.entityModels().metadata(entityType);
         this.form = RepositoryLogicDeletes.bind(metadata, boundForm);
         RepositoryEntityIdSupport<T> ids = RepositoryEntityIdSupport.create(
                 metadata, client.entityModels());
-        ReactiveRepositoryLifecycleSupport<T> lifecycle =
+        this.lifecycle =
                 new ReactiveRepositoryLifecycleSupport<>(metadata, listener);
         this.entityWriter = new ReactiveRepositoryEntityWriter<>(
                 client, this.form, metadata, this.entityValues, lifecycle, ids);
         ReactiveRepositoryBatchCoordinator<T> batchCoordinator = new ReactiveRepositoryBatchCoordinator<>(metadata,
                 this.entityValues, lifecycle, ids);
         this.batchOperations = new ReactiveRepositoryBatchOperations<>(client, this.form, batchCoordinator);
-        this.readMapper = new ReactiveRepositoryReadMapper<>(client, this.form, entityType, metadata, lifecycle);
     }
 
     /**
@@ -155,17 +158,28 @@ public final class ReactiveFormRepository<T> {
 
     public Mono<Long> physicalDelete(ConditionGroup where) { return entityWriter.physicalDelete(conditions(where)); }
 
-    public Flux<T> select(ConditionGroup where) { return readMapper.select(conditions(where), null, null); }
+    public Flux<T> select(ConditionGroup where) {
+        return lifecycle.postLoad(client.select(query(where), entityType));
+    }
     /** 在订阅时按受控锁读取当前实体；调用方决定事务范围。 */
     public Flux<T> lockingRead(ConditionGroup where, ReadLock lock) {
-        return readMapper.lockingRead(conditions(where), lock);
+        return lifecycle.postLoad(client.lockingRead(LockingReadSpec.of(query(where),
+                Objects.requireNonNull(lock, "repository read lock must not be null")), entityType));
     }
     /** 在当前 Repository 绑定的表单上执行类型化聚合。 */
     public Flux<AggregateRow> aggregate(AggregateSpec spec) {
         return client.aggregate(requireRepositoryAggregate(spec));
     }
     public Mono<PageResult<T>> page(ConditionGroup where, PageQuery page) {
-        return readMapper.page(conditions(where), page, null, null);
+        QuerySpec query = query(where);
+        if (!page.sorts().isEmpty()) {
+            query = query.withSorts(page.sorts());
+        }
+        return client.page(query, page, entityType).flatMap(lifecycle::postLoad);
+    }
+
+    private QuerySpec query(ConditionGroup where) {
+        return EntityQueryDefaults.query(form, metadata, conditions(where), client.defaultFieldScope());
     }
 
     private ConditionGroup conditions(ConditionGroup where) {

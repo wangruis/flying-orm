@@ -143,7 +143,8 @@ class JdbcOwnerRestrictedBatchUpdateTest {
 
     private static ProtectedBatchRows.RowView row(ProtectedWriteWork work) {
         Object[] parameters = work.writeRequest().parameters().toArray();
-        return ProtectedBatchRows.decode(ProtectedBatchRows.extend(parameters, work), parameters.length);
+        return ProtectedBatchRows.admit(
+                ProtectedBatchRows.extend(parameters, work), parameters.length, Long.MAX_VALUE, "test bytes");
     }
 
     private static ProtectedWriteWork work(long id, String value) {

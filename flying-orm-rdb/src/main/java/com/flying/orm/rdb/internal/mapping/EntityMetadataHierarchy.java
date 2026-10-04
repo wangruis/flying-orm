@@ -1,6 +1,5 @@
 package com.flying.orm.rdb.internal.mapping;
 
-import com.flying.orm.rdb.internal.InternalApi;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -16,7 +15,6 @@ import java.util.Optional;
  * @author wangr
  * @version v3.3
  */
-@InternalApi
 public final class EntityMetadataHierarchy {
 
     private EntityMetadataHierarchy() {

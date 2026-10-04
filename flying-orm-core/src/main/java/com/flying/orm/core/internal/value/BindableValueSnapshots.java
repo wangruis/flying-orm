@@ -89,19 +89,11 @@ public final class BindableValueSnapshots {
     }
 
     public static Object immutableScalar(Object value, Class<?> arrayComponentType) {
-        return immutableScalar(value, arrayComponentType, BufferSnapshot.READABLE);
-    }
-
-    public static Object immutableScalar(Object value,
-                                         Class<?> arrayComponentType,
-                                         BufferSnapshot bufferSnapshot) {
-        Objects.requireNonNull(bufferSnapshot, "buffer snapshot mode must not be null");
         if (value == null) {
             return null;
         }
         if (value instanceof ByteBuffer buffer) {
-            return bufferSnapshot == BufferSnapshot.STATE
-                    ? copyBufferState(buffer) : copyReadableBuffer(buffer);
+            return copyReadableBuffer(buffer);
         }
         if (value instanceof CharSequence text && !(text instanceof String)) {
             return copyText(text, arrayComponentType);
@@ -112,26 +104,11 @@ public final class BindableValueSnapshots {
         return value;
     }
 
-    public enum BufferSnapshot {
-        READABLE,
-        STATE
-    }
-
     private static ByteBuffer copyReadableBuffer(ByteBuffer value) {
         ByteBuffer source = value.duplicate().order(value.order());
         ByteBuffer copy = ByteBuffer.allocate(source.remaining()).order(value.order());
         copy.put(source).flip();
         return copy.asReadOnlyBuffer().order(value.order());
-    }
-
-    private static ByteBuffer copyBufferState(ByteBuffer value) {
-        ByteBuffer source = value.duplicate().order(value.order());
-        int position = source.position();
-        int limit = source.limit();
-        source.position(0);
-        ByteBuffer copy = ByteBuffer.allocate(limit).order(value.order());
-        copy.put(source).flip().position(position);
-        return copy;
     }
 
     private static Object copyText(CharSequence value, Class<?> componentType) {

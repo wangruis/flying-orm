@@ -74,13 +74,12 @@ final class R2dbcProtectedWriteExecutor {
             return Mono.just(List.of(work.knownOwner()));
         }
         SqlRequest request = work.ownerQuery();
-        SqlExecutionOptions ownerReadOptions = ProtectedWriteWork.ownerReadOptions(options);
         Statement statement = session.prepareStatement(
                 connection, request, OwnedBindableValues.ownedValues(request.parameters()));
         Flux<DynamicRow> rows = Flux.from(statement.execute())
                    .concatMap(result -> R2dbcExecutionSession.mapRows(
-                           result, ownerReadOptions, largeObjects), 1);
-        return session.protectRows(rows, request.sql(), ownerReadOptions)
+                           result, options, largeObjects), 1);
+        return session.protectRows(rows, request.sql(), options)
                    .map(work::ownerFrom)
                    .collectList();
     }

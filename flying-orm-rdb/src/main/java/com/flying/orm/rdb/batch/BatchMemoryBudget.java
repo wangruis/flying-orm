@@ -8,7 +8,6 @@ import java.lang.reflect.Array;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
-import java.time.temporal.TemporalAccessor;
 import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Collection;
@@ -48,25 +47,6 @@ public final class BatchMemoryBudget {
             throw new IllegalArgumentException("batch row estimate length is out of bounds");
         }
         return estimateRowBytes(safeRow, length, new IdentityHashMap<>());
-    }
-
-    /**
-     * 单次识别并估算不含嵌套或可变载荷的普通标量行；需要图遍历时返回 {@code -1}。
-     * 该快路径让批量所有权检查复用估算结果，不削减未知值的失败闭合处理。
-     */
-    public static long estimateShallowScalarRowBytes(Object[] row) {
-        if (row == null) {
-            return REFERENCE_BYTES;
-        }
-        long total = ROW_OVERHEAD + (long) row.length * REFERENCE_BYTES;
-        for (Object value : row) {
-            long bytes = shallowScalarBytes(value);
-            if (bytes < 0L) {
-                return -1L;
-            }
-            total = saturatedAdd(total, bytes);
-        }
-        return total;
     }
 
     /**
@@ -197,16 +177,6 @@ public final class BatchMemoryBudget {
                 return entry.getKey();
             }
         };
-    }
-
-    private static long shallowScalarBytes(Object value) {
-        if (value == null) return REFERENCE_BYTES;
-        if (value instanceof String text) return 24L + utf8Length(text);
-        if (value instanceof BigDecimal decimal) return estimateBigDecimalBytes(decimal);
-        if (value instanceof BigInteger integer) return estimateBigIntegerBytes(integer);
-        if (value instanceof Number || value instanceof Boolean || value instanceof Character) return 24L;
-        if (value instanceof Enum<?> || value instanceof TemporalAccessor) return 64L;
-        return -1L;
     }
 
     /**

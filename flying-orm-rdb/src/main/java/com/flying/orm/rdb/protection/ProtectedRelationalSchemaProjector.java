@@ -72,7 +72,6 @@ public final class ProtectedRelationalSchemaProjector {
      * <p>唯一索引还必须与 CRUD 的稳定令牌声明一致，避免密钥轮换期间接受重复业务值。
      * 这是 legacy 与完整关系 Schema 共用的物理关系规则，不是业务代码的索引改写入口。</p>
      */
-    @InternalApi
     public static List<String> projectIndexColumns(
             DynamicForm logicalForm,
             List<String> columns,

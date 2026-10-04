@@ -3,7 +3,6 @@ package com.flying.orm.rdb.jdbc;
 import static com.flying.orm.core.internal.error.ThrowableGraph.addSuppressedIfAcyclic;
 import static com.flying.orm.core.internal.error.ThrowableGraph.findVirtualMachineError;
 
-import com.flying.orm.rdb.execution.BatchRowSnapshotter;
 import com.flying.orm.rdb.batch.BatchMemoryLimitExceededException;
 import com.flying.orm.rdb.execution.ProtectedBatchRows;
 import org.reactivestreams.Publisher;
@@ -139,7 +138,7 @@ final class JdbcBatchRows implements Subscriber<Object[]>, AutoCloseable {
                                 Math.addExact(acceptedCount, 1L));
                     }
                     // BatchWriteRequest 约定 onNext 后整行所有权转移；这里只校验形状并记录预算。
-                    ProtectedBatchRows.RowView admitted = BatchRowSnapshotter.snapshotView(
+                    ProtectedBatchRows.RowView admitted = ProtectedBatchRows.admit(
                             safeRow, parameterCount, maxRowBytes, "row bytes");
                     evidence.accept(1L);
                     acceptedCount = Math.addExact(acceptedCount, 1L);

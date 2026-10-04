@@ -3,7 +3,6 @@ package com.flying.orm.rdb.internal.protection;
 import com.flying.orm.rdb.batch.BatchMemoryBudget;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.execution.SqlWriteResult;
-import com.flying.orm.rdb.internal.InternalApi;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -23,10 +22,9 @@ import java.util.Set;
  * @author wangr
  * @version v1.0
  */
-@InternalApi
 public final class ProtectedReplacementBatchPlan {
 
-    public static final int MAX_OPERATIONS = 500;
+    private static final int MAX_OPERATIONS = 500;
     /** Preferred combined binding count; a wider individual replacement occupies its own segment. */
     public static final int MAX_PARAMETERS = 2_000;
     private static final long OPERATION_OVERHEAD_BYTES = 48L;

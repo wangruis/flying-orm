@@ -1,6 +1,5 @@
 package com.flying.orm.rdb.internal.template;
 
-import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.internal.dialect.DatabaseProduct;
 
 import java.util.Objects;
@@ -15,7 +14,6 @@ import java.util.Objects;
  * @date 2026-08-24
  * @version v3.0
  */
-@InternalApi
 public final class SqlLexicalScanner {
 
     private static final Rules GENERIC = new Rules(false, true, true, true, true, true, true, true, false, true);
@@ -38,7 +36,7 @@ public final class SqlLexicalScanner {
     }
 
     /** 驱动产品未知时使用可移植注释规则，但仍识别全部受支持引用边界。 */
-    public static Rules portableRules() {
+    static Rules portableRules() {
         return PORTABLE;
     }
 

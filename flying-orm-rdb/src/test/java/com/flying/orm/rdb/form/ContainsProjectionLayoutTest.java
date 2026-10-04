@@ -19,6 +19,7 @@ import com.flying.orm.rdb.mapping.RowMapper;
 import com.flying.orm.rdb.protection.ProtectedConditions;
 import com.flying.orm.rdb.protection.ProtectedFieldKeyRing;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
+import com.flying.orm.rdb.protection.ProtectedFormLayout;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
 import org.junit.jupiter.api.Test;
@@ -147,9 +148,9 @@ class ContainsProjectionLayoutTest {
     @Test
     void reactivePublicQueryKeepsProjectionStateInsideEachSubscription() {
         try (Fixture fixture = new Fixture()) {
-            Object encrypted = fixture.runtime.prepareWrite(fixture.form,
-                    Map.of("id", 1L, "secret", "alphabet", "note", "seed"),
-                    DataScope.none(), ValueCodecRegistry.standard()).ownedValues().get("secret");
+            Object encrypted = fixture.runtime.writeOperation(fixture.form, ProtectedFormLayout.physical(fixture.form),
+                    DataScope.none(), ValueCodecRegistry.standard())
+                    .prepare(Map.of("id", 1L, "secret", "alphabet", "note", "seed")).ownedValues().get("secret");
             LinkedHashMap<String, Object> raw = new LinkedHashMap<>();
             raw.put("id", 1L);
             raw.put("secret", encrypted);

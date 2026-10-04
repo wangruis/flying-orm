@@ -85,7 +85,7 @@ public final class StableEncoder {
     }
 
     /** 写入缓冲区从 position 到 limit 的内容，不改变调用方状态。 */
-    public StableEncoder bytes(String tag, ByteBuffer value) {
+    StableEncoder bytes(String tag, ByteBuffer value) {
         ensureOpen();
         ByteBuffer remaining = Objects.requireNonNull(value, "stable buffer must not be null")
                                       .asReadOnlyBuffer();

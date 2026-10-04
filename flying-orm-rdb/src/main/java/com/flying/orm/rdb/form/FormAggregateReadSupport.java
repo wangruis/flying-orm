@@ -87,7 +87,6 @@ public final class FormAggregateReadSupport {
     }
 
     /** SQL Server 的稳定数值聚合规则在装配时确定，规划请求时只读取这个不可变事实。 */
-    @InternalApi
     public boolean sqlServerDialect() {
         return renderer.sqlServerDialect();
     }
@@ -98,7 +97,6 @@ public final class FormAggregateReadSupport {
     }
 
     /** MIN/MAX 与结果别名排序复用普通查询的稳定 OFFSET_TIME 排序约束。 */
-    @InternalApi
     public void requireStableOffsetTimeOrdering(DynamicField field) {
         renderer.requireStableOffsetTimeOrdering(field);
     }
@@ -113,7 +111,6 @@ public final class FormAggregateReadSupport {
     }
 
     /** 聚合包只经这个窄桥复用 form 包内的字段用途和查询形状审批。 */
-    @InternalApi
     public FieldUseSnapshot approveAggregate(String resource,
                                              FieldUseRequirements requirements,
                                              FieldScope scope,
@@ -130,31 +127,12 @@ public final class FormAggregateReadSupport {
                 projectionCount, groupCount, aggregateCount, havingNodeCount, sortCount);
     }
 
-    /** HAVING 字段先按结果布局校验和编码，再映射到 planner 已声明的安全 SQL 表达式。 */
-    public SqlFragment renderHaving(DynamicForm resultForm,
-                                    ConditionGroup having,
-                                    Map<String, String> expressionsByAlias) {
-        return renderHaving(resultForm, having, expressionsByAlias, null, null);
-    }
-
     /** 只在装配关系 term 时创建 HAVING 的外层限定表达式。 */
     public boolean hasCorrelatedTerms() {
         return renderer.conditionRenderer().hasCorrelatedTerms();
     }
 
-    /** 内部聚合组合边界：关联表达式只从同一份已验证分组/聚合声明生成。 */
-    @InternalApi
-    public SqlFragment renderHaving(DynamicForm resultForm,
-                                    ConditionGroup having,
-                                    Map<String, String> expressionsByAlias,
-                                    Map<String, String> correlatedExpressionsByAlias,
-                                    String outerQualifier) {
-        return renderHaving(resultForm, having, expressionsByAlias, correlatedExpressionsByAlias,
-                            outerQualifier, null);
-    }
-
     /** Alias SQL and value semantics come from the same already validated aggregate declaration. */
-    @InternalApi
     public SqlFragment renderHaving(DynamicForm resultForm,
                                     ConditionGroup having,
                                     Map<String, String> expressionsByAlias,

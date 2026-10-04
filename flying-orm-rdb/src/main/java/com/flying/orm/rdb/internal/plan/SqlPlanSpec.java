@@ -55,13 +55,13 @@ public record SqlPlanSpec(String dialect,
     }
 
     /** @return 规范化 schema；无 schema 时返回空字符串。 */
-    public String schema() {
+    String schema() {
         int separator = table.indexOf('.');
         return separator < 0 ? "" : table.substring(0, separator);
     }
 
     /** @return 不带 schema 的规范化物理表名。 */
-    public String physicalTable() {
+    String physicalTable() {
         int separator = table.indexOf('.');
         return separator < 0 ? table : table.substring(separator + 1);
     }

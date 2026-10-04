@@ -16,6 +16,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ProtectionSurfaceConvergenceTest {
 
     @Test
+    void runtimeDoesNotKeepATestOnlyWritePreparationFacade() {
+        assertThrows(NoSuchMethodException.class, () -> ProtectedFieldRuntime.class.getDeclaredMethod(
+                "prepareWrite", DynamicForm.class, java.util.Map.class,
+                com.flying.orm.core.scope.DataScope.class, com.flying.orm.core.codec.ValueCodecRegistry.class));
+    }
+
+    @Test
+    void physicalLayoutDoesNotNeedARuntimeForwarder() {
+        assertThrows(NoSuchMethodException.class,
+                () -> ProtectedFieldRuntime.class.getDeclaredMethod("physicalForm", DynamicForm.class));
+    }
+
+    @Test
     void operationPlansBelongToTheProtectedFieldRuntime() {
         assertThrows(ClassNotFoundException.class, () -> Class.forName(
                 "com.flying.orm.rdb.protection.ProtectedFieldOperationPlans"));
@@ -31,7 +44,7 @@ class ProtectionSurfaceConvergenceTest {
                             "projectIndexColumns", DynamicForm.class, List.class, boolean.class);
                     assertTrue(Modifier.isPublic(method.getModifiers()));
                     assertTrue(Modifier.isStatic(method.getModifiers()));
-                    assertTrue(method.isAnnotationPresent(InternalApi.class));
+                    assertTrue(method.getDeclaringClass().isAnnotationPresent(InternalApi.class));
                 });
     }
 }

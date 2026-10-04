@@ -12,7 +12,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ProtectedWriteWorkTest {
@@ -71,19 +70,9 @@ class ProtectedWriteWorkTest {
     }
 
     @Test
-    void ownerReadsHonorDeveloperOptionsWithoutAnInternalCeiling() {
-        SqlExecutionOptions unlimited = SqlExecutionOptions.unlimited();
-        assertSame(unlimited, ProtectedWriteWork.ownerReadOptions(unlimited));
-        SqlExecutionOptions large = SqlExecutionOptions.safeDefaults().withMaxRows(10_000L)
-                .withMaxResultBytes(128L * 1024 * 1024)
-                .withMaxLargeObjectBytes(32L * 1024 * 1024).withMaxLargeObjectChars(32_000_000L);
-        assertSame(large, ProtectedWriteWork.ownerReadOptions(large));
-        SqlExecutionOptions strict = SqlExecutionOptions.safeDefaults()
-                .withMaxRows(25L)
-                .withMaxResultBytes(1_024L)
-                .withMaxLargeObjectBytes(512L)
-                .withMaxLargeObjectChars(256L);
-        assertSame(strict, ProtectedWriteWork.ownerReadOptions(strict));
+    void workDescriptionDoesNotWrapUnchangedExecutionOptions() {
+        assertThrows(NoSuchMethodException.class, () -> ProtectedWriteWork.class.getDeclaredMethod(
+                "ownerReadOptions", SqlExecutionOptions.class));
     }
 
     @Test

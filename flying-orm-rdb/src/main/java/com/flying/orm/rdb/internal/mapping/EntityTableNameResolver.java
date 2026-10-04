@@ -14,23 +14,13 @@ final class EntityTableNameResolver {
     }
 
     /**
-     * 保留旧实体映射使用的限定字符串。
-     *
-     * <p>旧字符串只能表达 {@code schema.table}，不能表达 catalog。需要完整关系身份的 3.2
-     * 调用链必须使用 {@link #resolveIdentity(Class, EntityNamingStrategy)}。</p>
-     */
-    static String resolve(Class<?> type, EntityNamingStrategy namingStrategy) {
-        return resolveTable(type, namingStrategy);
-    }
-
-    /**
      * 直接从实体注解构造分段关系身份。
      *
      * <p>{@link TableName#value()} 中即使含有点号，也只会被当作完整表名保存。</p>
      */
-    static RelationIdentity resolveIdentity(Class<?> type, EntityNamingStrategy namingStrategy) {
+    static RelationIdentity resolveIdentity(Class<?> type) {
         Optional<TableName> tableDefinition = FlyingAnnotationReader.tableName(type);
-        String defaultName = namingStrategy.tableName(type);
+        String defaultName = EntityFieldNames.snakeCase(type.getSimpleName());
         String table = tableDefinition.map(TableName::value)
                                       .map(FlyingAnnotationReader::text)
                                       .orElse(null);
@@ -52,8 +42,8 @@ final class EntityTableNameResolver {
      * 已经没有歧义，只有旧式两段 value 才在这里按原有语义转换；更多段没有受支持的旧模型，严格
      * 关系入口会直接拒绝而不是猜测 catalog。</p>
      */
-    static RelationIdentity resolveRelationalIdentity(Class<?> type, EntityNamingStrategy namingStrategy) {
-        RelationIdentity identity = resolveIdentity(type, namingStrategy);
+    static RelationIdentity resolveRelationalIdentity(Class<?> type) {
+        RelationIdentity identity = resolveIdentity(type);
         if (hasExplicitNamespace(type) || !identity.table().contains(".")) {
             return identity;
         }
@@ -85,11 +75,6 @@ final class EntityTableNameResolver {
                                      .map(TableName::schema)
                                      .map(FlyingAnnotationReader::text)
                                      .isPresent();
-    }
-
-    /** 解析实体并返回兼容旧 API 的限定表名。 */
-    static String resolveTable(Class<?> type, EntityNamingStrategy namingStrategy) {
-        return resolveTable(resolveIdentity(type, namingStrategy));
     }
 
     /**

@@ -327,7 +327,8 @@ class FormEncryptedTypeCodecTest {
         }
 
         private DynamicRow plaintext(DynamicRow row) {
-            return runtime.transformResult(form, row, DataScope.none(), SensitiveDisplayMode.FULL, mappings.valueCodecs());
+            return runtime.resultOperation(form, DataScope.none(), SensitiveDisplayMode.FULL, mappings.valueCodecs())
+                    .transform(row);
         }
 
         @Override

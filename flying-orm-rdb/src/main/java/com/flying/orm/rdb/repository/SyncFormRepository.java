@@ -11,9 +11,12 @@ import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.aggregate.AggregateRow;
 import com.flying.orm.rdb.aggregate.AggregateSpec;
 import com.flying.orm.rdb.form.SyncFormClient;
+import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.internal.mapping.EntityValues;
 import com.flying.orm.rdb.lifecycle.ReactiveEntityListener;
 import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.mapping.EntityQueryDefaults;
+import com.flying.orm.rdb.lock.LockingReadSpec;
 import com.flying.orm.rdb.lock.ReadLock;
 import com.flying.orm.rdb.operator.SyncEntityDmlDeleteOperator;
 import com.flying.orm.rdb.operator.SyncEntityDmlOperator;
@@ -31,8 +34,8 @@ import java.util.Objects;
  * 的逻辑删除、乐观锁规则组织成表单规格，再交给 {@link SyncFormClient} 执行。SQL 从连接取得到结果返回
  * 全程走原生 JDBC。</p>
  *
- * <p>这个类故意只保留面向使用者的 Repository 方法。查询、单实体写入、批量执行和生命周期顺序分别放在
- * 独立协作者中，避免同步入口随着功能增加重新长成第二个 ORM 内核。</p>
+ * <p>查询直接复用实体查询规格和表单客户端；单实体写入、批量执行和生命周期顺序由各自的协作者负责，
+ * 不在 Repository 中重复实现 SQL 或字段映射。</p>
  *
  * <p>同步批量按有界缓冲顺序执行并返回实际 SQL 事实。每行完成生成键回填和辅助 SQL 后执行
  * POST；连接获取、释放与多语句一致性由上层提供和保证。</p>
@@ -51,7 +54,8 @@ public final class SyncFormRepository<T> {
     private final ReactiveEntityListener<T> listener;
     private final SyncRepositoryEntityWriter<T> entityWriter;
     private final SyncRepositoryBatchCoordinator<T> batchCoordinator;
-    private final SyncRepositoryReadMapper<T> readMapper;
+    private final EntityMetadata<T> metadata;
+    private final SyncRepositoryLifecycleSupport<T> lifecycle;
 
     private SyncFormRepository(SyncFormClient client,
                                DynamicForm form,
@@ -64,17 +68,16 @@ public final class SyncFormRepository<T> {
         this.entityValues = Objects.requireNonNull(entityValues, "repository entity values must not be null");
         this.listener = listener;
 
-        EntityMetadata<T> metadata = client.entityModels().metadata(type);
+        this.metadata = client.entityModels().metadata(type);
         this.form = RepositoryLogicDeletes.bind(metadata, boundForm);
         RepositoryEntityIdSupport<T> ids = RepositoryEntityIdSupport.create(
                 metadata, client.entityModels());
-        SyncRepositoryLifecycleSupport<T> lifecycle = new SyncRepositoryLifecycleSupport<>(
+        this.lifecycle = new SyncRepositoryLifecycleSupport<>(
                 metadata, listener, new SyncRepositoryAwaiter());
         this.entityWriter = new SyncRepositoryEntityWriter<>(
                 client, this.form, metadata, this.entityValues, lifecycle, ids);
         this.batchCoordinator = new SyncRepositoryBatchCoordinator<>(
                 client, this.form, metadata, this.entityValues, lifecycle, ids);
-        this.readMapper = new SyncRepositoryReadMapper<>(client, this.form, type, metadata, lifecycle);
     }
 
     /** 使用共享的实体元数据和字段策略创建同步 Repository。 */
@@ -137,16 +140,29 @@ public final class SyncFormRepository<T> {
 
     public long physicalDelete(ConditionGroup where) { return entityWriter.physicalDelete(conditions(where)); }
 
-    public List<T> select(ConditionGroup where) { return readMapper.select(conditions(where), null, null); }
+    public List<T> select(ConditionGroup where) {
+        return lifecycle.postLoad(client.select(query(where), entityType));
+    }
     /** 在调用方 JDBC 事务内按受控锁读取当前实体；事务生命周期仍归调用方。 */
     public List<T> lockingRead(ConditionGroup where, ReadLock lock) {
-        return readMapper.lockingRead(conditions(where), lock);
+        return lifecycle.postLoad(client.lockingRead(LockingReadSpec.of(query(where),
+                Objects.requireNonNull(lock, "repository read lock must not be null")), entityType));
     }
     /** 在当前 Repository 绑定的表单上执行类型化聚合。 */
     public List<AggregateRow> aggregate(AggregateSpec spec) {
         return client.aggregate(requireRepositoryAggregate(spec));
     }
-    public PageResult<T> page(ConditionGroup where, PageQuery page) { return readMapper.page(conditions(where), page, null, null); }
+    public PageResult<T> page(ConditionGroup where, PageQuery page) {
+        QuerySpec query = query(where);
+        if (!page.sorts().isEmpty()) {
+            query = query.withSorts(page.sorts());
+        }
+        return lifecycle.postLoad(client.page(query, page, entityType));
+    }
+
+    private QuerySpec query(ConditionGroup where) {
+        return EntityQueryDefaults.query(form, metadata, conditions(where), client.defaultFieldScope());
+    }
 
     private ConditionGroup conditions(ConditionGroup where) {
         return entityValues.normalizeCondition(where, client.entityRenderer().terms());

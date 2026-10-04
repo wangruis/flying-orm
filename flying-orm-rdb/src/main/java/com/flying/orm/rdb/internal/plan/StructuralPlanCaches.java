@@ -51,10 +51,6 @@ public final class StructuralPlanCaches implements MetadataCacheInvalidator {
     }
 
     /** 清理指定表的 SQL 计划；带 schema 时精确清理。 */
-    public void invalidateTable(String table) {
-        invalidate(table);
-    }
-
     @Override
     public void invalidate(String table) {
         String normalized = SqlPlanSpec.normalizeTable(table);

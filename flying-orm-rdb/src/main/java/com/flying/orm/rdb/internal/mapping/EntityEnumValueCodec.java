@@ -4,7 +4,6 @@ import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.rdb.codec.JdbcLegacyTemporalAdapter;
-import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.mapping.MappingException;
 import com.flying.orm.rdb.json.JsonValueCodec;
 import tools.jackson.databind.JsonNode;
@@ -28,7 +27,6 @@ import java.util.Objects;
  * @author wangr
  * @version v2.0.0
  */
-@InternalApi
 public final class EntityEnumValueCodec {
 
     private final Class<?> enumType;
@@ -46,11 +44,6 @@ public final class EntityEnumValueCodec {
         this.valueType = member.getType();
         this.constantsByValue = constantsByValue;
         this.absoluteTimestamp = absoluteTimestamp;
-    }
-
-    /** 根据元数据中的成员名创建访问计划；空成员名表示该字段不使用自定义枚举值。 */
-    public static EntityEnumValueCodec create(Class<?> enumType, String memberName) {
-        return create(enumType, memberName, DatabaseType.of("VARCHAR"));
     }
 
     /** 字段的存储语义决定绝对时间身份；显式文本映射仍保留原偏移量。 */
@@ -90,7 +83,7 @@ public final class EntityEnumValueCodec {
     }
 
     /** 把枚举常量转换成真正绑定到 SQL 的成员值。 */
-    public Object write(Object value) {
+    Object write(Object value) {
         if (value == null) {
             return null;
         }

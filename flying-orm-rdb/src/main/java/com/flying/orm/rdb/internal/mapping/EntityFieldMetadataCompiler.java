@@ -30,12 +30,11 @@ final class EntityFieldMetadataCompiler {
 
     static EntityFieldMetadata compile(Class<?> entityType,
                                        Field field,
-                                       EntityNamingStrategy namingStrategy,
                                        Optional<FlyingLogicDelete> classLogicDelete,
                                        boolean deferLogicDeleteLiteralDecoding) {
         Optional<TableField> flyingField = FlyingAnnotationReader.tableField(field);
         Optional<TableId> flyingId = FlyingAnnotationReader.tableId(field);
-        String columnName = columnName(field, namingStrategy, flyingId, flyingField);
+        String columnName = columnName(field, flyingId, flyingField);
         Optional<LogicDeleteValues> logicDelete = logicDelete(field, columnName, classLogicDelete);
         EntityFieldTypeResolver.EnumValueDefinition enumValue = EntityFieldTypeResolver.enumValue(field);
         EntityEnumStorage enumStorage = EntityFieldTypeResolver.enumStorage(field, enumValue);
@@ -96,7 +95,6 @@ final class EntityFieldMetadataCompiler {
     }
 
     private static String columnName(Field field,
-                                     EntityNamingStrategy namingStrategy,
                                      Optional<TableId> flyingId,
                                      Optional<TableField> flyingField) {
         String explicitIdColumn = flyingId.map(TableId::value).map(FlyingAnnotationReader::text).orElse(null);
@@ -109,7 +107,7 @@ final class EntityFieldMetadataCompiler {
         if (explicitFieldColumn != null) {
             return explicitFieldColumn;
         }
-        return namingStrategy.columnName(field.getName());
+        return EntityFieldNames.snakeCase(field.getName());
     }
 
     private static ValueGeneration valueGeneration(Class<?> entityType, Optional<TableId> flyingId) {

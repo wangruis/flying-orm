@@ -105,15 +105,14 @@ final class JdbcProtectedWriteExecutor {
                                                          ProtectedWriteWork work,
                                                          SqlExecutionOptions options) throws SQLException {
         SqlRequest request = work.ownerQuery();
-        SqlExecutionOptions ownerReadOptions = ProtectedWriteWork.ownerReadOptions(options);
         List<DynamicRow> rows = new ArrayList<>();
         try (PreparedStatement statement = connection.prepareStatement(request.sql())) {
-            JdbcStatementOptions.apply(statement, ownerReadOptions);
+            JdbcStatementOptions.apply(statement, options);
             JdbcStatementBinder.bind(statement, OwnedBindableValues.ownedValues(request.parameters()));
             JdbcStatementControl.requireNotInterrupted(statement);
             try (ResultSet resultSet = statement.executeQuery()) {
                 JdbcResultSetReader.readQueryRows(
-                        resultSet, statement, SqlStatementType.SELECT, ownerReadOptions, rows);
+                        resultSet, statement, SqlStatementType.SELECT, options, rows);
             }
         }
         return rows.stream().map(work::ownerFrom).toList();

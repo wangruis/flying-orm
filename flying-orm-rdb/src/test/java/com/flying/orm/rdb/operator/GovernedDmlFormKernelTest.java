@@ -15,6 +15,7 @@ import com.flying.orm.rdb.form.SyncFormClient;
 import com.flying.orm.rdb.mapping.RowMapper;
 import com.flying.orm.rdb.protection.ProtectedFieldKeyRing;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
+import com.flying.orm.rdb.protection.ProtectedFormLayout;
 import com.flying.orm.rdb.protection.ProtectedConditions;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
@@ -68,8 +69,8 @@ class GovernedDmlFormKernelTest {
             FormDataSqlRenderer forms = FormDataSqlRenderer.create(
                     conditions, RdbDialect.postgresql()).withProtectedFields(protection);
             Map<String, Object> stored = new LinkedHashMap<>(protection
-                    .prepareWrite(form, Map.<String, Object>of("secret", "classified"),
-                                  DataScope.none(), conditions.valueCodecs())
+                    .writeOperation(form, ProtectedFormLayout.physical(form), DataScope.none(), conditions.valueCodecs())
+                    .prepare(Map.of("secret", "classified"))
                     .values());
             // 模拟数据库只返回 SELECT 投影；盲索引只出现在 WHERE，不应进入结果行。
             stored.keySet().removeIf(name -> name.startsWith("__fop_"));

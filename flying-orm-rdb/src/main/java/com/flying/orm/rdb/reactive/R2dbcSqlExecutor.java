@@ -304,6 +304,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
                 request, options, Objects.requireNonNull(
                         generatedKeyColumn, "generated key column must not be null"));
     }
+    @InternalApi
     @Override
     public Mono<SqlWriteResult> protectedWrite(ProtectedWriteWork work, SqlExecutionOptions options) {
         ProtectedWriteWork safeWork = Objects.requireNonNull(work, "protected write work must not be null");

@@ -82,7 +82,7 @@ class BatchMemoryBudgetDeepGraphTest {
 
         assertEquals(600L, BatchMemoryBudget.estimateRowBytes(row));
         assertEquals(600L, BatchMemoryBudget.estimateValueBytes(row));
-        assertEquals(187L, BatchMemoryBudget.estimateShallowScalarRowBytes(
+        assertEquals(187L, BatchMemoryBudget.estimateRowBytes(
                 new Object[]{null, "A", new BigDecimal("123.45"), BigInteger.valueOf(256), 1000}));
     }
 }

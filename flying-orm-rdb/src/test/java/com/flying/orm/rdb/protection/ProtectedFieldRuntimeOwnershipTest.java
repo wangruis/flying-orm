@@ -37,7 +37,7 @@ class ProtectedFieldRuntimeOwnershipTest {
             IllegalStateException write = assertThrows(
                     IllegalStateException.class,
                     () -> runtime.writeOperation(
-                            form, runtime.physicalForm(form), DataScope.none(), codecs));
+                            form, ProtectedFormLayout.physical(form), DataScope.none(), codecs));
             IllegalStateException result = assertThrows(
                     IllegalStateException.class,
                     () -> runtime.resultOperation(
@@ -79,8 +79,9 @@ class ProtectedFieldRuntimeOwnershipTest {
         callerValues.put("payload", payload);
 
         try (ProtectedFieldRuntime runtime = ProtectedFieldRuntime.withoutKeys()) {
-            ProtectedFieldRuntime.PreparedWrite prepared = runtime.prepareWrite(
-                    form, callerValues, DataScope.none(), ValueCodecRegistry.standard());
+            ProtectedFieldRuntime.PreparedWrite prepared = runtime.writeOperation(
+                    form, ProtectedFormLayout.physical(form), DataScope.none(), ValueCodecRegistry.standard())
+                    .prepare(callerValues);
             callerValues.put("payload", new byte[]{9, 9, 9});
             assertNotSame(callerValues, prepared.ownedValues());
             assertArrayEquals(new byte[]{1, 2, 3}, (byte[]) prepared.ownedValues().get("payload"));
@@ -101,8 +102,9 @@ class ProtectedFieldRuntimeOwnershipTest {
 
         try (ProtectedFieldRuntime runtime = ProtectedFieldRuntime.create(
                 ProtectedFieldKeyRing.single("v1", new byte[32]))) {
-            ProtectedFieldRuntime.PreparedWrite prepared = runtime.prepareWrite(
-                    form, callerValues, DataScope.none(), ValueCodecRegistry.standard());
+            ProtectedFieldRuntime.PreparedWrite prepared = runtime.writeOperation(
+                    form, ProtectedFormLayout.physical(form), DataScope.none(), ValueCodecRegistry.standard())
+                    .prepare(callerValues);
             payload[0] = 9;
 
             assertNotSame(payload, prepared.ownedValues().get("payload"));

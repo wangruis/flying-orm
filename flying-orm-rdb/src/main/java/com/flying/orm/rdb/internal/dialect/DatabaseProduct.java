@@ -1,6 +1,5 @@
 package com.flying.orm.rdb.internal.dialect;
 
-import com.flying.orm.rdb.internal.InternalApi;
 
 /**
  * Canonical identity of the database products supported by flying-orm.
@@ -13,7 +12,6 @@ import com.flying.orm.rdb.internal.InternalApi;
  * @date 2026-08-24
  * @version v3.0
  */
-@InternalApi
 public enum DatabaseProduct {
     H2,
     MYSQL,

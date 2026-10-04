@@ -152,22 +152,52 @@ class OrdinaryProtectedWriteBatchingTest {
         }
     }
 
-    @Test
-    void reactiveProtectedUpdateKeepsOwnerRowBudgetWithoutDeadline() {
-        Counts counts = new Counts(2, false);
-        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
-                .withMaxRows(1);
+    @TestFactory
+    Stream<DynamicTest> protectedUpdateKeepsDeveloperOwnerRowBudget() {
+        return bothExecutors("owner row budget", reactive -> {
+            Counts counts = new Counts(2, false);
+            SqlExecutionOptions options = SqlExecutionOptions.safeDefaults().withMaxRows(1);
 
-        SqlRowLimitExceededException failure = assertThrows(SqlRowLimitExceededException.class,
-                () -> execute(true, counts, work(1), options));
+            SqlRowLimitExceededException failure = assertThrows(SqlRowLimitExceededException.class,
+                    () -> execute(reactive, counts, work(1), options));
 
-        assertEquals(1, failure.maxRows());
-        assertEquals(1, failure.overflowIndex());
-        assertEquals(1, counts.ownerReads);
-        assertEquals(0, counts.businessWrites);
-        assertEquals(0, counts.commits);
-        assertEquals(0, counts.rollbacks);
-        assertEquals(0, counts.closes);
+            assertEquals(1, failure.maxRows());
+            assertEquals(1, failure.overflowIndex());
+            assertEquals(1, counts.ownerReads);
+            assertEquals(0, counts.businessWrites);
+            assertEquals(0, counts.commits);
+            assertEquals(0, counts.rollbacks);
+            assertEquals(0, counts.closes);
+        });
+    }
+
+    @TestFactory
+    Stream<DynamicTest> ownerReadsKeepUnlimitedAndLargeDeveloperBudgets() {
+        return bothExecutors("unlimited and large owner budgets", reactive -> {
+            for (SqlExecutionOptions options : List.of(SqlExecutionOptions.unlimited(),
+                    SqlExecutionOptions.safeDefaults().withMaxRows(10_000L)
+                            .withMaxResultBytes(128L * 1024 * 1024)
+                            .withMaxLargeObjectBytes(32L * 1024 * 1024)
+                            .withMaxLargeObjectChars(32_000_000L))) {
+                Counts counts = new Counts(2_501, false);
+                assertEquals(2_501L, execute(reactive, counts, work(0), options).affectedRows());
+                assertLifecycle(counts);
+            }
+        });
+    }
+
+    @TestFactory
+    Stream<DynamicTest> ownerReadsKeepDeveloperResultMemoryBudget() {
+        return bothExecutors("owner result memory budget", reactive -> {
+            Counts counts = new Counts(2, false);
+            SqlExecutionOptions options = SqlExecutionOptions.unlimited().withMaxResultBytes(1L);
+            assertThrows(SqlResultMemoryLimitExceededException.class,
+                    () -> execute(reactive, counts, work(1), options));
+            assertEquals(1, counts.ownerReads);
+            assertEquals(0, counts.businessWrites);
+            assertEquals(0, counts.deletes);
+            assertEquals(0, counts.inserts);
+        });
     }
 
     private static Stream<DynamicTest> bothExecutors(String name,

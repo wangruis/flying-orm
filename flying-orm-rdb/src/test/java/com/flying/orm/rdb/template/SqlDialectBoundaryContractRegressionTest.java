@@ -39,8 +39,8 @@ class SqlDialectBoundaryContractRegressionTest {
             String sql = prefix + "REPLACE(:text, :pattern, :replacement)";
             var reactive = SqlTemplateEngine.compileNative(
                     sql, replaceValues(), RdbDialect.sqlServer(), ValueCodecRegistry.standard());
-            var jdbc = SqlTemplateEngine.compileNativeJdbc(
-                    sql, replaceValues(), RdbDialect.sqlServer(), ValueCodecRegistry.standard());
+            var jdbc = SqlTemplateEngine.prepareNative(
+                    sql, RdbDialect.sqlServer(), ValueCodecRegistry.standard(), true).render(replaceValues());
             assertEquals(prefix + "REPLACE(@P0, @P1, @P2)", reactive.sql());
             assertEquals(prefix + "REPLACE(?, ?, ?)", jdbc.sql());
             assertEquals(List.of("abc", "b", "x"), reactive.parameters());
@@ -59,8 +59,8 @@ class SqlDialectBoundaryContractRegressionTest {
             String sql = "SELECT REPLACE(:text, :pattern, :replacement) AS result" + suffix;
             assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.compileNative(
                     sql, replaceValues(), RdbDialect.sqlServer(), ValueCodecRegistry.standard()));
-            assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.compileNativeJdbc(
-                    sql, replaceValues(), RdbDialect.sqlServer(), ValueCodecRegistry.standard()));
+            assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.prepareNative(
+                    sql, RdbDialect.sqlServer(), ValueCodecRegistry.standard(), true).render(replaceValues()));
             assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.create(
                     SqlTemplateRegistry.builder().register(SqlTemplate.query("bad", sql, Set.of())).build(),
                     RdbDialect.sqlServer(), ValueCodecRegistry.standard()));
@@ -90,9 +90,9 @@ class SqlDialectBoundaryContractRegressionTest {
                 "descending", "select :v as v order by v desc", Set.of())).build();
         var engine = SqlTemplateEngine.create(registry, RdbDialect.sqlServer(), ValueCodecRegistry.standard());
         assertEquals(List.of(7), engine.render("descending", Map.of("v", 7), Map.of()).parameters());
-        assertEquals(List.of(7), SqlTemplateEngine.compileNativeJdbc(
-                "select :v as v order by v desc", Map.of("v", 7),
-                RdbDialect.sqlServer(), ValueCodecRegistry.standard()).parameters());
+        assertEquals(List.of(7), SqlTemplateEngine.prepareNative(
+                "select :v as v order by v desc",
+                RdbDialect.sqlServer(), ValueCodecRegistry.standard(), true).render(Map.of("v", 7)).parameters());
     }
 
     @Test
@@ -118,8 +118,8 @@ class SqlDialectBoundaryContractRegressionTest {
             for (String suffix : List.of(" BEGIN NULL; END;", " SELECT 1 FROM dual")) {
                 assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.compileNative(
                         sql + suffix, Map.of(), RdbDialect.oracle(), ValueCodecRegistry.standard()));
-                assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.compileNativeJdbc(
-                        sql + suffix, Map.of(), RdbDialect.oracle(), ValueCodecRegistry.standard()));
+                assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.prepareNative(
+                        sql + suffix, RdbDialect.oracle(), ValueCodecRegistry.standard(), true).render(Map.of()));
             }
         }
         assertThrows(IllegalArgumentException.class, () -> assertOracle(
@@ -169,8 +169,8 @@ class SqlDialectBoundaryContractRegressionTest {
     private static void assertOracle(String sql) {
         var nativeRequest = SqlTemplateEngine.compileNative(
                 sql, Map.of(), RdbDialect.oracle(), ValueCodecRegistry.standard());
-        var jdbcRequest = SqlTemplateEngine.compileNativeJdbc(
-                sql, Map.of(), RdbDialect.oracle(), ValueCodecRegistry.standard());
+        var jdbcRequest = SqlTemplateEngine.prepareNative(
+                sql, RdbDialect.oracle(), ValueCodecRegistry.standard(), true).render(Map.of());
         assertEquals(sql, nativeRequest.sql());
         assertEquals(sql, jdbcRequest.sql());
         assertTrue(nativeRequest.parameters().isEmpty());
@@ -205,8 +205,8 @@ class SqlDialectBoundaryContractRegressionTest {
         for (String suffix : List.of(" BEGIN NULL; END;", " SELECT 1 FROM dual", " DELETE FROM account")) {
             assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.compileNative(
                     first + suffix, Map.of(), RdbDialect.oracle(), ValueCodecRegistry.standard()));
-            assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.compileNativeJdbc(
-                    first + suffix, Map.of(), RdbDialect.oracle(), ValueCodecRegistry.standard()));
+            assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.prepareNative(
+                    first + suffix, RdbDialect.oracle(), ValueCodecRegistry.standard(), true).render(Map.of()));
         }
     }
 }

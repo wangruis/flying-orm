@@ -17,7 +17,6 @@ import com.flying.orm.rdb.internal.mapping.EntityRelationalMetadataCompiler;
 import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
@@ -93,28 +92,6 @@ public final class EntitySchemaDescriptor<T> {
     /** 创建实体完整关系描述的构建器。 */
     public static <T> Builder<T> builder(Class<T> entityType) {
         return new Builder<>(entityType);
-    }
-
-    /**
-     * 供内部统一编译器发布已经核对完成的三个视图。
-     *
-     * <p>公开构建入口仍然只有 {@link #builder(Class)}；该工厂只解决内部包之间无法使用包级构造器的问题。</p>
-     */
-    @InternalApi
-    public static <T> EntitySchemaDescriptor<T> create(EntityTypeMappingRegistry typeMappings,
-                                                        EntityMetadata<T> metadata,
-                                                        RelationalTableDefinition table) {
-        return create(typeMappings, metadata, RelationalSchemaDefinition.of(List.of(table)), Map.of());
-    }
-
-    /** 统一编译器发布字段级精确映射时使用；普通业务代码仍通过 builder 创建描述。 */
-    @InternalApi
-    public static <T> EntitySchemaDescriptor<T> create(
-            EntityTypeMappingRegistry typeMappings,
-            EntityMetadata<T> metadata,
-            RelationalTableDefinition table,
-            Map<String, EntityTypeMappingRegistry.Mapping> fieldMappings) {
-        return create(typeMappings, metadata, RelationalSchemaDefinition.of(List.of(table)), fieldMappings);
     }
 
     /** 内部统一编译器发布完整最终物理 Schema 时使用。 */

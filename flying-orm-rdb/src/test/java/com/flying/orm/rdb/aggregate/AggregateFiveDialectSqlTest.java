@@ -171,14 +171,14 @@ class AggregateFiveDialectSqlTest {
                 FieldUsePolicy.unrestricted(),
                 QueryShapeLimits.defaults()).plan(spec);
 
-        String status = renderer.conditionRenderer().identifier("status");
-        String statusGroup = renderer.conditionRenderer().identifier("status_group");
-        String tenant = renderer.conditionRenderer().identifier("tenant_id");
-        String tenantCount = renderer.conditionRenderer().identifier("tenant_count");
-        String amount = renderer.conditionRenderer().identifier("amount");
-        String gross = renderer.conditionRenderer().identifier("gross");
-        String average = renderer.conditionRenderer().identifier("average");
-        String orders = renderer.conditionRenderer().identifier("orders");
+        String status = dialect.schema().identifier("status");
+        String statusGroup = dialect.schema().identifier("status_group");
+        String tenant = dialect.schema().identifier("tenant_id");
+        String tenantCount = dialect.schema().identifier("tenant_count");
+        String amount = dialect.schema().identifier("amount");
+        String gross = dialect.schema().identifier("gross");
+        String average = dialect.schema().identifier("average");
+        String orders = dialect.schema().identifier("orders");
         assertEquals("select " + status + " as " + statusGroup
                              + ", " + ("sqlserver".equals(dialect.name()) ? "count_big" : "count")
                              + "(distinct " + tenant + ") as " + tenantCount

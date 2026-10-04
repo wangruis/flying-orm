@@ -4,7 +4,6 @@ import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.batch.BatchMemoryLimitExceededException;
-import com.flying.orm.rdb.execution.BatchRowSnapshotter;
 import com.flying.orm.rdb.execution.ProtectedBatchRows;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.core.sql.render.SqlRequest;
@@ -69,7 +68,7 @@ class R2dbcBatchChunkerTest {
     void formsASmallerChunkWhenTheNextOwnedRowWouldExceedTheByteBudget() {
         Object[] first = {new byte[64]};
         Object[] second = {new byte[64]};
-        long oneRowBytes = BatchRowSnapshotter.snapshotAndEstimate(
+        long oneRowBytes = ProtectedBatchRows.admit(
                 first, 1, Long.MAX_VALUE, "test budget").estimatedBytes();
         BatchWriteRequest request = com.flying.orm.rdb.batch.BatchWriteRequests.request(
                 "INSERT INTO samples(value) VALUES (?)",

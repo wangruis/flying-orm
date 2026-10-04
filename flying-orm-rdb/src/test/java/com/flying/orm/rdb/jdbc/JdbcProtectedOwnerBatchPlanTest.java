@@ -47,7 +47,7 @@ class JdbcProtectedOwnerBatchPlanTest {
 
     @Test
     void wideOwnerQueriesUseIndividualPlansAndStillHonorTheByteBudget() {
-        int count = ProtectedOwnerBatchPlan.MAX_PARAMETERS + 1;
+        int count = 2_001;
         ProtectedWriteWork work = updateWork("select id from business_row where id in ("
                 + String.join(",", java.util.Collections.nCopies(count, "?")) + ")",
                 java.util.Collections.nCopies(count, 1L));
@@ -106,7 +106,7 @@ class JdbcProtectedOwnerBatchPlanTest {
     @Test
     void splitsAtTheFixedRowBoundary() {
         List<ProtectedBatchRows.RowView> rows = new ArrayList<>();
-        for (int index = 0; index <= ProtectedOwnerBatchPlan.MAX_ROWS; index++) {
+        for (int index = 0; index <= 500; index++) {
             rows.add(row(updateWork(
                     "select id from business_row where id = ?", List.of((long) index))));
         }
@@ -114,12 +114,12 @@ class JdbcProtectedOwnerBatchPlanTest {
         List<ProtectedOwnerBatchPlan> plans = StreamSupport.stream(
                 ProtectedOwnerBatchPlan.plans(rows, Long.MAX_VALUE).spliterator(), false).toList();
 
-        assertEquals(List.of(ProtectedOwnerBatchPlan.MAX_ROWS, 1),
+        assertEquals(List.of(500, 1),
                      plans.stream().map(ProtectedOwnerBatchPlan::size).toList());
         assertTrue(plans.getFirst().sql().contains(
-                ", " + (ProtectedOwnerBatchPlan.MAX_ROWS - 1) + " as flying_orm_owner_slot"));
+                ", 499 as flying_orm_owner_slot"));
         assertTrue(plans.getLast().sql().contains(", 0 as flying_orm_owner_slot"));
-        assertEquals(List.of((long) ProtectedOwnerBatchPlan.MAX_ROWS), plans.getLast().parameters());
+        assertEquals(List.of(500L), plans.getLast().parameters());
     }
 
     @Test
@@ -211,8 +211,8 @@ class JdbcProtectedOwnerBatchPlanTest {
 
     private static ProtectedBatchRows.RowView row(ProtectedWriteWork work) {
         Object[] parameters = work.writeRequest().parameters().toArray();
-        return ProtectedBatchRows.decode(
-                ProtectedBatchRows.extend(parameters, work), parameters.length);
+        return ProtectedBatchRows.admit(
+                ProtectedBatchRows.extend(parameters, work), parameters.length, Long.MAX_VALUE, "test bytes");
     }
 
     private static ProtectedWriteWork updateWork(String ownerSql, List<Object> ownerParameters) {

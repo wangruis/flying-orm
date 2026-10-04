@@ -147,8 +147,12 @@ public final class ReactiveFormClient {
                 Objects.requireNonNull(registry, "entity model registry must not be null")));
     }
 
-    /** @return 当前客户端使用的实体映射注册表。 */
-    @InternalApi
+    /**
+     * 返回当前客户端使用的实体映射注册表，供属性名条件、局部赋值和结果映射复用。
+     * 注册表与客户端共享，生命周期由创建它的装配方管理。
+     *
+     * @return 当前客户端的实体映射注册表
+     */
     public EntityModelRegistry entityModels() {
         return configuration.entityModels();
     }

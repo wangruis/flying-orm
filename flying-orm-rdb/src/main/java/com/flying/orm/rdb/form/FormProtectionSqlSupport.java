@@ -25,6 +25,7 @@ import com.flying.orm.rdb.lock.ReadLock;
 import com.flying.orm.rdb.protection.ProtectedContainsLayout;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 import com.flying.orm.rdb.protection.ProtectedFieldReprotection;
+import com.flying.orm.rdb.protection.ProtectedFormLayout;
 import com.flying.orm.rdb.result.DynamicRow;
 
 import java.util.LinkedHashMap;
@@ -73,7 +74,7 @@ final class FormProtectionSqlSupport {
                                    Map<String, Object> values,
                                    DataScope scope) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        return prepareWrite(safeForm, protectedFields.physicalForm(safeForm), values, scope);
+        return prepareWrite(safeForm, ProtectedFormLayout.physical(safeForm), values, scope);
     }
 
     FormPreparedWrite prepareWrite(DynamicForm form,
@@ -262,7 +263,7 @@ final class FormProtectionSqlSupport {
                                                       List<String> visibleFields) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
         return prepareQuery(
-                safeForm, protectedFields.physicalForm(safeForm), where, scope, visibleFields);
+                safeForm, ProtectedFormLayout.physical(safeForm), where, scope, visibleFields);
     }
 
     ProtectedFieldRuntime.PreparedQuery prepareQuery(DynamicForm form,
@@ -505,7 +506,7 @@ final class FormProtectionSqlSupport {
     }
 
     DynamicForm physicalForm(DynamicForm form) {
-        return protectedFields.physicalForm(form);
+        return ProtectedFormLayout.physical(form);
     }
 
 }

@@ -4,7 +4,6 @@ import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.internal.value.BindableValueSnapshots;
 import com.flying.orm.core.type.LogicalType;
-import com.flying.orm.rdb.internal.InternalApi;
 import tools.jackson.databind.JsonNode;
 
 import java.lang.reflect.Array;
@@ -24,7 +23,6 @@ import java.util.function.Predicate;
  * @author wangr
  * @version v3.1
  */
-@InternalApi
 public final class FormValueSnapshots {
 
     private FormValueSnapshots() {

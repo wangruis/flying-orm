@@ -27,6 +27,7 @@ import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.protection.ProtectedConditions;
 import com.flying.orm.rdb.protection.ProtectedFieldKeyRing;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
+import com.flying.orm.rdb.protection.ProtectedFormLayout;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
@@ -277,8 +278,9 @@ class FormConvergenceCharacterizationTest {
     private static DynamicRow encryptedRow(ProtectedFieldRuntime runtime, DynamicForm form, long id, String value) {
         Map<String, Object> raw = new LinkedHashMap<>();
         raw.put("id", id);
-        raw.put("secret", runtime.prepareWrite(form, Map.of("id", id, "secret", value, "note", "private"),
-                DataScope.none(), ValueCodecRegistry.standard()).ownedValues().get("secret"));
+        raw.put("secret", runtime.writeOperation(form, ProtectedFormLayout.physical(form),
+                DataScope.none(), ValueCodecRegistry.standard())
+                .prepare(Map.of("id", id, "secret", value, "note", "private")).ownedValues().get("secret"));
         raw.put("note", "private");
         return DynamicRow.copyOf(raw);
     }

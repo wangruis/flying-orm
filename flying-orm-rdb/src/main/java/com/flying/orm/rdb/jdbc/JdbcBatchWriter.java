@@ -7,6 +7,7 @@ import com.flying.orm.rdb.batch.BatchExecutionState;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.execution.ProtectedBatchRows;
+import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.internal.plan.SqlExecutionStatements;
 import com.flying.orm.rdb.lifecycle.EntityPostWriteException;
 import com.flying.orm.rdb.observation.BatchExecutionObserver;
@@ -47,11 +48,13 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
         return new JdbcBatchWriter(connections, dialect, Objects.requireNonNull(observer, "batch observer must not be null"));
     }
 
+    @InternalApi
     @Override
     public BatchExecutionEvidence writeProtectedBatch(BatchWriteRequest request, LongConsumer rowCompleted) {
         return writeBatch(request, rowCompleted);
     }
 
+    @InternalApi
     @Override
     public BatchExecutionEvidence writeBatch(BatchWriteRequest request, LongConsumer rowCompleted) {
         Objects.requireNonNull(request, "batch write request must not be null");

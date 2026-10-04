@@ -64,7 +64,6 @@ class NonPersistentEntityPropertyContractTest {
     private static <T> void assertWriteLayoutsExcludeDisplayName(EntityValues<T> values, T entity) {
         assertEquals(List.of("id", "account_name"), List.copyOf(values.readForInsert(entity).keySet()));
         assertEquals(List.of("account_name"), List.copyOf(values.readForUpdate(entity).keySet()));
-        assertEquals(List.of("id", "account_name"), List.copyOf(values.readForUpsert(entity).keySet()));
 
         RepositoryUpsertValues batchUpsert = values.repositoryUpsertValues(entity);
         assertEquals(List.of("id", "account_name"), List.copyOf(batchUpsert.keySet()));

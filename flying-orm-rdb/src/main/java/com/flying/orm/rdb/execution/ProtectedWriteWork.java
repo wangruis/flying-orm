@@ -67,12 +67,6 @@ public record ProtectedWriteWork(Kind kind,
                 .anyMatch(field -> !knownOwner.containsKey(field) || knownOwner.get(field) == null);
     }
 
-    /** owner 预读沿用调用方执行选项，不另设内部容量上限。 */
-    public static SqlExecutionOptions ownerReadOptions(SqlExecutionOptions options) {
-        return Objects.requireNonNull(
-                options, "protected write execution options must not be null");
-    }
-
     /** 返回 INSERT 唯一缺失、必须由数据库生成的 owner 字段。 */
     public String generatedOwnerField() {
         String missing = null;
@@ -140,7 +134,6 @@ public record ProtectedWriteWork(Kind kind,
     /**
      * 内部 DML 直接绑定工作计划持有的只读令牌视图，避免经过公开数组访问器再次深复制。
      */
-    @InternalApi
     public List<Object> sideIndexParameters(Map<String, Object> owner,
                                             FieldTokens field,
                                             int tokenIndex) {
@@ -229,7 +222,6 @@ public record ProtectedWriteWork(Kind kind,
         }
 
         /** 从上游已经冻结的令牌视图建立工作计划，不再复制二进制载荷。 */
-        @InternalApi
         public static FieldTokens owned(String fieldTag,
                                         int tokenCount,
                                         IntFunction<ByteBuffer> tokenAt) {
@@ -237,13 +229,11 @@ public record ProtectedWriteWork(Kind kind,
         }
 
         /** @return 工作计划持有的令牌数量。 */
-        @InternalApi
         public int tokenCount() {
             return storage().size();
         }
 
         /** @return 指定令牌的独立只读绑定视图。 */
-        @InternalApi
         public ByteBuffer ownedToken(int index) {
             return storage().readOnlyBuffer(index);
         }

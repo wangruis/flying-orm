@@ -3,6 +3,7 @@ package com.flying.orm.rdb.repository;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.scope.FieldScope;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.mapping.EntityMetadata;
 import com.flying.orm.rdb.mapping.EntityQueryDefaults;
@@ -10,9 +11,9 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
-import java.util.Arrays;
+import java.util.List;
 
-import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -20,18 +21,26 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RepositorySurfaceConvergenceTest {
 
     @Test
-    void querySpecificationAssemblyHasOneOwner() throws NoSuchMethodException {
-        Method query = EntityQueryDefaults.class.getDeclaredMethod(
+    void querySpecificationAssemblyHasOneOwner() {
+        Method query = assertDoesNotThrow(() -> EntityQueryDefaults.class.getDeclaredMethod(
                 "query",
                 DynamicForm.class,
                 EntityMetadata.class,
                 ConditionGroup.class,
-                DataScope.class,
-                SqlExecutionOptions.class);
+                FieldScope.class));
 
         assertTrue(Modifier.isStatic(query.getModifiers()));
-        assertFalse(hasDeclaredMethod(SyncRepositoryReadMapper.class, "querySpec"));
-        assertFalse(hasDeclaredMethod(ReactiveRepositoryReadMapper.class, "querySpec"));
+        assertThrows(NoSuchMethodException.class, () -> EntityQueryDefaults.class.getDeclaredMethod(
+                "query", DynamicForm.class, EntityMetadata.class, ConditionGroup.class,
+                DataScope.class, SqlExecutionOptions.class, FieldScope.class));
+    }
+
+    @Test
+    void repositoryReadsHaveNoMappinglessForwardingLayer() {
+        for (String name : List.of("SyncRepositoryReadMapper", "ReactiveRepositoryReadMapper")) {
+            assertThrows(ClassNotFoundException.class,
+                    () -> Class.forName("com.flying.orm.rdb.repository." + name));
+        }
     }
 
     @Test
@@ -40,7 +49,4 @@ class RepositorySurfaceConvergenceTest {
                      () -> Class.forName("com.flying.orm.rdb.repository.RepositoryBatchLifecyclePlan"));
     }
 
-    private static boolean hasDeclaredMethod(Class<?> type, String name) {
-        return Arrays.stream(type.getDeclaredMethods()).anyMatch(method -> method.getName().equals(name));
-    }
 }

@@ -26,6 +26,7 @@ import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.lock.OptimisticLockOptions;
 import com.flying.orm.rdb.protection.ProtectedFieldKeyRing;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
+import com.flying.orm.rdb.protection.ProtectedFormLayout;
 import com.flying.orm.rdb.protection.MaskingPolicyRegistry;
 import com.flying.orm.rdb.protection.ProtectedConditions;
 import com.flying.orm.rdb.protection.ProtectedValueNormalizerRegistry;
@@ -71,9 +72,9 @@ class ReactiveProtectionCpuBoundaryTest {
         try (ProtectedFieldRuntime protection = ProtectedFieldRuntime.create(
                 ProtectedFieldKeyRing.single("v1", new byte[32]))) {
             ValueCodecRegistry codecs = ValueCodecRegistry.standard().withFirst(codec);
-            protection.prepareWrite(
-                    protectedForm(), Map.of("id", 0L, "secret", "entropy-warmup"),
-                    DataScope.none(), codecs);
+            DynamicForm form = protectedForm();
+            protection.writeOperation(form, ProtectedFormLayout.physical(form), DataScope.none(), codecs)
+                    .prepare(Map.of("id", 0L, "secret", "entropy-warmup"));
             codec.writeThreads.clear();
             ReactiveFormClient client = client(executor, protection, codec);
 
@@ -118,9 +119,9 @@ class ReactiveProtectionCpuBoundaryTest {
         BoundaryMutatingMap mutable = new BoundaryMutatingMap();
         try (ProtectedFieldRuntime protection = ProtectedFieldRuntime.create(
                 ProtectedFieldKeyRing.single("v1", new byte[32]))) {
-            protection.prepareWrite(
-                    protectedForm(), Map.of("id", 0L, "secret", "entropy-warmup"),
-                    DataScope.none(), ValueCodecRegistry.standard());
+            DynamicForm form = protectedForm();
+            protection.writeOperation(form, ProtectedFormLayout.physical(form), DataScope.none(), ValueCodecRegistry.standard())
+                    .prepare(Map.of("id", 0L, "secret", "entropy-warmup"));
             ReactiveFormClient client = client(executor, protection, codec);
             AtomicInteger emitted = new AtomicInteger();
             Flux<Map<String, Object>> rows = Flux.generate(sink -> {
@@ -191,9 +192,10 @@ class ReactiveProtectionCpuBoundaryTest {
                 ProtectedFieldKeyRing.single("v1", new byte[32]),
                 ProtectedValueNormalizerRegistry.standard(), policies)) {
             ValueCodecRegistry codecs = ValueCodecRegistry.standard().withFirst(codec);
-            Map<String, Object> stored = protection.prepareWrite(
-                    protectedMaskedForm(), Map.of("id", 7L, "secret", "classified"),
-                    DataScope.none(), codecs).values();
+            DynamicForm form = protectedMaskedForm();
+            Map<String, Object> stored = protection.writeOperation(
+                    form, ProtectedFormLayout.physical(form), DataScope.none(), codecs)
+                    .prepare(Map.of("id", 7L, "secret", "classified")).values();
             executor.queryRows = Flux.just(DynamicRow.copyOf(stored));
             ReactiveFormClient client = client(executor, protection, codec);
 
@@ -239,9 +241,10 @@ class ReactiveProtectionCpuBoundaryTest {
         CapturingBatchExecutor executor = new CapturingBatchExecutor();
         try (ProtectedFieldRuntime protection = ProtectedFieldRuntime.create(
                 ProtectedFieldKeyRing.single("v1", new byte[32]))) {
-            protection.prepareWrite(
-                    protectedForm(), Map.of("id", 0L, "secret", "entropy-warmup"),
-                    DataScope.none(), ValueCodecRegistry.standard().withFirst(codec));
+            DynamicForm form = protectedForm();
+            protection.writeOperation(form, ProtectedFormLayout.physical(form),
+                    DataScope.none(), ValueCodecRegistry.standard().withFirst(codec))
+                    .prepare(Map.of("id", 0L, "secret", "entropy-warmup"));
             codec.writeThreads.clear();
             ReactiveFormClient client = client(executor, protection, codec);
 

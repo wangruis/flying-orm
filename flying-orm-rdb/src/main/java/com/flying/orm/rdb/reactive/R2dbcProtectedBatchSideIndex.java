@@ -53,8 +53,7 @@ final class R2dbcProtectedBatchSideIndex {
             if (chunk.rows().stream().noneMatch(row -> row.work() != null)) {
                 return Mono.just(new Prepared(List.of(), request.options().maxBufferedBytes()));
             }
-            SqlExecutionOptions options = ProtectedWriteWork.ownerReadOptions(
-                    largeObjectOptions(request));
+            SqlExecutionOptions options = largeObjectOptions(request);
             List<RowState> states = new java.util.ArrayList<>(chunk.rows().size());
             for (ProtectedBatchRows.RowView row : chunk.rows()) {
                 states.add(new RowState(row.work(), List.of()));

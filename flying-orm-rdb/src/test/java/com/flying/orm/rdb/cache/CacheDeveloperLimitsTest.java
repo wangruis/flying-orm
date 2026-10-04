@@ -6,9 +6,7 @@ import java.time.Duration;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class CacheDeveloperLimitsTest {
     @Test
@@ -16,8 +14,8 @@ class CacheDeveloperLimitsTest {
         CacheRegionPolicy policy = new CacheRegionPolicy(true, Long.MAX_VALUE, Integer.MAX_VALUE,
                 Duration.ofMinutes(1), true);
         BoundedCacheRegion<String, String> cache = BoundedCacheRegion.create(policy, (key, value) -> Integer.MAX_VALUE);
-        assertTrue(cache.put("one", "first"));
-        assertTrue(cache.put("two", "second"));
+        assertEquals("first", cache.get("one", key -> "first"));
+        assertEquals("second", cache.get("two", key -> "second"));
         assertEquals(2L * Integer.MAX_VALUE, cache.snapshot().estimatedWeight());
         assertEquals("first", cache.getIfPresent("one"));
     }
@@ -33,8 +31,10 @@ class CacheDeveloperLimitsTest {
                 assertNull(cache.getIfPresent("key"));
             }
             assertEquals(2, loads.get());
-            assertTrue(cache.put("key", "ok"));
-            assertFalse(cache.put("key", "large"));
+            assertEquals("ok", cache.get("key", key -> "ok"));
+            assertEquals("ok", cache.getIfPresent("key"));
+            cache.invalidate("key");
+            assertEquals("large", cache.get("key", key -> "large"));
             assertNull(cache.getIfPresent("key"));
             assertEquals(0, cache.snapshot().estimatedSize());
             assertEquals(3, cache.snapshot().rejectedOversizedCount());

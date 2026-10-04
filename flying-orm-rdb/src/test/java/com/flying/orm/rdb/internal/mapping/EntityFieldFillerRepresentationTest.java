@@ -104,7 +104,7 @@ class EntityFieldFillerRepresentationTest {
         return switch (operation) {
             case INSERT -> values.readForInsert(entry);
             case UPDATE -> values.readForUpdate(entry);
-            case UPSERT -> values.readForUpsert(entry);
+            case UPSERT -> values.repositoryUpsertValues(entry);
         };
     }
 

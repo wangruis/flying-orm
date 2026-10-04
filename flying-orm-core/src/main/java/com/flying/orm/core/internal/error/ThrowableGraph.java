@@ -47,7 +47,7 @@ public final class ThrowableGraph {
      * @param <T> 目标异常类型
      * @return 第一个匹配节点；未找到时返回 {@code null}
      */
-    public static <T extends Throwable> T find(Throwable root, Class<T> type) {
+    static <T extends Throwable> T find(Throwable root, Class<T> type) {
         Objects.requireNonNull(type, "throwable type must not be null");
         Throwable current = root;
         for (int depth = 0; current != null && depth <= MAX_KNOWN_WRAPPERS; depth++) {
@@ -114,7 +114,7 @@ public final class ThrowableGraph {
     }
 
     /** 判断直接异常或受支持包装链是否按对象身份包含目标节点。 */
-    public static boolean reaches(Throwable root, Throwable target) {
+    private static boolean reaches(Throwable root, Throwable target) {
         if (root == null || target == null) {
             return false;
         }

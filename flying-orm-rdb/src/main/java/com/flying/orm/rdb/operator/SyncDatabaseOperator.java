@@ -28,6 +28,9 @@ import java.util.Objects;
  * <p>门面只保存可并发共享的不可变组件；每次 {@code dml()}、{@code ddl()} 或 SQL 调用都会创建自己的
  * 轻量命令对象，因此业务代码可以安全复用同一个门面。</p>
  *
+ * <p>配置方法返回新门面，不修改原门面或所属 FlyingOrmClients 的其他入口。
+ * 派生门面复用已有组件，不延长所属 FlyingOrmClients 管理的共享资源生命周期。</p>
+ *
  * @author wangr
  * @date 2026-08-07
  * @version v2.0
@@ -135,28 +138,24 @@ public final class SyncDatabaseOperator {
                                            templateParameters);
     }
 
-    /** 返回继续收紧默认数据范围的新门面。 */
-    @InternalApi
+    /** 返回与已有默认数据范围取交集的新门面，作用于动态及实体 DML，不改写原生 SQL 或模板。 */
     public SyncDatabaseOperator withDefaultDataScope(DataScope scope) {
         DataScope safeScope = Objects.requireNonNull(scope, "data scope must not be null");
         return copy(forms.withDefaultDataScope(safeScope), schema, defaultDataScope.and(safeScope));
     }
 
-    /** 返回使用新默认批量策略的门面。 */
-    @InternalApi
+    /** 返回使用新默认批量策略的门面；单次调用显式提供的批量选项仍优先。 */
     public SyncDatabaseOperator withDefaultBatchWriteOptions(BatchWriteOptions options) {
         BatchWriteOptions safeOptions = Objects.requireNonNull(options, "batch write options must not be null");
         return copy(forms.withDefaultBatchWriteOptions(safeOptions), schema, defaultDataScope);
     }
 
-    /** 返回使用新 DDL 执行保护的门面。 */
-    @InternalApi
+    /** 返回为 Schema 迁移设置默认执行选项的门面；单次迁移可显式覆盖。 */
     public SyncDatabaseOperator withSchemaExecutionOptions(SchemaMigrationExecutionOptions options) {
         return copy(forms, schema.withDefaultMigrationExecutionOptions(options), defaultDataScope);
     }
 
-    /** 返回使用新 DDL observer 的门面。 */
-    @InternalApi
+    /** 返回为 Schema 迁移设置观察器的门面，不改变 DML 或元数据读取配置。 */
     public SyncDatabaseOperator withSchemaObserver(SchemaMigrationObserver observer) {
         return copy(forms, schema.withMigrationObserver(observer), defaultDataScope);
     }

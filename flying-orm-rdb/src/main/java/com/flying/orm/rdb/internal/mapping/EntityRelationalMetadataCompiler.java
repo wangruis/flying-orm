@@ -17,7 +17,6 @@ import com.flying.orm.core.metadata.TablePartitionDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.type.DatabaseType;
-import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.mapping.EntityFieldMetadata;
 import com.flying.orm.rdb.mapping.EntityMetadata;
 import com.flying.orm.rdb.mapping.EntitySchemaDescriptor;
@@ -42,7 +41,6 @@ import java.util.Set;
  * @author wangr
  * @version v3.2
  */
-@InternalApi
 public final class EntityRelationalMetadataCompiler {
 
     private EntityRelationalMetadataCompiler() {

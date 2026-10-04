@@ -5,6 +5,8 @@ import com.flying.orm.core.annotation.TableId;
 import com.flying.orm.core.annotation.TableName;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.page.PageQuery;
+import com.flying.orm.core.page.PageResult;
+import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.scope.FieldScope;
 import com.flying.orm.core.sql.render.SqlRenderer;
@@ -18,6 +20,8 @@ import com.flying.orm.rdb.form.FormDataSqlRenderer;
 import com.flying.orm.rdb.form.ReactiveFormClient;
 import com.flying.orm.rdb.form.SyncFormClient;
 import com.flying.orm.rdb.form.spec.QuerySpec;
+import com.flying.orm.rdb.lifecycle.EntityLifecyclePhase;
+import com.flying.orm.rdb.lock.ReadLock;
 import com.flying.orm.rdb.mapping.MappingException;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.repository.ReactiveFormRepository;
@@ -32,6 +36,7 @@ import reactor.core.publisher.Mono;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
@@ -43,6 +48,65 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EntityDefaultProjectionContractTest {
+
+    @Test
+    void syncRepositoryReadTerminalsKeepPostLoadAndPageMetadata() {
+        Fixture fixture = new Fixture();
+        AtomicInteger callbacks = new AtomicInteger();
+        SyncFormRepository<Account> repository = SyncFormRepository.create(
+                fixture.sync, fixture.sync.entityModels().metadata(Account.class).toDynamicForm(), Account.class)
+                .withListener(event -> Mono.fromRunnable(() -> {
+                    assertEquals(EntityLifecyclePhase.POST_LOAD, event.phase());
+                    event.entity().name = "loaded";
+                    callbacks.incrementAndGet();
+                }));
+        ConditionGroup where = ConditionGroup.and().build();
+
+        assertEquals("loaded", repository.select(where).getFirst().name);
+        assertEquals(1, callbacks.get());
+        PageResult<Account> page = repository.page(where, PageQuery.of(1, 10, PageSort.desc("id")));
+        assertEquals("loaded", page.rows().getFirst().name);
+        assertEquals(1, page.total());
+        assertEquals(1, page.page());
+        assertEquals(10, page.size());
+        assertTrue(fixture.dataRequest.sql().contains("order by \"id\" desc"), fixture.dataRequest.sql());
+        assertEquals(2, callbacks.get());
+        assertEquals("loaded", repository.lockingRead(where, ReadLock.update()).getFirst().name);
+        assertTrue(fixture.dataRequest.sql().endsWith("FOR UPDATE"), fixture.dataRequest.sql());
+        assertEquals(3, callbacks.get());
+    }
+
+    @Test
+    void reactiveRepositoryReadTerminalsKeepPostLoadLazyAndPageMetadata() {
+        Fixture fixture = new Fixture();
+        AtomicInteger callbacks = new AtomicInteger();
+        ReactiveFormRepository<Account> repository = ReactiveFormRepository.create(
+                fixture.reactive, fixture.reactive.entityModels().metadata(Account.class).toDynamicForm(), Account.class)
+                .withListener(event -> Mono.fromRunnable(() -> {
+                    assertEquals(EntityLifecyclePhase.POST_LOAD, event.phase());
+                    event.entity().name = "loaded";
+                    callbacks.incrementAndGet();
+                }));
+        ConditionGroup where = ConditionGroup.and().build();
+        Flux<Account> select = repository.select(where);
+        Mono<PageResult<Account>> paged = repository.page(where, PageQuery.of(1, 10, PageSort.desc("id")));
+        Flux<Account> locked = repository.lockingRead(where, ReadLock.update());
+
+        assertNull(fixture.dataRequest);
+        assertEquals(0, callbacks.get());
+        assertEquals("loaded", select.single().block().name);
+        assertEquals(1, callbacks.get());
+        PageResult<Account> page = paged.block();
+        assertEquals("loaded", page.rows().getFirst().name);
+        assertEquals(1, page.total());
+        assertEquals(1, page.page());
+        assertEquals(10, page.size());
+        assertTrue(fixture.dataRequest.sql().contains("order by \"id\" desc"), fixture.dataRequest.sql());
+        assertEquals(2, callbacks.get());
+        assertEquals("loaded", locked.single().block().name);
+        assertTrue(fixture.dataRequest.sql().endsWith("FOR UPDATE"), fixture.dataRequest.sql());
+        assertEquals(3, callbacks.get());
+    }
 
     @Test
     void syncEntityTerminalsHonorDefaultProjection() {
@@ -284,7 +348,7 @@ class EntityDefaultProjectionContractTest {
             reactive = ReactiveFormClient.create(new ReactiveSqlExecutor() {
                 @Override
                 public Flux<DynamicRow> query(SqlRequest request) {
-                    return Flux.just(row(request));
+                    return Flux.defer(() -> Flux.just(row(request)));
                 }
 
                 @Override

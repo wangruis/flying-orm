@@ -6,13 +6,10 @@ import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.condition.TermHandler;
 import com.flying.orm.core.condition.TermRegistry;
 import com.flying.orm.core.internal.error.ThrowableGraph;
-import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.internal.condition.ConditionNodes;
 import com.flying.orm.rdb.mapping.EntityEnumStorage;
 import com.flying.orm.rdb.mapping.EntityFieldMetadata;
 import com.flying.orm.rdb.mapping.EntityFieldFiller;
-import com.flying.orm.rdb.mapping.EntityMappingEvent;
-import com.flying.orm.rdb.mapping.EntityMappingListener;
 import com.flying.orm.rdb.mapping.EntityMetadata;
 import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
 import com.flying.orm.rdb.mapping.MappingException;
@@ -100,7 +97,6 @@ public final class EntityValues<T> {
     }
 
     /** Reuse the write plan's enum representation before the shared field/dialect condition encoding. */
-    @InternalApi
     public ConditionGroup normalizeCondition(ConditionGroup where, TermRegistry terms) {
         if (conditionEncoders.isEmpty()) {
             return where;
@@ -110,14 +106,12 @@ public final class EntityValues<T> {
     }
 
     /** Reuse the entity field's write representation for one Lambda DML assignment. */
-    @InternalApi
     public Object normalizeWriteValue(String fieldName, Object value) {
         UnaryOperator<Object> encoder = enumEncoder(fieldName);
         return encoder != null && value instanceof Enum<?> ? encoder.apply(value) : value;
     }
 
     /** Reuse the entity field's condition representation before a multi-source JOIN loses entity identity. */
-    @InternalApi
     public Object normalizeConditionValue(String fieldName,
                                           String operator,
                                           Object value,
@@ -182,23 +176,11 @@ public final class EntityValues<T> {
     }
 
     /**
-     * upsert 同时包含插入和冲突更新两个阶段，只要字段允许其中一种写法就保留；具体阶段仍由方言渲染器决定。
-     */
-    public Map<String, Object> readForUpsert(T entity) {
-        return read(entity, EntityFieldFiller.Operation.UPSERT,
-                    (field, value) -> (field.insertable()
-                            && EntityWriteValuePolicy.accepts(field.insertStrategy(), value))
-                            || (field.updatable()
-                            && EntityWriteValuePolicy.accepts(field.updateStrategy(), value)));
-    }
-
-    /**
      * 为 Repository 批量 upsert 一次读取实体，同时保留 INSERT 与冲突 UPDATE 的独立字段策略。
      *
      * @param entity 本次写入的实体
      * @return 不可变的阶段化 upsert 快照
      */
-    @InternalApi
     public RepositoryUpsertValues repositoryUpsertValues(T entity) {
         T safeEntity = Objects.requireNonNull(entity, "entity must not be null");
         Map<String, Object> values = new LinkedHashMap<>();
@@ -248,24 +230,6 @@ public final class EntityValues<T> {
         return values;
     }
 
-    /**
-     * 读取实体并在参数交给 SQL 渲染器前发布一次事件。默认 {@link #read(Object)} 不创建事件对象，
-     * 只有明确安装监听器的应用才承担这点开销。
-     *
-     * @param entity 本次写入的实体
-     * @param listener 应用级线程安全监听器
-     * @return 新建的可修改列值 Map
-     */
-    public Map<String, Object> read(T entity, EntityMappingListener listener) {
-        EntityMappingListener safeListener = Objects.requireNonNull(listener,
-                                                                    "entity mapping listener must not be null");
-        Map<String, Object> values = read(entity);
-        if (safeListener != EntityMappingListener.NONE) {
-            safeListener.beforeWrite(new EntityMappingEvent(metadata, entity, values));
-        }
-        return values;
-    }
-
     /** 仅供内部测试或注册表缓存未命中时创建计划。 */
     public static <T> EntityValues<T> createUncached(Class<T> type) {
         return createUncached(type, EntityMetadataResolver.createUncached(type));
@@ -284,7 +248,6 @@ public final class EntityValues<T> {
     }
 
     /** 注册表在冷路径绑定精确字段映射，取值时保留应用 codec 所需的领域类型。 */
-    @InternalApi
     public static <T> EntityValues<T> createUncached(
             Class<T> type,
             EntityMetadata<T> metadata,

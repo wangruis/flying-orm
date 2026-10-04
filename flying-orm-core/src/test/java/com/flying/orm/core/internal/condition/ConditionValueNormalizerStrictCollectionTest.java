@@ -37,7 +37,8 @@ class ConditionValueNormalizerStrictCollectionTest {
         ConditionValueNormalizer.Result result = ConditionValueNormalizer.normalize(
                 ConditionValueShape.COLLECTION,
                 misleadingSize,
-                ConditionValuePolicy.REJECT_EMPTY);
+                ConditionValuePolicy.REJECT_EMPTY,
+                (scalar, index) -> scalar, Integer.MAX_VALUE, Integer.MAX_VALUE);
 
         assertEquals(List.of(42), result.value());
     }
@@ -49,7 +50,8 @@ class ConditionValueNormalizerStrictCollectionTest {
                 () -> ConditionValueNormalizer.normalize(
                         ConditionValueShape.COLLECTION,
                         Arrays.asList(42, null),
-                        ConditionValuePolicy.REJECT_EMPTY));
+                        ConditionValuePolicy.REJECT_EMPTY,
+                        (scalar, index) -> scalar, Integer.MAX_VALUE, Integer.MAX_VALUE));
 
         assertEquals(ConditionValueException.Error.NULL_VALUE, error.error());
     }
@@ -77,7 +79,8 @@ class ConditionValueNormalizerStrictCollectionTest {
                 () -> ConditionValueNormalizer.normalize(
                         ConditionValueShape.RANGE,
                         unbounded,
-                        ConditionValuePolicy.REJECT_EMPTY));
+                        ConditionValuePolicy.REJECT_EMPTY,
+                        (scalar, index) -> scalar, Integer.MAX_VALUE, Integer.MAX_VALUE));
 
         assertEquals(ConditionValueException.Error.RANGE_SIZE_INVALID, error.error());
         assertEquals(3, consumed.get());

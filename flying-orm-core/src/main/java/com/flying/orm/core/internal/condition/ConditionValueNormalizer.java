@@ -25,21 +25,7 @@ import java.util.Objects;
  * @version v1.0
  */
 public final class ConditionValueNormalizer {
-    private static final int DEFAULT_MAX_COLLECTION_SIZE = 1_000;
-    private static final int DEFAULT_MAX_STRING_LENGTH = 4_096;
     private ConditionValueNormalizer() {
-    }
-
-    /**
-     * 使用原值作为标量结果进行整理。
-     *
-     * @param shape  term 需要的值形状
-     * @param value  调用方传入的原始值
-     * @param policy 空值是忽略还是拒绝
-     * @return 是否应保留条件以及整理后的值
-     */
-    public static Result normalize(ConditionValueShape shape, Object value, ConditionValuePolicy policy) {
-        return normalize(shape, value, policy, (scalar, index) -> scalar);
     }
 
     /**
@@ -49,34 +35,10 @@ public final class ConditionValueNormalizer {
      * @param value     原始输入
      * @param policy    空值处理策略
      * @param converter 标量转换器
+     * @param maxCollectionSize 调用方指定的集合元素上限
+     * @param maxStringLength 调用方指定的文本长度上限
      * @return 可直接放入条件 AST 的结果；{@link Result#present()} 为 false 时应跳过该条件
      */
-    public static Result normalize(ConditionValueShape shape,
-                                   Object value,
-                                   ConditionValuePolicy policy,
-                                   ScalarConverter converter) {
-        return normalize(shape,
-                         value,
-                         policy,
-                         converter,
-                         DEFAULT_MAX_COLLECTION_SIZE,
-                         DEFAULT_MAX_STRING_LENGTH);
-    }
-
-    /** 调用方可为每次请求设置集合上限。 */
-    public static Result normalize(ConditionValueShape shape,
-                                   Object value,
-                                   ConditionValuePolicy policy,
-                                   ScalarConverter converter,
-                                   int maxCollectionSize) {
-        return normalize(shape,
-                         value,
-                         policy,
-                         converter,
-                         maxCollectionSize,
-                         DEFAULT_MAX_STRING_LENGTH);
-    }
-
     public static Result normalize(ConditionValueShape shape,
                                    Object value,
                                    ConditionValuePolicy policy,
@@ -345,10 +307,10 @@ public final class ConditionValueNormalizer {
      * @param value   整理后的标量或不可变集合；被忽略时为 null
      */
     public record Result(boolean present, Object value) {
-        public static Result of(Object value) {
+        private static Result of(Object value) {
             return new Result(true, value);
         }
-        public static Result ignored() {
+        private static Result ignored() {
             return new Result(false, null);
         }
     }

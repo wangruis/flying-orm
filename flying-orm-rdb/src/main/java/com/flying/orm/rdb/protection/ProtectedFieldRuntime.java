@@ -3,7 +3,6 @@ package com.flying.orm.rdb.protection;
 import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.rdb.internal.InternalApi;
@@ -88,25 +87,9 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
                 Objects.requireNonNull(policies, "masking policy registry must not be null"));
     }
 
-    /** 把一行逻辑写入值转换为只供内部 SQL 渲染使用的物理值。 */
-    public PreparedWrite prepareWrite(DynamicForm form, Map<String, Object> values,
-                                      DataScope scope, ValueCodecRegistry codecs) {
-        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        return prepareWrite(safeForm, ProtectedFormLayout.physical(safeForm), values, scope, codecs);
-    }
-
-    /** Internal operation seam that reuses the physical form already derived by the planner. */
-    @InternalApi
-    public PreparedWrite prepareWrite(DynamicForm form, DynamicForm physicalForm,
-                                      Map<String, Object> values, DataScope scope,
-                                      ValueCodecRegistry codecs) {
-        return writeOperation(form, physicalForm, scope, codecs).prepare(values);
-    }
-
     /**
      * 为一次写入或批量订阅编译不随行变化的保护上下文；行级方法只处理当前值。
      */
-    @InternalApi
     public WriteOperation writeOperation(DynamicForm form, DynamicForm physicalForm,
                                          DataScope scope, ValueCodecRegistry codecs) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
@@ -118,31 +101,6 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
         requireKeys();
         return new WriteOperation(
                 safePhysicalForm, writes.plan(safeForm, safePhysicalForm, scope, codecs));
-    }
-
-    /**
-     * 为一行逻辑值生成 CONTAINS 侧索引令牌；没有启用 CONTAINS 时返回空列表。
-     *
-     * <p>返回值不包含 owner 主键，数据库生成键可以在基础 insert 成功后再与这些不可变令牌组合。</p>
-     */
-    public List<ContainsFieldTokens> prepareContainsTokens(DynamicForm form, Map<String, Object> values,
-                                                           DataScope scope, ValueCodecRegistry codecs) {
-        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        boolean containsSearch = safeForm.protections().encryptedFields().values().stream()
-                .anyMatch(definition -> definition.searchModes().contains(EncryptedSearchMode.CONTAINS));
-        if (!containsSearch) {
-            return List.of();
-        }
-        return writeOperation(safeForm, ProtectedFormLayout.physical(safeForm), scope, codecs)
-                .containsTokens(values);
-    }
-
-    /** 提取单表查询中的显式 CONTAINS 条件，供有界候选查询与解密复核编排使用。 */
-    public Optional<PreparedContainsQuery> prepareContainsQuery(DynamicForm form,
-                                                                ConditionGroup where,
-                                                                DataScope scope,
-                                                                ValueCodecRegistry codecs) {
-        return prepareContainsQuery(form, form, where, scope, codecs);
     }
 
     /** 提取单表 CONTAINS 条件，并只读取本次 Scope 允许暴露的业务字段。 */
@@ -162,32 +120,19 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
     }
 
     /** 把显式保护搜索改写为隐藏列 HMAC 条件，并拒绝密文上的普通比较。 */
-    public PreparedQuery prepareQuery(DynamicForm form,
+    PreparedQuery prepareQuery(DynamicForm form,
                                       DynamicForm visibleForm,
                                       ConditionGroup where,
                                       DataScope scope,
                                       ValueCodecRegistry codecs) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        return prepareQuery(safeForm, ProtectedFormLayout.physical(safeForm), visibleForm,
-                            where, scope, codecs);
-    }
-
-    /** Internal operation seam that reuses the physical form already derived by the planner. */
-    @InternalApi
-    public PreparedQuery prepareQuery(DynamicForm form,
-                                      DynamicForm physicalForm,
-                                      DynamicForm visibleForm,
-                                      ConditionGroup where,
-                                      DataScope scope,
-                                      ValueCodecRegistry codecs) {
-        return prepareQuery(form, physicalForm, where, scope, codecs,
+        return prepareQuery(safeForm, ProtectedFormLayout.physical(safeForm), where, scope, codecs,
                             ProtectedFormLayout.visibleFieldNames(visibleForm));
     }
 
     /**
      * 内部规划边界直接传入最终 SQL 所需的投影；纯条件路径传空列表，避免遍历并丢弃全部业务字段。
      */
-    @InternalApi
     public PreparedQuery prepareQuery(DynamicForm form,
                                       DynamicForm physicalForm,
                                       ConditionGroup where,
@@ -207,14 +152,7 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
         return queries.prepare(safeForm, safePhysicalForm, where, scope, codecs, safeVisibleFields);
     }
 
-    /** 解密已经物化为 byte[] 的字段，并按查询级展示策略处理显式 masked 字段。 */
-    public DynamicRow transformResult(DynamicForm form, DynamicRow row, DataScope scope,
-                                      SensitiveDisplayMode displayMode, ValueCodecRegistry codecs) {
-        return resultOperation(form, scope, displayMode, codecs).transform(row);
-    }
-
     /** 为一次查询结果流固定租户身份和展示策略，避免每行重复派生。 */
-    @InternalApi
     public ResultOperation resultOperation(DynamicForm form, DataScope scope,
                                            SensitiveDisplayMode displayMode, ValueCodecRegistry codecs) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
@@ -258,17 +196,11 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
     }
 
     /** Applies the established masking policy to one projected value. */
-    @InternalApi
     public Object maskValue(
             Object value,
             com.flying.orm.core.protection.MaskedFieldDefinition definition,
             SensitiveDisplayMode displayMode) {
         return masking.transformValue(value, definition, displayMode);
-    }
-
-    /** @return 包含密文和隐藏索引列的内部物理表单 */
-    public DynamicForm physicalForm(DynamicForm form) {
-        return ProtectedFormLayout.physical(Objects.requireNonNull(form, "dynamic form must not be null"));
     }
 
     @Override
@@ -285,7 +217,6 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
     }
 
     /** 单次写入或批量订阅共享的保护值计划。 */
-    @InternalApi
     public static final class WriteOperation {
         private final DynamicForm physicalForm;
         private final ProtectedWriteTransformer.Plan encrypted;
@@ -309,7 +240,6 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
     }
 
     /** 单次查询结果流共享的保护结果计划。 */
-    @InternalApi
     public static final class ResultOperation {
         private final ProtectedResultTransformer.ResultPlan encrypted;
         private final MaskedFieldResultTransformer masking;
@@ -343,7 +273,6 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
         }
 
         /** Internal transformer seam for a completed physical-value map that it exclusively owns. */
-        @InternalApi
         static PreparedWrite owned(DynamicForm physicalForm, Map<String, Object> values) {
             return new PreparedWrite(physicalForm, PreparedWriteValues.owned(values));
         }
@@ -359,7 +288,6 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
         }
 
         /** Internal renderer seam for the immutable values already owned by this plan. */
-        @InternalApi
         public Map<String, Object> ownedValues() {
             return values;
         }
@@ -391,7 +319,6 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
         }
 
         /** @return 内部工作计划可直接复用的令牌数量，不发布底层数组。 */
-        @InternalApi
         public int tokenCount() {
             return tokens.size();
         }
@@ -399,7 +326,6 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
         /**
          * 返回构造期自有令牌的独立只读视图。视图共享已经冻结的载荷，但不能取得或修改底层数组。
          */
-        @InternalApi
         public ByteBuffer ownedToken(int index) {
             return ByteBuffer.wrap(tokens.get(index)).asReadOnlyBuffer();
         }

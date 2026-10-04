@@ -47,7 +47,6 @@ public record BatchOptimisticUpdate(Map<String, Object> values,
     }
 
     /** Internal planning seam for values already owned by this immutable batch row. */
-    @InternalApi
     Map<String, Object> ownedValues() {
         return values;
     }

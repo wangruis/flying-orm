@@ -23,6 +23,7 @@ import com.flying.orm.rdb.protection.MaskingPolicyRegistry;
 import com.flying.orm.rdb.protection.ProtectedConditions;
 import com.flying.orm.rdb.protection.ProtectedFieldKeyRing;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
+import com.flying.orm.rdb.protection.ProtectedFormLayout;
 import com.flying.orm.rdb.protection.ProtectedValueNormalizerRegistry;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
@@ -162,8 +163,8 @@ class SyncContainsPlanningReuseTest {
     }
 
     private static DynamicRow encryptedRow(ProtectedFieldRuntime runtime, DynamicForm form, long id, String secret) {
-        return DynamicRow.copyOf(runtime.prepareWrite(form, Map.of("id", id, "secret", secret),
-                DataScope.none(), ValueCodecRegistry.standard()).ownedValues());
+        return DynamicRow.copyOf(runtime.writeOperation(form, ProtectedFormLayout.physical(form),
+                DataScope.none(), ValueCodecRegistry.standard()).prepare(Map.of("id", id, "secret", secret)).ownedValues());
     }
 
     record Result(Long id, String secret) { }

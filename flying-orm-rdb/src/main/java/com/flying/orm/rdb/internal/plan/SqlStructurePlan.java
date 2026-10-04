@@ -27,7 +27,7 @@ public final class SqlStructurePlan {
      * @param operation 操作类型
      * @param table 物理表身份
      */
-    public SqlStructurePlan(SqlStatementPlan statement,
+    private SqlStructurePlan(SqlStatementPlan statement,
                             String operation,
                             String table) {
         this.statement = Objects.requireNonNull(
@@ -65,7 +65,7 @@ public final class SqlStructurePlan {
     }
 
     /** @return 参数化 SQL 文本。 */
-    public String sql() {
+    String sql() {
         return statement.sql();
     }
 
@@ -75,12 +75,12 @@ public final class SqlStructurePlan {
     }
 
     /** @return 操作类型。 */
-    public String operation() {
+    String operation() {
         return operation;
     }
 
     /** @return 物理表身份。 */
-    public String table() {
+    String table() {
         return table;
     }
 

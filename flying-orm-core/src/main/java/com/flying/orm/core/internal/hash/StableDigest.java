@@ -27,7 +27,7 @@ public final class StableDigest {
      * @param domain 稳定、非空的用途和协议版本，例如 {@code batch-payload/v1}
      * @return 新编码器
      */
-    public static StableEncoder sha256(String domain) {
+    static StableEncoder sha256(String domain) {
         return sha256(domain(domain));
     }
 

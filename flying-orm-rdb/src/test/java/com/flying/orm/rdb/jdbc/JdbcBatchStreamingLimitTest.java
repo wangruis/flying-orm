@@ -4,7 +4,6 @@ import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
 import com.flying.orm.rdb.batch.BatchMemoryLimitExceededException;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
-import com.flying.orm.rdb.execution.BatchRowSnapshotter;
 import com.flying.orm.rdb.execution.ProtectedBatchRows;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
@@ -95,7 +94,7 @@ class JdbcBatchStreamingLimitTest {
     void startsANewChunkBeforeRequestingAnotherRowAtTheByteBudget() throws Exception {
         Object[] first = {new byte[64]};
         Object[] second = {new byte[64]};
-        long oneRowBytes = BatchRowSnapshotter.snapshotAndEstimate(
+        long oneRowBytes = ProtectedBatchRows.admit(
                 first, 1, Long.MAX_VALUE, "test budget").estimatedBytes();
         BatchWriteRequest request = com.flying.orm.rdb.batch.BatchWriteRequests.request(
                 "insert into samples(value) values (?)",

@@ -24,7 +24,7 @@ class NonPersistentColumnAliasCollisionTest {
         assertAll(
                 () -> assertEquals(Map.of("shadow", "stored"), values.readForInsert(entity)),
                 () -> assertEquals(Map.of("shadow", "stored"), values.readForUpdate(entity)),
-                () -> assertEquals(Map.of("shadow", "stored"), values.readForUpsert(entity)),
+                () -> assertEquals(Map.of("shadow", "stored"), values.repositoryUpsertValues(entity)),
                 () -> assertEquals(Map.of("shadow", "stored"),
                         values.repositoryUpsertValues(entity).insertValues()),
                 () -> assertEquals(Map.of("shadow", "stored"),
@@ -49,7 +49,7 @@ class NonPersistentColumnAliasCollisionTest {
         assertAll(
                 () -> assertEquals(Map.of("shadow", "stored"), values.readForInsert(entity)),
                 () -> assertEquals(Map.of("shadow", "stored"), values.readForUpdate(entity)),
-                () -> assertEquals(Map.of("shadow", "stored"), values.readForUpsert(entity)),
+                () -> assertEquals(Map.of("shadow", "stored"), values.repositoryUpsertValues(entity)),
                 () -> assertEquals(Map.of("shadow", "stored"),
                         values.repositoryUpsertValues(entity).insertValues()),
                 () -> assertEquals(Map.of("shadow", "stored"),
@@ -78,7 +78,7 @@ class NonPersistentColumnAliasCollisionTest {
         assertAll(
                 () -> assertEquals(Map.of("shadow", "stored"), values.readForInsert(entity)),
                 () -> assertEquals(Map.of("shadow", "stored"), values.readForUpdate(entity)),
-                () -> assertEquals(Map.of("shadow", "stored"), values.readForUpsert(entity)),
+                () -> assertEquals(Map.of("shadow", "stored"), values.repositoryUpsertValues(entity)),
                 () -> assertEquals("stored", mapped.name),
                 () -> assertNull(mapped.shadow));
     }

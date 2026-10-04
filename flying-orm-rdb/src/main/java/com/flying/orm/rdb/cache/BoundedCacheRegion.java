@@ -68,22 +68,6 @@ public final class BoundedCacheRegion<K, V> {
         return value == null || value.oversized() ? null : value.value();
     }
 
-    /** @return true 表示对象已进入缓存，false 表示区域关闭或对象过大。 */
-    public boolean put(K key, V value) {
-        K safeKey = Objects.requireNonNull(key, "cache key must not be null");
-        V safeValue = Objects.requireNonNull(value, "cache value must not be null");
-        if (!policy.enabled()) {
-            return false;
-        }
-        WeightedValue<V> weighted = weighted(safeKey, safeValue);
-        if (weighted.oversized()) {
-            cache.invalidate(safeKey);
-            return false;
-        }
-        cache.put(safeKey, weighted);
-        return true;
-    }
-
     public void invalidate(K key) {
         cache.invalidate(Objects.requireNonNull(key, "cache key must not be null"));
     }

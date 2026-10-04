@@ -111,7 +111,12 @@ public final class SyncFormClient {
     @InternalApi
     public BatchWriteOptions defaultBatchWriteOptions() { return configuration.batchOptions(); }
 
-    @InternalApi
+    /**
+     * 返回当前客户端使用的实体映射注册表，供属性名条件、局部赋值和结果映射复用。
+     * 注册表与客户端共享，生命周期由创建它的装配方管理。
+     *
+     * @return 当前客户端的实体映射注册表
+     */
     public EntityModelRegistry entityModels() { return configuration.entityModels(); }
 
     /** 实体默认投影复用客户端已冻结的字段范围；行级 Scope 仍由查询计划统一合并。 */

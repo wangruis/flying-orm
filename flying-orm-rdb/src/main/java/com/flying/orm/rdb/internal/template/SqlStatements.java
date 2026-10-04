@@ -1,7 +1,6 @@
 package com.flying.orm.rdb.internal.template;
 
 import com.flying.orm.rdb.dialect.RdbDialect;
-import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.internal.dialect.DatabaseProduct;
 
 import java.util.Objects;
@@ -47,7 +46,6 @@ public final class SqlStatements {
     /**
      * 低层 JDBC/R2DBC 原生请求按驱动报告的数据库名复用同一词法边界，避免上层校验后被错误的通用规则二次拒绝。
      */
-    @InternalApi
     public static String requireSingleForDatabaseProduct(String sql, String databaseProductName) {
         return requireSingle(sql, Objects.requireNonNullElse(databaseProductName, ""));
     }

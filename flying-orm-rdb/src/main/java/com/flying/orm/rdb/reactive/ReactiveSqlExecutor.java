@@ -170,6 +170,7 @@ public interface ReactiveSqlExecutor {
     }
 
     /** ORM 内部受保护字段工作单元，使用同一条上层提供的连接。 */
+    @InternalApi
     default Mono<SqlWriteResult> protectedWrite(ProtectedWriteWork work, SqlExecutionOptions options) {
         Objects.requireNonNull(work, "protected write work must not be null");
         Objects.requireNonNull(options, "sql execution options must not be null");

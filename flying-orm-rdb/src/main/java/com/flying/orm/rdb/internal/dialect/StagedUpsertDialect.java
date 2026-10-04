@@ -1,7 +1,6 @@
 package com.flying.orm.rdb.internal.dialect;
 
 import com.flying.orm.rdb.dialect.UpsertDialect;
-import com.flying.orm.rdb.internal.InternalApi;
 
 import java.util.List;
 
@@ -11,7 +10,6 @@ import java.util.List;
  * @author wangr
  * @version v3.1
  */
-@InternalApi
 public interface StagedUpsertDialect extends UpsertDialect {
 
     String renderStaged(String table,

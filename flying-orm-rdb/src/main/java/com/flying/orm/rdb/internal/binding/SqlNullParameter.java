@@ -1,6 +1,5 @@
 package com.flying.orm.rdb.internal.binding;
 
-import com.flying.orm.rdb.internal.InternalApi;
 
 import java.util.Objects;
 
@@ -12,7 +11,6 @@ import java.util.Objects;
  * @date 2026-08-25
  * @version v3.1
  */
-@InternalApi
 public record SqlNullParameter(Class<?> javaType) {
 
     public SqlNullParameter {

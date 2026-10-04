@@ -3,7 +3,6 @@ package com.flying.orm.rdb.internal.cache;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.rdb.exception.RdbErrorKind;
 import com.flying.orm.rdb.exception.RdbException;
-import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.metadata.MetadataCacheInvalidator;
 
 import java.util.ArrayList;
@@ -18,7 +17,6 @@ import java.util.function.Consumer;
  * @author wangr
  * @version v3.1
  */
-@InternalApi
 public final class SchemaCacheInvalidationCoordinator
         implements MetadataCacheInvalidator, Consumer<String> {
 

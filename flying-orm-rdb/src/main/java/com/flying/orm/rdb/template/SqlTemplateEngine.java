@@ -93,16 +93,6 @@ public final class SqlTemplateEngine {
                 .render(values);
     }
 
-    /** 同步 JDBC 使用同一安全扫描过程，但参数标记固定生成 {@code ?}。 */
-    @InternalApi
-    public static SqlRequest compileNativeJdbc(String sql,
-                                               Map<String, ?> values,
-                                               RdbDialect dialect,
-                                               ValueCodecRegistry valueCodecs) {
-        return prepareNative(sql, SqlTemplateRenderer.Backend.create(dialect, valueCodecs, true))
-                .render(values);
-    }
-
     /**
      * 原生 SQL 调用状态在创建时完成一次方言校验和占位符编译，重复执行时只绑定本次参数。
      */

@@ -164,8 +164,7 @@ final class JdbcProtectedBatchSideIndex {
 
     private static SqlExecutionOptions ownerReadOptions(BatchWriteRequest request) {
         long limit = request.options().maxBufferedBytes();
-        return ProtectedWriteWork.ownerReadOptions(
-                new SqlExecutionOptions(0, limit, limit, limit, 0));
+        return new SqlExecutionOptions(0, limit, limit, limit, 0);
     }
 
     private static void replace(Connection connection,

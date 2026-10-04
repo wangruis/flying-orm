@@ -63,7 +63,7 @@ class JdbcProtectedBatchSideIndexBatchingTest {
     void ordinaryChunkDoesNotPreparePerRowProtectionState() throws Exception {
         List<ProtectedBatchRows.RowView> rows = new ArrayList<>();
         for (int index = 0; index < 500; index++) {
-            rows.add(ProtectedBatchRows.decode(new Object[]{"plain", (long) index}, 2));
+            rows.add(ProtectedBatchRows.admit(new Object[]{"plain", (long) index}, 2, Long.MAX_VALUE, "test bytes"));
         }
         JdbcProtectedBatchSideIndex.Prepared prepared = new JdbcProtectedBatchSideIndex().prepare(
                 null, request(), rows);
@@ -177,8 +177,8 @@ class JdbcProtectedBatchSideIndexBatchingTest {
 
     private static ProtectedBatchRows.RowView row(ProtectedWriteWork work) {
         Object[] parameters = work.writeRequest().parameters().toArray();
-        return ProtectedBatchRows.decode(
-                ProtectedBatchRows.extend(parameters, work), parameters.length);
+        return ProtectedBatchRows.admit(
+                ProtectedBatchRows.extend(parameters, work), parameters.length, Long.MAX_VALUE, "test bytes");
     }
 
     private static ProtectedWriteWork updateWork(long ownerId) {

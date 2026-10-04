@@ -2,7 +2,6 @@ package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.rdb.batch.BatchExecutionEvidenceException;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
-import com.flying.orm.rdb.execution.BatchRowSnapshotter;
 import com.flying.orm.rdb.execution.ProtectedBatchRows;
 import reactor.core.publisher.Flux;
 
@@ -111,7 +110,7 @@ final class R2dbcBatchChunker {
                                        Object[] row,
                                        int parameterCount,
                                        long maxRowBytes) {
-            ProtectedBatchRows.RowView owned = BatchRowSnapshotter.snapshotView(
+            ProtectedBatchRows.RowView owned = ProtectedBatchRows.admit(
                     row, parameterCount, maxRowBytes, "row bytes");
             return new IndexedRow(offset, owned);
         }

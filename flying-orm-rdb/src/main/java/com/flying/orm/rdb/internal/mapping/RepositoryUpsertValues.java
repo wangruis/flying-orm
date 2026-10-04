@@ -1,6 +1,5 @@
 package com.flying.orm.rdb.internal.mapping;
 
-import com.flying.orm.rdb.internal.InternalApi;
 
 import java.util.AbstractMap;
 import java.util.Collections;
@@ -18,7 +17,6 @@ import java.util.Set;
  * @date 2026-08-28
  * @version v1.0
  */
-@InternalApi
 public final class RepositoryUpsertValues extends AbstractMap<String, Object> {
 
     private final Map<String, Object> values;

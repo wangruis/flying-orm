@@ -42,7 +42,8 @@ class ConditionGroupOwnershipTest {
                 ConditionValueShape.COLLECTION,
                 List.of(1, 2, 3),
                 ConditionValuePolicy.REJECT_EMPTY,
-                (scalar, index) -> TermCondition.snapshotScalar("in", scalar));
+                (scalar, index) -> TermCondition.snapshotScalar("in", scalar),
+                Integer.MAX_VALUE, Integer.MAX_VALUE);
         TermCondition term = TermCondition.owned(identity, "in", normalized.value());
         ConditionGroup group = ConditionGroup.and().add(term).build();
         Field rawValue = TermCondition.class.getDeclaredField("value");

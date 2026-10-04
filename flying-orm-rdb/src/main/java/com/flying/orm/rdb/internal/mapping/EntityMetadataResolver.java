@@ -28,8 +28,6 @@ import java.util.Optional;
  */
 public final class EntityMetadataResolver {
 
-    private static final EntityNamingStrategy NAMING_STRATEGY = EntityNamingStrategy.SNAKE_CASE;
-
     private EntityMetadataResolver() {
     }
 
@@ -49,10 +47,10 @@ public final class EntityMetadataResolver {
 
     private static <T> EntityCompilation<T> compile(Class<T> type, boolean strictRelational) {
         RelationIdentity relationIdentity = strictRelational
-                ? EntityTableNameResolver.resolveRelationalIdentity(type, NAMING_STRATEGY)
-                : EntityTableNameResolver.resolveIdentity(type, NAMING_STRATEGY);
+                ? EntityTableNameResolver.resolveRelationalIdentity(type)
+                : EntityTableNameResolver.resolveIdentity(type);
         String legacyTable = EntityTableNameResolver.resolveTable(relationIdentity);
-        String formId = NAMING_STRATEGY.tableName(type);
+        String formId = EntityFieldNames.snakeCase(type.getSimpleName());
         Optional<FlyingLogicDelete> classLogicDelete = Optional.ofNullable(type.getAnnotation(FlyingLogicDelete.class));
         List<Field> persistentFields = strictRelational ? new ArrayList<>() : null;
         List<Field> excludedFields = strictRelational ? new ArrayList<>() : null;
@@ -90,7 +88,7 @@ public final class EntityMetadataResolver {
                 }
 
                 EntityFieldMetadata metadata = EntityFieldMetadataCompiler.compile(
-                        type, field, NAMING_STRATEGY, classLogicDelete, strictRelational);
+                        type, field, classLogicDelete, strictRelational);
                 if (strictRelational) {
                     persistentFields.add(field);
                 }

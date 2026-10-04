@@ -46,7 +46,7 @@ class ProtectedExecutionValueSnapshotTest {
 
         BatchMemoryLimitExceededException failure = assertThrows(
                 BatchMemoryLimitExceededException.class,
-                () -> BatchRowSnapshotter.snapshotAndEstimate(row, 1, 32L, "test bytes"));
+                () -> ProtectedBatchRows.admit(row, 1, 32L, "test bytes"));
 
         assertEquals("test bytes", failure.limitName());
         assertEquals(32L, failure.limit());
@@ -58,7 +58,7 @@ class ProtectedExecutionValueSnapshotTest {
         ByteBuffer shared = ByteBuffer.wrap(new byte[]{1, 2});
         Object[] row = {shared, shared};
 
-        Object[] owned = BatchRowSnapshotter.snapshot(row);
+        Object[] owned = ProtectedBatchRows.admit(row, 2, 4096L, "test bytes").row();
 
         assertSame(row, owned);
         assertSame(shared, owned[0]);
@@ -79,9 +79,9 @@ class ProtectedExecutionValueSnapshotTest {
                 List.of(new ProtectedWriteWork.FieldTokens("phone", List.of(new byte[]{2}))));
         Object[] row = ProtectedBatchRows.extend(new Object[]{1L}, work);
 
-        Object[] snapshot = BatchRowSnapshotter.snapshot(row, 1, 4096L, "test bytes");
+        ProtectedBatchRows.RowView admitted = ProtectedBatchRows.admit(row, 1, 4096L, "test bytes");
 
-        assertSame(work, ProtectedBatchRows.work(snapshot, 1));
+        assertSame(work, admitted.work());
     }
 
     @Test

@@ -2,6 +2,7 @@ package com.flying.orm.rdb.execution;
 
 import com.flying.orm.core.internal.value.OwnedBindableValues;
 import com.flying.orm.rdb.batch.BatchMemoryBudget;
+import com.flying.orm.rdb.batch.BatchMemoryLimitExceededException;
 import com.flying.orm.rdb.internal.InternalApi;
 
 import java.util.Arrays;
@@ -39,25 +40,23 @@ public final class ProtectedBatchRows {
         return extended;
     }
 
-    /** 返回只包含可绑定值的数组；普通行不额外复制。 */
-    public static Object[] parameters(Object[] row, int parameterCount) {
-        Object[] safeRow = decode(row, parameterCount).row();
-        return safeRow.length == parameterCount ? safeRow : Arrays.copyOf(safeRow, parameterCount);
+    /** 校验已经移交所有权的批量行并计算预算，JDBC/R2DBC 后续复用同一视图，不重复复制参数。 */
+    public static RowView admit(Object[] row, int parameterCount, long maxBufferedBytes, String limitName) {
+        Object[] safeRow = Objects.requireNonNull(row, "batch row must not be null");
+        if (maxBufferedBytes <= 0L) {
+            throw new IllegalArgumentException("batch snapshot byte limit must be positive");
+        }
+        Objects.requireNonNull(limitName, "batch snapshot limit name must not be null");
+        RowView view = decode(safeRow, parameterCount);
+        long estimatedBytes = estimateRowBytes(view);
+        if (estimatedBytes == Long.MAX_VALUE || estimatedBytes > maxBufferedBytes) {
+            throw new BatchMemoryLimitExceededException(limitName, maxBufferedBytes, estimatedBytes);
+        }
+        return new RowView(safeRow, parameterCount, view.work(), estimatedBytes);
     }
 
-    /** 返回行尾工作描述；普通批量行返回 null。 */
-    public static ProtectedWriteWork work(Object[] row, int parameterCount) {
-        return decode(row, parameterCount).work();
-    }
-
-    /** 按参数、owner、查询和令牌内容估算扩展行预算，避免内部元数据绕过批量内存上限。 */
-    public static long estimateRowBytes(Object[] row, int parameterCount) {
-        return estimateRowBytes(decode(row, parameterCount));
-    }
-
-    /** 一次完成行形状、工作元数据解码，供 JDBC/R2DBC 内核复用。 */
-    @InternalApi
-    public static RowView decode(Object[] row, int parameterCount) {
+    /** 在批量准入时解码行形状和工作元数据。 */
+    private static RowView decode(Object[] row, int parameterCount) {
         if (row == null || parameterCount < 0) {
             throw invalidShape();
         }
@@ -75,8 +74,7 @@ public final class ProtectedBatchRows {
     }
 
     /** 使用已经校验的行视图计算一次预算，不重新解释尾槽元数据。 */
-    @InternalApi
-    public static long estimateRowBytes(RowView view) {
+    private static long estimateRowBytes(RowView view) {
         RowView safeView = Objects.requireNonNull(view, "protected batch row view must not be null");
         Object[] safeRow = safeView.row();
         int parameterCount = safeView.parameterCount();
@@ -112,7 +110,6 @@ public final class ProtectedBatchRows {
     }
 
     /** 已校验行的只读内部视图；数组所有权仍属于当前批量执行。 */
-    @InternalApi
     public static final class RowView {
 
         private final Object[] row;
@@ -147,10 +144,6 @@ public final class ProtectedBatchRows {
                 throw new IllegalStateException("protected batch row view has no byte estimate");
             }
             return estimatedBytes;
-        }
-
-        RowView withEstimatedBytes(long bytes) {
-            return new RowView(row, parameterCount, work, bytes);
         }
     }
 }

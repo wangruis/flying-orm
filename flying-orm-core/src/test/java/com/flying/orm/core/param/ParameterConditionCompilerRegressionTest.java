@@ -412,7 +412,8 @@ class ParameterConditionCompilerRegressionTest {
         ConditionValueNormalizer.Result result = ConditionValueNormalizer.normalize(
                 ConditionValueShape.COLLECTION,
                 List.of(first, second),
-                ConditionValuePolicy.REJECT_EMPTY);
+                ConditionValuePolicy.REJECT_EMPTY,
+                (scalar, index) -> scalar, Integer.MAX_VALUE, Integer.MAX_VALUE);
 
         List<?> values = assertInstanceOf(List.class, result.value());
         assertTrue(java.util.Arrays.equals(first, assertInstanceOf(byte[].class, values.get(0))));

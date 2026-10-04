@@ -2,7 +2,6 @@ package com.flying.orm.rdb.internal.plan;
 
 import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
 import com.flying.orm.core.sql.render.SqlStatementPlan;
-import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.internal.dialect.DatabaseProduct;
 import com.flying.orm.rdb.internal.template.SqlLexicalScanner;
 import com.flying.orm.rdb.internal.template.SqlStatements;
@@ -16,7 +15,6 @@ import java.util.Objects;
  * @date 2026-08-24
  * @version v3.1
  */
-@InternalApi
 public final class SqlStatementCompiler {
 
     private SqlStatementCompiler() {

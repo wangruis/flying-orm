@@ -23,6 +23,7 @@ import com.flying.orm.rdb.jdbc.JdbcSqlExecutor;
 import com.flying.orm.rdb.lock.OptimisticLockOptions;
 import com.flying.orm.rdb.protection.ProtectedFieldKeyRing;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
+import com.flying.orm.rdb.protection.ProtectedFormLayout;
 import com.flying.orm.rdb.reactive.R2dbcSqlExecutor;
 import io.r2dbc.spi.ColumnMetadata;
 import io.r2dbc.spi.R2dbcType;
@@ -132,8 +133,8 @@ class ProtectedBatchSequentialUpdateTest {
 
     private static Set<String> tokens(ProtectedFieldRuntime runtime, DynamicForm form, String value) {
         Set<String> result = new HashSet<>();
-        runtime.prepareContainsTokens(form, Map.of("secret", value),
-                DataScope.none(), ValueCodecRegistry.standard()).forEach(field ->
+        runtime.writeOperation(form, ProtectedFormLayout.physical(form), DataScope.none(), ValueCodecRegistry.standard())
+                .containsTokens(Map.of("secret", value)).forEach(field ->
                 field.tokens().forEach(token -> result.add(binary(token))));
         return result;
     }

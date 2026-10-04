@@ -1,9 +1,9 @@
 package com.flying.orm.rdb.internal.mapping;
 
 import com.flying.orm.core.internal.Names;
-import com.flying.orm.rdb.internal.InternalApi;
 
 import java.util.Locale;
+import java.util.Objects;
 
 /**
  * Canonical Java-member/database-column matching for entity metadata and mapped result labels.
@@ -15,10 +15,34 @@ import java.util.Locale;
  * @date 2026-08-24
  * @version v3.0
  */
-@InternalApi
 public final class EntityFieldNames {
 
     private EntityFieldNames() {
+    }
+
+    /** 默认表名和列名共用的 snake_case 规则；显式注解名称不经过此转换。 */
+    static String snakeCase(String propertyName) {
+        String text = Objects.requireNonNull(propertyName, "property name must not be null").trim();
+        if (text.isEmpty()) {
+            throw new IllegalArgumentException("property name must not be blank");
+        }
+        StringBuilder name = new StringBuilder(text.length() + 8);
+        for (int i = 0; i < text.length(); i++) {
+            char current = text.charAt(i);
+            if (Character.isUpperCase(current)) {
+                if (i > 0 && name.charAt(name.length() - 1) != '_') {
+                    name.append('_');
+                }
+                name.append(Character.toLowerCase(current));
+            } else if (current == '-' || current == ' ') {
+                if (!name.isEmpty() && name.charAt(name.length() - 1) != '_') {
+                    name.append('_');
+                }
+            } else {
+                name.append(current);
+            }
+        }
+        return name.toString();
     }
 
     /** @return the canonical entity member/column lookup key */

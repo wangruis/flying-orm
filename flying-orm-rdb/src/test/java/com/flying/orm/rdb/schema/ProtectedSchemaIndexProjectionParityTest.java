@@ -15,6 +15,7 @@ import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.rdb.protection.ProtectedFieldKeyRing;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
+import com.flying.orm.rdb.protection.ProtectedFormLayout;
 import com.flying.orm.rdb.protection.ProtectedRelationalSchemaProjector;
 import org.junit.jupiter.api.Test;
 
@@ -71,10 +72,12 @@ class ProtectedSchemaIndexProjectionParityTest {
              ProtectedFieldRuntime rotating = ProtectedFieldRuntime.create(
                     ProtectedFieldKeyRing.builder().current("v2", newKey).readable("v1", oldKey)
                             .uniqueSearchKey(oldKey).build())) {
-            byte[] first = (byte[]) original.prepareWrite(form, Map.of("secret", "same business value"),
-                    DataScope.none(), ValueCodecRegistry.standard()).values().get(hashColumn);
-            byte[] second = (byte[]) rotating.prepareWrite(form, Map.of("secret", "same business value"),
-                    DataScope.none(), ValueCodecRegistry.standard()).values().get(hashColumn);
+            byte[] first = (byte[]) original.writeOperation(form, ProtectedFormLayout.physical(form),
+                    DataScope.none(), ValueCodecRegistry.standard())
+                    .prepare(Map.of("secret", "same business value")).values().get(hashColumn);
+            byte[] second = (byte[]) rotating.writeOperation(form, ProtectedFormLayout.physical(form),
+                    DataScope.none(), ValueCodecRegistry.standard())
+                    .prepare(Map.of("secret", "same business value")).values().get(hashColumn);
 
             assertArrayEquals(first, second);
         }
