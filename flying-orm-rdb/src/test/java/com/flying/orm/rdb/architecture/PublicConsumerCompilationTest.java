@@ -1,6 +1,9 @@
 package com.flying.orm.rdb.architecture;
 
 import com.flying.orm.rdb.bootstrap.FlyingOrmClients;
+import com.flying.orm.rdb.form.ReactiveFormClient;
+import com.flying.orm.rdb.form.SyncFormClient;
+import com.flying.orm.rdb.internal.InternalApi;
 import org.junit.jupiter.api.Test;
 
 import javax.tools.DiagnosticCollector;
@@ -12,10 +15,21 @@ import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** Keeps the external consumer source in the normal quality gate without installing artifacts. */
 class PublicConsumerCompilationTest {
+    @Test
+    void configuredEntityAndBatchAccessorsAreStablePublicContracts() throws Exception {
+        for (Class<?> type : List.of(SyncFormClient.class, ReactiveFormClient.class)) {
+            for (String name : List.of("entityRenderer", "defaultFieldScope", "defaultBatchWriteOptions")) {
+                assertFalse(type.getMethod(name).isAnnotationPresent(InternalApi.class),
+                        () -> type.getSimpleName() + "." + name + " must be a stable public contract");
+            }
+        }
+    }
+
     @Test
     void upperServiceCanCompileAgainstTheCurrentPublicContracts() throws Exception {
         var compiler = ToolProvider.getSystemJavaCompiler();

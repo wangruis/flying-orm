@@ -1,4 +1,4 @@
-# flying-orm 4.1.1
+# flying-orm 4.1.2
 
 轻 SQL，重 Java。面向动态表单和实体的 ORM，提供 JDBC 同步与 R2DBC / Reactor 响应式入口。
 
@@ -16,7 +16,7 @@ Java 21+。数据库驱动与连接池由应用自行提供。以下是本分支
 <dependency>
     <groupId>io.github.wangruis</groupId>
     <artifactId>flying-orm-rdb</artifactId>
-    <version>4.1.1</version>
+    <version>4.1.2</version>
 </dependency>
 ```
 

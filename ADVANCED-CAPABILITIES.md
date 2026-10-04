@@ -1,4 +1,4 @@
-# flying-orm 4.1.1 高级能力
+# flying-orm 4.1.2 高级能力
 
 普通 CRUD、分页与报表优先使用 [表单或 Repository 入口](EXAMPLES.md)。以下接口用于服务端明确控制的特殊查询与扩展。
 

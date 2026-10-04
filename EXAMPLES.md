@@ -1,4 +1,4 @@
-# flying-orm 4.1.1 示例
+# flying-orm 4.1.2 示例
 
 默认使用 R2DBC：查询返回 `Flux`，单结果和写入返回 `Mono`。连接装配见 [README](README.md)，注解定义见 [ANNOTATIONS](ANNOTATIONS.md)。
 

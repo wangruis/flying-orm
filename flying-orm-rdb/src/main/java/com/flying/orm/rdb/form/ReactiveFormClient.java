@@ -134,8 +134,11 @@ public final class ReactiveFormClient {
         return operations.previewFieldUse(spec);
     }
 
-    /** Repository 和容器集成读取批量默认策略时使用。 */
-    @InternalApi
+    /**
+     * 返回当前客户端的默认批量策略；显式请求策略仍可覆盖它。
+     *
+     * @return 当前不可变批量策略
+     */
     public BatchWriteOptions defaultBatchWriteOptions() {
         return configuration.batchOptions();
     }
@@ -157,8 +160,12 @@ public final class ReactiveFormClient {
         return configuration.entityModels();
     }
 
-    /** 实体默认投影复用客户端已冻结的字段范围；行级 Scope 仍由查询计划统一合并。 */
-    @InternalApi
+    /**
+     * 返回当前客户端的默认字段范围，供上层封装复用默认投影规则。
+     * 本方法只返回字段范围，不代表完整行级 Scope；行级范围仍由执行链统一合并。
+     *
+     * @return 当前不可变字段范围
+     */
     public FieldScope defaultFieldScope() {
         return configuration.dataScope().fields();
     }
@@ -168,8 +175,13 @@ public final class ReactiveFormClient {
         return EntityDmlOperator.create(this, renderer.conditionRenderer(), type);
     }
 
-    /** Repository 内部创建 Lambda DML 状态时复用当前已装配的条件渲染器。 */
-    @InternalApi
+    /**
+     * 返回当前实体执行链使用的条件渲染器，供上层复用已注册的运算符和渲染规则。
+     * 使用 {@code entityModels().condition(..., entityRenderer().terms())} 可保持自定义条件语义一致。
+     * 渲染器只负责 SQL 构建，不执行查询，也不替代表单执行链的 Scope 和字段治理。
+     *
+     * @return 当前条件渲染器
+     */
     public SqlRenderer entityRenderer() {
         return renderer.conditionRenderer();
     }

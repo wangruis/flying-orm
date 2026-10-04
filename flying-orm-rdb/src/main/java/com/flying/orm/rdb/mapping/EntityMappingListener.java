@@ -5,10 +5,14 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * 实体映射生命周期监听器，不依赖 Spring，也不绑定线程本地变量。
+ * 实体映射回调，不依赖 Spring，也不绑定线程本地变量。
  *
- * <p>同一个监听器可能被多个 R2DBC 订阅并发调用，实现类必须自己保证线程安全。回调运行在当前映射链路中，
- * 抛出的异常会终止本次读写，因此这里只适合轻量审计、字段归一化结果检查和指标采集，不应做阻塞网络调用。</p>
+ * <p>通过 {@link RowMapper#of(Class, EntityMappingListener)} 注册的监听器只自动收到 {@link #afterRead}。
+ * {@link #beforeWrite} 由调用方显式派发，ORM 写入入口没有自动注册或调用它的机制。</p>
+ *
+ * <p>同一个监听器可能被多个 R2DBC 订阅并发调用，实现类必须自己保证线程安全。
+ * afterRead 异常会终止当前映射链路；手动 beforeWrite 的异常直接传播给调用方，由调用方决定是否继续写入。
+ * 回调只适合轻量检查、审计和指标采集，不应做阻塞网络调用。</p>
  * @author wangr
  * @date 2026-08-03
  * @version v1.0
@@ -18,11 +22,20 @@ public interface EntityMappingListener {
     EntityMappingListener NONE = new EntityMappingListener() {
     };
 
-    /** 写参数已经从实体读取完成、尚未交给 SQL 渲染器时调用。 */
+    /**
+     * 调用方可在写参数读取完成后、执行写入前显式派发；ORM 不会自动调用本方法。
+     * 抛出的异常传播给派发方，不代表数据库写入或事务结果。
+     *
+     * @param event 调用方提供的映射事件
+     */
     default void beforeWrite(EntityMappingEvent event) {
     }
 
-    /** 数据库行已经成功构造成实体后调用。 */
+    /**
+     * 注册到 RowMapper 后，在数据库行成功构造成实体时自动调用。
+     *
+     * @param event 当前读取映射事件
+     */
     default void afterRead(EntityMappingEvent event) {
     }
 

@@ -14,6 +14,8 @@ import com.flying.orm.rdb.bootstrap.FlyingOrmClients;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.form.spec.BatchSpec;
 import com.flying.orm.rdb.form.spec.QuerySpec;
+import com.flying.orm.rdb.form.SyncFormClient;
+import com.flying.orm.rdb.form.ReactiveFormClient;
 import com.flying.orm.rdb.jdbc.JdbcConnectionAccess;
 import com.flying.orm.rdb.jdbc.JdbcSqlExecutor;
 import com.flying.orm.rdb.protection.ProtectedFieldKeyRing;
@@ -76,6 +78,17 @@ public final class UpperServiceConsumer {
         FlyingOrmClients.builder(reactive).dialect(dialect);
         FlyingOrmClients.builder(jdbc, reactive).dialect(dialect);
         return com.flying.orm.rdb.jdbc.JdbcBatchWriter.create(jdbc, dialect).writeBatch(batch);
+    }
+
+    public static void compileConfiguredEntitySurface(SyncFormClient sync, ReactiveFormClient reactive) {
+        sync.entityModels().condition(CompatibilityEntity.class, "name", "=", "Alice",
+                sync.entityRenderer().terms());
+        reactive.entityModels().condition(CompatibilityEntity.class, "name", "=", "Alice",
+                reactive.entityRenderer().terms());
+        sync.defaultFieldScope();
+        reactive.defaultFieldScope();
+        sync.defaultBatchWriteOptions();
+        reactive.defaultBatchWriteOptions();
     }
 
     public static final class CompatibilityEntity {
