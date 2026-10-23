@@ -42,7 +42,8 @@ final class FormQueryShapeGuard {
 
     static List<String> readableProjections(QuerySpec spec, DynamicForm readableForm) {
         List<String> selected = projectionFields(spec, readableForm);
-        return spec.projections().isEmpty() || spec.projections().equals(List.of("*")) ? selected
+        List<String> requested = spec.projections();
+        return requested.isEmpty() || requested.size() == 1 && requested.getFirst().equals("*") ? selected
                 : FormSqlRenderSupport.canonicalFieldNames(readableForm, selected);
     }
 
@@ -50,6 +51,10 @@ final class FormQueryShapeGuard {
     static List<String> projectionFields(QuerySpec spec, DynamicForm readableForm) {
         List<String> requested = spec.projections();
         if (!requested.isEmpty() && !requested.contains("*")) return requested;
+        if (spec.excludedFields().isEmpty() && !readableForm.fields().isEmpty()
+                && (requested.isEmpty() || requested.size() == 1)) {
+            return readableForm.fieldNames();
+        }
         List<String> selected = new ArrayList<>(readableForm.fields().size() + requested.size());
         for (String name : requested.isEmpty() ? List.of("*") : requested) {
             if (name.equals("*")) {

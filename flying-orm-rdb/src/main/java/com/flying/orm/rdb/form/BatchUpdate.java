@@ -68,7 +68,7 @@ public record BatchUpdate(Map<String, Object> values,
      * 冻结标准可绑定的可变值，普通业务对象仍保持既有可信交接语义。
      */
     private static Map<String, Object> snapshotValues(Map<String, Object> source) {
-        Map<String, Object> snapshot = new LinkedHashMap<>(source.size());
+        Map<String, Object> snapshot = LinkedHashMap.newLinkedHashMap(source.size());
         source.forEach((name, value) -> snapshot.put(name, BindableValueSnapshots.logicalValue(value)));
         return Collections.unmodifiableMap(snapshot);
     }

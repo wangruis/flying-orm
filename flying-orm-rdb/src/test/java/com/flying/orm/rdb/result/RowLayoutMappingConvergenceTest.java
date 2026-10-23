@@ -5,6 +5,11 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.UnaryOperator;
 
@@ -112,6 +117,65 @@ class RowLayoutMappingConvergenceTest {
         assertEquals(1, firstBinding);
         assertEquals(firstBinding, secondBinding);
         assertEquals(1, bindings.get());
+    }
+
+    @Test
+    void publishedBindingReadsDoNotWaitForAnotherPlanToBePrepared() throws Exception {
+        RowLayout layout = RowLayout.of(List.of("id"));
+        Object plan = new Object();
+        Object binding = layout.mappingBinding(plan, Object::new);
+        CountDownLatch preparing = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch read = new CountDownLatch(1);
+        try (ExecutorService executor = Executors.newFixedThreadPool(2)) {
+            Future<Object> pending = executor.submit(() -> layout.mappingBinding(new Object(), () -> {
+                preparing.countDown();
+                try {
+                    release.await();
+                } catch (InterruptedException failure) {
+                    Thread.currentThread().interrupt();
+                    throw new AssertionError(failure);
+                }
+                return new Object();
+            }));
+            try {
+                assertTrue(preparing.await(5, TimeUnit.SECONDS));
+                Future<Object> reused = executor.submit(() -> {
+                    Object value = layout.mappingBinding(plan, () -> {
+                        throw new AssertionError("published binding must be reused");
+                    });
+                    read.countDown();
+                    return value;
+                });
+                assertTrue(read.await(5, TimeUnit.SECONDS), "published reads must not wait for binding creation");
+                assertSame(binding, reused.get());
+            } finally {
+                release.countDown();
+            }
+            pending.get();
+        }
+    }
+
+    @Test
+    void concurrentBindingsAreCreatedOncePerIdentityAndRetainedAcrossPlans() {
+        RowLayout layout = RowLayout.of(List.of("id"));
+        Object[] plans = java.util.stream.IntStream.range(0, 32)
+                .mapToObj(index -> new String("same name")).toArray();
+        AtomicInteger created = new AtomicInteger();
+        java.util.stream.IntStream.range(0, 256).parallel().forEach(index -> {
+            Object plan = plans[index % plans.length];
+            assertSame(plan, layout.mappingBinding(plan, () -> {
+                created.incrementAndGet();
+                return plan;
+            }));
+        });
+
+        assertEquals(plans.length, created.get());
+        for (Object plan : plans) {
+            assertSame(plan, layout.mappingBinding(plan, () -> {
+                throw new AssertionError("earlier plan binding must be retained");
+            }));
+        }
     }
 
     @Test

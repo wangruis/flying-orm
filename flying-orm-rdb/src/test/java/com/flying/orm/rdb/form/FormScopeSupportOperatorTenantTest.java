@@ -31,6 +31,28 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class FormScopeSupportOperatorTenantTest {
 
     @Test
+    void unscopedPlainUpdateDoesNotTraverseValuesForInactivePolicies() {
+        DynamicForm form = DynamicForm.builder("orders", "orders")
+                .addField(DynamicField.of("id", "BIGINT"))
+                .addField(DynamicField.of("name", "VARCHAR")).build();
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql());
+        FormScopeSupport scopes = new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none());
+        AtomicInteger traversals = new AtomicInteger();
+        Map<String, Object> values = countingMap(Map.of("name", "changed"), traversals);
+        ConditionGroup where = ConditionGroup.and().where("id", "=", 7L).build();
+
+        ConditionGroup scoped = scopes.applyUpdateScope(form, values, where, DataScope.none());
+
+        assertEquals(0, traversals.get(), "inactive policies must leave value traversal to the SQL renderer");
+        assertSame(where, scoped);
+        com.flying.orm.core.sql.render.SqlRequest request = renderer.update(form, values, scoped);
+        assertEquals("update \"orders\" set \"name\" = ? where \"id\" = ?", request.sql());
+        assertEquals(java.util.List.of("changed", 7L), request.parameters());
+        assertThrows(IllegalArgumentException.class, () -> renderer.update(form, Map.of("missing", 1), scoped));
+    }
+
+    @Test
     void mergesEquivalentTextTenantCarriersWithoutChangingPublishedValues() {
         FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
                 SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql());

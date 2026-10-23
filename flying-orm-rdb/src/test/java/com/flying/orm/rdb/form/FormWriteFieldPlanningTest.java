@@ -21,6 +21,75 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 class FormWriteFieldPlanningTest {
     private static volatile FormSqlRenderSupport.WriteFields fieldsSink;
     private static volatile com.flying.orm.core.sql.render.SqlRequest updateSink;
+    private static volatile Object[] batchSink;
+    private static volatile boolean layoutMatches;
+
+    @Test
+    void batchLayoutMatchingDoesNotAllocateSeparateKeyAndValueViews() {
+        requireUninstrumentedVm();
+        java.lang.management.ThreadMXBean standard = ManagementFactory.getThreadMXBean();
+        assumeTrue(standard instanceof com.sun.management.ThreadMXBean);
+        com.sun.management.ThreadMXBean allocation = (com.sun.management.ThreadMXBean) standard;
+        assumeTrue(allocation.isThreadAllocatedMemorySupported());
+        allocation.setThreadAllocatedMemoryEnabled(true);
+        Map<String, Object> first = new LinkedHashMap<>();
+        first.put("id", 7L);
+        first.put("name", "Ada");
+        BatchInsertPlan plan = new FormBatchSqlRenderer(support(), RdbDialect.postgresql().upsert())
+                .insertPlan(form(), first);
+        BatchInsertPlan.Cursor cursor = new BatchInsertPlan.Cursor(first, plan, true);
+        int iterations = 30_000;
+        double[] bytes = new double[2];
+        long thread = Thread.currentThread().threadId();
+        for (int mode = 0; mode < 2; mode++) {
+            for (int index = 0; index < iterations; index++) {
+                Map<String, Object> row = new LinkedHashMap<>(first);
+                if (mode == 1) layoutMatches = cursor.matches(row);
+                batchSink = plan.parameters(row, index);
+            }
+            long before = allocation.getThreadAllocatedBytes(thread);
+            for (int index = 0; index < iterations; index++) {
+                Map<String, Object> row = new LinkedHashMap<>(first);
+                if (mode == 1) layoutMatches = cursor.matches(row);
+                batchSink = plan.parameters(row, index);
+            }
+            bytes[mode] = (allocation.getThreadAllocatedBytes(thread) - before) / (double) iterations;
+        }
+        assertTrue(layoutMatches);
+        assertArrayEquals(new Object[]{7L, "Ada"}, batchSink);
+        System.out.println("batch layout matching additional allocation B/row=" + (bytes[1] - bytes[0]));
+        assertTrue(bytes[1] - bytes[0] < 24, "matching must reuse the binding entry view: " + java.util.Arrays.toString(bytes));
+    }
+
+    @Test
+    void orderedBatchRowsDoNotAllocateNormalizedFieldNames() {
+        requireUninstrumentedVm();
+        java.lang.management.ThreadMXBean standard = ManagementFactory.getThreadMXBean();
+        assumeTrue(standard instanceof com.sun.management.ThreadMXBean);
+        com.sun.management.ThreadMXBean allocation = (com.sun.management.ThreadMXBean) standard;
+        assumeTrue(allocation.isThreadAllocatedMemorySupported());
+        allocation.setThreadAllocatedMemoryEnabled(true);
+        DynamicForm.Builder builder = DynamicForm.builder("wide_items", "wide_items")
+                .addField(DynamicField.primaryKey("id", "BIGINT"));
+        Map<String, Object> values = new LinkedHashMap<>();
+        for (int index = 0; index < 64; index++) {
+            String name = "fieldValue" + index;
+            builder.addField(DynamicField.of(name, "VARCHAR"));
+            values.put(name, index % 2 == 0 ? null : "value");
+        }
+        DynamicForm form = builder.build();
+        FormSqlRenderSupport support = support();
+        BatchColumnLayout layout = BatchColumnLayout.of(form, support.writeFields(form, values, 0L), support);
+        int iterations = 20_000;
+        for (int index = 0; index < iterations; index++) batchSink = layout.parameters(values, index);
+        long thread = Thread.currentThread().threadId();
+        long before = allocation.getThreadAllocatedBytes(thread);
+        for (int index = 0; index < iterations; index++) batchSink = layout.parameters(values, index);
+        double bytes = (allocation.getThreadAllocatedBytes(thread) - before) / (double) iterations;
+        assertArrayEquals(values.values().toArray(), batchSink);
+        System.out.println("ordered batch allocation width=64 B/row=" + bytes);
+        assertTrue(bytes < 1024, "ordered batch rows must not allocate per-field normalized names: " + bytes);
+    }
 
     @Test
     void updatesDoNotRetainAPerFieldIntermediateCarrier() {
@@ -62,7 +131,7 @@ class FormWriteFieldPlanningTest {
             assertEquals(List.copyOf(values.values()), updateSink.parameters().subList(0, width));
             assertEquals(1L, updateSink.parameters().getLast());
             System.out.println("cached update allocation width=" + width + " B/op=" + bytes);
-            if (width == 64) assertTrue(bytes < 4800, "wide updates must avoid per-field tracking nodes: " + bytes);
+            if (width == 64) assertTrue(bytes < 3200, "canonical updates must avoid a duplicate-field index: " + bytes);
         }
     }
 
@@ -144,6 +213,9 @@ class FormWriteFieldPlanningTest {
                 () -> renderer.insert(form(), values)).getMessage());
         assertEquals("duplicate normalized dynamic write field", assertThrows(IllegalArgumentException.class,
                 () -> renderer.insertBatch(form(), List.of(values))).getMessage());
+        assertEquals("duplicate normalized dynamic update field", assertThrows(IllegalArgumentException.class,
+                () -> renderer.update(form(), values,
+                        com.flying.orm.core.condition.ConditionGroup.and().where("id", "=", 1L).build())).getMessage());
     }
 
     @Test

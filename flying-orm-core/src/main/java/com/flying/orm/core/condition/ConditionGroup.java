@@ -12,7 +12,6 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.function.Consumer;
 
 /**
@@ -258,8 +257,8 @@ public final class ConditionGroup implements ConditionNode {
         /** 添加受信原值条件，不清理文本或省略空值；已注册多值 term 在此取得集合快照。 */
         public Builder add(String field, String operator, Object value) {
             String normalized = Names.key(operator, "condition operator");
-            ConditionValueShape shape = terms.find(normalized).map(TermHandler::shape)
-                    .orElse(ConditionValueShape.SCALAR);
+            TermHandler handler = terms.findNormalized(normalized);
+            ConditionValueShape shape = handler == null ? ConditionValueShape.SCALAR : handler.shape();
             children.add(TermCondition.owned(FieldIdentity.of(field), normalized,
                     TermCondition.snapshotValue(normalized, value, shape)));
             return this;
@@ -294,16 +293,14 @@ public final class ConditionGroup implements ConditionNode {
                                 Object value,
                                 ConditionValuePolicy policy) {
             String normalizedOperator = Names.key(operator, "condition operator");
-            Optional<TermHandler> standard = TermRegistry.standard().find(normalizedOperator);
-            boolean standardOperator = standard.isPresent();
-            ConditionValueShape shape = standard.or(() -> terms.find(normalizedOperator))
-                                               .map(TermHandler::shape)
-                                               .orElse(ConditionValueShape.SCALAR);
+            TermHandler standard = TermRegistry.standard().findNormalized(normalizedOperator);
+            TermHandler handler = standard == null ? terms.findNormalized(normalizedOperator) : standard;
+            ConditionValueShape shape = handler == null ? ConditionValueShape.SCALAR : handler.shape();
             ConditionValueNormalizer.Result result = ConditionValueNormalizer.normalize(
                     shape,
                     value,
                     policy,
-                    TermCondition.snapshotConverter(standardOperator),
+                    TermCondition.snapshotConverter(standard != null),
                     Integer.MAX_VALUE,
                     Integer.MAX_VALUE);
             if (result.present()) {

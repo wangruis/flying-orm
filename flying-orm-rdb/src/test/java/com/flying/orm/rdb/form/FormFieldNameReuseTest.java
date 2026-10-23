@@ -12,12 +12,17 @@ import java.util.List;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedList;
+import java.lang.management.ManagementFactory;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class FormFieldNameReuseTest {
+
+    private static volatile List<String> projectionSink;
 
     private final DynamicForm form = DynamicForm.builder("users", "users")
             .addField(DynamicField.primaryKey("id", "BIGINT"))
@@ -27,6 +32,54 @@ class FormFieldNameReuseTest {
     void canonicalProjectionReusesTheImmutableQueryList() {
         QuerySpec spec = query(List.of("id", "userName"));
         assertSame(spec.projections(), FormQueryShapeGuard.readableProjections(spec, form));
+    }
+
+    @Test
+    void defaultAndWildcardProjectionsDoNotAllocateFieldNameListsPerQuery() {
+        assumeTrue(ManagementFactory.getRuntimeMXBean().getInputArguments().stream()
+                .noneMatch(argument -> argument.startsWith("-javaagent:")));
+        java.lang.management.ThreadMXBean standard = ManagementFactory.getThreadMXBean();
+        assumeTrue(standard instanceof com.sun.management.ThreadMXBean);
+        com.sun.management.ThreadMXBean allocation = (com.sun.management.ThreadMXBean) standard;
+        assumeTrue(allocation.isThreadAllocatedMemorySupported());
+        allocation.setThreadAllocatedMemoryEnabled(true);
+        int iterations = 30_000;
+        for (QuerySpec spec : List.of(query(List.of()), query(List.of("*")))) {
+            List<String> names = FormQueryShapeGuard.readableProjections(spec, form);
+            assertSame(names, FormSqlRenderSupport.canonicalFieldNames(form, names),
+                    "renderer must reuse prepared names instead of copying them");
+            for (int index = 0; index < iterations; index++) {
+                projectionSink = FormSqlRenderSupport.canonicalFieldNames(form,
+                        FormQueryShapeGuard.readableProjections(spec, form));
+            }
+            long thread = Thread.currentThread().threadId();
+            long before = allocation.getThreadAllocatedBytes(thread);
+            for (int index = 0; index < iterations; index++) {
+                projectionSink = FormSqlRenderSupport.canonicalFieldNames(form,
+                        FormQueryShapeGuard.readableProjections(spec, form));
+            }
+            double bytes = (allocation.getThreadAllocatedBytes(thread) - before) / (double) iterations;
+            assertEquals(List.of("id", "userName"), projectionSink);
+            System.out.println("default projection allocation B/query=" + bytes);
+            assertTrue(bytes < 32, "default projection must reuse form names: " + bytes);
+        }
+    }
+
+    @Test
+    void wildcardReuseKeepsReadScopeExclusionsDuplicatesAndEmptyProjectionRules() {
+        DynamicForm readable = DynamicForm.builder("users", "users")
+                .addField(DynamicField.of("userName", "VARCHAR")).build();
+        List<String> selected = FormQueryShapeGuard.readableProjections(query(List.of()), readable);
+        assertEquals(List.of("userName"), selected);
+        assertThrows(UnsupportedOperationException.class, () -> selected.add("id"));
+        assertEquals(List.of("id"), FormQueryShapeGuard.readableProjections(
+                query(List.of("*")).withExcludedFields(List.of("USERNAME")), form));
+        assertEquals(List.of("userName", "id", "userName"), FormQueryShapeGuard.readableProjections(
+                query(List.of("userName", "*")), form));
+        assertThrows(IllegalArgumentException.class, () -> FormQueryShapeGuard.readableProjections(
+                query(List.of()).withExcludedFields(List.of("id", "userName")), form));
+        assertThrows(IllegalArgumentException.class, () -> FormQueryShapeGuard.readableProjections(
+                query(List.of()), DynamicForm.builder("empty", "empty").build()));
     }
 
     @Test
@@ -58,6 +111,11 @@ class FormFieldNameReuseTest {
 
     @Test
     void rendererCanonicalizationStillValidatesCanonicalLookingNames() {
+        DynamicForm other = DynamicForm.builder("other", "other")
+                .addField(DynamicField.of("id", "BIGINT"))
+                .addField(DynamicField.of("missing", "VARCHAR")).build();
+        assertThrows(IllegalArgumentException.class,
+                () -> FormSqlRenderSupport.canonicalFieldNames(form, other.fieldNames()));
         assertThrows(IllegalArgumentException.class,
                 () -> FormSqlRenderSupport.canonicalFieldNames(form, List.of("id", "missing")));
         assertThrows(IllegalArgumentException.class,
@@ -66,7 +124,8 @@ class FormFieldNameReuseTest {
     }
 
     private QuerySpec query(List<String> projections) {
-        return QuerySpec.of(form, ConditionGroup.and().build()).withProjection(projections, List.of());
+        QuerySpec spec = QuerySpec.of(form, ConditionGroup.and().build());
+        return projections.isEmpty() ? spec : spec.withProjection(projections, List.of());
     }
 
     @Test

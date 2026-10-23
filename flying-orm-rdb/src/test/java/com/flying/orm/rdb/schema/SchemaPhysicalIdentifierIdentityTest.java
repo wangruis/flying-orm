@@ -17,9 +17,32 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /** PostgreSQL quoted 列的仅大小写改名必须显式表达，不能被兼容查找吞掉。 */
 class SchemaPhysicalIdentifierIdentityTest {
+
+    @Test
+    void appendedIdentifiersPreserveQuotingAndExistingBufferContent() {
+        for (SchemaDialect dialect : List.of(SchemaDialect.standard(), RdbDialect.postgresql().schema(),
+                RdbDialect.mysql().schema(), RdbDialect.sqlServer().schema())) {
+            for (String name : List.of("id", "user.userId", "catalog.schema.field", " _field ")) {
+                StringBuilder sql = new StringBuilder("prefix ");
+                dialect.appendIdentifier(sql, name);
+                assertEquals("prefix " + dialect.identifier(name), sql.toString());
+            }
+        }
+    }
+
+    @Test
+    void appendedIdentifiersRejectSqlFragmentsBeforeChangingTheBuffer() {
+        SchemaDialect dialect = RdbDialect.postgresql().schema();
+        for (String name : List.of("a..b", "id;drop table users", "id --", "sum(id)", "a.\"b\"", "")) {
+            StringBuilder sql = new StringBuilder("prefix ");
+            assertThrows(IllegalArgumentException.class, () -> dialect.appendIdentifier(sql, name));
+            assertEquals("prefix ", sql.toString());
+        }
+    }
 
     @Test
     void detectsForeignKeyActionAndReferenceNamespaceChanges() {

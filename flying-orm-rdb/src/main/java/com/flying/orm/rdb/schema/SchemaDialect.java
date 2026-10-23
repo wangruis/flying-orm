@@ -73,7 +73,7 @@ public final class SchemaDialect {
     private final FormSchemaDdlRenderer formRenderer;
     private SchemaDialect(String quoteOpen,
                           String quoteClose,
-                          Map<String, String> typeMappings,
+                          Map<String, DatabaseType> typeMappings,
                           Map<String, Function<DatabaseType, String>> typeRenderers,
                           ColumnCommentStyle columnCommentStyle,
                           TableCommentStyle tableCommentStyle,
@@ -151,6 +151,10 @@ public final class SchemaDialect {
         return types.identifier(value);
     }
 
+    StringBuilder appendIdentifier(StringBuilder sql, String value) {
+        return types.appendIdentifier(sql, value);
+    }
+
     /**
      * 逐段渲染关系身份。每一段中的点号都属于名称本身，不会被再次拆分。
      */
@@ -167,6 +171,10 @@ public final class SchemaDialect {
     }
 
     public String dataType(String value, Integer length, Integer precision, Integer scale) {
+        return types.dataType(DatabaseType.of(value), length, precision, scale);
+    }
+
+    String mappedDataType(DatabaseType value, Integer length, Integer precision, Integer scale) {
         return types.dataType(value, length, precision, scale);
     }
 
@@ -345,7 +353,7 @@ public final class SchemaDialect {
 
         private String quoteOpen;
         private String quoteClose;
-        private final Map<String, String> typeMappings = new LinkedHashMap<>();
+        private final Map<String, DatabaseType> typeMappings = new LinkedHashMap<>();
         private final Map<String, Function<DatabaseType, String>> typeRenderers = new LinkedHashMap<>();
         private ColumnCommentStyle columnCommentStyle = ColumnCommentStyle.NONE;
         private TableCommentStyle tableCommentStyle = TableCommentStyle.NONE;
@@ -387,7 +395,7 @@ public final class SchemaDialect {
         /** 把业务类型映射成数据库类型；两边都按安全类型语法校验。 */
         public Builder mapType(String logicalType, String databaseType) {
             String key = SchemaDialectTypeSupport.canonicalDataType(logicalType);
-            typeMappings.put(key, SchemaDialectTypeSupport.requireDataType(databaseType, "database type"));
+            typeMappings.put(key, DatabaseType.of(databaseType).requireSafe("database type"));
             typeRenderers.remove(key);
             return this;
         }

@@ -14,6 +14,56 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class ValueCodecRegistryPriorityTest {
 
     @Test
+    void integralConversionsRetainPrecisionAndOtherNumberRules() {
+        ValueCodecRegistry registry = ValueCodecRegistry.standard();
+        for (Number value : List.<Number>of((byte) -1, (short) 32767, Integer.MIN_VALUE,
+                Integer.MAX_VALUE, 0L, 9_007_199_254_740_993L, Long.MIN_VALUE, Long.MAX_VALUE)) {
+            assertEquals(value.longValue(), registry.read(value, Long.class));
+            assertEquals(java.math.BigInteger.valueOf(value.longValue()),
+                    registry.read(value, java.math.BigInteger.class));
+            assertEquals(value.longValue() != 0, registry.read(value, Boolean.class));
+        }
+        Number atomic = new java.util.concurrent.atomic.AtomicLong(9_007_199_254_740_993L);
+        assertEquals(atomic.longValue(), registry.read(atomic, Long.class));
+        assertEquals(java.math.BigInteger.valueOf(atomic.longValue()),
+                registry.read(atomic, java.math.BigInteger.class));
+        assertEquals(true, registry.read(new java.math.BigDecimal("0.0001"), Boolean.class));
+        assertEquals(false, registry.read(-0.0d, Boolean.class));
+        assertEquals(true, registry.read(java.math.BigInteger.ONE.shiftLeft(64), Boolean.class));
+        assertThrows(IllegalArgumentException.class, () -> registry.read(Double.NaN, Boolean.class));
+        assertThrows(IllegalArgumentException.class, () -> registry.read(1.5d, Long.class));
+        assertThrows(IllegalArgumentException.class, () -> registry.read(1.5d, java.math.BigInteger.class));
+        assertThrows(IllegalArgumentException.class, () -> registry.read(Long.MAX_VALUE, Integer.class));
+        assertThrows(IllegalArgumentException.class, () -> registry.read(128L, Byte.class));
+        assertThrows(IllegalArgumentException.class, () -> registry.read(32768L, Short.class));
+    }
+
+    @Test
+    void integralFastPathsStayBehindAdaptersAndApplicationCodecs() {
+        AtomicBoolean customEnabled = new AtomicBoolean(true);
+        ValueCodecRegistry registry = ValueCodecRegistry.standard().withFirst(new ValueCodec() {
+            public boolean supports(Class<?> target) { return customEnabled.get(); }
+            public Object read(Object value, Class<?> target) {
+                if (target == Long.class) return 77L;
+                if (target == Boolean.class) return false;
+                return java.math.BigInteger.TEN;
+            }
+        });
+        assertEquals(77L, registry.read(4096, Long.class));
+        assertEquals(false, registry.read(4096, Boolean.class));
+        assertEquals(java.math.BigInteger.TEN, registry.read(4096, java.math.BigInteger.class));
+        customEnabled.set(false);
+        assertEquals(4096L, registry.read(4096, Long.class));
+        ValueCodecRegistry adapted = registry.withDriverAdapter(new DriverValueAdapter() {
+            public boolean supports(Object value) { return value instanceof Integer; }
+            public Object unwrap(Object value) { return 0L; }
+        });
+        assertEquals(0L, adapted.read(4096, Long.class));
+        assertEquals(false, adapted.read(4096, Boolean.class));
+        assertEquals(java.math.BigInteger.ZERO, adapted.read(4096, java.math.BigInteger.class));
+    }
+
+    @Test
     void adaptersKeepPriorityAndReevaluateSupportOnEveryRead() {
         AtomicBoolean enabled = new AtomicBoolean();
         List<String> calls = new ArrayList<>();

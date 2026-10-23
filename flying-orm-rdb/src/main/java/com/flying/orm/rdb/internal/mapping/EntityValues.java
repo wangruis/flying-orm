@@ -523,7 +523,7 @@ public final class EntityValues<T> {
         @Override
         public Object read(Object target) {
             try {
-                return method.invoke(target);
+                return method.invoke(target, (Object[]) null);
             } catch (ReflectiveOperationException error) {
                 ThrowableGraph.rethrowVirtualMachineError(error);
                 throw new MappingException("entity getter cannot be read: " + method.getName(), error);

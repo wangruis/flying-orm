@@ -15,14 +15,23 @@ final class EntityTypeMappingResolver {
             boolean preferStandardDefault,
             String requestedId,
             List<EntityTypeMappingRegistry.Mapping> standardMappings) {
-        List<EntityTypeMappingRegistry.Mapping> compatible = new ArrayList<>();
+        EntityTypeMappingRegistry.Mapping single = null;
+        List<EntityTypeMappingRegistry.Mapping> compatible = null;
         for (EntityTypeMappingRegistry.Mapping mapping : source) {
             if (mapping.javaType().isAssignableFrom(javaType)) {
+                if (single == null) {
+                    single = mapping;
+                    continue;
+                }
+                if (compatible == null) {
+                    compatible = new ArrayList<>();
+                    compatible.add(single);
+                }
                 compatible.add(mapping);
             }
         }
-        if (compatible.isEmpty()) {
-            return null;
+        if (compatible == null) {
+            return single == null ? null : single.forResolvedType(javaType);
         }
 
         List<EntityTypeMappingRegistry.Mapping> mostSpecific = new ArrayList<>();

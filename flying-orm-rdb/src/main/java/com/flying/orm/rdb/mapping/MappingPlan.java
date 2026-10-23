@@ -189,7 +189,7 @@ final class MappingPlan<T> implements RowMapper<T> {
             values = mapped.toArray(NestedValue[]::new);
             bound = (row, codecs) -> {
                 try {
-                    T target = beanWriter.constructor().newInstance();
+                    T target = beanWriter.constructor().newInstance((Object[]) null);
                     for (int index = 0; index < values.length; index++) {
                         writers.get(index).write(target, values[index].read(row, codecs), codecs);
                     }
@@ -523,8 +523,8 @@ final class MappingPlan<T> implements RowMapper<T> {
                 }
             }
             return new BoundBeanWriter<>(this,
-                                         Arrays.copyOf(indexes, size),
-                                         Arrays.copyOf(boundWriters, size));
+                                         size == indexes.length ? indexes : Arrays.copyOf(indexes, size),
+                                         size == boundWriters.length ? boundWriters : Arrays.copyOf(boundWriters, size));
         }
     }
 
@@ -535,7 +535,7 @@ final class MappingPlan<T> implements RowMapper<T> {
         @Override
         public T write(IntFunction<Object> row, ValueCodecRegistry valueCodecs) {
             try {
-                T target = writer.constructor().newInstance();
+                T target = writer.constructor().newInstance((Object[]) null);
                 // 查询结果里的额外列直接忽略，支持 join/计算列与窄实体并存。
                 for (int index = 0; index < indexes.length; index++) {
                     writers[index].write(target, row.apply(indexes[index]), valueCodecs);

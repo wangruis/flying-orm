@@ -128,9 +128,12 @@ record BatchInsertPlan(SqlStatementPlan statement,
         }
 
         boolean matches(Map<String, Object> row) {
-            if (current.columnLayout().hasExpressions() || !RepositoryUpsertValues.sameLayout(source, row)) return false;
-            for (Object value : row.values()) {
-                if (value instanceof ValueExpression) return false;
+            boolean staged = source instanceof RepositoryUpsertValues || row instanceof RepositoryUpsertValues;
+            if (current.columnLayout().hasExpressions() || (staged
+                    ? !RepositoryUpsertValues.sameLayout(source, row) : source.size() != row.size())) return false;
+            // 普通行一次遍历同时核对字段和表达式，复用后续绑定所需的 entrySet 视图。
+            for (Map.Entry<String, Object> entry : row.entrySet()) {
+                if (entry.getValue() instanceof ValueExpression || !staged && !source.containsKey(entry.getKey())) return false;
             }
             return true;
         }

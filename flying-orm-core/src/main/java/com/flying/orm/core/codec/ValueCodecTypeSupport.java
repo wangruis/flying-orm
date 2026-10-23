@@ -57,7 +57,7 @@ final class ValueCodecTypeSupport {
         if (value instanceof BigInteger integer) {
             return new BigDecimal(integer);
         }
-        if (value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long) {
+        if (isIntegral(value)) {
             return BigDecimal.valueOf(((Number) value).longValue());
         }
         if (value instanceof Number number) {
@@ -75,20 +75,32 @@ final class ValueCodecTypeSupport {
         }
     }
 
-    static long exactLong(BigDecimal value) {
+    static long exactLong(Object value) {
+        if (isIntegral(value)) return ((Number) value).longValue();
+        BigDecimal number = decimal(value);
         try {
-            return value.longValueExact();
+            return number.longValueExact();
         } catch (ArithmeticException failure) {
             throw new IllegalArgumentException("number cannot be converted to long without loss");
         }
     }
 
-    static BigInteger exactBigInteger(BigDecimal value) {
+    static BigInteger exactBigInteger(Object value) {
+        if (isIntegral(value)) return BigInteger.valueOf(((Number) value).longValue());
+        BigDecimal number = decimal(value);
         try {
-            return value.toBigIntegerExact();
+            return number.toBigIntegerExact();
         } catch (ArithmeticException failure) {
             throw new IllegalArgumentException("number cannot be converted to big integer without loss");
         }
+    }
+
+    static boolean nonZero(Number value) {
+        return isIntegral(value) ? value.longValue() != 0 : decimal(value).compareTo(BigDecimal.ZERO) != 0;
+    }
+
+    private static boolean isIntegral(Object value) {
+        return value instanceof Byte || value instanceof Short || value instanceof Integer || value instanceof Long;
     }
 
     private static BigDecimal decimalText(String text) {

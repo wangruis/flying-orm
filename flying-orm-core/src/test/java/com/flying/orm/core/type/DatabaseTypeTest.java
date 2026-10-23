@@ -13,6 +13,48 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class DatabaseTypeTest {
 
     @Test
+    void compactAndSpacedDeclarationsHaveTheSameStructuredMeaning() {
+        String[][] declarations = {
+                {"VARCHAR(64)", " VARCHAR ( 64 ) "},
+                {"DECIMAL(12,3)[]", " DECIMAL ( 12 , 3 ) [ ] "},
+                {"TIMESTAMP(6) WITH TIME ZONE[]", "TIMESTAMP\t(6)  WITH\nTIME\rZONE [ ]"},
+                {"INTERVAL DAY(2) TO SECOND(6)", "INTERVAL  DAY (2) TO SECOND (6)"},
+                {"CHAR(20 BYTE)", "CHAR ( 20  BYTE )"}
+        };
+        for (String[] pair : declarations) {
+            DatabaseType compact = DatabaseType.of(pair[0]);
+            DatabaseType spaced = DatabaseType.of(pair[1]);
+            assertTrue(compact.safeDeclaration(), pair[0]);
+            assertEquals(compact, spaced);
+            assertEquals(compact.baseName(), spaced.baseName());
+            assertEquals(compact.arguments(), spaced.arguments());
+            assertEquals(compact.arrayDimensions(), spaced.arrayDimensions());
+            assertEquals(compact.comparisonShape(), spaced.comparisonShape());
+        }
+    }
+
+    @Test
+    void plainTypeNamesRetainCaseClassificationAndRejectMalformedNames() {
+        for (String name : List.of("INTEGER", "varchar", "MiXeD_2", "_", "enum", "set", "interval")) {
+            DatabaseType type = DatabaseType.of(" " + name + " ");
+            assertEquals(name, type.declaration());
+            assertEquals(name.toLowerCase(java.util.Locale.ROOT), type.canonical());
+            assertEquals(name.toUpperCase(java.util.Locale.ROOT), type.baseName());
+            assertTrue(type.safeDeclaration());
+            assertTrue(type.arguments().isEmpty());
+            assertEquals(0, type.arrayDimensions());
+            assertFalse(type.unsigned());
+            assertFalse(type.zerofill());
+        }
+        for (String name : List.of("2INTEGER", "INTEGER;", "INTEGER--", "INTEGER/", "INTEGER()", "INTEGER\u0000x")) {
+            assertFalse(DatabaseType.of(name).safeDeclaration(), name);
+        }
+        assertEquals(LogicalType.INTEGER, DatabaseType.of("INTEGER").logicalType());
+        assertEquals(LogicalType.OTHER, DatabaseType.of("MiXeD_2").logicalType());
+        assertEquals(LogicalType.INTERVAL, DatabaseType.of("interval").logicalType());
+    }
+
+    @Test
     void classifiesOnlyCompleteKnownTypeNames() {
         DatabaseType text = DatabaseType.of("VARCHAR(255)");
         DatabaseType custom = DatabaseType.of("CONTEXT_ID");

@@ -365,6 +365,8 @@ final class FormScopeSupport {
         DataScope safeScope = Objects.requireNonNull(scope, "data scope must not be null");
         FieldScope fields = safeScope.fields();
         TenantDefinition tenant = safeForm.tenant().orElse(null);
+        // 未启用范围或加密时，字段与表达式由渲染器校验，不逐字段执行空策略。
+        if (tenant == null && safeScope.empty() && safeForm.protections().encryptedFields().isEmpty()) return;
         TenantScope formTenantScope = tenant == null ? null : requiredTenantScope(safeForm, tenant, safeScope);
         String suppliedTenantField = null;
         for (Map.Entry<String, Object> entry : safeValues.entrySet()) {

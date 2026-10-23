@@ -64,10 +64,9 @@ public final class SyncDatabaseOperator {
         this.jdbcMetadata = safe.jdbcMetadata();
         this.metadataInvalidator = safe.metadataInvalidator();
         this.templateParameters = safe.templateParameters();
-        this.templateEngine = SqlTemplateEngine.create(safe.templates(),
-                                                       this.dialect,
-                                                       this.renderer.valueCodecs())
-                                               .forJdbc();
+        this.templateEngine = SqlTemplateEngine.createJdbc(safe.templates(),
+                                                           this.dialect,
+                                                           this.renderer.valueCodecs());
     }
 
     /** 默认范围、批量策略和 schema 配置不改变模板编译上下文，直接复用已装配的只读组件。 */

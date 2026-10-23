@@ -281,7 +281,7 @@ public final class ValueCodecRegistry {
         public Object read(Object value, Class<?> targetType) {
             if (value instanceof Number number) {
                 // 不能借 intValue() 判断真假，大整数低位为 0 或小数会被错误解释。
-                return ValueCodecTypeSupport.decimal(number).compareTo(BigDecimal.ZERO) != 0;
+                return ValueCodecTypeSupport.nonZero(number);
             }
             return switch (ValueCodecTypeSupport.text(value).toLowerCase(Locale.ROOT)) {
                 case "true", "1", "yes", "y", "on" -> true;
@@ -291,7 +291,7 @@ public final class ValueCodecRegistry {
         }
     }
 
-    /** 数值先收口到 BigDecimal，再做精确整数或显式浮点转换。 */
+    /** 整数扩大直接转换；其余数值通过 BigDecimal 做精确整数或显式浮点转换。 */
     private static final class NumberValueCodec implements ValueCodec {
 
         @Override
@@ -301,18 +301,18 @@ public final class ValueCodecRegistry {
 
         @Override
         public Object read(Object value, Class<?> targetType) {
+            if (targetType == Long.class) {
+                return ValueCodecTypeSupport.exactLong(value);
+            }
+            if (targetType == BigInteger.class) {
+                return ValueCodecTypeSupport.exactBigInteger(value);
+            }
             BigDecimal number = ValueCodecTypeSupport.decimal(value);
             if (targetType == Integer.class) {
                 return ValueCodecTypeSupport.exactInteger(number);
             }
-            if (targetType == Long.class) {
-                return ValueCodecTypeSupport.exactLong(number);
-            }
             if (targetType == BigDecimal.class) {
                 return number;
-            }
-            if (targetType == BigInteger.class) {
-                return ValueCodecTypeSupport.exactBigInteger(number);
             }
             if (targetType == Double.class) {
                 double converted = number.doubleValue();

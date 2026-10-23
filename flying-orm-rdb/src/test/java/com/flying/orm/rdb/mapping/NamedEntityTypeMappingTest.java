@@ -13,6 +13,33 @@ class NamedEntityTypeMappingTest {
     private static final ValueCodec NUMBER = codec(true);
 
     @Test
+    void candidateSelectionRetainsSpecificityStandardPreferenceAndAmbiguity() {
+        EntityTypeMappingRegistry.Mapping standard = EntityTypeMappingRegistry.standard().resolve(String.class);
+        EntityTypeMappingRegistry.Mapping broad = new EntityTypeMappingRegistry.Mapping(
+                "text", CharSequence.class, DatabaseType.of("VARCHAR"), standard.codec());
+        EntityTypeMappingRegistry.Mapping unrelated = new EntityTypeMappingRegistry.Mapping(
+                "comparable", Comparable.class, DatabaseType.of("VARCHAR"), standard.codec());
+        EntityTypeMappingRegistry.Mapping named = new EntityTypeMappingRegistry.Mapping(
+                "named", String.class, DatabaseType.of("VARCHAR"), standard.codec());
+        List<EntityTypeMappingRegistry.Mapping> defaults = List.of(standard);
+        assertNull(EntityTypeMappingResolver.resolveRegistered(
+                List.of(broad), Number.class, true, null, defaults));
+        assertEquals(StringBuilder.class, EntityTypeMappingResolver.resolveRegistered(
+                List.of(broad), StringBuilder.class, true, null, defaults).javaType());
+        for (List<EntityTypeMappingRegistry.Mapping> candidates : List.of(
+                List.of(broad, unrelated, standard), List.of(standard, unrelated, broad))) {
+            assertSame(standard, EntityTypeMappingResolver.resolveRegistered(
+                    candidates, String.class, true, null, defaults));
+        }
+        assertSame(standard, EntityTypeMappingResolver.resolveRegistered(
+                List.of(named, standard), String.class, true, null, defaults));
+        assertThrows(MappingException.class, () -> EntityTypeMappingResolver.resolveRegistered(
+                List.of(named, standard), String.class, false, "VARCHAR", defaults));
+        assertThrows(MappingException.class, () -> EntityTypeMappingResolver.resolveRegistered(
+                List.of(broad, unrelated), String.class, true, null, defaults));
+    }
+
+    @Test
     void explicitNamesChooseDifferentStorageWithoutChangingDefaultConversion() {
         EntityTypeMappingRegistry mappings = namedMappings();
         assertSame(CODE, mappings.resolve("state-code", State.class).codec());

@@ -70,6 +70,17 @@ public final class DatabaseType {
 
     private DatabaseType(String declaration) {
         this.declaration = Names.requireText(declaration, "database type");
+        if (isPlainTypeName(this.declaration)) {
+            this.canonical = this.declaration.toLowerCase(Locale.ROOT);
+            this.baseName = this.declaration.toUpperCase(Locale.ROOT);
+            this.arguments = List.of();
+            this.arrayDimensions = 0;
+            this.unsigned = false;
+            this.zerofill = false;
+            this.safeDeclaration = true;
+            this.logicalType = logicalType(baseName);
+            return;
+        }
         Parsed literal = parseLiteralMembers(this.declaration);
         this.canonical = literal == null ? canonicalize(this.declaration)
                 : literal.baseName().toLowerCase(Locale.ROOT) + "(" + String.join(",", literal.arguments()) + ")";
@@ -160,7 +171,7 @@ public final class DatabaseType {
 
     /** @return canonical declaration with numeric argument groups removed, preserving modifiers and arrays */
     public String comparisonShape() {
-        if (!safeDeclaration || "ENUM".equals(baseName) || "SET".equals(baseName)) {
+        if (!safeDeclaration || arguments.isEmpty() || "ENUM".equals(baseName) || "SET".equals(baseName)) {
             return canonical;
         }
         return WHITESPACE.matcher(ARGUMENT_GROUP.matcher(canonical).replaceAll("").trim()).replaceAll(" ");
@@ -207,12 +218,25 @@ public final class DatabaseType {
         return declaration;
     }
 
+    private static boolean isPlainTypeName(String value) {
+        for (int index = 0; index < value.length(); index++) {
+            char character = value.charAt(index);
+            if (!(character >= 'A' && character <= 'Z'
+                    || character >= 'a' && character <= 'z' || character == '_'
+                    || index > 0 && character >= '0' && character <= '9')) return false;
+        }
+        return true;
+    }
+
     private static String canonicalize(String value) {
         // Quoted vendor syntax is not parsed here; its case and whitespace may be data.
         if (value.indexOf('\'') >= 0 || value.indexOf('"') >= 0 || value.indexOf('`') >= 0) {
             return value.trim();
         }
-        String normalized = WHITESPACE.matcher(value.trim().toLowerCase(Locale.ROOT)).replaceAll(" ");
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        Matcher whitespace = WHITESPACE.matcher(normalized);
+        if (!whitespace.find()) return normalized;
+        normalized = whitespace.replaceAll(" ");
         normalized = OPEN_PARENTHESIS_SPACE.matcher(normalized).replaceAll("(");
         normalized = CLOSE_PARENTHESIS_SPACE.matcher(normalized).replaceAll(")");
         normalized = COMMA_SPACE.matcher(normalized).replaceAll(",");
@@ -269,7 +293,7 @@ public final class DatabaseType {
             copiedUntil = matcher.end();
         }
         base.append(scalar, copiedUntil, scalar.length());
-        String baseName = WHITESPACE.matcher(base.toString().trim()).replaceAll(" ").toUpperCase(Locale.ROOT);
+        String baseName = base.toString().trim().toUpperCase(Locale.ROOT);
         return new Parsed(baseName, arguments, arrays, unsigned, zerofill);
     }
 

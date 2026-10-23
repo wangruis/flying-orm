@@ -41,7 +41,7 @@ final class BatchColumnLayout {
         this.offsets = row.offsets();
     }
 
-    /** 声明布局中的同序行直接绑定；子集或重排行才需要名称索引。 */
+    /** 与首行布局同序的行直接绑定；重排行才需要名称索引。 */
     private Map<String, Integer> indexes() {
         Map<String, Integer> current = indexesByNormalizedName;
         if (current != null) return current;
@@ -108,13 +108,19 @@ final class BatchColumnLayout {
             return;
         }
 
-        // 直接复用最终参数数组去重；null 是已绑定的合法值，不能用来表示尚未绑定。
-        Arrays.fill(parameters, 0, fields.size(), UNBOUND);
+        boolean ordered = true;
         int seenCount = 0;
         for (Map.Entry<String, Object> entry : safeRow.entrySet()) {
-            String name = FieldIdentity.of(entry.getKey()).key();
             int index = seenCount;
-            if (fields != form.fields() || !fields.get(index).normalizedName().equals(name)) {
+            DynamicField expected = fields.get(index);
+            String name = expected.name().equals(entry.getKey())
+                    ? expected.normalizedName() : FieldIdentity.of(entry.getKey()).key();
+            if (!expected.normalizedName().equals(name)) {
+                // 首次乱序才标记未绑定后缀；已绑定前缀（包括 null）保留，Scope 尾部不受影响。
+                if (ordered) {
+                    Arrays.fill(parameters, seenCount, fields.size(), UNBOUND);
+                    ordered = false;
+                }
                 Integer mappedIndex = indexes().get(name);
                 if (mappedIndex == null) {
                     form.field(entry.getKey()); // 保留未知字段与首行布局不匹配的异常区别。
@@ -122,7 +128,7 @@ final class BatchColumnLayout {
                 }
                 index = mappedIndex;
             }
-            if (parameters[index] != UNBOUND) {
+            if (!ordered && parameters[index] != UNBOUND) {
                 throw new IllegalArgumentException("duplicate normalized batch insert field");
             }
             seenCount++;

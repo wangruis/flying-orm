@@ -48,11 +48,11 @@ final class SchemaTypeMapping {
             "time", "datetime2", "datetimeoffset");
     private static final long ISO_LOCAL_TIME_MAX_LENGTH = 18L;
 
-    private final Map<String, String> mappings;
+    private final Map<String, DatabaseType> mappings;
     private final Map<String, Function<DatabaseType, String>> renderers;
     private final SchemaDialect.GeneratedValueStyle databaseStyle;
 
-    SchemaTypeMapping(Map<String, String> mappings,
+    SchemaTypeMapping(Map<String, DatabaseType> mappings,
                       Map<String, Function<DatabaseType, String>> renderers,
                       SchemaDialect.GeneratedValueStyle databaseStyle) {
         this.mappings = Map.copyOf(Objects.requireNonNull(mappings, "type mappings must not be null"));
@@ -64,13 +64,13 @@ final class SchemaTypeMapping {
         DatabaseType logical = safeType(value, "data type");
         String custom = customType(logical, null, null, null);
         if (custom != null) return custom;
-        String mapped = mappedType(logical);
-        validateTemporalPrecision(logical, safeType(mapped, "mapped data type"), null);
-        return mapped;
+        DatabaseType mapped = mappedType(logical);
+        validateTemporalPrecision(logical, mapped, null);
+        return mapped.declaration();
     }
 
-    String render(String value, Integer length, Integer precision, Integer scale) {
-        DatabaseType logical = safeType(value, "data type");
+    String render(DatabaseType logical, Integer length, Integer precision, Integer scale) {
+        logical.requireSafe("data type");
         String custom = customType(logical, length, precision, scale);
         if (custom != null) return custom;
         return mappedType(logical, length, precision, scale);
@@ -83,13 +83,12 @@ final class SchemaTypeMapping {
 
     private String mappedType(DatabaseType logical, Integer length, Integer precision, Integer scale) {
         validateTemporalArguments(logical, length, scale);
-        String mapped = mappedType(logical);
-        DatabaseType physical = safeType(mapped, "mapped data type");
+        DatabaseType physical = mappedType(logical);
         validateTemporalPrecision(logical, physical, precision);
         if (isTextBackedTemporalType(logical, physical)) {
-            return withTypeArguments(mapped, length, null, null);
+            return withTypeArguments(physical, length, null, null);
         }
-        return withTypeArguments(mapped, length, precision, scale);
+        return withTypeArguments(physical, length, precision, scale);
     }
 
     String renderPhysical(String value, Integer length, Integer precision, Integer scale) {
@@ -97,13 +96,13 @@ final class SchemaTypeMapping {
         if (!physical.arguments().isEmpty()) {
             return physical.declaration();
         }
-        return withTypeArguments(physical.declaration(), length, precision, scale);
+        return withTypeArguments(physical, length, precision, scale);
     }
 
     private String customType(DatabaseType logical, Integer length, Integer precision, Integer scale) {
         if (renderers.isEmpty()) return null;
         DatabaseType input = length == null && precision == null && scale == null ? logical
-                : safeType(applyTypeArguments(logical.declaration(), length, precision, scale), "data type");
+                : safeType(applyTypeArguments(logical, length, precision, scale), "data type");
         Function<DatabaseType, String> renderer = renderers.get(input.canonical());
         if (renderer == null && !mappings.containsKey(logical.canonical())) {
             renderer = renderers.get(input.comparisonShape());
@@ -112,22 +111,22 @@ final class SchemaTypeMapping {
         return safeType(renderer.apply(input), "rendered data type").declaration();
     }
 
-    private String mappedType(DatabaseType type) {
+    private DatabaseType mappedType(DatabaseType type) {
         if (databaseStyle == SchemaDialect.GeneratedValueStyle.POSTGRESQL && type.isArray()) {
             String scalar = type.canonical().substring(
                     0, type.canonical().length() - type.arrayDimensions() * 2);
-            return mappedType(safeType(scalar, "array element data type"))
-                    + "[]".repeat(type.arrayDimensions());
+            return safeType(mappedType(safeType(scalar, "array element data type")).declaration()
+                    + "[]".repeat(type.arrayDimensions()), "mapped data type");
         }
-        String direct = mappings.get(type.canonical());
+        DatabaseType direct = mappings.get(type.canonical());
         if (direct != null) {
             return mappedTemporalCapacity(type, direct);
         }
         String scalar = mappedScalarModifierType(type);
         if (scalar != null) {
-            return scalar;
+            return safeType(scalar, "mapped data type");
         }
-        String temporal = mappedTemporalType(type);
+        DatabaseType temporal = mappedTemporalType(type);
         if (temporal != null) {
             return mappedTemporalCapacity(type, temporal);
         }
@@ -136,7 +135,7 @@ final class SchemaTypeMapping {
                 && !mappings.containsKey(type.canonical())) {
             throw new IllegalArgumentException("UUID requires an explicit schema dialect type mapping");
         }
-        return type.declaration();
+        return type;
     }
 
     private String mappedScalarModifierType(DatabaseType type) {
@@ -144,14 +143,14 @@ final class SchemaTypeMapping {
         for (String suffix : SCALAR_MODIFIER_SUFFIXES) {
             if (normalized.endsWith(suffix)) {
                 String base = normalized.substring(0, normalized.length() - suffix.length()).stripTrailing();
-                String mappedBase = mappings.get(base);
-                return mappedBase == null ? null : mappedBase + suffix.toUpperCase(Locale.ROOT);
+                DatabaseType mappedBase = mappings.get(base);
+                return mappedBase == null ? null : mappedBase.declaration() + suffix.toUpperCase(Locale.ROOT);
             }
         }
         return null;
     }
 
-    private String mappedTemporalType(DatabaseType type) {
+    private DatabaseType mappedTemporalType(DatabaseType type) {
         String logicalType = switch (type.baseName()) {
             case "TIMESTAMP WITH TIME ZONE" -> "timestamptz";
             case "TIMESTAMP WITHOUT TIME ZONE" -> "timestamp";
@@ -161,24 +160,24 @@ final class SchemaTypeMapping {
             case "TIME WITH LOCAL TIME ZONE" -> throw new IllegalArgumentException(
                     "time with local time zone is not a supported SQL data type");
             default -> {
-                String base = type.baseName().toLowerCase(Locale.ROOT);
+                String base = baseType(type);
                 yield TEMPORAL_TYPES.contains(base) ? base : null;
             }
         };
         if (logicalType == null) {
             return null;
         }
-        String mappedBase = "timestamp with local time zone".equals(logicalType)
-                ? "TIMESTAMP WITH LOCAL TIME ZONE"
+        DatabaseType mappedBase = "timestamp with local time zone".equals(logicalType)
+                ? safeType("TIMESTAMP WITH LOCAL TIME ZONE", "mapped data type")
                 : mappings.get(logicalType);
         if (mappedBase == null) {
             return null;
         }
-        String mapped = type.arguments().isEmpty()
-                || isTextBackedTemporalType(type, safeType(mappedBase, "mapped data type"))
-                ? mappedBase
+        boolean preserveBase = type.arguments().isEmpty() || isTextBackedTemporalType(type, mappedBase);
+        if (preserveBase && !type.isArray()) return mappedBase;
+        String mapped = preserveBase ? mappedBase.declaration()
                 : withArguments(mappedBase, String.join(",", type.arguments()));
-        return SchemaDialectTypeSupport.requireDataType(
+        return safeType(
                 mapped + "[]".repeat(type.arrayDimensions()), "mapped data type");
     }
 
@@ -191,39 +190,39 @@ final class SchemaTypeMapping {
     }
 
     /** Oracle stores local time in text; 18 characters are required for nanosecond ISO values. */
-    private String mappedTemporalCapacity(DatabaseType logicalType, String mappedType) {
-        DatabaseType safeMapped = safeType(mappedType, "mapped data type");
+    private DatabaseType mappedTemporalCapacity(DatabaseType logicalType, DatabaseType safeMapped) {
         String logicalBase = baseType(logicalType);
         if (databaseStyle != SchemaDialect.GeneratedValueStyle.ORACLE
                 || !("time".equals(logicalBase) || "time without time zone".equals(logicalBase))
                 || !CHARACTER_TYPES.contains(baseType(safeMapped))) {
-            return safeMapped.declaration();
+            return safeMapped;
         }
         long[] arguments = numericArguments(safeMapped);
         return arguments.length == 1 && arguments[0] < ISO_LOCAL_TIME_MAX_LENGTH
-                ? withArguments(safeMapped.declaration(), String.valueOf(ISO_LOCAL_TIME_MAX_LENGTH))
-                : safeMapped.declaration();
+                ? safeType(withArguments(safeMapped, String.valueOf(ISO_LOCAL_TIME_MAX_LENGTH)),
+                        "mapped data type")
+                : safeMapped;
     }
 
-    private String withTypeArguments(String type, Integer length, Integer precision, Integer scale) {
+    private String withTypeArguments(DatabaseType type, Integer length, Integer precision, Integer scale) {
         if ((length != null || precision != null || scale != null) && !acceptsTypeArguments(type)) {
             throw new IllegalArgumentException("data type does not accept length or precision arguments: " + type);
         }
         return applyTypeArguments(type, length, precision, scale);
     }
 
-    private static String applyTypeArguments(String type, Integer length, Integer precision, Integer scale) {
+    private static String applyTypeArguments(DatabaseType type, Integer length, Integer precision, Integer scale) {
         if (length != null) {
             return withArguments(type, String.valueOf(length));
         }
         if (precision != null && scale != null) {
             return withArguments(type, precision + "," + scale);
         }
-        return precision == null ? type : withArguments(type, String.valueOf(precision));
+        return precision == null ? type.declaration() : withArguments(type, String.valueOf(precision));
     }
 
-    private boolean acceptsTypeArguments(String type) {
-        String base = baseType(safeType(type, "data type"));
+    private boolean acceptsTypeArguments(DatabaseType type) {
+        String base = baseType(type);
         if (base.startsWith("interval ")) {
             return false;
         }
@@ -310,7 +309,8 @@ final class SchemaTypeMapping {
     }
 
     private static String baseType(DatabaseType type) {
-        String base = type.baseName().toLowerCase(Locale.ROOT);
+        String base = type.arguments().isEmpty() && !type.isArray() && !type.unsigned() && !type.zerofill()
+                ? type.canonical() : type.baseName().toLowerCase(Locale.ROOT);
         return switch (base) {
             case "timestamp with time zone", "timestamp with local time zone",
                     "timestamp without time zone" -> "timestamp";
@@ -340,8 +340,9 @@ final class SchemaTypeMapping {
         return DatabaseType.of(value).requireSafe(name);
     }
 
-    private static String withArguments(String type, String arguments) {
-        String unit = characterLengthUnit(DatabaseType.of(type));
+    private static String withArguments(DatabaseType parsedType, String arguments) {
+        String type = parsedType.declaration();
+        String unit = characterLengthUnit(parsedType);
         if (!unit.isEmpty() && arguments.chars().allMatch(Character::isDigit)) {
             arguments += " " + unit.toUpperCase(Locale.ROOT);
         }
@@ -350,9 +351,12 @@ final class SchemaTypeMapping {
             int close = type.lastIndexOf(')');
             return close < open ? type : type.substring(0, open + 1) + arguments + type.substring(close);
         }
-        Matcher modifier = TYPE_MODIFIER_SUFFIX.matcher(type);
         int arrayStart = type.indexOf('[');
-        int insertAt = modifier.find() ? modifier.start() : arrayStart >= 0 ? arrayStart : type.length();
+        int insertAt = arrayStart >= 0 ? arrayStart : type.length();
+        if (parsedType.unsigned() || parsedType.zerofill() || parsedType.baseName().endsWith("TIME ZONE")) {
+            Matcher modifier = TYPE_MODIFIER_SUFFIX.matcher(type);
+            if (modifier.find()) insertAt = modifier.start();
+        }
         return type.substring(0, insertAt) + "(" + arguments + ")" + type.substring(insertAt);
     }
 
@@ -364,7 +368,7 @@ final class SchemaTypeMapping {
         if (unit.isEmpty() || !characterLengthUnit(target).isEmpty()
                 || !("CHAR".equals(target.baseName()) || "VARCHAR2".equals(target.baseName()))
                 || target.arguments().size() != 1) return desired;
-        return withArguments(desired, target.arguments().getFirst() + " " + unit.toUpperCase(Locale.ROOT));
+        return withArguments(target, target.arguments().getFirst() + " " + unit.toUpperCase(Locale.ROOT));
     }
 
     static String characterLengthUnit(DatabaseType type) {

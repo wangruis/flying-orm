@@ -253,9 +253,16 @@ final class FormWriteSqlRenderer {
         if (values.isEmpty()) {
             throw new IllegalArgumentException("dynamic form values must not be empty");
         }
-        Map<DynamicField, Boolean> assignedFields = values.size() > 1 ? new IdentityHashMap<>(values.size()) : null;
+        Map<DynamicField, Boolean> assignedFields = null;
         for (Map.Entry<String, Object> entry : values.entrySet()) {
             DynamicField field = form.field(entry.getKey());
+            // 模型原名引用在任何 Map 中都唯一；不同引用才建索引，也保留 IdentityHashMap 的重复检测。
+            if (assignedFields == null && values.size() > 1 && entry.getKey() != field.name()) {
+                assignedFields = new IdentityHashMap<>(values.size());
+                for (int index = 0; index < fields.size(); index += 2) {
+                    assignedFields.put(form.field(fields.get(index)), Boolean.TRUE);
+                }
+            }
             if (assignedFields != null && assignedFields.put(field, Boolean.TRUE) != null) {
                 throw new IllegalArgumentException("duplicate normalized dynamic update field");
             }

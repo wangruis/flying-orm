@@ -36,6 +36,7 @@ public final class DynamicForm {
     private final String namingSource;
 
     private final List<DynamicField> fields;
+    private volatile List<String> fieldNames;
     private final List<DynamicField> runtimeDefaultFields;
     private final FeatureRegistry features;
     private final boolean hasFieldFeatures;
@@ -164,6 +165,16 @@ public final class DynamicForm {
      */
     public List<DynamicField> fields() {
         return fields;
+    }
+
+    /** 按声明顺序返回只读字段名，首次读取后随表单复用，不重复生成投影列表。 */
+    public List<String> fieldNames() {
+        List<String> names = fieldNames;
+        if (names == null) {
+            names = List.copyOf(fields.stream().map(DynamicField::name).toList());
+            fieldNames = names;
+        }
+        return names;
     }
 
     /** 已声明应用默认值的字段；普通表单不在每次写入时扫描全部字段。 */

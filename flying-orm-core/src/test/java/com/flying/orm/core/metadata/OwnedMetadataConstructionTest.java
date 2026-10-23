@@ -12,6 +12,25 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class OwnedMetadataConstructionTest {
 
     @Test
+    void absentTableObjectsRemainAbsentAfterBuilderAddsThem() {
+        RelationalTableDefinition.Builder builder = RelationalTableDefinition.builder("people")
+                .addColumn(ColumnDefinition.builder("id", "BIGINT").build());
+        RelationalTableDefinition empty = builder.build();
+        IndexDefinition index = IndexDefinition.builder("ix_id").addColumn("id").build();
+        ForeignKeyDefinition key = ForeignKeyDefinition.builder("fk_parent").addColumn("id")
+                .reference(RelationIdentity.table("parent")).addReferenceColumn("id").build();
+        RelationalTableDefinition populated = builder.addIndex(index).addForeignKey(key).build();
+        assertTrue(empty.indexes().isEmpty());
+        assertTrue(empty.foreignKeys().isEmpty());
+        assertTrue(empty.findIndex("ix_id").isEmpty());
+        assertTrue(empty.findForeignKey("fk_parent").isEmpty());
+        assertSame(index, populated.findIndex("IX_ID").orElseThrow());
+        assertSame(key, populated.findForeignKey("FK_PARENT").orElseThrow());
+        assertThrows(UnsupportedOperationException.class, () -> populated.indexes().clear());
+        assertThrows(UnsupportedOperationException.class, () -> empty.foreignKeys().add(key));
+    }
+
+    @Test
     void metadataBuildersPublishImmutableSnapshots() {
         IndexDefinition.Builder indexBuilder = IndexDefinition.builder("ix_customer")
                                                            .addColumn("tenant_id");

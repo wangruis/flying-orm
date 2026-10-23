@@ -29,7 +29,6 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -174,30 +173,42 @@ public final class RelationalSchemaSqlRenderer {
                                         Map<String, SchemaSequenceSqlRenderer.Definition> existingSequences,
                                         Map<String, SchemaSequenceSqlRenderer.Definition> createdSequences) {
         IndexDefinition inlineIndex = prepareTable(table);
-        List<SqlRequest> requests = new ArrayList<>();
+        List<SqlRequest> requests = new ArrayList<>(1);
+        StringBuilder sql = new StringBuilder(128).append("create table ")
+                .append(dialect.relationIdentifier(table.identity())).append(" (");
+        int definitionStart = sql.length();
+        ValueGeneration identity = ValueGeneration.none();
         for (ColumnDefinition column : table.columns()) {
             SchemaSequenceSqlRenderer.addCreate(
                     dialect, requests, column,
                     existingSequences, createdSequences, this::dataType);
+            appendColumnDefinition(definitionSeparator(sql, definitionStart), column,
+                    column.charset(), column.collation(), dataType(column), storageComment(column), false);
+            if (identity.strategy() == ValueGeneration.Strategy.NONE
+                    && column.generation().strategy() == ValueGeneration.Strategy.IDENTITY) {
+                identity = column.generation();
+            }
         }
 
-        StringJoiner definitions = new StringJoiner(", ");
         PrimaryKeyDefinition primaryKey = table.primaryKey().orElse(null);
-        table.columns().forEach(column -> definitions.add(columnDefinition(column, dataType(column), false)));
         if (primaryKey != null) {
-            definitions.add(primaryKey(primaryKey));
+            definitionSeparator(sql, definitionStart).append(primaryKey(primaryKey));
         }
-        table.uniqueConstraints().stream()
-                .filter(key -> SchemaDefinitionEquality.ordinaryUnique(key, dialect))
-                .map(this::unique).forEach(definitions::add);
+        for (UniqueConstraintDefinition key : table.uniqueConstraints()) {
+            if (SchemaDefinitionEquality.ordinaryUnique(key, dialect)) {
+                definitionSeparator(sql, definitionStart).append(unique(key));
+            }
+        }
         if (inlineIndex != null) {
-            definitions.add(indexDefinition(inlineIndex,
+            definitionSeparator(sql, definitionStart).append(indexDefinition(inlineIndex,
                     dialect.identifier(unqualifiedIdentifier(inlineIndex.name(), "index name")), ""));
         }
-        table.checks().stream().map(this::check).forEach(definitions::add);
-        Set<String> indexNames = new HashSet<>();
-        table.indexes().forEach(index -> indexNames.add(index.name()));
-        List<ForeignKeyDefinition> deferredForeignKeys = new ArrayList<>();
+        for (CheckConstraintDefinition check : table.checks()) {
+            definitionSeparator(sql, definitionStart).append(check(check));
+        }
+        Set<String> indexNames = table.foreignKeys().isEmpty() || table.indexes().isEmpty() ? Set.of()
+                : table.indexes().stream().map(IndexDefinition::name).collect(Collectors.toSet());
+        List<ForeignKeyDefinition> deferredForeignKeys = List.of();
         for (ForeignKeyDefinition foreignKey : table.foreignKeys()) {
             List<String> referenceColumns = foreignKey.referenceColumns();
             // 自引用若只能由独立唯一索引提供候选键，必须等 CREATE INDEX 完成后再建立外键。
@@ -211,32 +222,26 @@ public final class RelationalSchemaSqlRenderer {
                             && index.keys().stream().allMatch(key -> referenceColumns.contains(key.column())));
             if (indexNames.contains(foreignKey.name()) || indexedSelfReference) {
                 // 同时保留 MySQL 同名支撑索引先于外键的顺序，避免数据库自动补出重复索引。
+                if (deferredForeignKeys.isEmpty()) deferredForeignKeys = new ArrayList<>();
                 deferredForeignKeys.add(foreignKey);
             } else {
-                definitions.add(foreignKey(foreignKey));
+                definitionSeparator(sql, definitionStart).append(foreignKey(foreignKey));
             }
         }
 
-        ValueGeneration identity = table.columns().stream()
-                .map(ColumnDefinition::generation)
-                .filter(value -> value.strategy() == ValueGeneration.Strategy.IDENTITY)
-                .findFirst()
-                .orElse(ValueGeneration.none());
-        String sql = "create table " + dialect.relationIdentifier(table.identity()) + " (" + definitions + ")"
-                + table.partition().map(partition -> switch (partition.strategy()) {
+        sql.append(')').append(table.partition().map(partition -> switch (partition.strategy()) {
                     case RANGE -> " partition by range (" + dialect.identifier(partition.column()) + ')';
-                }).orElse("")
-                + dialect.generatedTableClause(identity)
-                + dialect.inlineTableCommentClause(table.comment());
-        requests.add(new SqlRequest(sql, List.of()));
-        table.uniqueConstraints().stream()
-                .filter(key -> !SchemaDefinitionEquality.ordinaryUnique(key, dialect))
-                .map(key -> createUnique(table.identity(), key)).forEach(requests::add);
-        table.indexes().stream().filter(index -> index != inlineIndex)
-                .map(index -> createIndex(table.identity(), index)).forEach(requests::add);
-        deferredForeignKeys.stream()
-                .map(foreignKey -> addConstraint(table.identity(), foreignKey(foreignKey)))
-                .forEach(requests::add);
+                }).orElse(""))
+                .append(dialect.generatedTableClause(identity))
+                .append(dialect.inlineTableCommentClause(table.comment()));
+        requests.add(new SqlRequest(sql.toString(), List.of()));
+        for (UniqueConstraintDefinition key : table.uniqueConstraints()) {
+            if (!SchemaDefinitionEquality.ordinaryUnique(key, dialect)) requests.add(createUnique(table.identity(), key));
+        }
+        for (IndexDefinition index : table.indexes()) {
+            if (index != inlineIndex) requests.add(createIndex(table.identity(), index));
+        }
+        for (ForeignKeyDefinition key : deferredForeignKeys) requests.add(addConstraint(table.identity(), foreignKey(key)));
         dialect.tableCommentSql(table.identity(), table.comment())
                 .ifPresent(comment -> requests.add(new SqlRequest(comment, List.of())));
         for (ColumnDefinition column : table.columns()) {
@@ -245,6 +250,10 @@ public final class RelationalSchemaSqlRenderer {
         }
         return List.copyOf(requests);
     }
+    private static StringBuilder definitionSeparator(StringBuilder sql, int definitionStart) {
+        return sql.length() == definitionStart ? sql : sql.append(", ");
+    }
+
     private List<SqlRequest> addColumn(RelationIdentity relation, ColumnDefinition column,
                                       Map<String, SchemaSequenceSqlRenderer.Definition> existingSequences,
                                       Map<String, SchemaSequenceSqlRenderer.Definition> createdSequences,
@@ -328,8 +337,14 @@ public final class RelationalSchemaSqlRenderer {
 
     private String columnDefinition(ColumnDefinition column, String charset, String collation,
                                     String type, String storageComment, boolean inlinePrimaryKey) {
-        StringBuilder sql = new StringBuilder(dialect.identifier(column.name()))
-                .append(' ').append(type);
+        StringBuilder sql = new StringBuilder();
+        appendColumnDefinition(sql, column, charset, collation, type, storageComment, inlinePrimaryKey);
+        return sql.toString();
+    }
+
+    private void appendColumnDefinition(StringBuilder sql, ColumnDefinition column, String charset, String collation,
+                                        String type, String storageComment, boolean inlinePrimaryKey) {
+        dialect.appendIdentifier(sql, column.name()).append(' ').append(type);
         // 字符集和排序规则属于列类型；尤其 MySQL 的 CHARACTER SET 不能放到 NOT NULL 后面。
         if (charset != null) {
             if (dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.MYSQL) {
@@ -380,7 +395,6 @@ public final class RelationalSchemaSqlRenderer {
         if (dialect.inlineColumnComment() && storageComment != null) {
             sql.append(" comment ").append(dialect.commentLiteral(storageComment));
         }
-        return sql.toString();
     }
     String storageComment(ColumnDefinition column) {
         return SchemaColumnCommentCodec.encode(
@@ -671,23 +685,28 @@ public final class RelationalSchemaSqlRenderer {
     /** 校验建表语法，并选出必须与自增列同时创建的已有索引；不擅自增加索引。 */
     private IndexDefinition prepareTable(RelationalTableDefinition table) {
         RelationalTableDdlValidator.validate(table, dialect);
-        List<ColumnDefinition> identities = table.columns().stream()
-                .filter(column -> column.generation().strategy() == ValueGeneration.Strategy.IDENTITY)
-                .toList();
-        if (identities.size() > 1
+        String identity = null;
+        int identityCount = 0;
+        for (ColumnDefinition column : table.columns()) {
+            if (column.generation().strategy() == ValueGeneration.Strategy.IDENTITY) {
+                if (identity == null) identity = column.name();
+                identityCount++;
+            }
+        }
+        if (identityCount > 1
                 && dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.H2
                 && dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.POSTGRESQL) {
             throw new UnsupportedOperationException("a table cannot contain more than one identity column");
         }
-        if (identities.isEmpty() || dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.MYSQL) {
+        if (identityCount == 0 || dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.MYSQL) {
             return null;
         }
-        String identity = identities.getFirst().name();
-        if (table.primaryKey().filter(key -> key.columns().getFirst().equals(identity)).isPresent()
-                || table.uniqueConstraints().stream().anyMatch(key -> key.columns().getFirst().equals(identity))) {
+        String identityColumn = identity;
+        if (table.primaryKey().filter(key -> key.columns().getFirst().equals(identityColumn)).isPresent()
+                || table.uniqueConstraints().stream().anyMatch(key -> key.columns().getFirst().equals(identityColumn))) {
             return null;
         }
-        return table.indexes().stream().filter(index -> index.keys().getFirst().column().equals(identity))
+        return table.indexes().stream().filter(index -> index.keys().getFirst().column().equals(identityColumn))
                 .findFirst().orElseThrow(() -> new UnsupportedOperationException(
                         "mysql identity column must be the first column of an index"));
     }

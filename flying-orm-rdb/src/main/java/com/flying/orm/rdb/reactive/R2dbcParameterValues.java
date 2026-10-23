@@ -169,6 +169,9 @@ final class R2dbcParameterValues {
     }
 
     private static Parameter stableParameter(Parameter source, Type type, Object value) {
+        if (source instanceof StableParameter stable && stable.type == type && stable.value == value) {
+            return source;
+        }
         boolean input = source instanceof Parameter.In;
         boolean output = source instanceof Parameter.Out;
         if (input && output) {

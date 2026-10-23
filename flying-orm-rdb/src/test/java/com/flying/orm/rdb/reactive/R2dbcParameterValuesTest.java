@@ -5,6 +5,7 @@ import com.flying.orm.rdb.internal.binding.SqlNullParameter;
 import io.r2dbc.spi.Blob;
 import io.r2dbc.spi.Clob;
 import io.r2dbc.spi.Parameter;
+import io.r2dbc.spi.Parameters;
 import io.r2dbc.spi.R2dbcType;
 import io.r2dbc.spi.Type;
 import org.junit.jupiter.api.Test;
@@ -23,6 +24,26 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** 参数判型和绑定必须读取同一个驱动值快照。 */
 class R2dbcParameterValuesTest {
+
+    @Test
+    void reusesFrozenScalarParametersWithoutAnotherBindingWrapper() {
+        Parameter plain = new Parameter() {
+            @Override
+            public Type getType() { return R2dbcType.INTEGER; }
+            @Override
+            public Object getValue() { return 7; }
+        };
+        for (Parameter source : List.of(plain, Parameters.in(R2dbcType.INTEGER, 7),
+                Parameters.out(R2dbcType.INTEGER), Parameters.inOut(R2dbcType.INTEGER, 7))) {
+            Parameter frozen = assertInstanceOf(Parameter.class, R2dbcParameterValues.snapshotForExecution(source));
+            assertEquals(source.getValue(), frozen.getValue());
+            assertSame(source.getType(), frozen.getType());
+            assertEquals(source instanceof Parameter.In, frozen instanceof Parameter.In);
+            assertEquals(source instanceof Parameter.Out, frozen instanceof Parameter.Out);
+            assertSame(frozen, R2dbcParameterValues.forBinding(frozen));
+            assertSame(frozen, R2dbcParameterValues.forOwnedBinding(frozen));
+        }
+    }
 
     @Test
     void convertsDriverNeutralTypedNullForSecondaryBindingPaths() {

@@ -34,8 +34,8 @@ final class RowLayout {
 
     private boolean ambiguousMappingColumns;
 
-    /** 按计划身份保存当前结果布局的字段绑定；生命周期不会超过当前 RowLayout。 */
-    private Map<Object, Object> mappingBindings;
+    /** 按计划身份发布只读快照；逐行复用不加锁，生命周期不会超过当前 RowLayout。 */
+    private volatile Map<Object, Object> mappingBindings = Map.of();
 
     private RowLayout(String[] columnNames, Map<String, Integer> indexes) {
         this.columnNames = columnNames;
@@ -174,19 +174,24 @@ final class RowLayout {
     }
 
     @SuppressWarnings("unchecked")
-    synchronized <T> T mappingBinding(Object plan, Supplier<? extends T> factory) {
+    <T> T mappingBinding(Object plan, Supplier<? extends T> factory) {
         Object safePlan = Objects.requireNonNull(plan, "mapping plan must not be null");
         Supplier<? extends T> safeFactory = Objects.requireNonNull(
                 factory, "mapping binding factory must not be null");
-        if (mappingBindings != null && mappingBindings.containsKey(safePlan)) {
-            return (T) mappingBindings.get(safePlan);
+        Object binding = mappingBindings.get(safePlan);
+        if (binding != null) {
+            return (T) binding;
         }
-        T binding = Objects.requireNonNull(safeFactory.get(), "mapping binding must not be null");
-        if (mappingBindings == null) {
-            mappingBindings = new IdentityHashMap<>();
+        synchronized (this) {
+            binding = mappingBindings.get(safePlan);
+            if (binding == null) {
+                binding = Objects.requireNonNull(safeFactory.get(), "mapping binding must not be null");
+                Map<Object, Object> resolved = new IdentityHashMap<>(mappingBindings);
+                resolved.put(safePlan, binding);
+                mappingBindings = resolved;
+            }
+            return (T) binding;
         }
-        mappingBindings.put(safePlan, binding);
-        return binding;
     }
 
     private static String requireColumnName(String name) {

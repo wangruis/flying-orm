@@ -156,7 +156,7 @@ public final class FormQuerySqlRenderer {
         if (projections != null && projections.isEmpty()) {
             throw new IllegalArgumentException("projected query must select at least one entity field");
         }
-        List<String> selectedFields = projections == null ? support.fieldNames(safeForm.fields())
+        List<String> selectedFields = projections == null ? safeForm.fieldNames()
                 : FormSqlRenderSupport.canonicalFieldNames(safeForm, projections);
         List<String> groupedFields = groups.isEmpty() ? List.of()
                 : FormSqlRenderSupport.canonicalFieldNames(safeForm, groups);

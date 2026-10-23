@@ -77,15 +77,36 @@ public final class ConditionExecutionViews {
     public static ConditionExecutionView compile(LogicalOperator operator,
                                                  List<ConditionNode> children,
                                                  Function<TermCondition, Object> ownedValueReader) {
+        Objects.requireNonNull(operator, "logical operator must not be null");
+        Objects.requireNonNull(children, "condition children must not be null");
+        Objects.requireNonNull(ownedValueReader, "owned condition value reader must not be null");
+        if (children.size() == 1 && children.getFirst() instanceof TermCondition term) {
+            ConditionExecutionView single = singleTerm(operator, term, ownedValueReader);
+            if (single != null) return single;
+        }
         StableEncoder shape = StableDigest.sha256(SHAPE_DOMAIN);
         Mask mask = new Mask();
-        List<Object> parameters = appendGroup(shape,
-                    Objects.requireNonNull(operator, "logical operator must not be null"),
-                    Objects.requireNonNull(children, "condition children must not be null"),
-                    Objects.requireNonNull(ownedValueReader, "owned condition value reader must not be null"),
-                    mask);
+        List<Object> parameters = appendGroup(shape, operator, children, ownedValueReader, mask);
         return new ConditionExecutionView(
                 shape.finishHex(), parameters, mask.required, mask.cacheable);
+    }
+
+    /** 单项标量/无参条件直接编码结构；固定前缀与枚举编号分隔，末尾完整保留字段，不含参数值。 */
+    private static ConditionExecutionView singleTerm(LogicalOperator operator, TermCondition term,
+                                                       Function<TermCondition, Object> ownedValueReader) {
+        int index = STRUCTURAL_TERMS.indexOf(term.operator());
+        if (index < 0) return null;
+        switch (term.operator()) {
+            case "in", "not-in", "between", "not-between" -> { return null; }
+            default -> { }
+        }
+        List<Object> parameters = switch (term.operator()) {
+            case "is-null", "is-not-null" -> List.of();
+            default -> Collections.singletonList(ownedValueReader.apply(term));
+        };
+        // T: 不会与复杂条件的十六进制摘要重叠；字段中的分隔符不会改变前面的固定结构。
+        String shape = "T:" + operator.name() + ":" + index + ":" + term.field();
+        return new ConditionExecutionView(shape, parameters, 1L << index, true);
     }
 
     public static long standardTermMask(TermRegistry terms) {

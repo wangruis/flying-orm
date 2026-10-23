@@ -214,7 +214,7 @@ public final class EntityModelRegistry implements AutoCloseable {
      */
     public Object writeValue(Class<?> type, String propertyName, Object value) {
         EntityFieldMetadata field = metadata(type).field(propertyName);
-        return entityValues(type).normalizeWriteValue(field.columnName(), value);
+        return value instanceof Enum<?> ? entityValues(type).normalizeWriteValue(field.columnName(), value) : value;
     }
 
     /**

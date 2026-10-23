@@ -66,12 +66,11 @@ public record TermCondition(FieldIdentity identity, String operator, Object valu
      */
     @Override
     public Object value() {
-        if (requiresCollectionSnapshot(operator) && value instanceof List<?> values) {
+        TermHandler standard = TermRegistry.standard().findNormalized(operator);
+        if (requiresCollectionSnapshot(standard) && value instanceof List<?> values) {
             return BindableValueSnapshots.logicalValues(values);
         }
-        return isStandardOperator(operator)
-                ? BindableValueSnapshots.logicalValue(value)
-                : BindableValueSnapshots.arrayGraph(value);
+        return snapshotScalar(standard != null, value);
     }
 
     /** 仅供构造期可信执行视图读取已经取得所有权的值。 */
@@ -143,14 +142,15 @@ public record TermCondition(FieldIdentity identity, String operator, Object valu
     static Object snapshotValue(String operator, Object value, ConditionValueShape shape) {
         // 直接 AST 的自定义 term 只有处理器自己知道值形状；不能因其实现 Collection 就改写驱动标量的类型。
         // 因而仅对内置多值 term 做集合快照，数组仍一律按值复制以阻断发布后的元素改写。
-        if (requiresCollectionSnapshot(operator)
+        TermHandler standard = TermRegistry.standard().findNormalized(operator);
+        if (requiresCollectionSnapshot(standard)
                 || shape == ConditionValueShape.COLLECTION || shape == ConditionValueShape.RANGE
                 || shape == ConditionValueShape.SCALAR_OR_COLLECTION) {
             if (value instanceof Iterable<?> iterable) {
                 return snapshotIterable(iterable);
             }
         }
-        return snapshotScalar(isStandardOperator(operator), value);
+        return snapshotScalar(standard != null, value);
     }
 
     /**
@@ -167,17 +167,10 @@ public record TermCondition(FieldIdentity identity, String operator, Object valu
         return BindableValueSnapshots.logicalValues(snapshot);
     }
 
-    private static boolean requiresCollectionSnapshot(String operator) {
-        return TermRegistry.standard()
-                           .find(operator)
-                           .map(TermHandler::shape)
-                           .map(shape -> shape == ConditionValueShape.COLLECTION
-                                   || shape == ConditionValueShape.RANGE)
-                           .orElse(false);
-    }
-
-    private static boolean isStandardOperator(String operator) {
-        return TermRegistry.standard().find(operator).isPresent();
+    private static boolean requiresCollectionSnapshot(TermHandler handler) {
+        if (handler == null) return false;
+        ConditionValueShape shape = handler.shape();
+        return shape == ConditionValueShape.COLLECTION || shape == ConditionValueShape.RANGE;
     }
 
     private record OwnedValue(Object value) {

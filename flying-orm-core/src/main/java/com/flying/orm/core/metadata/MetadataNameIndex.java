@@ -2,7 +2,6 @@ package com.flying.orm.core.metadata;
 
 import com.flying.orm.core.internal.Names;
 
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -29,14 +28,15 @@ final class MetadataNameIndex<T> {
     private final Map<String, T> unambiguousFoldedValues;
 
     private MetadataNameIndex(Map<String, T> exactValues, Map<String, T> unambiguousFoldedValues) {
-        this.exactValues = Collections.unmodifiableMap(exactValues);
-        this.unambiguousFoldedValues = Collections.unmodifiableMap(unambiguousFoldedValues);
+        this.exactValues = exactValues;
+        this.unambiguousFoldedValues = unambiguousFoldedValues;
     }
 
     static <T> MetadataNameIndex<T> ofOwned(List<T> values,
                                             Function<T, String> nameExtractor,
                                             Function<T, String> keyExtractor,
                                             String itemName) {
+        if (values.isEmpty()) return new MetadataNameIndex<>(Map.of(), Map.of());
         Map<String, T> exactValues = new LinkedHashMap<>(Names.mapCapacity(values.size()));
         Map<String, T> foldedValues = new LinkedHashMap<>(Names.mapCapacity(values.size()));
         Set<String> ambiguousFoldedNames = new HashSet<>();

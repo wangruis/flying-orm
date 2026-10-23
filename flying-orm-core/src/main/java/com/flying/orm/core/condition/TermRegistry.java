@@ -137,7 +137,12 @@ public final class TermRegistry {
      * @return 匹配处理器；不存在时返回空
      */
     public Optional<TermHandler> find(String id) {
-        return Optional.ofNullable(handlersById.get(Names.key(id, "term id")));
+        return Optional.ofNullable(findNormalized(Names.key(id, "term id")));
+    }
+
+    /** 条件内部已规范化的 id 直接读取；不创建临时 Optional 或重复规范化。 */
+    TermHandler findNormalized(String id) {
+        return handlersById.get(id);
     }
 
     /**

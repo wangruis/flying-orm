@@ -51,6 +51,14 @@ public final class SqlTemplateEngine {
         return new SqlTemplateEngine(registry, dialect, valueCodecs, false);
     }
 
+    /** 直接为 JDBC 编译注册模板，不先生成响应式参数计划。 */
+    @InternalApi
+    public static SqlTemplateEngine createJdbc(SqlTemplateRegistry registry,
+                                               RdbDialect dialect,
+                                               ValueCodecRegistry valueCodecs) {
+        return new SqlTemplateEngine(registry, dialect, valueCodecs, true);
+    }
+
     /** 返回使用 JDBC 问号参数标记的模板引擎。 */
     @InternalApi
     public SqlTemplateEngine forJdbc() {

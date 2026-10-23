@@ -94,6 +94,38 @@ class BatchColumnLayoutOwnershipTest {
     }
 
     @Test
+    void partialFirstRowOrderBindsWithoutANameIndex() throws ReflectiveOperationException {
+        DynamicForm form = DynamicForm.builder("items", "items")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("displayName", "VARCHAR"))
+                .addField(DynamicField.of("age", "INTEGER")).build();
+        FormSqlRenderSupport support = support();
+        Map<String, Object> row = new java.util.LinkedHashMap<>();
+        row.put("age", 20);
+        row.put("displayName", null);
+        BatchColumnLayout layout = BatchColumnLayout.of(form, support.writeFields(form, row, 0L), support);
+        assertArrayEquals(new Object[]{20, null}, layout.parameters(row, 1));
+        row.clear();
+        row.put(" AGE ", 21);
+        row.put("DISPLAYNAME", "Ada");
+        assertArrayEquals(new Object[]{21, "Ada"}, layout.parameters(row, 2));
+        java.lang.reflect.Field indexes = BatchColumnLayout.class.getDeclaredField("indexesByNormalizedName");
+        indexes.setAccessible(true);
+        assertNull(indexes.get(layout), "the first row defines positional binding, not the entire form");
+        row.clear();
+        row.put("displayName", null);
+        row.put("age", 22);
+        Object[] parameters = {"old", "old", "scope"};
+        layout.writeParameters(row, 3, parameters);
+        assertArrayEquals(new Object[]{22, null, "scope"}, parameters);
+        row.clear();
+        row.put("age", 23);
+        row.put("displayName", "Bob");
+        layout.writeParameters(row, 4, parameters);
+        assertArrayEquals(new Object[]{23, "Bob", "scope"}, parameters);
+    }
+
+    @Test
     void indexedLayoutFieldsMustBelongToTheFormAndHaveAUniqueNormalizedName() {
         assertArrayEquals(new Object[0], layout(FORM, List.of()).parameters(Map.of(), 1));
         IllegalArgumentException duplicate = assertThrows(IllegalArgumentException.class,

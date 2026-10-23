@@ -202,8 +202,8 @@ final class SchemaDefinitionEquality {
     static String desiredColumnType(SchemaDialect dialect, ColumnDefinition column) {
         Integer precision = column.databaseType().logicalType().temporal()
                 ? column.temporalPrecision() : column.precision();
-        return dialect.dataType(
-                column.databaseType().declaration(), column.length(), precision, column.scale());
+        return dialect.mappedDataType(
+                column.databaseType(), column.length(), precision, column.scale());
     }
 
     static boolean sameGeneration(ValueGeneration actual,

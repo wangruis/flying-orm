@@ -150,6 +150,8 @@ public final class RelationalTableDefinition {
     }
 
     private void validateConstraintNames() {
+        if (primaryKey == null && uniqueConstraints.isEmpty() && checks.isEmpty()
+                && indexes.isEmpty() && foreignKeys.isEmpty()) return;
         Set<String> constraintNames = new HashSet<>();
         Set<String> indexNames = new HashSet<>();
         if (primaryKey != null) {
@@ -254,10 +256,10 @@ public final class RelationalTableDefinition {
         private String comment;
         private final List<ColumnDefinition> columns = new ArrayList<>();
         private PrimaryKeyDefinition primaryKey;
-        private final List<UniqueConstraintDefinition> uniqueConstraints = new ArrayList<>();
-        private final List<IndexDefinition> indexes = new ArrayList<>();
-        private final List<ForeignKeyDefinition> foreignKeys = new ArrayList<>();
-        private final List<CheckConstraintDefinition> checks = new ArrayList<>();
+        private List<UniqueConstraintDefinition> uniqueConstraints = List.of();
+        private List<IndexDefinition> indexes = List.of();
+        private List<ForeignKeyDefinition> foreignKeys = List.of();
+        private List<CheckConstraintDefinition> checks = List.of();
         private TablePartitionDefinition partition;
 
         private Builder(RelationIdentity identity) {
@@ -291,22 +293,26 @@ public final class RelationalTableDefinition {
         }
 
         public Builder addUnique(UniqueConstraintDefinition definition) {
+            if (uniqueConstraints.isEmpty()) uniqueConstraints = new ArrayList<>();
             uniqueConstraints.add(Objects.requireNonNull(
                     definition, "unique constraint definition must not be null"));
             return this;
         }
 
         public Builder addIndex(IndexDefinition definition) {
+            if (indexes.isEmpty()) indexes = new ArrayList<>();
             indexes.add(Objects.requireNonNull(definition, "index definition must not be null"));
             return this;
         }
 
         public Builder addForeignKey(ForeignKeyDefinition definition) {
+            if (foreignKeys.isEmpty()) foreignKeys = new ArrayList<>();
             foreignKeys.add(Objects.requireNonNull(definition, "foreign key definition must not be null"));
             return this;
         }
 
         public Builder addCheck(CheckConstraintDefinition definition) {
+            if (checks.isEmpty()) checks = new ArrayList<>();
             checks.add(Objects.requireNonNull(definition, "check constraint definition must not be null"));
             return this;
         }

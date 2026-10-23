@@ -21,6 +21,17 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class SchemaMigrationPlanTest {
 
     @Test
+    void singleStepPlanReusesItsImmutableRequests() {
+        DynamicForm form = DynamicForm.builder("people", "people")
+                .addField(DynamicField.of("name", "VARCHAR").withLength(64)).build();
+        SchemaMigrationPlan plan = FormSchemaSqlRenderer.create(RdbDialect.postgresql())
+                .createTablePlan(form, List.of());
+        assertEquals(1, plan.steps().size());
+        assertSame(plan.steps().getFirst().requests(), plan.requests());
+        assertThrows(UnsupportedOperationException.class, () -> plan.requests().clear());
+    }
+
+    @Test
     void incrementalIndexAndForeignKeyCanReferenceAnExistingUndeclaredColumn() {
         DynamicForm declared = DynamicForm.builder("orders", "orders")
                 .addField(DynamicField.primaryKey("id", "BIGINT")).build();

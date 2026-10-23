@@ -47,7 +47,11 @@ public final class SchemaMigrationPlan {
         this.absentRelation = builder.absentRelation;
         this.steps = List.copyOf(builder.steps);
         this.requests = builder.requests == null
-                ? steps.stream().flatMap(step -> step.requests().stream()).toList()
+                ? switch (steps.size()) {
+                    case 0 -> List.of();
+                    case 1 -> steps.getFirst().requests();
+                    default -> steps.stream().flatMap(step -> step.requests().stream()).toList();
+                }
                 : List.copyOf(builder.requests);
         this.tableExists = builder.tableExists;
         this.skippedChanges = List.copyOf(builder.skippedChanges);

@@ -17,6 +17,72 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 class ConditionExecutionViewScaleTest {
+    private static volatile ConditionExecutionView viewSink;
+    private static volatile ConditionGroup groupSink;
+
+    @Test
+    void scalarConditionConstructionAvoidsOptionalLookupIntermediates() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(java.lang.management.ManagementFactory.getRuntimeMXBean()
+                .getInputArguments().stream().noneMatch(argument -> argument.startsWith("-javaagent:")));
+        java.lang.management.ThreadMXBean standard = java.lang.management.ManagementFactory.getThreadMXBean();
+        org.junit.jupiter.api.Assumptions.assumeTrue(standard instanceof com.sun.management.ThreadMXBean);
+        com.sun.management.ThreadMXBean allocation = (com.sun.management.ThreadMXBean) standard;
+        org.junit.jupiter.api.Assumptions.assumeTrue(allocation.isThreadAllocatedMemorySupported());
+        allocation.setThreadAllocatedMemoryEnabled(true);
+        int iterations = 30_000;
+        for (int i = 0; i < iterations; i++) groupSink = ConditionGroup.and().where("id", "=", 7).build();
+        long thread = Thread.currentThread().threadId();
+        long before = allocation.getThreadAllocatedBytes(thread);
+        for (int i = 0; i < iterations; i++) groupSink = ConditionGroup.and().where("id", "=", 7).build();
+        double bytes = (allocation.getThreadAllocatedBytes(thread) - before) / (double) iterations;
+        assertEquals(7, ((TermCondition) groupSink.children().getFirst()).value());
+        System.out.println("scalar condition construction allocation B/op=" + bytes);
+        org.junit.jupiter.api.Assertions.assertTrue(bytes < 320,
+                "scalar condition construction should avoid lookup intermediates: " + bytes);
+    }
+
+    @Test
+    void singleScalarViewDoesNotAllocateDigestState() {
+        org.junit.jupiter.api.Assumptions.assumeTrue(java.lang.management.ManagementFactory.getRuntimeMXBean()
+                .getInputArguments().stream().noneMatch(argument -> argument.startsWith("-javaagent:")));
+        java.lang.management.ThreadMXBean standard = java.lang.management.ManagementFactory.getThreadMXBean();
+        org.junit.jupiter.api.Assumptions.assumeTrue(standard instanceof com.sun.management.ThreadMXBean);
+        com.sun.management.ThreadMXBean allocation = (com.sun.management.ThreadMXBean) standard;
+        org.junit.jupiter.api.Assumptions.assumeTrue(allocation.isThreadAllocatedMemorySupported());
+        allocation.setThreadAllocatedMemoryEnabled(true);
+        List<ConditionNode> terms = List.of(TermCondition.of("id", "=", 7));
+        int iterations = 30_000;
+        for (int i = 0; i < iterations; i++) {
+            viewSink = ConditionExecutionViews.compile(LogicalOperator.AND, terms, TermCondition::value);
+        }
+        long thread = Thread.currentThread().threadId();
+        long before = allocation.getThreadAllocatedBytes(thread);
+        for (int i = 0; i < iterations; i++) {
+            viewSink = ConditionExecutionViews.compile(LogicalOperator.AND, terms, TermCondition::value);
+        }
+        double bytes = (allocation.getThreadAllocatedBytes(thread) - before) / (double) iterations;
+        System.out.println("single condition view allocation B/op=" + bytes);
+        org.junit.jupiter.api.Assertions.assertTrue(bytes < 256,
+                "single scalar conditions must not allocate digest state: " + bytes);
+    }
+
+    @Test
+    void scalarShapesKeepFieldsOperatorsAndNullBindingsDistinct() {
+        java.util.Set<String> shapes = new java.util.HashSet<>();
+        for (String field : List.of("id", "0:id", "名称", "=1:AND:id")) {
+            for (String operator : List.of("=", "!=", "<>", ">", ">=", "<", "<=", "like", "not-like",
+                    "like-ignore-case", "not-like-ignore-case", "is-null", "is-not-null")) {
+                for (LogicalOperator group : LogicalOperator.values()) {
+                    ConditionGroup condition = group == LogicalOperator.AND
+                            ? ConditionGroup.and().add(TermCondition.of(field, operator, null)).build()
+                            : ConditionGroup.or().add(TermCondition.of(field, operator, null)).build();
+                    org.junit.jupiter.api.Assertions.assertTrue(shapes.add(condition.executionView().shapeDigest()));
+                    List<Object> parameters = ConditionExecutionViews.bindParameters(condition, ValueCodecRegistry.standard());
+                    assertEquals(operator.startsWith("is-") ? List.of() : java.util.Collections.singletonList(null), parameters);
+                }
+            }
+        }
+    }
 
     @Test
     void conditionShapeUsesCompactFramedSegmentsWithoutParameterValues() {
@@ -55,8 +121,7 @@ class ConditionExecutionViewScaleTest {
     @Test
     void nestedShapeRetainsFramedUnicodeFieldsAndChildDigest() {
         ConditionGroup child = ConditionGroup.and().where("名称", "=", "张三").build();
-        String childDigest = StableDigest.sha256(StableDigest.domain("condition-plan-shape/v2"))
-                .marker("AND").text("F", "名称").integer("=", 1).marker("END").finishHex();
+        String childDigest = "T:AND:0:名称";
         String parentDigest = StableDigest.sha256(StableDigest.domain("condition-plan-shape/v2"))
                 .marker("OR").text("N", childDigest).marker("END").finishHex();
         assertEquals(childDigest, child.executionView().shapeDigest());

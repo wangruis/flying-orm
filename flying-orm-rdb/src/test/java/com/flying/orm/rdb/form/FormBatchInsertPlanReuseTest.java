@@ -23,8 +23,32 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class FormBatchInsertPlanReuseTest {
+    @Test
+    void cursorMatchesCurrentColumnsWithoutConfusingOrderNullOrExpressions() {
+        RdbDialect dialect = RdbDialect.postgresql();
+        FormSqlRenderSupport support = new FormSqlRenderSupport(SqlRenderer.builder().addDefaultTerms().build(),
+                dialect.json(), dialect.name(), true, dialect.schema()::identifier,
+                StructuralPlanCaches.create(OrmCachePolicy.safeDefaults()), Map.of(),
+                dialect.capabilities(), dialect.schema()::relationIdentifier);
+        Map<String, Object> first = row(1L, "one");
+        BatchInsertPlan plan = new FormBatchSqlRenderer(support, dialect.upsert()).insertPlan(form("VARCHAR"), first);
+        BatchInsertPlan.Cursor cursor = new BatchInsertPlan.Cursor(first, plan, true);
+        Map<String, Object> reordered = new LinkedHashMap<>();
+        reordered.put("name", null);
+        reordered.put("id", 2L);
+        assertTrue(cursor.matches(reordered));
+        assertArrayEquals(new Object[]{2L, null}, plan.parameters(reordered, 1));
+        assertFalse(cursor.matches(Map.of("id", 2L)));
+        assertFalse(cursor.matches(Map.of("id", 2L, "other", "two")));
+        assertFalse(cursor.matches(Map.of("id", 2L, "name", com.flying.orm.core.expression.ValueExpression.value("two"))));
+        assertTrue(cursor.matches(row(3L, "three")));
+        assertArrayEquals(new Object[]{3L, "three"}, plan.parameters(row(3L, "three"), 2));
+    }
+
     @Test
     void cachedStatementStillEncodesEveryCurrentRow() {
         AtomicInteger writes = new AtomicInteger();

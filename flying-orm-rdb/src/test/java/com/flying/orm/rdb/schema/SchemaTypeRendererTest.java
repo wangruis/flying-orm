@@ -12,10 +12,25 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SchemaTypeRendererTest {
+
+    @Test
+    void rendersAlreadyParsedColumnsWithoutReparsingTheirType() {
+        ColumnDefinition column = ColumnDefinition.builder("name", "VARCHAR(64)").build();
+        SchemaDialect dialect = SchemaDialect.builder().mapType("varchar", type -> {
+            assertSame(column.databaseType(), type);
+            return type.declaration();
+        }).build();
+        SchemaOperation add = SchemaOperation.of(SchemaOperation.Kind.ADD_COLUMN,
+                RelationIdentity.table("labels"), "name", null, column,
+                SchemaOperation.Compatibility.SAFE_INCREMENTAL);
+        assertEquals("alter table labels add column name VARCHAR(64)",
+                RelationalSchemaSqlRenderer.create(dialect).render(add).getFirst().sql());
+    }
 
     @Test
     void undeclaredObservedColumnOptionsDoNotTurnValueInequalityIntoAlter() {

@@ -17,6 +17,37 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class SqlTemplateRendererTest {
 
     @Test
+    void directJdbcPreparationPreservesStaticPlansDynamicIdentifiersAndServerParameters() {
+        SqlTemplateRegistry registry = SqlTemplateRegistry.builder()
+                .register(SqlTemplate.query("static", "select :value, :tenant, :value", Set.of()), Set.of("tenant"))
+                .register(SqlTemplate.query("dynamic", "select :value from ${table}", Set.of("table")))
+                .register(SqlTemplate.query("json", "select payload ? :key", Set.of()))
+                .build();
+        for (RdbDialect dialect : java.util.List.of(RdbDialect.postgresql(), RdbDialect.mysql(),
+                RdbDialect.sqlServer(), RdbDialect.oracle())) {
+            SqlTemplateEngine engine = SqlTemplateEngine.createJdbc(registry, dialect, ValueCodecRegistry.standard());
+            SqlTemplateEngine.PreparedSql prepared = engine.prepare("static");
+            SqlRequest first = prepared.render(Map.of("value", 3, "tenant", 7), Map.of());
+            SqlRequest second = prepared.render(Map.of("value", 4, "tenant", 8), Map.of());
+            assertEquals("select ?, ?, ?", first.sql());
+            assertEquals(java.util.List.of(3, 7, 3), first.parameters());
+            assertSame(first.statement(), second.statement());
+            assertEquals(Set.of("tenant"), prepared.serverParameters());
+            assertEquals(java.util.List.of(5),
+                    engine.render("dynamic", Map.of("value", 5), Map.of("table", "people")).parameters());
+            assertThrows(IllegalArgumentException.class,
+                    () -> engine.render("dynamic", Map.of("value", 5), Map.of("table", "people; drop table people")));
+        }
+        SqlTemplateEngine postgres = SqlTemplateEngine.createJdbc(
+                registry, RdbDialect.postgresql(), ValueCodecRegistry.standard());
+        assertEquals("select payload ?? ?", postgres.render("json", Map.of("key", "enabled"), Map.of()).sql());
+        SqlTemplateRegistry invalid = SqlTemplateRegistry.builder()
+                .register(SqlTemplate.query("missing", "select :value", Set.of()), Set.of("tenant")).build();
+        assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.createJdbc(
+                invalid, RdbDialect.postgresql(), ValueCodecRegistry.standard()));
+    }
+
+    @Test
     void readsOnlyReferencedValuesFromAReusableParameterMap() {
         Object[] unusedCycle = new Object[1];
         unusedCycle[0] = unusedCycle;

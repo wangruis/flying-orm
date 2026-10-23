@@ -24,7 +24,7 @@ final class SchemaDialectTypeSupport {
 
     SchemaDialectTypeSupport(String quoteOpen,
                              String quoteClose,
-                             Map<String, String> typeMappings,
+                             Map<String, DatabaseType> typeMappings,
                              Map<String, Function<DatabaseType, String>> typeRenderers,
                              SchemaDialect.GeneratedValueStyle databaseStyle) {
         this.quoteOpen = quoteOpen;
@@ -45,31 +45,31 @@ final class SchemaDialectTypeSupport {
         if (dot < 0) {
             return quoteOpen + text + quoteClose;
         }
-        StringBuilder quoted = new StringBuilder(text.length()).append(quoteOpen);
+        return appendQuotedIdentifier(new StringBuilder(text.length()), text).toString();
+    }
+
+    StringBuilder appendIdentifier(StringBuilder sql, String value) {
+        String text = SqlIdentifiers.requireIdentifier(value);
+        return quoteOpen == null ? sql.append(text) : appendQuotedIdentifier(sql, text);
+    }
+
+    private StringBuilder appendQuotedIdentifier(StringBuilder sql, String text) {
+        sql.append(quoteOpen);
         int start = 0;
-        do {
-            quoted.append(text, start, dot).append(quoteClose).append('.').append(quoteOpen);
+        for (int dot = text.indexOf('.'); dot >= 0; dot = text.indexOf('.', start)) {
+            sql.append(text, start, dot).append(quoteClose).append('.').append(quoteOpen);
             start = dot + 1;
-            dot = text.indexOf('.', start);
-        } while (dot >= 0);
-        return quoted.append(text, start, text.length()).append(quoteClose).toString();
+        }
+        return sql.append(text, start, text.length()).append(quoteClose);
     }
 
     String identifier(RelationIdentity value) {
-        RelationIdentity relation = Objects.requireNonNull(value, "relation identity must not be null");
-        StringJoiner qualified = new StringJoiner(".");
-        if (relation.catalog().isPresent()) {
-            qualified.add(identifierSegment(relation.catalog().orElseThrow()));
-        }
-        if (relation.schema().isPresent()) {
-            qualified.add(identifierSegment(relation.schema().orElseThrow()));
-        }
-        qualified.add(identifierSegment(relation.table()));
-        return qualified.toString();
+        return namespaceObjectIdentifier(value, value.table());
     }
 
     String namespaceObjectIdentifier(RelationIdentity value, String objectName) {
         RelationIdentity relation = Objects.requireNonNull(value, "relation identity must not be null");
+        if (relation.catalog().isEmpty() && relation.schema().isEmpty()) return identifierSegment(objectName);
         StringJoiner qualified = new StringJoiner(".");
         if (relation.catalog().isPresent()) {
             qualified.add(identifierSegment(relation.catalog().orElseThrow()));
@@ -83,6 +83,7 @@ final class SchemaDialectTypeSupport {
 
     String schemaObjectIdentifier(RelationIdentity value, String objectName) {
         RelationIdentity relation = Objects.requireNonNull(value, "relation identity must not be null");
+        if (relation.schema().isEmpty()) return identifierSegment(objectName);
         StringJoiner qualified = new StringJoiner(".");
         if (relation.schema().isPresent()) {
             qualified.add(identifierSegment(relation.schema().orElseThrow()));
@@ -100,7 +101,7 @@ final class SchemaDialectTypeSupport {
         return mapping.render(value);
     }
 
-    String dataType(String value, Integer length, Integer precision, Integer scale) {
+    String dataType(DatabaseType value, Integer length, Integer precision, Integer scale) {
         return mapping.render(value, length, precision, scale);
     }
 

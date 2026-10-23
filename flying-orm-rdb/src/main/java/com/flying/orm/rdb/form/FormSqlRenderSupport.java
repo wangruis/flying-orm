@@ -269,6 +269,7 @@ final class FormSqlRenderSupport {
     /** 校验每个字段；名称未变化时复用不可变列表，不保留调用方的可变列表。 */
     static List<String> canonicalFieldNames(DynamicForm form, List<String> fields) {
         Objects.requireNonNull(form, "dynamic form must not be null");
+        if (fields.size() == form.fields().size() && fields == form.fieldNames()) return fields;
         List<String> normalized = null;
         int index = 0;
         for (String name : fields) {
