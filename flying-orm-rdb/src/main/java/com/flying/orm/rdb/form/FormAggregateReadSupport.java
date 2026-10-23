@@ -1,59 +1,54 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.ConditionNode;
 import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.field.FieldIdentity;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.join.JoinQuerySpec;
+import com.flying.orm.core.join.JoinSource;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
+import com.flying.orm.core.protection.MaskedFieldDefinition;
 import com.flying.orm.core.scope.DataScope;
-import com.flying.orm.core.scope.FieldScope;
-import com.flying.orm.core.scope.FieldUse;
 import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.scope.FieldUseRequirements;
 import com.flying.orm.core.scope.FieldUseSnapshot;
 import com.flying.orm.core.sql.render.SqlFragment;
-import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.core.sql.render.SqlTermHandler;
+import com.flying.orm.core.sql.render.CorrelatedSqlTermHandler;
+import com.flying.orm.core.metadata.Feature;
 import com.flying.orm.rdb.form.spec.QuerySpec;
-import com.flying.orm.rdb.internal.InternalApi;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.internal.condition.ConditionNodes;
 import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
-import com.flying.orm.rdb.result.DynamicRow;
 
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Function;
+import java.util.function.UnaryOperator;
 
 /**
- * 聚合 planner 对既有表单 Scope、逻辑删除、字段保护和 codec 的窄桥接。
- *
- * <p>这里不生成聚合 SQL，也不保存聚合状态；它只让 aggregate 包复用 form 包内已经存在的
- * 安全不变量，避免另建第二套 Scope 或保护实现。</p>
+ * 聚合读取的来源、Scope、保护条件和结果值准备，与普通读取直接共用表单内部所有者。
  *
  * @author wangr
  * @version v3.2
  */
-@InternalApi
-public final class FormAggregateReadSupport {
+final class FormAggregateReadSupport {
 
-    private final FormDataSqlRenderer renderer;
+    final FormDataSqlRenderer renderer;
     private final FormScopeSupport scopes;
 
-    public FormAggregateReadSupport(FormDataSqlRenderer renderer,
-                                    StructuredConditionResolver resolver,
-                                    DataScope defaultDataScope) {
-        this.renderer = Objects.requireNonNull(renderer, "form data sql renderer must not be null");
-        this.scopes = new FormScopeSupport(
-                this.renderer,
-                Objects.requireNonNull(resolver, "structured condition resolver must not be null"),
-                Objects.requireNonNull(defaultDataScope, "default data scope must not be null"));
+    FormAggregateReadSupport(FormDataSqlRenderer renderer, FormScopeSupport scopes) {
+        this.renderer = renderer;
+        this.scopes = scopes;
     }
 
     /** 合并业务条件、客户端/调用 Scope、逻辑删除和受保护条件，且不获取连接。 */
-    public PreparedRead prepare(QuerySpec spec) {
+    PreparedRead prepare(QuerySpec spec) {
         QuerySpec safeSpec = Objects.requireNonNull(spec, "aggregate query spec must not be null");
         ScopedRead read = scopes.scopedRead(safeSpec);
         return prepare(safeSpec, read);
@@ -63,11 +58,48 @@ public final class FormAggregateReadSupport {
      * governed 聚合额外保留同一次编译得到的业务条件，供字段用途和扩展能力审批复用。
      * Scope、租户和逻辑删除只存在于 {@link PreparedRead#where()}，不会被误记成调用方 FILTER。
      */
-    public GovernedPreparedRead prepareGoverned(QuerySpec spec) {
+    GovernedPreparedRead prepareGoverned(QuerySpec spec) {
         QuerySpec safeSpec = Objects.requireNonNull(spec, "aggregate query spec must not be null");
         FormScopeSupport.GovernedRead governed = scopes.governedRead(safeSpec);
         return new GovernedPreparedRead(
                 prepare(safeSpec, governed.read()), governed.businessWhere());
+    }
+
+    /** 关联报表复用同一来源规划，不创建普通 JOIN 的投影表单或解码计划。 */
+    JoinedRead prepareJoin(JoinQuerySpec spec, FieldUseRequirements.Builder requirements,
+                                  QueryShapeLimits limits, boolean governed) {
+        JoinQueryPlanner planner = new JoinQueryPlanner(renderer, scopes, SqlExecutionOptions.unlimited());
+        return new JoinedRead(spec, planner.prepareAggregateSources(
+                spec, requirements, governed ? new QueryShapeBudget(limits) : null, governed));
+    }
+
+    /** 只供聚合规划消费；字段和 Scope 保留来源身份。 */
+    final class JoinedRead {
+        private final JoinQuerySpec spec;
+        private final JoinQueryPlanner.PreparedSources sources;
+
+        private JoinedRead(JoinQuerySpec spec, JoinQueryPlanner.PreparedSources sources) {
+            this.spec = spec;
+            this.sources = sources;
+        }
+
+        DynamicField field(JoinSource source, String field) {
+            return sources.readableForms().get(source).field(field);
+        }
+
+        String expression(JoinSource source, String field) {
+            return renderer.conditionRenderer().identifier("t" + source.ordinal())
+                    + "." + renderer.conditionRenderer().identifier(field);
+        }
+
+        SqlFragment relation() {
+            return renderer.joinQueries().relation(spec, sources.physicalForms(),
+                    sources.protections(), sources.valueConditions());
+        }
+
+        FieldUseSnapshot approve(FieldUseRequirements requirements, FieldUsePolicy policy) {
+            return JoinQueryPlanner.approveFieldUse(requirements, sources.scopes(), policy);
+        }
     }
 
     private PreparedRead prepare(QuerySpec spec, ScopedRead read) {
@@ -77,79 +109,36 @@ public final class FormAggregateReadSupport {
                 spec.form(), read.form(), prepared.physicalForm(), prepared.where(), read.scope());
     }
 
-    public String identifier(String value) {
-        return renderer.conditionRenderer().identifier(value);
-    }
-
-    /** 物理关系使用与普通 CRUD 相同的 legacy/分段身份渲染规则。 */
-    public String identifier(DynamicForm form) {
-        return renderer.relationIdentifier(form);
-    }
-
-    /** SQL Server 的稳定数值聚合规则在装配时确定，规划请求时只读取这个不可变事实。 */
-    public boolean sqlServerDialect() {
-        return renderer.sqlServerDialect();
-    }
-
-    /** PostgreSQL UUID 聚合适配同样只读取装配时的方言事实。 */
-    public boolean postgresqlDialect() {
-        return renderer.postgresqlDialect();
-    }
-
-    /** MIN/MAX 与结果别名排序复用普通查询的稳定 OFFSET_TIME 排序约束。 */
-    public void requireStableOffsetTimeOrdering(DynamicField field) {
-        renderer.requireStableOffsetTimeOrdering(field);
-    }
-
-    public SqlFragment renderWhere(DynamicForm physicalForm, ConditionGroup where) {
-        return renderer.renderCondition(physicalForm, where);
-    }
-
-    /** 只在显式 governed 聚合遍历中审批扩展 term；默认聚合不调用。 */
-    public void approveTermExtension(TermCondition term, FieldUse use) {
-        FieldUseGuard.approveTermExtension(renderer, term, use);
-    }
-
-    /** 聚合包只经这个窄桥复用 form 包内的字段用途和查询形状审批。 */
-    public FieldUseSnapshot approveAggregate(String resource,
-                                             FieldUseRequirements requirements,
-                                             FieldScope scope,
-                                             SqlRequest request,
-                                             FieldUsePolicy policy,
-                                             QueryShapeLimits limits,
-                                             int projectionCount,
-                                             int groupCount,
-                                             int aggregateCount,
-                                             int havingNodeCount,
-                                             int sortCount) {
-        return FieldUseGuard.approveAggregate(
-                resource, requirements, scope, request, policy, limits,
-                projectionCount, groupCount, aggregateCount, havingNodeCount, sortCount);
-    }
-
-    /** 只在装配关系 term 时创建 HAVING 的外层限定表达式。 */
-    public boolean hasCorrelatedTerms() {
-        return renderer.conditionRenderer().hasCorrelatedTerms();
+    /** 仅实际使用关系 term 的 HAVING 需要外层限定表达式；普通配置不遍历条件。 */
+    boolean hasCorrelatedTerms(DynamicForm form, ConditionGroup condition) {
+        if (form.features().features().isEmpty() && !renderer.conditionRenderer().hasCorrelatedTerms()) {
+            return false;
+        }
+        for (ConditionNode node : ConditionNodes.preorder(condition)) {
+            if (node instanceof TermCondition term) {
+                Feature feature = form.features().find(term.operator()).orElse(null);
+                if (feature instanceof SqlTermHandler
+                        ? feature instanceof CorrelatedSqlTermHandler
+                        : renderer.conditionRenderer().isCorrelatedTerm(term.operator())) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /** Alias SQL and value semantics come from the same already validated aggregate declaration. */
-    public SqlFragment renderHaving(DynamicForm resultForm,
+    SqlFragment renderHaving(DynamicForm resultForm,
                                     ConditionGroup having,
                                     Map<String, String> expressionsByAlias,
                                     Map<String, String> correlatedExpressionsByAlias,
                                     String outerQualifier,
                                     Function<String, DynamicField> valueFieldResolver) {
-        Map<String, String> safeExpressions = Objects.requireNonNull(
-                expressionsByAlias, "aggregate alias expressions must not be null");
-        safeExpressions.forEach((alias, expression) -> {
-            Objects.requireNonNull(alias, "aggregate alias must not be null");
-            Objects.requireNonNull(expression, "aggregate alias expression must not be null");
-        });
         return renderer.renderCondition(
                 resultForm,
                 having,
                 alias -> {
-                    String expression = safeExpressions.get(FieldIdentity.of(alias).key());
+                    String expression = expressionsByAlias.get(FieldIdentity.of(alias).key());
                     if (expression == null) {
                         throw new IllegalArgumentException("HAVING references an undeclared aggregate result alias");
                     }
@@ -161,59 +150,51 @@ public final class FormAggregateReadSupport {
                 valueFieldResolver);
     }
 
-    /** 普通字段及实体自定义字段沿用表单查询的同一解码规则。 */
-    public Object decode(DynamicField field, Object value) {
+    /** 一次准备字段读取规则；javaType 为 null 时保留字段类型，否则兑现聚合表达式的结果类型。 */
+    UnaryOperator<Object> decoder(DynamicField field, Class<?> javaType) {
         DynamicField safeField = Objects.requireNonNull(field, "aggregate source field must not be null");
-        if (value == null) {
-            return null;
-        }
         EntityTypeMappingRegistry.Mapping custom = renderer.customFieldMapping(safeField);
-        return custom == null
-                ? renderer.readScalarValue(safeField, value)
-                : custom.codec().read(value, custom.javaType());
+        FormScalarReadPlan scalar = custom == null ? renderer.scalarReadPlan(safeField) : null;
+        if (custom == null && scalar == null && javaType == null) return UnaryOperator.identity();
+        return value -> {
+            if (value == null) return null;
+            Object decoded = custom != null ? custom.codec().read(value, custom.javaType())
+                    : scalar != null ? scalar.read(value) : value;
+            return decoded == null || javaType == null || javaType.isInstance(decoded)
+                    ? decoded : renderer.valueCodecs().read(decoded, javaType);
+        };
     }
 
-    /** MIN/MAX 在方言解码后继续走应用 codec，最终兑现表达式声明的 Java 类型。 */
-    public Object decode(DynamicField field, Object value, Class<?> javaType) {
-        Object decoded = decode(field, value);
-        if (decoded == null) {
-            return null;
-        }
-        Class<?> target = Objects.requireNonNull(javaType, "aggregate Java type must not be null");
-        return target.isInstance(decoded)
-                ? decoded : renderer.valueCodecs().read(decoded, target);
-    }
-
-    public Class<?> customJavaType(DynamicField field) {
+    Class<?> customJavaType(DynamicField field) {
         EntityTypeMappingRegistry.Mapping mapping = renderer.customFieldMapping(
                 Objects.requireNonNull(field, "aggregate source field must not be null"));
         return mapping == null ? null : mapping.javaType();
     }
 
     /** 分组值仍遵循 QuerySpec 的声明/强制脱敏展示模式。 */
-    public Object maskGroupValue(DynamicForm form,
+    Object maskGroupValue(DynamicForm form,
                                  DynamicField field,
                                  Object value,
                                  SensitiveDisplayMode displayMode) {
-        if (value == null || form.protections().masked(field.name()).isEmpty()) {
+        if (value == null) {
             return value;
         }
-        Map<String, Object> single = new LinkedHashMap<>(1);
-        single.put(field.name(), value);
-        DynamicRow masked = renderer.protection().mask(
-                form, DynamicRow.copyOf(single),
+        MaskedFieldDefinition definition = form.protections().masked(field.name()).orElse(null);
+        if (definition == null) {
+            return value;
+        }
+        return renderer.protection().maskValue(value, definition,
                 Objects.requireNonNull(displayMode, "aggregate display mode must not be null"));
-        return masked.get(field.name());
     }
 
     /** 一次规划共享的既有读取事实。 */
-    public record PreparedRead(DynamicForm logicalForm,
+    record PreparedRead(DynamicForm logicalForm,
                                DynamicForm readableForm,
                                DynamicForm physicalForm,
                                ConditionGroup where,
                                DataScope scope) {
 
-        public PreparedRead {
+        PreparedRead {
             logicalForm = Objects.requireNonNull(logicalForm, "aggregate logical form must not be null");
             readableForm = Objects.requireNonNull(readableForm, "aggregate readable form must not be null");
             physicalForm = Objects.requireNonNull(physicalForm, "aggregate physical form must not be null");
@@ -222,10 +203,10 @@ public final class FormAggregateReadSupport {
         }
     }
 
-    /** 仅由 governed 聚合创建；既有 PreparedRead 的五组件布局保持不变。 */
-    public record GovernedPreparedRead(PreparedRead read, ConditionGroup businessWhere) {
+    /** 显式字段治理额外消费业务条件，普通聚合不创建此状态。 */
+    record GovernedPreparedRead(PreparedRead read, ConditionGroup businessWhere) {
 
-        public GovernedPreparedRead {
+        GovernedPreparedRead {
             read = Objects.requireNonNull(read, "governed aggregate read must not be null");
             businessWhere = Objects.requireNonNull(
                     businessWhere, "governed aggregate business where must not be null");

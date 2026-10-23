@@ -1,5 +1,7 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.core.form.DynamicField;
+import com.flying.orm.core.internal.hash.StableDigest;
 import com.flying.orm.core.metadata.CheckConstraintDefinition;
 import com.flying.orm.core.metadata.CheckPredicate;
 import com.flying.orm.core.metadata.ColumnDefault;
@@ -14,7 +16,9 @@ import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 import com.flying.orm.core.metadata.UniqueNullPolicy;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.core.sql.render.SqlIdentifiers;
 import com.flying.orm.core.type.DatabaseType;
+import com.flying.orm.rdb.internal.template.SchemaDefaultExpressions;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -32,18 +36,23 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.StringJoiner;
+import java.util.function.Supplier;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
  * 把规范关系 operation 编译成确定顺序、零业务参数的 DDL 请求。
  *
  * <p>本类只消费已经校验过的关系对象，不读取数据库，也不从说明文字反向解析 SQL。当前方言不能
- * 无损表达的操作会明确抛出 {@link UnsupportedOperationException}，由计划审阅器保留为人工步骤。</p>
+ * 无损表达的操作会明确抛出 {@link UnsupportedOperationException}，直接向调用方传播。</p>
  *
  * @author wangr
  * @version v3.2
  */
 public final class RelationalSchemaSqlRenderer {
+
+    private static final StableDigest.Domain ADDED_DEFAULT_NAME_DOMAIN =
+            StableDigest.domain("legacy-added-column-default/v1");
 
     private final SchemaDialect dialect;
     private final RelationalSchemaEvolutionSqlRenderer evolution;
@@ -75,13 +84,57 @@ public final class RelationalSchemaSqlRenderer {
                            boolean physicalActualTypes,
                            DatabaseType observedActualType) {
         SchemaOperation source = Objects.requireNonNull(operation, "schema operation must not be null");
+        return renderOperation(source, existingSequences, prepared -> renderBuiltIn(
+                source, existingSequences, prepared, physicalActualTypes, observedActualType));
+    }
+
+    private List<SqlRequest> renderOperation(SchemaOperation operation,
+                                            Map<String, SchemaSequenceSqlRenderer.Definition> existingSequences,
+                                            Function<Map<String, SchemaSequenceSqlRenderer.Definition>, List<SqlRequest>> builtin) {
+        if (operation.kind() == SchemaOperation.Kind.VERIFY_MANUALLY) throw unsupported(operation.kind());
         Map<String, SchemaSequenceSqlRenderer.Definition> createdSequences = new LinkedHashMap<>();
-        List<SqlRequest> requests = switch (source.kind()) {
+        SchemaOperationRenderer custom = dialect.operationRenderer();
+        List<SqlRequest> requests;
+        if (custom == null) {
+            requests = builtin.apply(createdSequences);
+        } else {
+            Supplier<List<SqlRequest>> fallback = new Supplier<>() {
+                private List<SqlRequest> result;
+
+                @Override
+                public List<SqlRequest> get() {
+                    if (result == null) {
+                        Map<String, SchemaSequenceSqlRenderer.Definition> prepared = new LinkedHashMap<>();
+                        result = List.copyOf(builtin.apply(prepared));
+                        createdSequences.putAll(prepared);
+                    }
+                    return result;
+                }
+            };
+            requests = List.copyOf(custom.render(operation, fallback));
+            if (requests.isEmpty()) throw new IllegalArgumentException("schema operation renderer returned no requests");
+        }
+        // 回调和默认渲染都成功之后才发布序列准备，失败操作不能占用后续步骤的序列。
+        existingSequences.putAll(createdSequences);
+        return requests;
+    }
+
+    private List<SqlRequest> renderBuiltIn(SchemaOperation source,
+                                         Map<String, SchemaSequenceSqlRenderer.Definition> existingSequences,
+                                         Map<String, SchemaSequenceSqlRenderer.Definition> createdSequences,
+                                         boolean physicalActualTypes,
+                                         DatabaseType observedActualType) {
+        return switch (source.kind()) {
             case CREATE_TABLE -> createTable((RelationalTableDefinition) source.desired(),
                                             existingSequences, createdSequences);
             case ADD_COLUMN -> addColumn(source.relation(), (ColumnDefinition) source.desired(),
-                                         existingSequences, createdSequences);
-            case CHANGE_COLUMN -> evolution.changeColumn(source, physicalActualTypes, observedActualType);
+                                         existingSequences, createdSequences, false);
+            case RENAME_COLUMN -> List.of(new SqlRequest(dialect.renameColumnSql(source.relation(),
+                    ((ColumnDefinition) source.actual()).name(), ((ColumnDefinition) source.desired()).name()), List.of()));
+            case CHANGE_COLUMN -> evolution.changeColumn(source,
+                    SchemaDefinitionEquality.actualColumnDdlType(dialect,
+                            (ColumnDefinition) source.actual(), physicalActualTypes),
+                    physicalActualTypes ? observedActualType : ((ColumnDefinition) source.actual()).databaseType(), false);
             case DROP_COLUMN, DROP_TABLE, DROP_PRIMARY_KEY, DROP_UNIQUE,
                     DROP_INDEX, DROP_CHECK, DROP_FOREIGN_KEY -> List.of(evolution.drop(source));
             case ADD_PRIMARY_KEY -> List.of(addConstraint(
@@ -112,9 +165,6 @@ public final class RelationalSchemaSqlRenderer {
                     foreignKey((ForeignKeyDefinition) source.desired()));
             case VERIFY_MANUALLY -> throw unsupported(source.kind());
         };
-        // 不支持的操作不能占用尚未进入可执行计划的序列。
-        existingSequences.putAll(createdSequences);
-        return requests;
     }
     Map<String, SchemaSequenceSqlRenderer.Definition> sequenceDefinitions(List<SchemaSnapshot> snapshots) {
         return SchemaSequenceSqlRenderer.definitions(dialect, snapshots, this::dataType);
@@ -123,20 +173,27 @@ public final class RelationalSchemaSqlRenderer {
     private List<SqlRequest> createTable(RelationalTableDefinition table,
                                         Map<String, SchemaSequenceSqlRenderer.Definition> existingSequences,
                                         Map<String, SchemaSequenceSqlRenderer.Definition> createdSequences) {
-        validateTableOptions(table);
+        IndexDefinition inlineIndex = prepareTable(table);
         List<SqlRequest> requests = new ArrayList<>();
         for (ColumnDefinition column : table.columns()) {
             SchemaSequenceSqlRenderer.addCreate(
-                    dialect, requests, table.identity(), column,
+                    dialect, requests, column,
                     existingSequences, createdSequences, this::dataType);
         }
 
         StringJoiner definitions = new StringJoiner(", ");
-        table.columns().stream().map(this::columnDefinition).forEach(definitions::add);
-        table.primaryKey().map(this::primaryKey).ifPresent(definitions::add);
+        PrimaryKeyDefinition primaryKey = table.primaryKey().orElse(null);
+        table.columns().forEach(column -> definitions.add(columnDefinition(column, dataType(column), false)));
+        if (primaryKey != null) {
+            definitions.add(primaryKey(primaryKey));
+        }
         table.uniqueConstraints().stream()
                 .filter(key -> SchemaDefinitionEquality.ordinaryUnique(key, dialect))
                 .map(this::unique).forEach(definitions::add);
+        if (inlineIndex != null) {
+            definitions.add(indexDefinition(inlineIndex,
+                    dialect.identifier(unqualifiedIdentifier(inlineIndex.name(), "index name")), ""));
+        }
         table.checks().stream().map(this::check).forEach(definitions::add);
         Set<String> indexNames = new HashSet<>();
         table.indexes().forEach(index -> indexNames.add(index.name()));
@@ -175,7 +232,8 @@ public final class RelationalSchemaSqlRenderer {
         table.uniqueConstraints().stream()
                 .filter(key -> !SchemaDefinitionEquality.ordinaryUnique(key, dialect))
                 .map(key -> createUnique(table.identity(), key)).forEach(requests::add);
-        table.indexes().stream().map(index -> createIndex(table.identity(), index)).forEach(requests::add);
+        table.indexes().stream().filter(index -> index != inlineIndex)
+                .map(index -> createIndex(table.identity(), index)).forEach(requests::add);
         deferredForeignKeys.stream()
                 .map(foreignKey -> addConstraint(table.identity(), foreignKey(foreignKey)))
                 .forEach(requests::add);
@@ -189,51 +247,87 @@ public final class RelationalSchemaSqlRenderer {
     }
     private List<SqlRequest> addColumn(RelationIdentity relation, ColumnDefinition column,
                                       Map<String, SchemaSequenceSqlRenderer.Definition> existingSequences,
-                                      Map<String, SchemaSequenceSqlRenderer.Definition> createdSequences) {
+                                      Map<String, SchemaSequenceSqlRenderer.Definition> createdSequences,
+                                      boolean inlinePrimaryKey) {
         List<SqlRequest> requests = new ArrayList<>();
         SchemaSequenceSqlRenderer.addCreate(
-                dialect, requests, relation, column,
+                dialect, requests, column,
                 existingSequences, createdSequences, this::dataType);
-        requests.add(new SqlRequest(dialect.addColumnSql(relation, columnDefinition(column)), List.of()));
-        dialect.columnCommentSql(relation, column.name(), storageComment(column))
-                .ifPresent(sql -> requests.add(new SqlRequest(sql, List.of())));
+        requests.add(new SqlRequest(dialect.addColumnSql(relation,
+                columnDefinition(column, dataType(column), inlinePrimaryKey), column.generation()), List.of()));
+        String comment = storageComment(column);
+        String commentSql = dialect.columnCommentSql(relation, column.name(), comment).orElse(null);
+        if (comment != null && !dialect.inlineColumnComment() && commentSql == null) {
+            throw unsupported(SchemaOperation.Kind.ADD_COLUMN);
+        }
+        if (commentSql != null) requests.add(new SqlRequest(commentSql, List.of()));
         return List.copyOf(requests);
+    }
+
+    private List<SqlRequest> addColumn(SchemaOperation operation, boolean inlinePrimaryKey,
+                                  Map<String, SchemaSequenceSqlRenderer.Definition> sequences) {
+        return renderOperation(operation, sequences, prepared -> addColumn(operation.relation(),
+                (ColumnDefinition) operation.desired(), sequences, prepared, inlinePrimaryKey));
     }
     SqlRequest addConstraint(RelationIdentity relation, String definition) {
         return new SqlRequest("alter table " + dialect.relationIdentifier(relation) + " add " + definition, List.of());
     }
     SqlRequest createIndex(RelationIdentity relation, IndexDefinition index) {
-        String indexName = dialect.identifier(index.name());
+        String localName = unqualifiedIdentifier(index.name(), "index name");
+        String indexName = dialect.identifier(localName);
         if (dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.ORACLE
                 && relation.schema().isPresent()) {
-            indexName = dialect.schemaObjectIdentifier(relation, index.name());
+            indexName = dialect.schemaObjectIdentifier(relation, localName);
         }
+        return new SqlRequest("create " + indexDefinition(index, indexName,
+                " on " + dialect.relationIdentifier(relation)), List.of());
+    }
+
+    private String indexDefinition(IndexDefinition index, String renderedName, String tableClause) {
         StringJoiner keys = new StringJoiner(", ");
         index.keys().forEach(key -> keys.add(
-                dialect.identifier(key.column()) + " "
+                dialect.identifier(unqualifiedIdentifier(key.column(), "index column")) + " "
                         + key.direction().name().toLowerCase(java.util.Locale.ROOT)));
-        String unique = index.unique() ? "unique " : "";
-        return new SqlRequest("create " + unique + "index " + indexName
-                                      + " on " + dialect.relationIdentifier(relation) + " (" + keys + ")",
-                              List.of());
+        return (index.unique() ? "unique " : "") + "index " + renderedName + tableClause + " (" + keys + ')';
+    }
+
+    private static String unqualifiedIdentifier(String value, String category) {
+        String identifier = SqlIdentifiers.requireIdentifier(value);
+        if (identifier.indexOf('.') >= 0) {
+            throw new IllegalArgumentException(category + " must not be qualified");
+        }
+        return identifier;
+    }
+
+    List<SqlRequest> changeColumn(SchemaOperation operation, String actualType, DatabaseType observedActualType) {
+        return renderOperation(operation, new LinkedHashMap<>(), ignored ->
+                evolution.changeColumn(operation, actualType, observedActualType, true));
     }
 
     String columnDefinition(ColumnDefinition column) {
-        return columnDefinition(column, column.charset(), column.collation());
+        return columnDefinition(column, dataType(column));
+    }
+
+    String columnDefinition(ColumnDefinition column, String type) {
+        return columnDefinition(column, column.charset(), column.collation(), type, storageComment(column));
+    }
+
+    /** 单列主键可内联声明，其余物理列规则共享同一实现。 */
+    String columnDefinition(ColumnDefinition column, String type, boolean inlinePrimaryKey) {
+        return columnDefinition(column, column.charset(), column.collation(), type, storageComment(column), inlinePrimaryKey);
     }
 
     String columnDefinition(ColumnDefinition column, String charset, String collation) {
         return columnDefinition(column, charset, collation, dataType(column), storageComment(column));
     }
 
-    /** Restores observed storage without applying logical type mappings a second time. */
-    String restoredColumnDefinition(ColumnDefinition column, boolean physicalTypes, String storageComment) {
-        return columnDefinition(column, column.charset(), column.collation(),
-                SchemaDefinitionEquality.actualColumnDdlType(dialect, column, physicalTypes), storageComment);
+    private String columnDefinition(ColumnDefinition column, String charset, String collation,
+                                    String type, String storageComment) {
+        return columnDefinition(column, charset, collation, type, storageComment, false);
     }
 
     private String columnDefinition(ColumnDefinition column, String charset, String collation,
-                                    String type, String storageComment) {
+                                    String type, String storageComment, boolean inlinePrimaryKey) {
         StringBuilder sql = new StringBuilder(dialect.identifier(column.name()))
                 .append(' ').append(type);
         // 字符集和排序规则属于列类型；尤其 MySQL 的 CHARACTER SET 不能放到 NOT NULL 后面。
@@ -267,7 +361,12 @@ public final class RelationalSchemaSqlRenderer {
             // Oracle 的 DEFAULT 子句属于列定义，必须位于 NOT NULL 等列约束之前。
             sql.append(" default ").append(defaultExpression);
         }
-        if (!column.nullable()) {
+        if (inlinePrimaryKey) {
+            if (dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.SQL_SERVER) {
+                sql.append(" not null");
+            }
+            sql.append(" primary key");
+        } else if (!column.nullable()) {
             sql.append(" not null");
         } else if (dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.SQL_SERVER) {
             sql.append(" null");
@@ -288,9 +387,103 @@ public final class RelationalSchemaSqlRenderer {
                 dialect, column.databaseType(), column.generation(), column.comment());
     }
     String dataType(ColumnDefinition column) {
-        Integer precision = column.databaseType().isTemporal()
-                ? column.temporalPrecision() : column.precision();
-        return dialect.dataType(column.databaseType().declaration(), column.length(), precision, column.scale());
+        return SchemaDefinitionEquality.desiredColumnType(dialect, column);
+    }
+
+    /** 普通增量输入的物理事实适配；SQL 和类型规则与完整关系操作共用。 */
+    SchemaDialect.GeneratedValueStyle generatedValueStyle() {
+        return dialect.generatedValueStyle();
+    }
+
+    List<SqlRequest> addColumn(RelationIdentity table, DynamicField field,
+                               Map<String, SchemaSequenceSqlRenderer.Definition> sequences) {
+        ColumnDefinition column = field.column();
+        String defaultName = addedDefaultConstraintName(table.qualifiedName(), field);
+        if (defaultName != null) column = column.toBuilder().defaultConstraintName(defaultName).build();
+        return addColumn(SchemaOperation.of(SchemaOperation.Kind.ADD_COLUMN, table,
+                column.name(), null, column, SchemaOperation.Compatibility.SAFE_INCREMENTAL), field.primaryKey(), sequences);
+    }
+
+    private String addedDefaultConstraintName(String table, DynamicField field) {
+        if (dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.SQL_SERVER
+                || field.generation().strategy() != ValueGeneration.Strategy.SEQUENCE) {
+            return null;
+        }
+        // 仅新加列使用可重复生成的名称；已有列始终使用数据库实际回读的名称。
+        return "df_" + StableDigest.sha256(ADDED_DEFAULT_NAME_DOMAIN)
+                .text("TABLE", table).text("COLUMN", field.name()).finishHex();
+    }
+
+    boolean requiresPhysicalCollation(ColumnDefinition field) {
+        // JSON、OFFSET_TIME 等逻辑类型也可能映射为字符存储，以最终 DDL 类型为准。
+        return dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.SQL_SERVER
+                && SchemaDialectTypeSupport.sqlServerCharacterType(dataType(field));
+    }
+
+    boolean requiresPhysicalLengthUnit(ColumnDefinition field) {
+        if (dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.ORACLE) return false;
+        String base = com.flying.orm.core.type.DatabaseType.of(dataType(field)).baseName();
+        return "CHAR".equals(base) || "VARCHAR2".equals(base);
+    }
+
+    String metadataDataType(ColumnDefinition column) {
+        ColumnDefinition safeColumn = Objects.requireNonNull(column, "column metadata must not be null");
+        return dialect.metadataDataType(safeColumn.databaseType().declaration(),
+                                safeColumn.length(),
+                                safeColumn.databaseType().logicalType().temporal()
+                                        ? safeColumn.temporalPrecision() : safeColumn.precision(),
+                                safeColumn.scale());
+    }
+
+    boolean sameDataType(String left, String right) {
+        return dialect.sameDataType(left, right);
+    }
+
+    /** 先把输入声明适配为物理差异；无变化列不能进入依赖排序或触发后端扩展。 */
+    SchemaOperation prepareColumnChange(SchemaOperation operation, SchemaSnapshot snapshot, boolean declaredSource) {
+        ColumnDefinition source = (ColumnDefinition) operation.actual();
+        ColumnDefinition target = (ColumnDefinition) operation.desired();
+        ColumnDefinition physical = snapshot == null ? null : snapshot.knownDefinition().column(source.name());
+        ColumnDefinition actual = physical == null ? source : physical;
+        String actualType = actualType(source, snapshot, declaredSource);
+        boolean typeChanged = !dialect.sameDataType(actualType,
+                SchemaTypeMapping.preserveCharacterLengthUnit(dialect, actualType, dataType(target)));
+        boolean nullableChanged = source.nullable() != target.nullable();
+        boolean commentChanged = !Objects.equals(storageComment(source), storageComment(target));
+        if (physical == null && (dialect.rewritesFullColumnDefinition() && (typeChanged || nullableChanged || commentChanged)
+                || (typeChanged || nullableChanged) && requiresPhysicalCollation(target))) {
+            throw new IllegalStateException("rewriting an existing column requires complete physical column metadata");
+        }
+        // 增量声明未指定 DEFAULT 时保留现值；完整变更集可以显式移除默认值。
+        boolean preserveDefault = declaredSource
+                ? SchemaDefinitionEquality.sameDefault(source.defaultValue(), target.defaultValue(), dialect)
+                : target.defaultValue().kind() == ColumnDefault.Kind.NONE;
+        ColumnDefault defaultValue = preserveDefault ? actual.defaultValue() : target.defaultValue();
+        String defaultName = target.defaultConstraintName() == null
+                ? actual.defaultConstraintName() : target.defaultConstraintName();
+        if (!defaultValue.equals(target.defaultValue()) || !Objects.equals(defaultName, target.defaultConstraintName())) {
+            target = target.toBuilder().defaultValue(defaultValue).defaultConstraintName(defaultName).build();
+        }
+        if (!typeChanged && !commentChanged
+                && SchemaDefinitionEquality.sameColumnAttributes(actual, target, dialect, operation.relation())) {
+            return null;
+        }
+        return SchemaOperation.of(operation.kind(), operation.relation(), target.name(), actual, target,
+                operation.compatibility());
+    }
+
+    boolean changesType(ColumnDefinition source, ColumnDefinition target,
+                        SchemaSnapshot snapshot, boolean declaredSource) {
+        String actualType = actualType(source, snapshot, declaredSource);
+        return !dialect.sameDataType(actualType,
+                SchemaTypeMapping.preserveCharacterLengthUnit(dialect, actualType, dataType(target)));
+    }
+
+    String actualType(ColumnDefinition source, SchemaSnapshot snapshot, boolean declaredSource) {
+        String actualType = declaredSource ? dataType(source) : metadataDataType(source);
+        return snapshot == null ? actualType : SchemaTypeMapping.preserveCharacterLengthUnit(dialect,
+                SchemaDefinitionEquality.actualColumnDdlType(dialect,
+                        snapshot.knownDefinition().column(source.name()), snapshot.physicalColumnTypes()), actualType);
     }
 
     String defaultExpression(ColumnDefinition column) {
@@ -299,6 +492,8 @@ public final class RelationalSchemaSqlRenderer {
             case NONE -> column.defaultConstraintName() != null
                     && column.generation().strategy() == ValueGeneration.Strategy.NONE ? "null" : null;
             case LITERAL -> literal(defaultValue.value().orElseThrow());
+            case NATIVE_EXPRESSION -> "(" + SchemaDefaultExpressions.normalize(
+                    (String) defaultValue.value().orElseThrow(), dialect.generatedValueStyle().name()) + ")";
             case CURRENT_DATE -> switch (dialect.generatedValueStyle()) {
                 case MYSQL -> "(current_date)";
                 case SQL_SERVER -> "(cast(current_timestamp as date))";
@@ -470,10 +665,11 @@ public final class RelationalSchemaSqlRenderer {
         return action.name().toLowerCase(java.util.Locale.ROOT).replace('_', ' ');
     }
     static UnsupportedOperationException unsupported(SchemaOperation.Kind kind) {
-        return new UnsupportedOperationException("relational schema operation requires manual SQL: " + kind);
+        return new UnsupportedOperationException("current dialect cannot render schema operation: " + kind);
     }
 
-    private void validateTableOptions(RelationalTableDefinition table) {
+    /** 校验建表语法，并选出必须与自增列同时创建的已有索引；不擅自增加索引。 */
+    private IndexDefinition prepareTable(RelationalTableDefinition table) {
         RelationalTableDdlValidator.validate(table, dialect);
         List<ColumnDefinition> identities = table.columns().stream()
                 .filter(column -> column.generation().strategy() == ValueGeneration.Strategy.IDENTITY)
@@ -484,20 +680,15 @@ public final class RelationalSchemaSqlRenderer {
             throw new UnsupportedOperationException("a table cannot contain more than one identity column");
         }
         if (identities.isEmpty() || dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.MYSQL) {
-            return;
-        }
-        // MySQL 的 AUTO_INCREMENT 必须落在索引首列。当前关系模型以主键表达这项稳定约束，
-        // 不在渲染器里猜测普通索引能否承担生成语义，避免产出依赖数据库细节的脆弱 DDL。
-        if (table.primaryKey().isEmpty()) {
-            throw new UnsupportedOperationException("mysql identity column must be the table primary key");
+            return null;
         }
         String identity = identities.getFirst().name();
-        List<String> primaryKeyColumns = table.primaryKey().orElseThrow().columns();
-        if (!primaryKeyColumns.contains(identity)) {
-            throw new UnsupportedOperationException("mysql identity column must be the table primary key");
+        if (table.primaryKey().filter(key -> key.columns().getFirst().equals(identity)).isPresent()
+                || table.uniqueConstraints().stream().anyMatch(key -> key.columns().getFirst().equals(identity))) {
+            return null;
         }
-        if (!primaryKeyColumns.getFirst().equals(identity)) {
-            throw new UnsupportedOperationException("mysql identity column must be the first primary-key column");
-        }
+        return table.indexes().stream().filter(index -> index.keys().getFirst().column().equals(identity))
+                .findFirst().orElseThrow(() -> new UnsupportedOperationException(
+                        "mysql identity column must be the first column of an index"));
     }
 }

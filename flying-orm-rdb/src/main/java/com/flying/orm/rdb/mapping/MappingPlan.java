@@ -1,15 +1,10 @@
 package com.flying.orm.rdb.mapping;
 
-import com.flying.orm.core.codec.ValueCodec;
 import com.flying.orm.core.codec.ValueCodecRegistry;
-import com.flying.orm.core.type.DatabaseType;
-import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.core.internal.error.ThrowableGraph;
-import com.flying.orm.rdb.internal.mapping.EntityEnumValueCodec;
 import com.flying.orm.rdb.internal.mapping.EntityFieldNames;
 import com.flying.orm.rdb.internal.mapping.EntityMetadataHierarchy;
 import com.flying.orm.rdb.internal.mapping.EntityMetadataResolver;
-import com.flying.orm.rdb.json.JsonValueCodec;
 import com.flying.orm.rdb.result.DynamicRow;
 
 import java.beans.IntrospectionException;
@@ -22,9 +17,15 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.RecordComponent;
 import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.function.IntFunction;
 
 /**
  * 预先编译“数据库行怎样写成对象”的映射计划，真正映射每一行时不再扫描构造器、setter 和字段。
@@ -42,18 +43,6 @@ import java.util.Objects;
  */
 final class MappingPlan<T> implements RowMapper<T> {
 
-    private static final ValueCodec DECODED_JSON = new ValueCodec() {
-        @Override
-        public boolean supports(Class<?> targetType) {
-            return JsonValueCodec.supportsTarget(targetType);
-        }
-
-        @Override
-        public Object read(Object value, Class<?> targetType) {
-            return JsonValueCodec.readDecoded(value, targetType);
-        }
-    };
-
     private final RecordWriter<T> recordWriter;
     private final BeanWriter<T> beanWriter;
     private final ValueCodecRegistry valueCodecs;
@@ -65,27 +54,238 @@ final class MappingPlan<T> implements RowMapper<T> {
         this.beanWriter = beanWriter;
         this.valueCodecs = Objects.requireNonNull(valueCodecs, "value codec registry must not be null");
     }
-    @SuppressWarnings("unchecked")
     static <T> MappingPlan<T> of(Class<T> type) {
         return of(type, ValueCodecRegistry.standard());
     }
 
-    /**
-     * 为目标类型和应用 codec 注册表创建或复用映射计划。
-     *
-     * <p>同一个实体可能被不同客户端使用不同转换规则，所以实例注册表的缓存键同时包含实体类型和注册表实例。
-     * 此静态便捷入口直接编译一次；生产热路径应由客户端实例注册表复用计划。</p>
-     *
-     * @param type 目标对象类型
-     * @param valueCodecs 应用级只读 codec 注册表
-     * @param <T> 目标对象类型
-     * @return 可并发复用的映射计划
-     */
+    /** 为类型和 codec 注册表编译独立计划；跨查询复用由客户端 EntityModelRegistry 管理。 */
     static <T> MappingPlan<T> of(Class<T> type, ValueCodecRegistry valueCodecs) {
         Class<T> safeType = Objects.requireNonNull(type, "mapping type must not be null");
         return createUncached(safeType,
                               EntityMetadataResolver.createUncached(safeType),
                               Objects.requireNonNull(valueCodecs, "value codec registry must not be null"));
+    }
+
+    static <T> RowMapper<T> nested(Class<T> type, ValueCodecRegistry valueCodecs) {
+        MappingPlan<T> root = of(type, valueCodecs);
+        return new RowMapper<>() {
+            private final ClassValue<MappingPlan<?>> plans = new ClassValue<>() {
+                @Override
+                protected MappingPlan<?> computeValue(Class<?> nestedType) {
+                    return nestedType == type ? root : of(nestedType, valueCodecs);
+                }
+            };
+
+            @Override
+            public T map(DynamicRow row) {
+                DynamicRow source = Objects.requireNonNull(row, "row must not be null");
+                NestedBinding<T> binding = source.mappingBinding(this,
+                        () -> root.bindNested(NestedColumns.of(source), List.of(""), plans));
+                return binding.writer().write(source, valueCodecs);
+            }
+
+            @Override
+            public Function<IntFunction<Object>, T> bindColumns(DynamicRow columns) {
+                NestedBinding<T> binding = root.bindNested(NestedColumns.of(columns), List.of(""), plans);
+                return values -> binding.writer().write(values, valueCodecs);
+            }
+        };
+    }
+
+    static RowMapper<Map<String, Object>> nestedMap() {
+        return new RowMapper<>() {
+            @Override
+            public Map<String, Object> map(DynamicRow row) {
+                return row.mappingBinding(this, () -> bindColumns(row)).apply(row);
+            }
+
+            @Override
+            public Function<IntFunction<Object>, Map<String, Object>> bindColumns(DynamicRow columns) {
+                List<MapPath> paths = new ArrayList<>();
+                Map<String, Integer> branches = new LinkedHashMap<>();
+                Set<String> leaves = new LinkedHashSet<>();
+                for (int column = 0; column < columns.columnCount(); column++) {
+                    String[] parts = columns.columnName(column).split("\\.", -1);
+                    StringBuilder path = new StringBuilder();
+                    int parent = 0;
+                    for (int part = 0; part < parts.length; part++) {
+                        if (parts[part].isEmpty()) throw new MappingException("nested map path must not contain empty parts");
+                        if (part > 0) path.append('.');
+                        path.append(parts[part]);
+                        String key = path.toString();
+                        boolean leaf = part == parts.length - 1;
+                        if (leaves.contains(key) || leaf && branches.containsKey(key)) {
+                            throw new MappingException("nested map path has both a value column and descendant columns");
+                        }
+                        if (leaf) {
+                            leaves.add(key);
+                            paths.add(new MapPath(parent, parts[part], column));
+                        } else {
+                            Integer child = branches.get(key);
+                            if (child == null) {
+                                child = branches.size() + 1;
+                                branches.put(key, child);
+                                paths.add(new MapPath(parent, parts[part], -1));
+                            }
+                            parent = child;
+                        }
+                    }
+                }
+                int mapCount = branches.size() + 1;
+                return values -> {
+                    List<Map<String, Object>> maps = new ArrayList<>(mapCount);
+                    maps.add(new LinkedHashMap<>());
+                    for (MapPath path : paths) {
+                        Object value;
+                        if (path.column() < 0) {
+                            Map<String, Object> child = new LinkedHashMap<>();
+                            maps.add(child);
+                            value = child;
+                        } else {
+                            value = values.apply(path.column());
+                        }
+                        maps.get(path.parent()).put(path.name(), value);
+                    }
+                    return maps.getFirst();
+                };
+            }
+        };
+    }
+
+    private record MapPath(int parent, String name, int column) { }
+
+    private NestedBinding<T> bindNested(NestedColumns columns, List<String> prefixes,
+                                        ClassValue<MappingPlan<?>> plans) {
+        NestedValue[] values;
+        BoundWriter<T> bound;
+        if (recordWriter != null) {
+            values = new NestedValue[recordWriter.names().length];
+            for (int index = 0; index < values.length; index++) {
+                if (recordWriter.names()[index] != null) {
+                    values[index] = nestedValue(columns, prefixes, recordWriter.names()[index],
+                            recordWriter.propertyNames()[index], recordWriter.parameterTypes()[index], plans);
+                }
+            }
+            bound = (row, codecs) -> {
+                Object[] arguments = recordWriter.defaultValues().clone();
+                for (int index = 0; index < values.length; index++) {
+                    if (values[index] != null) {
+                        arguments[index] = recordWriter.readers()[index].read(values[index].read(row, codecs), codecs);
+                    }
+                }
+                return recordWriter.instantiate(arguments);
+            };
+        } else {
+            List<EntityValueWriter> writers = new ArrayList<>();
+            List<NestedValue> mapped = new ArrayList<>();
+            for (BeanFieldWriter field : beanWriter.fields()) {
+                NestedValue value = nestedValue(columns, prefixes, field.columnKey(), field.propertyKey(),
+                        field.type(), plans);
+                if (value != null) {
+                    writers.add(field.writer());
+                    mapped.add(value);
+                }
+            }
+            values = mapped.toArray(NestedValue[]::new);
+            bound = (row, codecs) -> {
+                try {
+                    T target = beanWriter.constructor().newInstance();
+                    for (int index = 0; index < values.length; index++) {
+                        writers.get(index).write(target, values[index].read(row, codecs), codecs);
+                    }
+                    return target;
+                } catch (ReflectiveOperationException error) {
+                    ThrowableGraph.rethrowVirtualMachineError(error);
+                    throw new MappingException("bean row cannot be mapped", error);
+                }
+            };
+        }
+        return new NestedBinding<>(bound, values);
+    }
+
+    private static NestedValue nestedValue(NestedColumns columns, List<String> prefixes, String column,
+                                           String property, Class<?> type, ClassValue<MappingPlan<?>> plans) {
+        Set<String> paths = new LinkedHashSet<>();
+        for (String prefix : prefixes) {
+            paths.add(prefix + column);
+            paths.add(prefix + property);
+        }
+        Integer index = null;
+        List<String> childPrefixes = new ArrayList<>();
+        for (String path : paths) {
+            if (index == null) {
+                index = columns.indexes().get(path);
+            }
+            if (columns.prefixes().contains(path + ".")) {
+                childPrefixes.add(path + ".");
+            }
+        }
+        if (index != null) {
+            if (!childPrefixes.isEmpty()) {
+                throw new MappingException("nested property has both a value column and descendant columns");
+            }
+            return new NestedValue(index, null);
+        }
+        if (childPrefixes.isEmpty()) {
+            return null;
+        }
+        NestedBinding<?> child = plans.get(type).bindNested(columns, childPrefixes, plans);
+        if (child.isEmpty()) {
+            return null;
+        }
+        return new NestedValue(-1, child);
+    }
+
+    private record NestedValue(int index, NestedBinding<?> child) {
+        private Object read(IntFunction<Object> row, ValueCodecRegistry codecs) {
+            return child == null ? row.apply(index) : child.readNullable(row, codecs);
+        }
+
+        private boolean hasValue(IntFunction<Object> row) {
+            return child == null ? row.apply(index) != null : child.hasValue(row);
+        }
+    }
+
+    private record NestedBinding<T>(BoundWriter<T> writer, NestedValue[] values) {
+        private boolean isEmpty() {
+            for (NestedValue value : values) {
+                if (value != null) return false;
+            }
+            return true;
+        }
+
+        private boolean hasValue(IntFunction<Object> row) {
+            for (NestedValue value : values) {
+                if (value != null && value.hasValue(row)) return true;
+            }
+            return false;
+        }
+
+        private T readNullable(IntFunction<Object> row, ValueCodecRegistry codecs) {
+            return hasValue(row) ? writer.write(row, codecs) : null;
+        }
+    }
+
+    private record NestedColumns(Map<String, Integer> indexes, Set<String> prefixes) {
+        private static NestedColumns of(DynamicRow row) {
+            Map<String, Integer> indexes = new LinkedHashMap<>();
+            Set<String> prefixes = new LinkedHashSet<>();
+            for (int index = 0; index < row.columnCount(); index++) {
+                String[] parts = row.columnName(index).split("\\.", -1);
+                StringBuilder path = new StringBuilder();
+                for (String part : parts) {
+                    if (!path.isEmpty()) {
+                        path.append('.');
+                        prefixes.add(path.toString());
+                    }
+                    path.append(EntityFieldNames.resultKey(part));
+                }
+                if (indexes.putIfAbsent(path.toString(), index) != null) {
+                    throw new MappingException("column paths become ambiguous after normalization");
+                }
+            }
+            return new NestedColumns(indexes, prefixes);
+        }
     }
 
     @Override
@@ -95,6 +295,12 @@ final class MappingPlan<T> implements RowMapper<T> {
         return bound.write(safeRow, valueCodecs);
     }
 
+    @Override
+    public Function<IntFunction<Object>, T> bindColumns(DynamicRow columns) {
+        BoundWriter<T> bound = bind(columns);
+        return values -> bound.write(values, valueCodecs);
+    }
+
     private BoundWriter<T> bind(DynamicRow row) {
         if (row.hasAmbiguousMappingColumns()) {
             throw new MappingException("column names become ambiguous after normalization");
@@ -102,65 +308,22 @@ final class MappingPlan<T> implements RowMapper<T> {
         if (recordWriter == null) {
             return beanWriter.bind(row);
         }
-        BoundRecordWriter<T> bound = recordWriter.bind(row);
-        return recordWriter.rawMappings() != null ? bound::writeRaw : bound;
+        return recordWriter.bind(row);
     }
 
     static <T> MappingPlan<T> createUncached(Class<T> type,
                                               EntityMetadata<T> metadata,
                                               ValueCodecRegistry valueCodecs) {
-        return createUncached(type, metadata, valueCodecs, Map.of());
+        return createUncached(type, metadata, valueCodecs, false, false);
     }
 
     static <T> MappingPlan<T> createUncached(
-            Class<T> type,
-            EntityMetadata<T> metadata,
-            ValueCodecRegistry valueCodecs,
-            Map<String, EntityTypeMappingRegistry.Mapping> customMappings) {
-        return createUncached(type, metadata, valueCodecs, customMappings, false);
-    }
-
-    static <T> MappingPlan<T> createUncached(
-            Class<T> type,
-            EntityMetadata<T> metadata,
-            ValueCodecRegistry valueCodecs,
-            Map<String, EntityTypeMappingRegistry.Mapping> customMappings,
-            boolean rawInput) {
-        return createUncached(type, metadata, valueCodecs, customMappings, rawInput, false);
-    }
-
-    static <T> MappingPlan<T> createUncached(
-            Class<T> type,
-            EntityMetadata<T> metadata,
-            ValueCodecRegistry valueCodecs,
-            Map<String, EntityTypeMappingRegistry.Mapping> customMappings,
-            boolean rawInput,
-            boolean decodedInput) {
-        Map<String, EntityTypeMappingRegistry.Mapping> safeCustomMappings = Objects.requireNonNull(
-                customMappings, "custom entity field mappings must not be null");
+            Class<T> type, EntityMetadata<T> metadata, ValueCodecRegistry valueCodecs,
+            boolean rawInput, boolean decodedInput) {
         if (type.isRecord()) {
-            return new MappingPlan<>(recordWriter(type, metadata, safeCustomMappings, rawInput, decodedInput),
-                    null, valueCodecs);
+            return new MappingPlan<>(recordWriter(type, metadata, rawInput, decodedInput), null, valueCodecs);
         }
-        return new MappingPlan<>(null, beanWriter(type, metadata, safeCustomMappings, rawInput, decodedInput),
-                valueCodecs);
-    }
-
-    /** Choose the input representation once, preserving explicit field codec precedence. */
-    private static ValueCodec fieldCodec(EntityFieldMetadata field,
-                                         Class<?> targetType,
-                                         EntityTypeMappingRegistry.Mapping customMapping,
-                                         boolean rawInput,
-                                         boolean decodedInput) {
-        if (rawInput) {
-            return null;
-        }
-        if (customMapping != null) {
-            return customMapping.codec();
-        }
-        return decodedInput && !field.databaseType().isArray()
-                && field.databaseType().logicalType() == LogicalType.JSON
-                && (JsonValueCodec.supportsTarget(targetType) || field.enumValueMember() != null) ? DECODED_JSON : null;
+        return new MappingPlan<>(null, beanWriter(type, metadata, rawInput, decodedInput), valueCodecs);
     }
 
     /** 映射计划的稳定逻辑重量，用反射写入槽数量近似长期占用，不在热路径扫描对象字节。 */
@@ -172,7 +335,6 @@ final class MappingPlan<T> implements RowMapper<T> {
     private static <T> RecordWriter<T> recordWriter(
             Class<T> type,
             EntityMetadata<T> metadata,
-            Map<String, EntityTypeMappingRegistry.Mapping> customMappings,
             boolean rawInput,
             boolean decodedInput) {
         try {
@@ -185,12 +347,7 @@ final class MappingPlan<T> implements RowMapper<T> {
             requireAccessible(constructor, "record constructor");
             String[] names = new String[components.length];
             String[] propertyNames = new String[components.length];
-            DatabaseType[] databaseTypes = new DatabaseType[components.length];
-            EntityEnumStorage[] enumStorage = new EntityEnumStorage[components.length];
-            EntityEnumValueCodec[] enumValues = new EntityEnumValueCodec[components.length];
-            ValueCodec[] customCodecs = new ValueCodec[components.length];
-            EntityTypeMappingRegistry.Mapping[] rawMappings = rawInput
-                    ? new EntityTypeMappingRegistry.Mapping[components.length] : null;
+            EntityRowValueConverter.Reader[] readers = new EntityRowValueConverter.Reader[components.length];
             Object[] defaultValues = new Object[components.length];
             for (int index = 0; index < components.length; index++) {
                 RecordComponent component = components[index];
@@ -203,25 +360,14 @@ final class MappingPlan<T> implements RowMapper<T> {
                 }
                 names[index] = EntityFieldNames.resultKey(field.columnName());
                 propertyNames[index] = EntityFieldNames.resultKey(field.name());
-                databaseTypes[index] = field.databaseType();
-                enumStorage[index] = field.enumStorage();
-                enumValues[index] = EntityRowValueConverter.enumValueCodec(component.getType(), field);
-                EntityTypeMappingRegistry.Mapping customMapping = customMappings.get(field.name());
-                customCodecs[index] = fieldCodec(
-                        field, component.getType(), customMapping, rawInput, decodedInput);
-                if (rawMappings != null) {
-                    rawMappings[index] = customMapping;
-                }
+                readers[index] = EntityRowValueConverter.bind(type, type, component.getGenericType(),
+                        component.getType(), field, rawInput, decodedInput);
             }
             return new RecordWriter<>(constructor,
                                       names,
                                       propertyNames,
                                       parameterTypes,
-                                      databaseTypes,
-                                      enumStorage,
-                                      enumValues,
-                                      customCodecs,
-                                      rawMappings,
+                                      readers,
                                       defaultValues);
         } catch (ReflectiveOperationException error) {
             throw new MappingException("record mapping plan cannot be created for " + type.getName(), error);
@@ -236,7 +382,6 @@ final class MappingPlan<T> implements RowMapper<T> {
     private static <T> BeanWriter<T> beanWriter(
             Class<T> type,
             EntityMetadata<T> metadata,
-            Map<String, EntityTypeMappingRegistry.Mapping> customMappings,
             boolean rawInput,
             boolean decodedInput) {
         try {
@@ -252,16 +397,13 @@ final class MappingPlan<T> implements RowMapper<T> {
                         && EntityMetadataHierarchy.isPersistentAccessor(writeMethod, property.getName())
                         && !"class".equals(property.getName())) {
                     requireAccessible(writeMethod, "bean setter");
-                    EntityTypeMappingRegistry.Mapping customMapping = customMappings.get(field.name());
+                    Class<?> memberType = EntityMetadataHierarchy.memberClass(type, writeMethod.getGenericParameterTypes()[0]);
                     EntityValueWriter writer = EntityValueWriter.forMethod(
-                            writeMethod, writeMethod.getParameterTypes()[0], field,
-                            fieldCodec(field, writeMethod.getParameterTypes()[0],
-                                    customMapping, rawInput, decodedInput));
-                    if (rawInput && customMapping != null) {
-                        writer = EntityValueWriter.fromRaw(writer, customMapping);
-                    }
+                            writeMethod, EntityRowValueConverter.bind(type, writeMethod.getDeclaringClass(),
+                                    writeMethod.getGenericParameterTypes()[0], memberType,
+                                    field, rawInput, decodedInput));
                     // 行数据可能来自 select name，也可能来自真实列 user_name，两种都能写回 Java 属性。
-                    registerWriter(writers, field, writer);
+                    registerWriter(writers, field, memberType, writer);
                 }
             }
             // 只有没有 setter writer 的实例字段才使用直接反射写入，避免同一属性写两次。
@@ -271,19 +413,15 @@ final class MappingPlan<T> implements RowMapper<T> {
                         && persistentField.name().equals(field.getName())
                         && !writers.containsKey(EntityFieldNames.resultKey(field.getName()))) {
                     requireAccessible(field, "bean field");
-                    EntityTypeMappingRegistry.Mapping customMapping = customMappings.get(persistentField.name());
+                    Class<?> memberType = EntityMetadataHierarchy.memberClass(type, field.getGenericType());
                     EntityValueWriter writer = EntityValueWriter.forField(
-                            field, field.getType(), persistentField,
-                            fieldCodec(persistentField, field.getType(),
-                                    customMapping, rawInput, decodedInput));
-                    if (rawInput && customMapping != null) {
-                        writer = EntityValueWriter.fromRaw(writer, customMapping);
-                    }
+                            field, EntityRowValueConverter.bind(type, field.getDeclaringClass(), field.getGenericType(),
+                                    memberType, persistentField, rawInput, decodedInput));
                     // 没有 setter 的字段同样同时认 Java 字段名和数据库列名。
-                    registerWriter(writers, persistentField, writer);
+                    registerWriter(writers, persistentField, memberType, writer);
                 }
             }
-            return new BeanWriter<>(constructor, writers);
+            return new BeanWriter<>(constructor, writers, List.copyOf(new LinkedHashSet<>(writers.values())));
         } catch (ReflectiveOperationException | IntrospectionException error) {
             throw new MappingException("bean mapping plan cannot be created for " + type.getName(), error);
         }
@@ -291,10 +429,12 @@ final class MappingPlan<T> implements RowMapper<T> {
 
     private static void registerWriter(Map<String, BeanFieldWriter> writers,
                                        EntityFieldMetadata field,
+                                       Class<?> type,
                                        EntityValueWriter writer) {
         String columnKey = EntityFieldNames.resultKey(field.columnName());
-        BeanFieldWriter binding = new BeanFieldWriter(columnKey, writer);
-        writers.put(EntityFieldNames.resultKey(field.name()), binding);
+        String propertyKey = EntityFieldNames.resultKey(field.name());
+        BeanFieldWriter binding = new BeanFieldWriter(columnKey, propertyKey, type, writer);
+        writers.put(propertyKey, binding);
         writers.put(columnKey, binding);
     }
 
@@ -313,11 +453,7 @@ final class MappingPlan<T> implements RowMapper<T> {
                                    String[] names,
                                    String[] propertyNames,
                                    Class<?>[] parameterTypes,
-                                   DatabaseType[] databaseTypes,
-                                   EntityEnumStorage[] enumStorage,
-                                   EntityEnumValueCodec[] enumValues,
-                                   ValueCodec[] customCodecs,
-                                   EntityTypeMappingRegistry.Mapping[] rawMappings,
+                                   EntityRowValueConverter.Reader[] readers,
                                    Object[] defaultValues) {
 
         private BoundRecordWriter<T> bind(DynamicRow row) {
@@ -331,53 +467,10 @@ final class MappingPlan<T> implements RowMapper<T> {
             }
             return new BoundRecordWriter<>(this, indexes);
         }
-    }
-
-    private record BoundRecordWriter<T>(RecordWriter<T> writer,
-                                        int[] indexes) implements BoundWriter<T> {
-
-        /** 原始值先按注册字段映射解码，再复用枚举成员和普通赋值规则；此策略只在布局绑定时选择。 */
-        private T writeRaw(DynamicRow row, ValueCodecRegistry valueCodecs) {
-            String[] names = writer.names();
-            Object[] arguments = new Object[names.length];
-            for (int i = 0; i < names.length; i++) {
-                if (names[i] == null || indexes[i] < 0) {
-                    arguments[i] = writer.defaultValues()[i];
-                    continue;
-                }
-                Object value = row.value(indexes[i]);
-                EntityTypeMappingRegistry.Mapping mapping = writer.rawMappings()[i];
-                if (mapping != null) {
-                    value = EntityRowValueConverter.readCustom(value, mapping);
-                }
-                arguments[i] = EntityRowValueConverter.convert(value,
-                        writer.parameterTypes()[i], writer.databaseTypes()[i],
-                        writer.enumStorage()[i], writer.enumValues()[i], null, valueCodecs);
-            }
-            return instantiate(arguments);
-        }
-
-        @Override
-        public T write(DynamicRow row, ValueCodecRegistry valueCodecs) {
-            String[] names = writer.names();
-            Object[] arguments = new Object[names.length];
-            for (int i = 0; i < names.length; i++) {
-                if (names[i] == null || indexes[i] < 0) {
-                    arguments[i] = writer.defaultValues()[i];
-                    continue;
-                }
-                arguments[i] = EntityRowValueConverter.convert(
-                        row.value(indexes[i]),
-                        writer.parameterTypes()[i], writer.databaseTypes()[i],
-                        writer.enumStorage()[i], writer.enumValues()[i],
-                        writer.customCodecs()[i], valueCodecs);
-            }
-            return instantiate(arguments);
-        }
 
         private T instantiate(Object[] arguments) {
             try {
-                return writer.constructor().newInstance(arguments);
+                return constructor.newInstance(arguments);
             } catch (ReflectiveOperationException error) {
                 ThrowableGraph.rethrowVirtualMachineError(error);
                 throw new MappingException("record row cannot be mapped", error);
@@ -385,10 +478,33 @@ final class MappingPlan<T> implements RowMapper<T> {
         }
     }
 
-    private record BeanFieldWriter(String columnKey, EntityValueWriter writer) {
+    private record BoundRecordWriter<T>(RecordWriter<T> writer,
+                                        int[] indexes) implements BoundWriter<T> {
+
+        @Override
+        public T write(IntFunction<Object> row, ValueCodecRegistry valueCodecs) {
+            String[] names = writer.names();
+            Object[] arguments = new Object[names.length];
+            for (int i = 0; i < names.length; i++) {
+                if (names[i] == null || indexes[i] < 0) {
+                    arguments[i] = writer.defaultValues()[i];
+                    continue;
+                }
+                arguments[i] = writer.readers()[i].read(row.apply(indexes[i]), valueCodecs);
+            }
+            return instantiate(arguments);
+        }
+
+        private T instantiate(Object[] arguments) {
+            return writer.instantiate(arguments);
+        }
     }
 
-    private record BeanWriter<T>(Constructor<T> constructor, Map<String, BeanFieldWriter> writers) {
+    private record BeanFieldWriter(String columnKey, String propertyKey, Class<?> type, EntityValueWriter writer) {
+    }
+
+    private record BeanWriter<T>(Constructor<T> constructor, Map<String, BeanFieldWriter> writers,
+                                 List<BeanFieldWriter> fields) {
 
         private BoundWriter<T> bind(DynamicRow row) {
             int[] indexes = new int[row.columnCount()];
@@ -417,12 +533,12 @@ final class MappingPlan<T> implements RowMapper<T> {
                                       EntityValueWriter[] writers) implements BoundWriter<T> {
 
         @Override
-        public T write(DynamicRow row, ValueCodecRegistry valueCodecs) {
+        public T write(IntFunction<Object> row, ValueCodecRegistry valueCodecs) {
             try {
                 T target = writer.constructor().newInstance();
                 // 查询结果里的额外列直接忽略，支持 join/计算列与窄实体并存。
                 for (int index = 0; index < indexes.length; index++) {
-                    writers[index].write(target, row.value(indexes[index]), valueCodecs);
+                    writers[index].write(target, row.apply(indexes[index]), valueCodecs);
                 }
                 return target;
             } catch (ReflectiveOperationException error) {
@@ -435,7 +551,7 @@ final class MappingPlan<T> implements RowMapper<T> {
     @FunctionalInterface
     private interface BoundWriter<T> {
 
-        T write(DynamicRow row, ValueCodecRegistry valueCodecs);
+        T write(IntFunction<Object> row, ValueCodecRegistry valueCodecs);
     }
 
 }

@@ -35,7 +35,10 @@ final class ConditionPlanCache {
     ConditionStructurePlan condition(String dialect,
                                      ConditionGroup where,
                                      SqlRenderer renderer) {
-        String safeDialect = requireText(dialect, "condition cache dialect");
+        String safeDialect = Objects.requireNonNull(dialect, "condition cache dialect must not be null");
+        if (safeDialect.isBlank()) {
+            throw new IllegalArgumentException("condition cache dialect must not be blank");
+        }
         ConditionGroup safeWhere = Objects.requireNonNull(where, "where condition must not be null");
         SqlRenderer safeRenderer = Objects.requireNonNull(renderer, "condition renderer must not be null");
         ConditionExecutionView view = enabled ? ConditionExecutionViews.of(safeWhere) : null;
@@ -72,14 +75,8 @@ final class ConditionPlanCache {
     }
 
     private static int weight(Key key, ConditionPlan plan) {
-        String sql = plan.sql();
-        int placeholders = 0;
-        for (int index = 0; index < sql.length(); index++) {
-            if (sql.charAt(index) == '?') {
-                placeholders++;
-            }
-        }
-        return 2 + dividedLength(sql.length(), 32) + placeholders;
+        // 仅保留 SQL 和一个参数数量整数；请求参数不进入缓存，不按参数数量重复计重。
+        return 2 + dividedLength(plan.sql().length(), 32);
     }
 
     private static int dividedLength(int length, int divisor) {
@@ -91,20 +88,6 @@ final class ConditionPlanCache {
         private List<Object> parameters;
     }
 
-    private static String requireText(String text, String name) {
-        String safeText = Objects.requireNonNull(text, name + " must not be null");
-        if (safeText.isBlank()) {
-            throw new IllegalArgumentException(name + " must not be blank");
-        }
-        return safeText;
-    }
-
     private record Key(String dialect, SqlRenderer renderer, String shape) {
-
-        private Key {
-            dialect = requireText(dialect, "condition cache dialect");
-            renderer = Objects.requireNonNull(renderer, "condition cache renderer must not be null");
-            shape = Objects.requireNonNull(shape, "condition shape must not be null");
-        }
     }
 }

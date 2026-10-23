@@ -5,7 +5,7 @@ import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.internal.sync.SyncBlockingGuard;
 import com.flying.orm.rdb.observation.SqlFailureCategory;
 import com.flying.orm.rdb.schema.SchemaDialect;
-import com.flying.orm.rdb.schema.SchemaMigrationExecutionOptions;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
@@ -28,11 +28,6 @@ class SqlTimePolicyBoundaryTest {
     @Test
     void sqlOptionsExposeCapacityButNoTimePolicy() {
         assertNoTimePolicy(SqlExecutionOptions.class);
-    }
-
-    @Test
-    void schemaOptionsExposeApprovalButNoTimePolicy() {
-        assertNoTimePolicy(SchemaMigrationExecutionOptions.class);
     }
 
     @Test

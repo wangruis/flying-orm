@@ -17,6 +17,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.Function;
+import java.util.function.Consumer;
 
 /**
  * 构造并读取 ConditionGroup 唯一的内部执行视图。
@@ -26,7 +27,7 @@ import java.util.function.Function;
  */
 public final class ConditionExecutionViews {
 
-    private static final StableDigest.Domain SHAPE_DOMAIN = StableDigest.domain("condition-plan-shape/v1");
+    private static final StableDigest.Domain SHAPE_DOMAIN = StableDigest.domain("condition-plan-shape/v2");
 
     private static final List<String> STRUCTURAL_TERMS = List.of(
             "=", "!=", "<>", ">", ">=", "<", "<=", "like", "not-like",
@@ -46,10 +47,31 @@ public final class ConditionExecutionViews {
         ValueCodecRegistry safeCodecs = Objects.requireNonNull(
                 valueCodecs, "condition value codecs must not be null");
         OwnedBindableValues.Buffer parameters = OwnedBindableValues.buffer(view.parameterCount());
-        for (Object source : view.parameterSources()) {
-            parameters.add(safeCodecs.write(BindableValueSnapshots.logicalValue(source)));
-        }
+        view.parameterSources().forEach(new ParameterBinder(parameters, safeCodecs));
         return parameters.publish();
+    }
+
+    /** Per execution state; shared source segments never carry encoded or mutable request values. */
+    private static final class ParameterBinder implements Consumer<Object> {
+        private final OwnedBindableValues.Buffer parameters;
+        private final ValueCodecRegistry codecs;
+        private Class<?> previousType;
+        private boolean requiresSnapshot;
+
+        private ParameterBinder(OwnedBindableValues.Buffer parameters, ValueCodecRegistry codecs) {
+            this.parameters = parameters;
+            this.codecs = codecs;
+        }
+
+        @Override
+        public void accept(Object source) {
+            if (source != null && source.getClass() != previousType) {
+                previousType = source.getClass();
+                requiresSnapshot = BindableValueSnapshots.requiresImmutableSnapshot(source);
+            }
+            Object value = requiresSnapshot ? BindableValueSnapshots.logicalValue(source) : source;
+            parameters.add(codecs.write(value));
+        }
     }
 
     public static ConditionExecutionView compile(LogicalOperator operator,
@@ -88,34 +110,37 @@ public final class ConditionExecutionViews {
                                     Mask mask) {
         List<Object> parameters = new ArrayList<>();
         List<List<Object>> segments = null;
-        shape.marker("GROUP_START").text("OPERATOR", operator.name());
+        shape.marker(operator.name());
         for (ConditionNode child : children) {
+            List<Object> shared = null;
             if (child instanceof ConditionGroup group) {
                 ConditionExecutionView nested = of(group);
-                shape.marker("NESTED_GROUP").text("SHAPE", nested.shapeDigest());
-                if (nested.parameterCount() != 0) {
-                    if (segments == null) segments = new ArrayList<>();
-                    if (!parameters.isEmpty()) {
-                        segments.add(Collections.unmodifiableList(parameters));
-                        parameters = new ArrayList<>();
-                    }
-                    segments.add(nested.parameterSources());
-                }
+                shape.text("N", nested.shapeDigest());
+                shared = nested.parameterSources();
                 mask.required |= nested.requiredStandardTermMask();
                 mask.cacheable = mask.cacheable && nested.structurallyCacheable();
             } else if (child instanceof TermCondition term) {
-                appendTerm(shape, term, parameters, ownedValueReader, mask);
+                shared = appendTerm(shape, term, parameters, ownedValueReader, mask);
             } else {
                 mask.cacheable = false;
             }
+            if (shared != null && !shared.isEmpty()) {
+                if (segments == null) segments = new ArrayList<>();
+                if (!parameters.isEmpty()) {
+                    segments.add(Collections.unmodifiableList(parameters));
+                    parameters = new ArrayList<>();
+                }
+                segments.add(shared);
+            }
         }
-        shape.marker("GROUP_END");
+        shape.marker("END");
         if (segments == null) return Collections.unmodifiableList(parameters);
         if (!parameters.isEmpty()) segments.add(Collections.unmodifiableList(parameters));
         return ConditionExecutionView.concatenate(segments);
     }
 
-    private static void appendTerm(StableEncoder shape,
+    @SuppressWarnings("unchecked")
+    private static List<Object> appendTerm(StableEncoder shape,
                                    TermCondition term,
                                    List<Object> parameters,
                                    Function<TermCondition, Object> ownedValueReader,
@@ -124,21 +149,24 @@ public final class ConditionExecutionViews {
         int termIndex = STRUCTURAL_TERMS.indexOf(term.operator());
         if (termIndex < 0) {
             mask.cacheable = false;
-            return;
+            return null;
         }
         mask.required |= 1L << termIndex;
         int before = parameters.size();
+        List<Object> shared = null;
         switch (term.operator()) {
             case "is-null", "is-not-null" -> {
             }
-            case "in", "not-in", "between", "not-between" ->
-                    appendMultiValueParameters(parameters, value);
+            case "in", "not-in", "between", "not-between" -> {
+                if (value instanceof List<?> values) shared = (List<Object>) values;
+                else appendMultiValueParameters(parameters, value);
+            }
             default -> parameters.add(value);
         }
-        shape.marker("TERM")
-             .text("FIELD", term.field())
-             .text("OPERATOR", term.operator())
-             .integer("ARITY", parameters.size() - before);
+        // F/N 与分组、标准运算符标签互斥；长度分帧保留字段边界，无需重复 TERM/OPERATOR 标签。
+        shape.text("F", term.field())
+             .integer(term.operator(), shared == null ? parameters.size() - before : shared.size());
+        return shared;
     }
 
     private static void appendMultiValueParameters(List<Object> parameters, Object value) {

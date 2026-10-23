@@ -11,6 +11,7 @@ import com.flying.orm.rdb.internal.plan.SqlStatementCompiler;
 
 import java.util.Locale;
 import java.util.Objects;
+import java.util.function.IntFunction;
 
 /**
  * 把渲染层统一使用的问号占位符换成具体 R2DBC 驱动认识的写法。
@@ -47,12 +48,33 @@ final class R2dbcBindMarkers {
         return SqlExecutionStatements.r2dbc(safeRequest.statement(), databaseProductName);
     }
 
+    String upsertBatch(BatchWriteRequest request) {
+        return SqlExecutionStatements.r2dbcUpsertBatch(request.statement(), databaseProductName);
+    }
+
+    /** 每次订阅独立，只复用最近一个窗口大小，不累计可变大小的 SQL 缓存。 */
+    IntFunction<String> insertBatch(BatchWriteRequest request) {
+        return new IntFunction<>() {
+            private int previousRows = -1;
+            private String sql;
+
+            @Override
+            public String apply(int rows) {
+                if (rows != previousRows) {
+                    sql = SqlExecutionStatements.r2dbcInsertBatch(request.statement(), databaseProductName, rows);
+                    previousRows = rows;
+                }
+                return sql;
+            }
+        };
+    }
+
     /**
      * 把已经通过结构校验的普通或 schema-qualified 标识符按驱动规则逐段引用。
      * PostgreSQL、Oracle 和 H2 先遵守未引用名称的大小写折叠，保留未引用标识符的大小写语义。
      */
     String identifier(String value) {
-        String safe = SqlIdentifiers.requireIdentifier(value, "R2DBC SQL identifier");
+        String safe = SqlIdentifiers.requireIdentifier(value);
         String[] segments = safe.split("\\.", -1);
         StringBuilder result = new StringBuilder(safe.length() + segments.length * 2);
         for (int index = 0; index < segments.length; index++) {

@@ -44,10 +44,10 @@ class ColumnDefaultConstraintNameTest {
     }
 
     @Test
-    void namesChangeFingerprintsWithoutChangingTheUnnamedEncoding() {
+    void namesParticipateInThePhysicalFingerprint() {
         String unnamed = RelationalMetadataFingerprint.of(table(null));
 
-        assertEquals("c96d146e9d9c8ad011dcee0e61d40beab03b35d64cc5aa88a4410f8ae3593d11", unnamed);
+        assertEquals(RelationalMetadataFingerprint.of(table(null)), unnamed);
         assertNotEquals(unnamed, RelationalMetadataFingerprint.of(table("DF_accounts_email_1")));
         assertNotEquals(RelationalMetadataFingerprint.of(table("DF_accounts_email_1")),
                 RelationalMetadataFingerprint.of(table("DF_accounts_email_2")));

@@ -12,7 +12,6 @@ import com.flying.orm.rdb.template.SyncSqlTemplateParameterProvider;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 
 /**
  * 已注册 SQL 模板的同步执行入口。
@@ -43,14 +42,13 @@ public final class SyncSqlTemplateOperator {
                             EntityModelRegistry entityModels,
                             SqlTemplateEngine engine,
                             String templateId,
-                            Set<String> serverParameters,
                             SyncSqlTemplateParameterProvider parameterProvider) {
         this.executor = Objects.requireNonNull(executor, "sync SQL executor must not be null");
         this.valueCodecs = Objects.requireNonNull(valueCodecs, "value codec registry must not be null");
         this.entityModels = Objects.requireNonNull(entityModels, "entity model registry must not be null");
         this.parameterProvider = Objects.requireNonNull(parameterProvider,
                                                         "sync SQL template parameter provider must not be null");
-        this.state = new SqlTemplateExecutionState(engine, templateId, serverParameters);
+        this.state = new SqlTemplateExecutionState(engine, templateId);
     }
 
     /**
@@ -163,8 +161,7 @@ public final class SyncSqlTemplateOperator {
 
     private <T> List<T> mappedQuery(RowMapper<T> mapper, int rowLimit) {
         SqlTemplateExecutionState.Snapshot snapshot = state.snapshot();
-        return SyncSqlResultOperations.queryMapped(
-                executor, render(snapshot), snapshot.options(), mapper, rowLimit);
+        return executor.queryMapped(render(snapshot), snapshot.options(), mapper, rowLimit);
     }
 
     private com.flying.orm.core.sql.render.SqlRequest render(SqlTemplateExecutionState.Snapshot snapshot) {

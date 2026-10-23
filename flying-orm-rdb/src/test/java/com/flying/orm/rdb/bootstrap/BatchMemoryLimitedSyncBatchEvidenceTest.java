@@ -18,13 +18,14 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class BatchMemoryLimitedSyncBatchEvidenceTest {
     @Test
-    void forwardsOrdinaryAndEvidenceEntriesWithoutChangingTheRequestOrEvidence() {
-        for (boolean protectedBatch : new boolean[]{false, true}) for (boolean evidenceAlias : new boolean[]{false, true}) {
+    void forwardsBatchEntriesWithoutChangingTheRequestOrEvidence() {
+        for (boolean protectedBatch : new boolean[]{false, true}) {
             AtomicInteger subscriptions = new AtomicInteger();
             BatchWriteRequest request = request(1, subscriptions);
             EvidenceExecutor delegate = new EvidenceExecutor(request, protectedBatch);
             SyncBatchExecutor limited = BatchMemoryLimitedSyncBatchExecutor.create(delegate, BatchMemoryLimits.defaults());
-            BatchExecutionEvidence result = invoke(limited, request, protectedBatch, evidenceAlias);
+            assertSame(delegate, limited, "unlimited policy must not add a forwarding layer");
+            BatchExecutionEvidence result = invoke(limited, request, protectedBatch);
             assertSame(delegate.evidence, result);
             assertEquals(1, delegate.calls);
             assertNull(delegate.callback);
@@ -49,13 +50,14 @@ class BatchMemoryLimitedSyncBatchEvidenceTest {
 
     @Test
     void checksLimitsBeforeDelegatingOrSubscribingEveryEntry() {
-        for (boolean protectedBatch : new boolean[]{false, true}) for (boolean evidenceAlias : new boolean[]{false, true}) {
+        for (boolean protectedBatch : new boolean[]{false, true}) {
             AtomicInteger subscriptions = new AtomicInteger();
-            BatchWriteRequest request = request(BatchMemoryLimits.DEFAULT_MAX_BUFFER_SIZE + 1, subscriptions);
+            BatchWriteRequest request = request(11, subscriptions);
             EvidenceExecutor delegate = new EvidenceExecutor(request, protectedBatch);
-            SyncBatchExecutor limited = BatchMemoryLimitedSyncBatchExecutor.create(delegate, BatchMemoryLimits.defaults());
+            SyncBatchExecutor limited = BatchMemoryLimitedSyncBatchExecutor.create(delegate,
+                    new BatchMemoryLimits(10, Long.MAX_VALUE));
             assertThrows(BatchMemoryLimitExceededException.class,
-                    () -> invoke(limited, request, protectedBatch, evidenceAlias));
+                    () -> invoke(limited, request, protectedBatch));
             assertThrows(BatchMemoryLimitExceededException.class, () -> {
                 if (protectedBatch) limited.writeProtectedBatch(request, offset -> fail());
                 else limited.writeBatch(request, offset -> fail());
@@ -66,9 +68,8 @@ class BatchMemoryLimitedSyncBatchEvidenceTest {
     }
 
     private static BatchExecutionEvidence invoke(SyncBatchExecutor executor, BatchWriteRequest request,
-                                                  boolean protectedBatch, boolean evidence) {
-        if (protectedBatch) return evidence ? executor.writeProtectedBatchEvidence(request) : executor.writeProtectedBatch(request);
-        return evidence ? executor.writeBatchEvidence(request) : executor.writeBatch(request);
+                                                  boolean protectedBatch) {
+        return protectedBatch ? executor.writeProtectedBatch(request) : executor.writeBatch(request);
     }
 
     private static BatchWriteRequest request(int bufferSize, AtomicInteger subscriptions) {

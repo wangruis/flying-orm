@@ -178,10 +178,11 @@ class StructuredConditionDeepSnapshotTest {
         Object snapshot = input.value();
         assertNotSame(source, snapshot);
         assertEquals(7, leaf(snapshot, shape));
+        StructuredConditionCompiler.validateStructure(input, StructuredConditionPolicy.defaults().allowOperator("raw"));
 
         StructuredConditionException failure = assertThrows(StructuredConditionException.class,
                 () -> StructuredConditionCompiler.validateStructure(input,
-                        StructuredConditionPolicy.defaults().allowOperator("raw")));
+                        StructuredConditionPolicy.defaults().allowOperator("raw").withMaxDepth(8)));
         assertEquals(StructuredConditionErrorCode.DEPTH_EXCEEDED, failure.code());
     }
 

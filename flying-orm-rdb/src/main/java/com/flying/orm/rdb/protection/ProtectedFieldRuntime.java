@@ -3,6 +3,8 @@ package com.flying.orm.rdb.protection;
 import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.form.DynamicField;
+import com.flying.orm.core.internal.value.BindableValueSnapshots;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.rdb.internal.InternalApi;
@@ -10,11 +12,14 @@ import com.flying.orm.rdb.result.DynamicRow;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * 字段保护的内部运行时，把逻辑值转换为密文/盲索引，并在结果边界完成解密和业务脱敏。
@@ -119,17 +124,6 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
                                        where, scope, codecs);
     }
 
-    /** 把显式保护搜索改写为隐藏列 HMAC 条件，并拒绝密文上的普通比较。 */
-    PreparedQuery prepareQuery(DynamicForm form,
-                                      DynamicForm visibleForm,
-                                      ConditionGroup where,
-                                      DataScope scope,
-                                      ValueCodecRegistry codecs) {
-        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        return prepareQuery(safeForm, ProtectedFormLayout.physical(safeForm), where, scope, codecs,
-                            ProtectedFormLayout.visibleFieldNames(visibleForm));
-    }
-
     /**
      * 内部规划边界直接传入最终 SQL 所需的投影；纯条件路径传空列表，避免遍历并丢弃全部业务字段。
      */
@@ -227,10 +221,15 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
         }
 
         public PreparedWrite prepare(Map<String, Object> values) {
+            return prepare(values, null);
+        }
+
+        /** 在同一次值编码中生成密文及可选侧索引，避免两次 codec 调用产生不同持久值。 */
+        public PreparedWrite prepare(Map<String, Object> values, Consumer<ContainsFieldTokens> contains) {
             Map<String, Object> safeValues = Objects.requireNonNull(
                     values, "dynamic form values must not be null");
             return encrypted == null
-                    ? new PreparedWrite(physicalForm, safeValues) : encrypted.prepare(safeValues);
+                    ? new PreparedWrite(physicalForm, safeValues) : encrypted.prepare(safeValues, contains);
         }
 
         public List<ContainsFieldTokens> containsTokens(Map<String, Object> values) {
@@ -266,30 +265,52 @@ public final class ProtectedFieldRuntime implements AutoCloseable {
     }
 
     /** 物理表单和参数值的不可变写入快照。 */
-    public record PreparedWrite(DynamicForm physicalForm, Map<String, Object> values) {
-        public PreparedWrite {
-            physicalForm = Objects.requireNonNull(physicalForm, "physical form must not be null");
-            values = PreparedWriteValues.initialize(physicalForm, values);
+    public static final class PreparedWrite {
+        private final DynamicForm physicalForm;
+        private final Map<String, Object> values;
+
+        public PreparedWrite(DynamicForm physicalForm, Map<String, Object> values) {
+            this(physicalForm, values, false);
+        }
+
+        private PreparedWrite(DynamicForm physicalForm, Map<String, Object> values, boolean owned) {
+            this.physicalForm = Objects.requireNonNull(physicalForm, "physical form must not be null");
+            this.values = owned ? Collections.unmodifiableMap(values) : snapshot(values);
         }
 
         /** Internal transformer seam for a completed physical-value map that it exclusively owns. */
         static PreparedWrite owned(DynamicForm physicalForm, Map<String, Object> values) {
-            return new PreparedWrite(physicalForm, PreparedWriteValues.owned(values));
+            return new PreparedWrite(physicalForm, values, true);
+        }
+
+        public DynamicForm physicalForm() {
+            return physicalForm;
         }
 
         /**
-         * 每次读取都重新复制 ORM 生成的密文与盲索引；普通二进制业务值仍遵守低层零复制交接契约。
+         * 对外读取复制二进制值；内部渲染直接使用计划已拥有的值，不再包装后拆回。
          *
          * @return 不可修改的物理写入值快照
          */
-        @Override
         public Map<String, Object> values() {
-            return PreparedWriteValues.snapshot(physicalForm, values);
+            return snapshot(values);
         }
 
         /** Internal renderer seam for the immutable values already owned by this plan. */
         public Map<String, Object> ownedValues() {
             return values;
+        }
+
+        private Map<String, Object> snapshot(Map<String, Object> source) {
+            Map<String, Object> copy = new LinkedHashMap<>();
+            Objects.requireNonNull(source, "protected write values must not be null").forEach((name, value) ->
+                    copy.put(name, physicalForm.findField(name)
+                            .map(field -> snapshotValue(field, value)).orElse(value)));
+            return Collections.unmodifiableMap(copy);
+        }
+
+        static Object snapshotValue(DynamicField field, Object value) {
+            return field.databaseType().isBinary() ? BindableValueSnapshots.immutableValue(value) : value;
         }
     }
 

@@ -94,7 +94,7 @@ class UpsertPurePrimaryKeyTest {
                 new StageRow(1L, "first insert", "first update"));
         RepositoryUpsertValues second = entityValues.repositoryUpsertValues(
                 new StageRow(1L, "second insert", "second update"));
-        BatchInsertPlan plan = renderer().batchRenderer.upsertPlan(form, first, form, first, first);
+        BatchInsertPlan plan = renderer().batchRenderer.upsertPlan(form, first, form, first, first, null, List.of(), null);
         BatchWriteRequest request = plan.request(
                 Flux.just(plan.parameters(first, 0L), plan.parameters(second, 1L)),
                 BatchWriteOptions.of(2));
@@ -149,7 +149,7 @@ class UpsertPurePrimaryKeyTest {
         }
         if (sql.contains("on duplicate key")) {
             assertTrue(sql.contains("if("), dialect + ": " + sql);
-            assertFalse(sql.contains(" = values("), dialect + ": " + sql);
+            assertTrue(sql.endsWith("(select null union all select null))"), dialect + ": " + sql);
             return;
         }
         assertFalse(sql.contains("when matched then update"), dialect + ": " + sql);

@@ -1,9 +1,11 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.core.metadata.RelationalTableDefinition;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.ForeignKeyMetadata;
-import com.flying.orm.core.metadata.IndexMetadata;
+import com.flying.orm.core.metadata.ForeignKeyDefinition;
+import com.flying.orm.core.metadata.IndexDefinition;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.core.sql.render.SqlRequest;
@@ -22,13 +24,11 @@ import com.flying.orm.rdb.sync.SyncSqlExecutor;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -39,6 +39,59 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SchemaPlannerSurfaceConvergenceTest {
 
     @Test
+    void formAndRelationalCreationUseTheSamePhysicalDeclaration() {
+        DynamicForm form = DynamicForm.builder("items", "items")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("name", "VARCHAR").withLength(80)).build();
+        for (RdbDialect dialect : List.of(RdbDialect.mysql(), RdbDialect.postgresql(),
+                RdbDialect.oracle(), RdbDialect.sqlServer(), RdbDialect.h2())) {
+            RelationalTableDefinition table = form.toTableDefinition();
+            SchemaOperation operation = SchemaOperation.of(SchemaOperation.Kind.CREATE_TABLE,
+                    table.identity(), table.name(), null, table, SchemaOperation.Compatibility.SAFE_INCREMENTAL);
+            assertEquals(RelationalSchemaSqlRenderer.create(dialect.schema()).render(operation),
+                    FormSchemaSqlRenderer.create(dialect).createTable(form), dialect.name());
+        }
+    }
+
+    @Test
+    void bothCreationEntrypointsPreserveTheDeclaredSequenceNamespace() {
+        for (String sequence : List.of("items_seq", "sequences.items_seq")) {
+            DynamicForm form = DynamicForm.builder("items", "tenant.items")
+                    .addField(DynamicField.primaryKey("id", "BIGINT").generatedBySequence(sequence)).build();
+            RelationalTableDefinition table = form.toTableDefinition();
+            SchemaOperation operation = SchemaOperation.of(SchemaOperation.Kind.CREATE_TABLE,
+                    table.identity(), table.name(), null, table, SchemaOperation.Compatibility.SAFE_INCREMENTAL);
+            RdbDialect dialect = RdbDialect.postgresql();
+            assertEquals(FormSchemaSqlRenderer.create(dialect).createTable(form),
+                    RelationalSchemaSqlRenderer.create(dialect.schema()).render(operation));
+        }
+    }
+
+    @Test
+    void simpleTableCommentUsesTheSameRelationResolution() {
+        SchemaDialect dialect = RdbDialect.sqlServer().schema();
+        assertEquals(dialect.columnCommentSql(RelationIdentity.table("items"), "note", "comment"),
+                dialect.columnCommentSql("items", "note", "comment"));
+    }
+
+    @Test
+    void schemaDialectDoesNotRetainUnreachableInternalOverloads() {
+        assertThrows(NoSuchMethodException.class, () -> SchemaDialect.class.getDeclaredMethod(
+                "tableCommentSql", String.class, String.class));
+        assertThrows(NoSuchMethodException.class, () -> SchemaDialectDdlSupport.class.getDeclaredMethod(
+                "tableCommentSql", String.class, String.class));
+        assertThrows(NoSuchMethodException.class, () -> SchemaDialectDdlSupport.class.getDeclaredMethod(
+                "sqlServerTableComment", String.class, String.class));
+        assertThrows(NoSuchMethodException.class, () -> SchemaDialect.class.getDeclaredMethod(
+                "alterColumnTypeSql", RelationIdentity.class,
+                String.class, String.class));
+        for (Class<?> tableType : List.of(String.class, RelationIdentity.class)) {
+            assertThrows(NoSuchMethodException.class, () -> SchemaDialect.class.getDeclaredMethod(
+                    "alterColumnNullabilitySql", tableType, String.class, String.class, String.class, boolean.class));
+        }
+    }
+
+    @Test
     void jdbcPlanningHasNoSecondPlannerOwner() {
         assertThrows(ClassNotFoundException.class, () -> Class.forName(
                 "com.flying.orm.rdb.schema.JdbcSchemaMigrationPlanner", false,
@@ -46,13 +99,73 @@ class SchemaPlannerSurfaceConvergenceTest {
     }
 
     @Test
+    void schemaClientsHaveOneCompleteDialectConstructionPath() {
+        assertThrows(NoSuchMethodException.class, () -> JdbcSchemaClient.class.getDeclaredMethod(
+                "create", SyncSqlExecutor.class, FormSchemaSqlRenderer.class));
+        assertThrows(NoSuchMethodException.class, () -> ReactiveSchemaClient.class.getDeclaredMethod(
+                "create", ReactiveSqlExecutor.class, FormSchemaSqlRenderer.class));
+    }
+
+    @Test
+    void auxiliaryTablesUseTheOrdinaryMigrationOwner() {
+        assertTrue(ProtectedContainsLayout.resolve(protectedForm()).orElseThrow().table().protections().isEmpty());
+        for (java.lang.reflect.Method method : ProtectedSchemaMigrationPlanner.class.getDeclaredMethods()) {
+            assertFalse(List.of("readReactivePlan", "readJdbcPlan", "migrateContainsPlan", "createContainsPlan")
+                    .contains(method.getName()), "auxiliary metadata and migration must use the ordinary planner");
+        }
+    }
+
+    @Test
+    void sqlServerCommentsShareRelationIdentityAndSql() {
+        SchemaDialect dialect = RdbDialect.sqlServer().schema();
+        RelationIdentity relation =
+                RelationIdentity.of(null, "app", "items");
+        String suffix = ", @level0type = N'SCHEMA', @level0name = N'app'"
+                + ", @level1type = N'TABLE', @level1name = N'items'"
+                + ", @level2type = N'COLUMN', @level2name = N'note'";
+        for (String previous : java.util.Arrays.asList(null, "old")) {
+            for (String target : java.util.Arrays.asList(null, "it's 名称")) {
+                java.util.Optional<String> rendered = dialect.columnCommentChangeSql(relation, "note", previous, target);
+                if (previous == null && target == null) {
+                    assertTrue(rendered.isEmpty());
+                } else {
+                    String procedure = previous == null ? "sp_addextendedproperty"
+                            : target == null ? "sp_dropextendedproperty" : "sp_updateextendedproperty";
+                    assertEquals("exec " + procedure + " @name = N'MS_Description'"
+                            + (target == null ? "" : ", @value = N'it''s 名称'") + suffix, rendered.orElseThrow());
+                }
+            }
+        }
+        assertEquals(dialect.columnCommentSql("app.items", "note", "it's 名称"),
+                dialect.columnCommentSql(relation, "note", "it's 名称"));
+        assertEquals("exec sp_addextendedproperty @name = N'MS_Description', @value = N'it''s 名称'"
+                        + suffix.substring(0, suffix.indexOf(", @level2type")),
+                dialect.tableCommentSql(relation, "it's 名称").orElseThrow());
+        assertTrue(dialect.tableCommentSql(relation, null).isEmpty());
+        assertThrows(UnsupportedOperationException.class,
+                () -> dialect.tableCommentSql(RelationIdentity.of("catalog", "app", "items"), "comment"));
+        String implicitTableComment = dialect.tableCommentSql(
+                RelationIdentity.table("item.part"), "it's 名称").orElseThrow();
+        assertTrue(implicitTableComment.startsWith("exec sp_executesql "));
+        assertFalse(implicitTableComment.contains("@level2type"));
+        assertThrows(NullPointerException.class, () -> dialect.columnCommentSql(relation, null, "comment"));
+        assertThrows(NullPointerException.class,
+                () -> dialect.columnCommentChangeSql(relation, null, "old", "new"));
+        assertThrows(UnsupportedOperationException.class,
+                () -> dialect.columnCommentSql("catalog.app.items", "note", "comment"));
+        assertTrue(dialect.columnCommentSql(RelationIdentity.table("item.part"),
+                "note", "comment").orElseThrow().startsWith("exec sp_executesql "));
+    }
+
+    @Test
     void bothClientsReuseTheRendererOwnedPlanner() throws ReflectiveOperationException {
         Harness harness = new Harness(Map.of(), Map.of());
-        Object planner = field(harness.renderer, "migrations");
-        assertSame(planner, field(harness.jdbc, "planner"));
-        assertSame(planner, field(harness.reactive, "planner"));
-        assertSame(planner, field(harness.jdbc.withMigrationObserver(SchemaMigrationObserver.noop()), "planner"));
-        assertSame(planner, field(harness.reactive.withMigrationObserver(SchemaMigrationObserver.noop()), "planner"));
+        Object jdbcPlanner = field(field(harness.jdbc, "renderer"), "migrations");
+        Object reactivePlanner = field(field(harness.reactive, "renderer"), "migrations");
+        assertSame(jdbcPlanner, field(harness.jdbc, "planner"));
+        assertSame(reactivePlanner, field(harness.reactive, "planner"));
+        assertSame(jdbcPlanner, field(harness.jdbc.withMigrationObserver(SchemaMigrationObserver.noop()), "planner"));
+        assertSame(reactivePlanner, field(harness.reactive.withMigrationObserver(SchemaMigrationObserver.noop()), "planner"));
     }
 
     @Test
@@ -64,37 +177,52 @@ class SchemaPlannerSurfaceConvergenceTest {
                 .addField(DynamicField.of("note", "VARCHAR").withLength(80)).build();
         for (boolean exists : List.of(false, true)) {
             Harness harness = new Harness(exists ? Map.of(source.table(), source) : Map.of(), Map.of());
-            ReviewedSchemaMigrationPlan review = harness.assertParity(target);
-            assertEquals(exists, review.migration().tableExists());
-            assertEquals(1, review.migration().requests().size());
+            SchemaMigrationPlan review = harness.assertParity(target);
+            assertEquals(exists, review.tableExists());
+            assertEquals(1, review.requests().size());
             assertEquals(exists ? "alter table items add column note VARCHAR(80)"
-                    : "create table items (id BIGINT primary key, note VARCHAR(80))",
-                    review.migration().requests().getFirst().sql());
+                    : "create table items (id BIGINT not null, note VARCHAR(80), constraint pk_items primary key (id))",
+                    review.requests().getFirst().sql());
             assertEquals(List.of("items", "items", "items", "items"), harness.metadata.tables);
         }
     }
 
     @Test
-    void containsCreateAndExistingOwnerKeepAuxiliaryRollbackAndInvalidationFacts() {
+    void containsCreateAndExistingOwnerKeepAuxiliaryDdlAndInvalidationFacts() {
         DynamicForm target = protectedForm();
         String side = ProtectedContainsLayout.resolve(target).orElseThrow().table().table();
         for (boolean ownerExists : List.of(false, true)) {
             Harness harness = new Harness(ownerExists
                     ? Map.of(target.table(), ProtectedFormLayout.physical(target)) : Map.of(), Map.of());
-            ReviewedSchemaMigrationPlan review = harness.assertParity(target);
-            assertEquals(ownerExists, review.migration().tableExists());
-            assertEquals(List.of(side), review.migration().additionalCreatedTables());
-            assertTrue(review.migration().sqlTexts().stream()
+            SchemaMigrationPlan review = harness.assertParity(target);
+            assertEquals(ownerExists, review.tableExists());
+            assertEquals(List.of(RelationIdentity.parse(side)), review.additionalCreatedTables());
+            assertTrue(review.sqlTexts().stream()
                     .anyMatch(sql -> sql.startsWith("create table " + side + " (")));
-            List<String> rollback = review.rollback().requests().stream().map(SqlRequest::sql).toList();
-            assertEquals("drop table " + side, rollback.getFirst());
-            assertEquals(ownerExists ? 1 : 2, rollback.size());
-            assertEquals(List.of(), review.rollback().gaps());
             assertEquals(ownerExists ? List.of(target.table(), side, target.table(), side,
                     target.table(), side, target.table(), side)
                     : List.of(target.table(), target.table(), target.table(), target.table()),
                     harness.metadata.tables);
         }
+    }
+
+    @Test
+    void existingContainsTableIsInvalidatedWhenIndexesAreAdded() {
+        DynamicForm target = protectedForm();
+        DynamicForm side = ProtectedContainsLayout.resolve(target).orElseThrow().table();
+        Harness harness = new Harness(Map.of(target.table(), ProtectedFormLayout.physical(target),
+                side.table(), side), Map.of());
+        SchemaMigrationPlan jdbc = harness.jdbc.planCreateOrAlter(
+                target, List.of(), List.of(), harness.jdbcReader,
+                SchemaMigrationOptions.safe());
+        SchemaMigrationPlan reactive = harness.reactive.planCreateOrAlter(
+                target, List.of(), List.of(), harness.reactiveReader,
+                SchemaMigrationOptions.safe()).block();
+
+        assertNotNull(reactive);
+        assertPlan(jdbc, reactive);
+        assertTrue(jdbc.additionalCreatedTables().contains(side.relationIdentity()));
+        assertFalse(jdbc.requests().isEmpty(), "missing side indexes must be planned");
     }
 
     @Test
@@ -104,7 +232,7 @@ class SchemaPlannerSurfaceConvergenceTest {
         for (String message : List.of("table metadata not found", "table metadata not found: items")) {
             Harness harness = new Harness(Map.of(),
                     Map.of(target.table(), new IllegalArgumentException(message)));
-            assertFalse(harness.assertParity(target).migration().tableExists());
+            assertFalse(harness.assertParity(target).tableExists());
         }
         for (RuntimeException failure : List.of(
                 new IllegalArgumentException("table metadata not found because access is denied"),
@@ -132,50 +260,85 @@ class SchemaPlannerSurfaceConvergenceTest {
                 .addField(DynamicField.of("first_parent", "BIGINT"))
                 .addField(DynamicField.of("second_parent", "BIGINT"))
                 .build();
-        IndexMetadata firstIndex = IndexMetadata.builder("ix_items_first")
+        IndexDefinition firstIndex = IndexDefinition.builder("ix_items_first")
                 .addColumn("first_parent").build();
-        IndexMetadata secondIndex = IndexMetadata.builder("ix_items_second")
+        IndexDefinition secondIndex = IndexDefinition.builder("ix_items_second")
                 .addColumn("second_parent").build();
-        ForeignKeyMetadata firstForeignKey = foreignKey(
+        ForeignKeyDefinition firstForeignKey = foreignKey(
                 "fk_items_first", "first_parent", "first_parents");
-        ForeignKeyMetadata secondForeignKey = foreignKey(
+        ForeignKeyDefinition secondForeignKey = foreignKey(
                 "fk_items_second", "second_parent", "second_parents");
 
         for (boolean exists : List.of(false, true)) {
             Harness harness = new Harness(exists ? Map.of(target.table(), target) : Map.of(), Map.of());
-            List<IndexMetadata> indexes = new ArrayList<>(List.of(firstIndex));
-            List<ForeignKeyMetadata> foreignKeys = new ArrayList<>(List.of(firstForeignKey));
+            List<IndexDefinition> indexes = new ArrayList<>(List.of(firstIndex));
+            List<ForeignKeyDefinition> foreignKeys = new ArrayList<>(List.of(firstForeignKey));
             Mono<SchemaMigrationPlan> plan = harness.reactive.planCreateOrAlter(
                     target, indexes, foreignKeys, harness.reactiveReader, SchemaMigrationOptions.safe());
-            Mono<ReviewedSchemaMigrationPlan> review = harness.reactive.reviewCreateOrAlter(
+            Mono<SchemaMigrationPlan> review = harness.reactive.planCreateOrAlter(
                     target, indexes, foreignKeys, harness.reactiveReader,
-                    SchemaMigrationOptions.safe(), SchemaMigrationReviewPolicy.allowBlocking());
+                    SchemaMigrationOptions.safe());
 
             assertTrue(harness.metadata.tables.isEmpty());
             indexes.set(0, secondIndex);
             foreignKeys.set(0, secondForeignKey);
 
             SchemaMigrationPlan planned = plan.block();
-            ReviewedSchemaMigrationPlan reviewed = review.block();
+            SchemaMigrationPlan reviewed = review.block();
             assertNotNull(planned);
             assertNotNull(reviewed);
             assertEquals(List.of("ix_items_first"),
-                    planned.targetIndexes().stream().map(IndexMetadata::name).toList());
+                    planned.target().indexes().stream().map(IndexDefinition::name).toList());
             assertEquals(List.of("fk_items_first"),
-                    planned.targetForeignKeys().stream().map(ForeignKeyMetadata::name).toList());
-            assertEquals(List.of("ix_items_first"), reviewed.migration().targetIndexes().stream()
-                    .map(IndexMetadata::name).toList());
-            assertEquals(List.of("fk_items_first"), reviewed.migration().targetForeignKeys().stream()
-                    .map(ForeignKeyMetadata::name).toList());
+                    planned.target().foreignKeys().stream().map(ForeignKeyDefinition::name).toList());
+            assertEquals(List.of("ix_items_first"), reviewed.target().indexes().stream()
+                    .map(IndexDefinition::name).toList());
+            assertEquals(List.of("fk_items_first"), reviewed.target().foreignKeys().stream()
+                    .map(ForeignKeyDefinition::name).toList());
         }
     }
 
-    private static ForeignKeyMetadata foreignKey(String name, String column, String referenceTable) {
-        return ForeignKeyMetadata.builder(name)
+    private static ForeignKeyDefinition foreignKey(String name, String column, String referenceTable) {
+        return ForeignKeyDefinition.builder(name)
                 .addColumn(column)
-                .referenceTable(referenceTable)
+                .reference(RelationIdentity.table(referenceTable))
                 .addReferenceColumn("id")
                 .build();
+    }
+
+    @Test
+    void customFormDdlRendersEachPhysicalTableOnceAcrossPlanAndReview() {
+        DynamicForm target = protectedForm();
+        DynamicForm side = ProtectedContainsLayout.resolve(target).orElseThrow().table();
+        for (int existing = 0; existing <= 2; existing++) {
+            Map<String, DynamicForm> tables = new LinkedHashMap<>();
+            if (existing > 0) tables.put(target.table(), ProtectedFormLayout.physical(target));
+            if (existing > 1) tables.put(side.table(), side);
+            List<String> calls = new ArrayList<>();
+            SchemaDialect schema = RdbDialect.h2().schema()
+                    .withFormRenderer((current, snapshot, plan) -> {
+                        calls.add(plan.target().name());
+                        return plan.requests().stream().map(request ->
+                                new SqlRequest("/* extended */ " + request.sql(), request.parameters())).toList();
+                    });
+            Harness harness = new Harness(tables, Map.of(), RdbDialect.h2().withSchema(schema));
+            SchemaMigrationPlan planned = harness.jdbc.planCreateOrAlter(target, List.of(), harness.jdbcReader);
+            assertPlan(planned, harness.reactive.planCreateOrAlter(target, List.of(), harness.reactiveReader).block());
+            SchemaMigrationPlan review = harness.jdbc.planCreateOrAlter(target, List.of(), List.of(),
+                    harness.jdbcReader, SchemaMigrationOptions.safe());
+            SchemaMigrationPlan reactive = harness.reactive.planCreateOrAlter(target, List.of(), List.of(),
+                    harness.reactiveReader, SchemaMigrationOptions.safe()).block();
+            assertNotNull(reactive);
+            assertPlan(review, reactive);
+            assertEquals(review.requests(), reactive.requests());
+            assertEquals(planned.requests(), review.requests());
+            assertTrue(review.additionalCreatedTables().contains(side.relationIdentity()));
+            // JDBC/reactive plan and JDBC/reactive review each render a table once.
+            assertEquals(existing == 0 ? 8 : 4, calls.size());
+            assertEquals(4, calls.stream().filter(side.table()::equals).count());
+            assertTrue(review.requests().stream()
+                    .allMatch(request -> request.sql().startsWith("/* extended */ ")));
+        }
     }
 
     private static DynamicForm protectedForm() {
@@ -194,10 +357,10 @@ class SchemaPlannerSurfaceConvergenceTest {
 
     private static void assertPlan(SchemaMigrationPlan jdbc, SchemaMigrationPlan reactive) {
         assertNotNull(reactive);
-        assertEquals(jdbc.target().table(), reactive.target().table());
-        assertEquals(jdbc.target().fields(), reactive.target().fields());
-        assertEquals(jdbc.targetIndexes(), reactive.targetIndexes());
-        assertEquals(jdbc.targetForeignKeys(), reactive.targetForeignKeys());
+        assertEquals(jdbc.target().name(), reactive.target().name());
+        assertEquals(jdbc.target().columns(), reactive.target().columns());
+        assertEquals(jdbc.target().indexes(), reactive.target().indexes());
+        assertEquals(jdbc.target().foreignKeys(), reactive.target().foreignKeys());
         assertEquals(jdbc.tableExists(), reactive.tableExists());
         assertEquals(jdbc.requests(), reactive.requests());
         assertEquals(jdbc.skippedChanges(), reactive.skippedChanges());
@@ -206,13 +369,17 @@ class SchemaPlannerSurfaceConvergenceTest {
 
     private static final class Harness {
         private final MetadataExecutor metadata;
-        private final FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.h2());
         private final JdbcSchemaClient jdbc;
         private final ReactiveSchemaClient reactive;
         private final JdbcFormMetadataReader jdbcReader;
         private final ReactiveFormMetadataReader reactiveReader;
 
         private Harness(Map<String, DynamicForm> tables, Map<String, RuntimeException> failures) {
+            this(tables, failures, RdbDialect.h2());
+        }
+
+        private Harness(Map<String, DynamicForm> tables, Map<String, RuntimeException> failures,
+                        RdbDialect dialect) {
             metadata = new MetadataExecutor(tables, failures);
             ReactiveSqlExecutor reactiveExecutor = new ReactiveSqlExecutor() {
                 @Override
@@ -225,29 +392,27 @@ class SchemaPlannerSurfaceConvergenceTest {
                     return Mono.error(new AssertionError("planning must not execute DDL"));
                 }
             };
-            jdbc = JdbcSchemaClient.create(metadata, renderer);
-            reactive = ReactiveSchemaClient.create(reactiveExecutor, renderer);
+            jdbc = JdbcSchemaClient.create(metadata, dialect);
+            reactive = ReactiveSchemaClient.create(reactiveExecutor, dialect);
             jdbcReader = JdbcFormMetadataReaders.create(metadata, RdbDialect.h2());
             reactiveReader = ReactiveFormMetadataReaders.create(reactiveExecutor, RdbDialect.h2());
         }
 
-        private ReviewedSchemaMigrationPlan assertParity(DynamicForm target) {
+        private SchemaMigrationPlan assertParity(DynamicForm target) {
             SchemaMigrationPlan plan = jdbc.planCreateOrAlter(target, List.of(), jdbcReader);
             int beforeSubscription = metadata.tables.size();
             Mono<SchemaMigrationPlan> pending = reactive.planCreateOrAlter(target, List.of(), reactiveReader);
             assertEquals(beforeSubscription, metadata.tables.size());
             assertPlan(plan, pending.block());
             assertTrue(metadata.tables.size() > beforeSubscription);
-            ReviewedSchemaMigrationPlan jdbcReview = jdbc.reviewCreateOrAlter(target, List.of(), List.of(),
-                    jdbcReader, SchemaMigrationOptions.safe(), SchemaMigrationReviewPolicy.allowBlocking());
-            ReviewedSchemaMigrationPlan reactiveReview = reactive.reviewCreateOrAlter(target, List.of(), List.of(),
-                    reactiveReader, SchemaMigrationOptions.safe(), SchemaMigrationReviewPolicy.allowBlocking()).block();
+            SchemaMigrationPlan jdbcReview = jdbc.planCreateOrAlter(target, List.of(), List.of(),
+                    jdbcReader, SchemaMigrationOptions.safe());
+            SchemaMigrationPlan reactiveReview = reactive.planCreateOrAlter(target, List.of(), List.of(),
+                    reactiveReader, SchemaMigrationOptions.safe()).block();
             assertNotNull(reactiveReview);
-            assertPlan(plan, jdbcReview.migration());
-            assertPlan(jdbcReview.migration(), reactiveReview.migration());
-            assertEquals(jdbcReview.rollback(), reactiveReview.rollback());
-            assertEquals(jdbcReview.onlineDdl(), reactiveReview.onlineDdl());
-            assertEquals(jdbcReview.fingerprint(), reactiveReview.fingerprint());
+            assertPlan(plan, jdbcReview);
+            assertPlan(jdbcReview, reactiveReview);
+            assertEquals(jdbcReview.requests(), reactiveReview.requests());
             return jdbcReview;
         }
 
@@ -256,16 +421,16 @@ class SchemaPlannerSurfaceConvergenceTest {
                     () -> jdbc.planCreateOrAlter(target, List.of(), jdbcReader)));
             assertSame(expected, assertThrows(RuntimeException.class,
                     () -> reactive.planCreateOrAlter(target, List.of(), reactiveReader).block()));
-            assertSame(expected, assertThrows(RuntimeException.class, () -> jdbc.reviewCreateOrAlter(
+            assertSame(expected, assertThrows(RuntimeException.class, () -> jdbc.planCreateOrAlter(
                     target, List.of(), List.of(), jdbcReader,
-                    SchemaMigrationOptions.safe(), SchemaMigrationReviewPolicy.allowBlocking())));
-            assertSame(expected, assertThrows(RuntimeException.class, () -> reactive.reviewCreateOrAlter(
+                    SchemaMigrationOptions.safe())));
+            assertSame(expected, assertThrows(RuntimeException.class, () -> reactive.planCreateOrAlter(
                     target, List.of(), List.of(), reactiveReader,
-                    SchemaMigrationOptions.safe(), SchemaMigrationReviewPolicy.allowBlocking()).block()));
+                    SchemaMigrationOptions.safe()).block()));
         }
     }
 
-    private static final class MetadataExecutor implements SyncSqlExecutor {
+    private static final class MetadataExecutor implements com.flying.orm.rdb.support.ListQueryFixture {
         private final Map<String, DynamicForm> forms;
         private final Map<String, RuntimeException> failures;
         private final List<String> tables = new ArrayList<>();
@@ -304,7 +469,7 @@ class SchemaPlannerSurfaceConvergenceTest {
         }
 
         @Override
-        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
             throw new AssertionError("planning must not execute DDL");
         }
     }

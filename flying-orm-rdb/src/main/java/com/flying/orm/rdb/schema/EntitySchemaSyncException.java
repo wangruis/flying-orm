@@ -10,7 +10,7 @@ import java.util.Objects;
  */
 public final class EntitySchemaSyncException extends IllegalStateException {
 
-    private final EntitySchemaSyncReport report;
+    private final transient EntitySchemaSyncReport report;
 
     public EntitySchemaSyncException(String message, EntitySchemaSyncReport report) {
         super(message);

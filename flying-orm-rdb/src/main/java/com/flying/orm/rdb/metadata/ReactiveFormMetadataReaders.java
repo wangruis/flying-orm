@@ -1,6 +1,8 @@
 package com.flying.orm.rdb.metadata;
 
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.metadata.RelationIdentity;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
@@ -49,7 +51,7 @@ public final class ReactiveFormMetadataReaders {
      * @return 带默认缓存的 reader
      */
     public static ReactiveFormMetadataCache cached(ReactiveFormMetadataReader delegate) {
-        return CachedReactiveFormMetadataReader.create(delegate);
+        return cached(delegate, CacheRegionPolicy.metadataDefaults(), MetadataCacheInvalidator.none());
     }
 
     /**
@@ -64,7 +66,7 @@ public final class ReactiveFormMetadataReaders {
     public static ReactiveFormMetadataCache cached(ReactiveFormMetadataReader delegate,
                                                    CacheRegionPolicy policy,
                                                    MetadataCacheInvalidator dependentInvalidator) {
-        return CachedReactiveFormMetadataReader.create(delegate, policy, dependentInvalidator);
+        return new CachedReactiveFormMetadataReader(delegate, policy, dependentInvalidator);
     }
 
     /**
@@ -84,16 +86,17 @@ public final class ReactiveFormMetadataReaders {
         }
 
         @Override
-        public Mono<DynamicForm> readForm(String formId, String table) {
+        public Mono<DynamicForm> readForm(String formId, RelationIdentity relation) {
             return unsupported();
         }
 
         @Override
-        public Mono<DynamicForm> readForm(String formId, String schema, String table) {
+        public Mono<RelationalTableDefinition> readTable(
+                RelationIdentity relation) {
             return unsupported();
         }
 
-        private Mono<DynamicForm> unsupported() {
+        private <T> Mono<T> unsupported() {
             return Mono.error(new UnsupportedOperationException(
                     "metadata reader is not implemented for the requested dialect"));
         }

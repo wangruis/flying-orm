@@ -140,7 +140,7 @@ class CompleteCharsetCollationRoundTripTest {
             };
             return ReactiveFormMetadataReaders.create(executor, dialect).readSnapshot("options").block();
         }
-        SyncSqlExecutor executor = new SyncSqlExecutor() {
+        SyncSqlExecutor executor = new com.flying.orm.rdb.support.ListQueryFixture() {
             @Override
             public List<DynamicRow> query(SqlRequest request) {
                 return rows(request, column, requests);
@@ -152,7 +152,7 @@ class CompleteCharsetCollationRoundTripTest {
             }
 
             @Override
-            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                 throw new UnsupportedOperationException();
             }
         };

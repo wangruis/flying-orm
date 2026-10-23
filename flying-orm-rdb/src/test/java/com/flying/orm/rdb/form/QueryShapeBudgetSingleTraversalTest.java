@@ -41,8 +41,8 @@ class QueryShapeBudgetSingleTraversalTest {
                                                  .withMaxProjectionCount(1)
                                                  .withMaxBindCount(2);
 
-        GovernedPlanEnvelope<FormOperationPlanner.PlannedQuery> envelope =
-                planner().selectGoverned(spec, policy, limits);
+        GovernedPlanEnvelope<FormReadPlanner.PlannedQuery> envelope =
+                planner().reads.selectGoverned(spec, policy, limits);
 
         assertTrue(envelope.fieldUse().allowed());
         assertEquals(1, envelope.fieldUse().decisions().stream()
@@ -58,6 +58,6 @@ class QueryShapeBudgetSingleTraversalTest {
         return new FormOperationPlanner(
                 renderer,
                 new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
-                SqlExecutionOptions.safeDefaults());
+                SqlExecutionOptions.unlimited());
     }
 }

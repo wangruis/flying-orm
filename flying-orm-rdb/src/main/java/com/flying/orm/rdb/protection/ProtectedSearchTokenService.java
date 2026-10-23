@@ -71,18 +71,6 @@ final class ProtectedSearchTokenService {
         return List.copyOf(result);
     }
 
-    byte[] currentSuffixToken(String value,
-                              EncryptedFieldDefinition definition,
-                              ProtectedFieldContext context) {
-        requireMode(definition, EncryptedSearchMode.SUFFIX);
-        String normalized = normalize(value, definition);
-        int length = normalized.codePointCount(0, normalized.length());
-        if (!definition.suffixLengths().contains(length)) {
-            throw new IllegalArgumentException("protected suffix length is not declared");
-        }
-        return token(keys.currentVersion(), "suffix/" + length, normalized, context);
-    }
-
     Map<Integer, byte[]> currentSuffixTokensForValue(String value,
                                                       EncryptedFieldDefinition definition,
                                                       ProtectedFieldContext context) {

@@ -48,6 +48,32 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SyncIndependentBatchLifecycleTest {
 
     @Test
+    void unversionedBatchKeepsZeroAndUnknownCountsWithoutInventingConflicts() {
+        JdbcFixture fixture = new JdbcFixture();
+        fixture.rowCounts = index -> switch (index) {
+            case 0 -> 0;
+            case 1 -> java.sql.Statement.SUCCESS_NO_INFO;
+            default -> 1;
+        };
+        List<GeneratedEntity> entities = IntStream.rangeClosed(1, 3).mapToObj(id -> {
+            GeneratedEntity entity = new GeneratedEntity(id);
+            entity.id = (long) id;
+            return entity;
+        }).toList();
+        com.flying.orm.rdb.batch.BatchExecutionEvidence result = fixture.repository(GeneratedEntity.class)
+                .updateBatch(Flux.fromIterable(entities), BatchWriteOptions.of(3));
+        assertEquals(3, result.successfulCount());
+        assertEquals(0, result.failedCount());
+        assertTrue(result.conflicts().isEmpty());
+        assertFalse(result.affectedRows().isKnown());
+        assertEquals(1, fixture.prepared, "ordinary rows share a native batch statement");
+        assertEquals(3, fixture.executions);
+        assertEquals(1, fixture.statementsClosed);
+        assertEquals(fixture.acquired, fixture.closed);
+        assertFalse(fixture.sql.getFirst().contains("version"));
+    }
+
+    @Test
     void asyncPreFailureCancelsInputBeforeOpeningAConnection() {
         JdbcFixture fixture = new JdbcFixture();
         IllegalStateException expected = new IllegalStateException("PRE failure");
@@ -84,7 +110,7 @@ class SyncIndependentBatchLifecycleTest {
                     });
             Flux<PayloadEntity> source = Flux.just(new PayloadEntity(1), new PayloadEntity(2))
                     .publishOn(reactor.core.scheduler.Schedulers.parallel(), 1);
-            assertEquals(2, execute(repository, operation, false, source, options()).successfulCount());
+            assertEquals(2, execute(repository, operation, source, options()).successfulCount());
             assertEquals(List.of("pre:1", "post:1", "pre:2", "post:2"), events);
             fixture.assertClosed(2, 0, 0);
         }
@@ -167,22 +193,20 @@ class SyncIndependentBatchLifecycleTest {
     }
 
     @Test
-    void preRunsBeforeParametersAreReadOnBothEntryNames() {
-        for (boolean evidence : new boolean[]{false, true}) {
-            JdbcFixture fixture = new JdbcFixture();
-            var repository = fixture.repository(GeneratedEntity.class).withListener(event -> {
-                if (event.phase() == EntityLifecyclePhase.PRE_PERSIST) event.entity().name = "prepared";
-                return Mono.empty();
-            });
-            execute(repository, Operation.INSERT, evidence, Flux.just(new GeneratedEntity(1)), options());
-            assertTrue(fixture.boundValues.contains("prepared"));
-            assertFalse(fixture.boundValues.contains("generated-1"));
-        }
+    void preRunsBeforeBatchParametersAreRead() {
+        JdbcFixture fixture = new JdbcFixture();
+        var repository = fixture.repository(GeneratedEntity.class).withListener(event -> {
+            if (event.phase() == EntityLifecyclePhase.PRE_PERSIST) event.entity().name = "prepared";
+            return Mono.empty();
+        });
+        execute(repository, Operation.INSERT, Flux.just(new GeneratedEntity(1)), options());
+        assertTrue(fixture.boundValues.contains("prepared"));
+        assertFalse(fixture.boundValues.contains("generated-1"));
     }
 
     @Test
-    void ordinaryAndEvidenceShareBoundedLifecycleForEveryOperation() {
-        for (Operation operation : Operation.values()) for (boolean evidence : new boolean[]{false, true}) {
+    void publicBatchKeepsBoundedLifecycleForEveryOperation() {
+        for (Operation operation : Operation.values()) {
             JdbcFixture fixture = new JdbcFixture();
             List<Long> posts = new ArrayList<>();
             var repository = fixture.repository(PayloadEntity.class).withListener(event -> {
@@ -196,7 +220,7 @@ class SyncIndependentBatchLifecycleTest {
                 return Mono.empty();
             });
             Flux<PayloadEntity> rows = Flux.range(1, 16).map(fixture::input);
-            var result = execute(repository, operation, evidence, rows, options());
+            var result = execute(repository, operation, rows, options());
             assertEquals(16, result.successfulCount());
             assertEquals(16, posts.size());
             fixture.assertClosed(16, 0, 0);
@@ -204,44 +228,40 @@ class SyncIndependentBatchLifecycleTest {
     }
 
     @Test
-    void generatedKeysWithoutListenerHaveOrdinaryEvidenceParity() {
-        for (boolean evidence : new boolean[]{false, true}) {
-            JdbcFixture fixture = new JdbcFixture();
-            var repository = fixture.repository(GeneratedEntity.class);
-            List<GeneratedEntity> entities = IntStream.rangeClosed(1, 16).mapToObj(GeneratedEntity::new).toList();
-            var result = execute(repository, Operation.INSERT, evidence, Flux.fromIterable(entities), options());
-            assertEquals(16, result.successfulCount());
-            assertEquals(IntStream.rangeClosed(1, 16).mapToObj(id -> 1_000L + id).toList(),
-                    entities.stream().map(GeneratedEntity::getId).toList());
-            fixture.assertClosed(16, 0, 0);
-        }
+    void generatedKeysAreReturnedWithoutListener() {
+        JdbcFixture fixture = new JdbcFixture();
+        var repository = fixture.repository(GeneratedEntity.class);
+        List<GeneratedEntity> entities = IntStream.rangeClosed(1, 16).mapToObj(GeneratedEntity::new).toList();
+        var result = execute(repository, Operation.INSERT, Flux.fromIterable(entities), options());
+        assertEquals(16, result.successfulCount());
+        assertEquals(IntStream.rangeClosed(1, 16).mapToObj(id -> 1_000L + id).toList(),
+                entities.stream().map(GeneratedEntity::getId).toList());
+        fixture.assertClosed(16, 0, 0);
     }
 
     @Test
     void postFailurePreservesPrimaryCauseAndAllCompletedKeysAndCallbacks() {
-        for (boolean evidence : new boolean[]{false, true}) {
-            JdbcFixture fixture = new JdbcFixture();
-            List<GeneratedEntity> entities = List.of(new GeneratedEntity(1), new GeneratedEntity(2), new GeneratedEntity(3));
-            List<Long> posts = new ArrayList<>();
-            IllegalStateException cause = new IllegalStateException("POST failed");
-            var repository = fixture.repository(GeneratedEntity.class).withListener(event -> {
-                if (event.phase() == EntityLifecyclePhase.POST_PERSIST) {
-                    posts.add(event.entity().id);
-                    if (posts.size() == 1) return Mono.error(cause);
-                }
-                return Mono.empty();
-            });
-            EntityPostWriteException failure = assertThrows(EntityPostWriteException.class,
-                    () -> execute(repository, Operation.INSERT, evidence, Flux.fromIterable(entities), BatchWriteOptions.of(2)));
-            assertSame(cause, failure.getCause());
-            assertEquals(EntityLifecyclePhase.POST_PERSIST, failure.phase());
-            assertEquals(List.of(1_001L, 1_002L), posts);
-            assertEquals(1_001L, entities.get(0).id);
-            assertEquals(1_002L, entities.get(1).id);
-            assertNull(entities.get(2).id);
-            assertEquals(1, fixture.acquired);
-            assertEquals(1, fixture.closed);
-        }
+        JdbcFixture fixture = new JdbcFixture();
+        List<GeneratedEntity> entities = List.of(new GeneratedEntity(1), new GeneratedEntity(2), new GeneratedEntity(3));
+        List<Long> posts = new ArrayList<>();
+        IllegalStateException cause = new IllegalStateException("POST failed");
+        var repository = fixture.repository(GeneratedEntity.class).withListener(event -> {
+            if (event.phase() == EntityLifecyclePhase.POST_PERSIST) {
+                posts.add(event.entity().id);
+                if (posts.size() == 1) return Mono.error(cause);
+            }
+            return Mono.empty();
+        });
+        EntityPostWriteException failure = assertThrows(EntityPostWriteException.class,
+                () -> execute(repository, Operation.INSERT, Flux.fromIterable(entities), BatchWriteOptions.of(2)));
+        assertSame(cause, failure.getCause());
+        assertEquals(EntityLifecyclePhase.POST_PERSIST, failure.phase());
+        assertEquals(List.of(1_001L, 1_002L), posts);
+        assertEquals(1_001L, entities.get(0).id);
+        assertEquals(1_002L, entities.get(1).id);
+        assertNull(entities.get(2).id);
+        assertEquals(1, fixture.acquired);
+        assertEquals(1, fixture.closed);
     }
 
     @Test
@@ -250,7 +270,7 @@ class SyncIndependentBatchLifecycleTest {
         fixture.failedExecuteAt = 2;
         List<GeneratedEntity> entities = List.of(new GeneratedEntity(1), new GeneratedEntity(2), new GeneratedEntity(3));
         assertThrows(com.flying.orm.rdb.batch.BatchExecutionEvidenceException.class,
-                () -> RepositoryBatchEvidenceAccess.sync(fixture.repository(GeneratedEntity.class)).insertEvidence(Flux.fromIterable(entities), options()));
+                () -> fixture.repository(GeneratedEntity.class).insertBatch(Flux.fromIterable(entities), options()));
         assertEquals(1_001L, entities.get(0).id);
         assertNull(entities.get(1).id);
         assertNull(entities.get(2).id);
@@ -259,12 +279,12 @@ class SyncIndependentBatchLifecycleTest {
     }
 
     private static <T> com.flying.orm.rdb.batch.BatchExecutionEvidence execute(
-            SyncFormRepository<T> repository, Operation operation, boolean evidence,
+            SyncFormRepository<T> repository, Operation operation,
             Flux<T> rows, BatchWriteOptions options) {
         return switch (operation) {
-            case INSERT -> evidence ? RepositoryBatchEvidenceAccess.sync(repository).insertEvidence(rows, options) : repository.insertBatch(rows, options);
-            case UPDATE -> evidence ? RepositoryBatchEvidenceAccess.sync(repository).updateEvidence(rows, options) : repository.updateBatch(rows, options);
-            case UPSERT -> evidence ? RepositoryBatchEvidenceAccess.sync(repository).upsertEvidence(rows, options) : repository.upsertBatch(rows, options);
+            case INSERT -> repository.insertBatch(rows, options);
+            case UPDATE -> repository.updateBatch(rows, options);
+            case UPSERT -> repository.upsertBatch(rows, options);
         };
     }
 

@@ -3,6 +3,7 @@ package com.flying.orm.rdb.metadata;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
+import com.flying.orm.rdb.schema.SchemaSnapshot;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -20,8 +21,7 @@ class InformationSchemaMetadataQueryOrderingTest {
     @Test
     void readTableSerializesMetadataQueriesOnOneExecutor() {
         RejectingConcurrentExecutor executor = new RejectingConcurrentExecutor();
-        InformationSchemaFormMetadataReader reader = new InformationSchemaFormMetadataReader(
-                executor, completeQueries());
+        InformationSchemaFormMetadataReader reader = new InformationSchemaFormMetadataReader(executor, new MetadataQueryProfile(completeQueries()));
 
         assertDoesNotThrow(() -> reader.readTable("app", "orders").block());
         assertEquals(1, executor.maxActive.get());
@@ -30,15 +30,29 @@ class InformationSchemaMetadataQueryOrderingTest {
     @Test
     void readSnapshotSerializesEveryCompleteMetadataQueryOnOneExecutor() {
         RejectingConcurrentExecutor executor = new RejectingConcurrentExecutor();
-        InformationSchemaFormMetadataReader reader = new InformationSchemaFormMetadataReader(
-                executor, completeQueries());
+        InformationSchemaFormMetadataReader reader = new InformationSchemaFormMetadataReader(executor, new MetadataQueryProfile(completeQueries()));
 
         assertDoesNotThrow(() -> reader.readSnapshot("app", "orders").block());
         assertEquals(1, executor.maxActive.get());
     }
 
-    private static InformationSchemaFormMetadataReader.Queries completeQueries() {
-        return InformationSchemaFormMetadataReader.Queries.complete(
+    @Test
+    void readSnapshotKeepsUnprovidedQueriesUnknown() {
+        RejectingConcurrentExecutor executor = new RejectingConcurrentExecutor();
+        InformationSchemaFormMetadataReader reader = new InformationSchemaFormMetadataReader(executor,
+                new MetadataQueryProfile(new MetadataQueryProfile.Queries(
+                        (schema, table) -> request("columns"), null, null, value -> value)));
+
+        SchemaSnapshot snapshot = reader.readSnapshot("app", "orders").block();
+
+        assertEquals(SchemaSnapshot.State.PRESENT, snapshot.tableState());
+        assertEquals(SchemaSnapshot.State.UNKNOWN, snapshot.indexes().state());
+        assertEquals(SchemaSnapshot.State.UNKNOWN, snapshot.foreignKeys().state());
+        assertEquals(1, executor.maxActive.get());
+    }
+
+    private static MetadataQueryProfile.Queries completeQueries() {
+        return MetadataQueryProfile.Queries.complete(
                 (schema, table) -> request("columns"),
                 (schema, table) -> request("indexes"),
                 (schema, table) -> request("foreign_keys"),
@@ -47,7 +61,7 @@ class InformationSchemaMetadataQueryOrderingTest {
                 (schema, table) -> request("primary_key"),
                 (schema, table) -> request("unique_constraints"),
                 (schema, table) -> request("checks"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.H2);
+                MetadataQueryProfile.SnapshotDialect.H2);
     }
 
     private static SqlRequest request(String name) {

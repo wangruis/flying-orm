@@ -46,7 +46,7 @@ class PartitionSchemaDiffTest {
         SchemaSnapshot unknown = snapshotWithUnknownPartition(desired);
         SchemaSnapshot absent = SchemaSnapshot.present(table("occurred_at", false));
 
-        assertNotEquals(SchemaSnapshotFingerprint.of(unknown), SchemaSnapshotFingerprint.of(absent));
+        assertNotEquals(unknown.partition().state(), absent.partition().state());
         assertPartitionManual(diff(desired, unknown));
     }
 

@@ -19,13 +19,16 @@ import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.form.spec.BatchSpec;
+import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.lock.OptimisticLockOptions;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
 import com.flying.orm.rdb.protection.MaskingPolicyRegistry;
 import com.flying.orm.rdb.protection.ProtectedConditions;
 import com.flying.orm.rdb.protection.ProtectedFieldKeyRing;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
+import com.flying.orm.rdb.protection.ProtectedContainsLayout;
 import com.flying.orm.rdb.protection.ProtectedValueNormalizerRegistry;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.sync.SyncBatchExecutor;
@@ -37,8 +40,87 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 class ProtectedOperationPlanReuseTest {
+
+    @Test
+    void singleUpdateOwnerQueryReusesProtectedPredicateWithOrWithoutVersion() {
+        AtomicInteger normalizations = new AtomicInteger();
+        ProtectedValueNormalizerRegistry normalizers = ProtectedValueNormalizerRegistry.standard()
+                .with("counting", value -> { normalizations.incrementAndGet(); return value; });
+        DynamicForm form = DynamicForm.builder("contacts", "contacts")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("secret", "VARCHAR"))
+                .addField(DynamicField.of("phone", "VARCHAR"))
+                .addField(DynamicField.of("version", "BIGINT"))
+                .encrypted("secret", EncryptedFieldDefinition.builder().normalizer("counting")
+                        .searchModes(EncryptedSearchMode.EXACT).build())
+                .encrypted("phone", EncryptedFieldDefinition.builder()
+                        .searchModes(EncryptedSearchMode.CONTAINS).build()).build();
+        ConditionGroup where = ConditionGroup.or().add(ProtectedConditions.exact("secret", "classified"))
+                .where("id", "=", 7L).build();
+        try (ProtectedFieldRuntime runtime = ProtectedFieldRuntime.create(
+                ProtectedFieldKeyRing.single("v1", new byte[32]), normalizers, MaskingPolicyRegistry.standard())) {
+            FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                    SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql()).withProtectedFields(runtime);
+            FormOperationPlanner planner = new FormOperationPlanner(renderer,
+                    new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
+                    SqlExecutionOptions.unlimited());
+            for (OptimisticLockOptions lock : java.util.Arrays.asList(null,
+                    OptimisticLockOptions.increment("version", 2L), OptimisticLockOptions.assign("version", 2L, 3L))) {
+                normalizations.set(0);
+                WriteSpec spec = WriteSpec.update(form, Map.of("phone", "13800000001"), where);
+                if (lock != null) spec = spec.withLock(lock);
+                FormOperationPlanner.PlannedWrite plan = planner.update(spec);
+                List<Object> ownerParameters = plan.protectedWrite().ownerQuery().parameters();
+                List<Object> writeParameters = plan.request().parameters();
+                assertArrayEquals(ownerParameters.toArray(), writeParameters.subList(
+                        writeParameters.size() - ownerParameters.size(), writeParameters.size()).toArray());
+                assertEquals(lock == null ? 2 : 3, ownerParameters.size());
+                if (lock != null) assertEquals(2L, ownerParameters.getLast());
+                assertEquals(1, normalizations.get(), "owner selection must reuse the prepared encrypted predicate");
+            }
+        }
+    }
+
+    @Test
+    void protectedBatchRowsRetainTheCompiledStatementAndIndependentValues() {
+        DynamicForm form = DynamicForm.builder("contacts", "contacts")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("phone", "VARCHAR"))
+                .encrypted("phone", EncryptedFieldDefinition.builder()
+                        .searchModes(EncryptedSearchMode.CONTAINS).build()).build();
+        Map<String, Object> logical = Map.of("id", 7L, "phone", "13800000001");
+        try (ProtectedFieldRuntime runtime = ProtectedFieldRuntime.create(
+                ProtectedFieldKeyRing.single("v1", new byte[32]))) {
+            for (RdbDialect dialect : List.of(RdbDialect.postgresql(), RdbDialect.mysql())) {
+                FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                        SqlRenderer.builder().addDefaultTerms().build(), dialect).withProtectedFields(runtime);
+                ProtectedContainsLayout layout = ProtectedContainsLayout.resolve(form).orElseThrow();
+                DynamicForm physical = renderer.protection().physicalForm(form);
+                FormProtectionSqlSupport.WriteOperation protection = renderer.protection().writeOperation(
+                        form, physical, DataScope.none(), layout);
+                FormPreparedWrite write = protection.prepare(logical);
+                for (boolean upsert : List.of(false, true)) {
+                    BatchInsertPlan plan = upsert
+                            ? renderer.batchRenderer.upsertPlan(form, logical, physical, write.values(), logical, null, List.of(), null)
+                            : renderer.batchRenderer.insertPlan(physical, write.values());
+                    Object[] parameters = plan.firstParameters();
+                    Object[] row = FormProtectedBatchRows.insert(
+                            protection, write, plan, parameters, upsert, layout);
+                    ProtectedWriteWork work = assertInstanceOf(ProtectedWriteWork.class, row[parameters.length]);
+                    assertSame(plan.statement(), work.writeRequest().statement(), dialect.name());
+                    int idIndex = plan.columnLayout().indexOf(physical.field("id").normalizedName());
+                    parameters[idIndex] = 99L;
+                    assertEquals(7L, work.writeRequest().parameters().get(idIndex));
+                    assertEquals(Map.of("id", 7L), work.knownOwner());
+                }
+            }
+        }
+    }
 
     @Test
     void derivesProtectedTenantIdentityOncePerBatchPlan() {
@@ -63,8 +145,9 @@ class ProtectedOperationPlanReuseTest {
                     SqlRenderer.builder().addDefaultTerms().build().withValueCodecs(codecs),
                     RdbDialect.postgresql()).withProtectedFields(runtime);
             NativeSyncFormBatchOperations operations = new NativeSyncFormBatchOperations(
-                    new ConsumingExecutor(), renderer, StructuredConditionResolver.defaults(),
-                    DataScope.none(), BatchWriteOptions.defaults(),
+                    new ConsumingExecutor(), renderer,
+                    new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
+                    BatchWriteOptions.defaults(),
                     com.flying.orm.core.scope.FieldUsePolicy.unrestricted());
 
             operations.writeBatch(spec, null);
@@ -92,11 +175,11 @@ class ProtectedOperationPlanReuseTest {
                                               .normalizer("counting")
                                               .build())
                                       .build();
-        BatchOptimisticUpdate first = new BatchOptimisticUpdate(
+        BatchUpdate first = new BatchUpdate(
                 Map.of("note", "first"),
                 ConditionGroup.and().where("id", "=", 1L).build(),
                 OptimisticLockOptions.increment("version", 0L));
-        BatchOptimisticUpdate second = new BatchOptimisticUpdate(
+        BatchUpdate second = new BatchUpdate(
                 Map.of("note", "second"),
                 ConditionGroup.and().where("id", "=", 2L).build(),
                 OptimisticLockOptions.increment("version", 0L));
@@ -112,8 +195,9 @@ class ProtectedOperationPlanReuseTest {
                     SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql())
                                                           .withProtectedFields(runtime);
             NativeSyncFormBatchOperations operations = new NativeSyncFormBatchOperations(
-                    new ConsumingExecutor(), renderer, StructuredConditionResolver.defaults(),
-                    DataScope.none(), BatchWriteOptions.defaults(),
+                    new ConsumingExecutor(), renderer,
+                    new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
+                    BatchWriteOptions.defaults(),
                     com.flying.orm.core.scope.FieldUsePolicy.unrestricted());
 
             operations.writeBatch(spec, null);
@@ -149,13 +233,11 @@ class ProtectedOperationPlanReuseTest {
                                         .values().get("phone");
             writes.set(0);
 
-            List<DynamicRow> decoded = new FormResultDecoder(renderer, models).decodeRows(
-                    form,
-                    List.of(DynamicRow.copyOf(Map.of("phone", ciphertext)),
-                            DynamicRow.copyOf(Map.of("phone", ciphertext))),
-                    SqlExecutionOptions.safeDefaults(),
-                    scope,
-                    SensitiveDisplayMode.DECLARED);
+            com.flying.orm.rdb.mapping.RowMapper<DynamicRow> decoder = new FormResultDecoder(renderer, models).rowDecoder(
+                    form, SqlExecutionOptions.unlimited(), scope, SensitiveDisplayMode.DECLARED);
+            List<DynamicRow> decoded = List.of(
+                    decoder.map(DynamicRow.copyOf(Map.of("phone", ciphertext))),
+                    decoder.map(DynamicRow.copyOf(Map.of("phone", ciphertext))));
 
             assertEquals(List.of("13800000001", "13800000001"),
                          decoded.stream().map(row -> row.get("phone")).toList());
@@ -191,7 +273,7 @@ class ProtectedOperationPlanReuseTest {
                                         .values().get("phone");
             writes.set(0);
             JoinResultProtector.ResultPlan plan = new JoinResultProtector(renderer).plan(
-                    spec, Map.of(source, scope), SensitiveDisplayMode.DECLARED);
+                    spec.projections(), Map.of(source, scope), SensitiveDisplayMode.DECLARED);
 
             List<Object> decoded = List.of(
                     plan.transform(DynamicRow.copyOf(Map.of("contact", ciphertext))).get("contact"),

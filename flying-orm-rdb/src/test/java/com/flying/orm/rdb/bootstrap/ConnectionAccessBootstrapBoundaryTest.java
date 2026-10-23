@@ -33,7 +33,7 @@ class ConnectionAccessBootstrapBoundaryTest {
     @Test
     void environmentAndAssemblyDoNotRetainTransactionOrInfrastructureOwners() {
         for (Class<?> type : List.of(FlyingOrmEnvironment.class, FlyingOrmAssemblyRequest.class,
-                                    FlyingOrmClientBuilderSupport.class)) {
+                                    FlyingOrmClientBuilder.class)) {
             assertFalse(Arrays.stream(type.getDeclaredFields()).anyMatch(field -> {
                 String name = field.getName().toLowerCase();
                 String fieldType = field.getGenericType().getTypeName();

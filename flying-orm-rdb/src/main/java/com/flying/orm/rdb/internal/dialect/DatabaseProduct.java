@@ -60,8 +60,19 @@ public enum DatabaseProduct {
         if (name == null || name.isBlank()) {
             return "";
         }
-        StringBuilder normalized = new StringBuilder(name.length());
-        for (int index = 0; index < name.length(); index++) {
+        int prefix = 0;
+        while (prefix < name.length()) {
+            char character = name.charAt(prefix);
+            if (!(character >= 'a' && character <= 'z' || character >= '0' && character <= '9')) {
+                break;
+            }
+            prefix++;
+        }
+        if (prefix == name.length()) {
+            return name;
+        }
+        StringBuilder normalized = new StringBuilder(name.length()).append(name, 0, prefix);
+        for (int index = prefix; index < name.length(); index++) {
             char character = name.charAt(index);
             if (Character.isLetterOrDigit(character)) {
                 normalized.append(Character.toLowerCase(character));

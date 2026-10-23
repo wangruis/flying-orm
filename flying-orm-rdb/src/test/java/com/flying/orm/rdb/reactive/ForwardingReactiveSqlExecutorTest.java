@@ -12,6 +12,8 @@ import com.flying.orm.rdb.execution.SqlExecutionSequence;
 import com.flying.orm.rdb.execution.SqlExecutionSequenceResult;
 import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.result.DynamicRow;
+import com.flying.orm.rdb.observation.SqlExecutionObserver;
+import com.flying.orm.rdb.observation.BatchExecutionObserver;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -28,11 +30,39 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class ForwardingReactiveSqlExecutorTest {
 
     @Test
+    void unlimitedBatchPolicyKeepsUnchangedExecutionChain() {
+        for (ReactiveSqlExecutor delegate : List.<ReactiveSqlExecutor>of(new PlainExecutor(), new ProbeExecutor())) {
+            ReactiveSqlExecutor configured = delegate.withObserver(ignored -> { })
+                    .withDefaultExecutionOptions(SqlExecutionOptions.maxRows(2));
+            assertSame(configured, configured.withBatchMemoryLimits(BatchMemoryLimits.defaults()));
+        }
+    }
+
+    @Test
+    void emptyObserversKeepExistingPoliciesAndObservation() {
+        for (ReactiveSqlExecutor delegate : List.<ReactiveSqlExecutor>of(new PlainExecutor(), new ProbeExecutor())) {
+            AtomicInteger observations = new AtomicInteger();
+            ReactiveSqlExecutor configured = delegate.withObserver(ignored -> observations.incrementAndGet())
+                    .withDefaultExecutionOptions(SqlExecutionOptions.maxRows(2));
+            ReactiveSqlExecutor unchanged = configured.withObservers(
+                    SqlExecutionObserver.noop(), BatchExecutionObserver.noop());
+            assertSame(configured, unchanged);
+            unchanged.rowsUpdated(new SqlRequest("update sample set id = ?", List.of(1))).block();
+            assertEquals(1, observations.get());
+            assertEquals(delegate instanceof ConnectionScopedReactiveSqlExecutor,
+                    unchanged instanceof ConnectionScopedReactiveSqlExecutor);
+        }
+    }
+
+    @Test
     void preservesCoreAndConnectionScopedCapabilities() {
         ProbeExecutor delegate = new ProbeExecutor();
         ReactiveSqlExecutor forwarding = delegate.withBatchMemoryLimits(BatchMemoryLimits.defaults());
+        assertSame(delegate, forwarding, "unlimited policy must not add a forwarding layer");
+        assertSame(delegate, delegate.withBatchMemoryLimits(new BatchMemoryLimits(1, 1024))
+                .withBatchMemoryLimits(BatchMemoryLimits.defaults()), "reset must remove the old policy");
         SqlRequest request = new SqlRequest("select ?", List.of(1));
-        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults();
+        SqlExecutionOptions options = SqlExecutionOptions.unlimited();
         SqlExecutionSequence sequence = new SqlExecutionSequence(List.of(), List.of(request), List.of());
 
         assertSame(delegate.query, forwarding.query(request, options));
@@ -49,7 +79,7 @@ class ForwardingReactiveSqlExecutorTest {
         assertFalse(delegate.withObserver(ignored -> {
         }) instanceof ConnectionScopedReactiveSqlExecutor);
         assertFalse(delegate.withDefaultExecutionOptions(
-                SqlExecutionOptions.safeDefaults()) instanceof ConnectionScopedReactiveSqlExecutor);
+                SqlExecutionOptions.unlimited()) instanceof ConnectionScopedReactiveSqlExecutor);
         assertFalse(delegate.withBatchMemoryLimits(
                 BatchMemoryLimits.defaults()) instanceof ConnectionScopedReactiveSqlExecutor);
     }
@@ -67,7 +97,7 @@ class ForwardingReactiveSqlExecutorTest {
 
         assertThrows(UnsupportedOperationException.class, () -> executor.rowsUpdatedReturningKeys(
                 new SqlRequest("insert into sample(name) values (?)", List.of("value")),
-                SqlExecutionOptions.safeDefaults()).block());
+                SqlExecutionOptions.unlimited()).block());
         assertEquals(0, writes.get());
     }
 
@@ -98,7 +128,7 @@ class ForwardingReactiveSqlExecutorTest {
                 List.of(Integer.class),
                 SqlBindMarkerStyle.CANONICAL,
                 Flux.empty(),
-                BatchWriteOptions.of(2));
+                BatchWriteOptions.of(2).withMemoryLimits(0, 64L * 1024 * 1024));
 
         assertInstanceOf(ConnectionScopedReactiveSqlExecutor.class, configured);
         assertSame(delegate.result, configured.writeBatch(request).block());

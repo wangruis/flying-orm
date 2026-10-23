@@ -1,8 +1,8 @@
 package com.flying.orm.rdb.metadata;
 
-import com.flying.orm.core.form.DynamicField;
-import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
+import com.flying.orm.core.metadata.RelationIdentity;
+import com.flying.orm.core.metadata.ReferentialAction;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -26,7 +26,7 @@ class NativeForeignKeyMetadataTest {
 
     @Test
     void nativeForeignKeyQueriesProjectSourceAndReferencedSchema() {
-        List<InformationSchemaFormMetadataReader.Queries> readers = List.of(
+        List<MetadataQueryProfile.Queries> readers = List.of(
                 H2MetadataQueries.queries(),
                 MySqlMetadataQueries.queries(),
                 PostgreSqlMetadataQueries.queries(),
@@ -49,26 +49,27 @@ class NativeForeignKeyMetadataTest {
 
     @Test
     void keepsCrossSchemaForeignKeyTargetQualifiedButLeavesLocalTargetUnqualified() {
-        assertEquals("tenant", foreignKey("app", "app").referenceTable());
-        assertEquals("identity.tenant", foreignKey("app", "identity").referenceTable());
+        assertEquals(RelationIdentity.table("tenant"), foreignKey("app", "app").reference());
+        assertEquals(RelationIdentity.of(null, "identity", "tenant"), foreignKey("app", "identity").reference());
+        assertEquals(ReferentialAction.CASCADE, foreignKey("app", "identity").onDelete());
+        assertEquals(ReferentialAction.RESTRICT, foreignKey("app", "identity").onUpdate());
     }
 
-    private static com.flying.orm.core.metadata.ForeignKeyMetadata foreignKey(
+    private static com.flying.orm.core.metadata.ForeignKeyDefinition foreignKey(
             String tableSchema,
             String referencedTableSchema) {
-        DynamicForm form = DynamicForm.builder("orders", "orders")
-                                      .addField(DynamicField.of("tenant_id", "BIGINT"))
-                                      .build();
-        TableMetadata metadata = FormMetadataRowConverter.toTableMetadata(
-                "orders",
-                form,
+        RelationalTableDefinition metadata = FormMetadataRowConverter.toTableDefinition(RelationIdentity.table("orders"),
+                FormMetadataRowConverter.tableBuilder(RelationIdentity.table("orders"), List.of(
+                        Map.of("COLUMN_NAME", "tenant_id", "DATA_TYPE", "BIGINT")), value -> value),
                 List.of(),
                 List.of(Map.of("FOREIGN_KEY_NAME", "fk_orders_tenant",
                                "TABLE_SCHEMA", tableSchema,
                                "COLUMN_NAME", "tenant_id",
                                "REFERENCED_TABLE_SCHEMA", referencedTableSchema,
                                "REFERENCED_TABLE_NAME", "tenant",
-                               "REFERENCED_COLUMN_NAME", "id")));
+                               "ON_DELETE", "CASCADE",
+                               "ON_UPDATE", "RESTRICT",
+                               "REFERENCED_COLUMN_NAME", "id")), List.of(), MetadataQueryProfile.SnapshotDialect.PARTIAL);
         return metadata.foreignKey("fk_orders_tenant");
     }
 }

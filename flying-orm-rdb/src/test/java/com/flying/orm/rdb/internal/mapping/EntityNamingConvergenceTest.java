@@ -49,7 +49,8 @@ class EntityNamingConvergenceTest {
         EntityMetadata<ExplicitRecord> schema = EntitySchemaDescriptor.builder(ExplicitRecord.class).build().metadata();
         for (EntityMetadata<ExplicitRecord> metadata : java.util.List.of(crud, schema)) {
             assertEquals("explicit_record", metadata.formId());
-            assertEquals("app.AuditLog", metadata.table());
+            assertEquals("AuditLog", metadata.table());
+            assertEquals("app", metadata.toDynamicForm().relationIdentity().schema().orElseThrow());
             assertEquals("PrimaryID", metadata.field("id").columnName());
             assertEquals("DisplayName", metadata.field("displayName").columnName());
         }

@@ -3,8 +3,6 @@ package com.flying.orm.rdb.operator;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.page.CursorPageQuery;
-import com.flying.orm.core.page.CursorSort;
 import com.flying.orm.core.page.KeysetPageQuery;
 import com.flying.orm.core.page.KeysetSort;
 import com.flying.orm.core.page.NullOrder;
@@ -14,11 +12,12 @@ import com.flying.orm.rdb.batch.BatchExecutionEvidenceException;
 import com.flying.orm.rdb.batch.BatchExecutionState;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.bootstrap.FlyingOrmClients;
-import com.flying.orm.rdb.form.BatchOptimisticUpdate;
+import com.flying.orm.rdb.form.BatchUpdate;
 import com.flying.orm.rdb.form.spec.BatchOperation;
 import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.jdbc.JdbcConnectionAccess;
 import com.flying.orm.rdb.lock.OptimisticLockOptions;
+import com.flying.orm.rdb.mapping.RowMapper;
 import com.flying.orm.rdb.reactive.R2dbcConnectionAccess;
 import io.r2dbc.spi.ConnectionFactories;
 import org.h2.jdbcx.JdbcDataSource;
@@ -32,9 +31,12 @@ import reactor.core.publisher.SignalType;
 import java.sql.Connection;
 import java.time.Duration;
 import java.util.AbstractList;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -94,10 +96,66 @@ class OperatorLifecycleAcceptanceTest {
     }
 
     @Test
+    void customRowMappingOwnsColumnAndCompletedRowExtensionsInBothKernels() throws Exception {
+        try (java.sql.Statement statement = keepAlive.createStatement()) {
+            statement.execute("insert into users values (1, 'Alice', 0), (2, null, 0)");
+        }
+        List<String> columns = new ArrayList<>();
+        RowMapper<Map<String, Object>> mapper = source -> {
+            Map<String, Object> target = new LinkedHashMap<>();
+            for (int index = 0; index < source.columnCount(); index++) {
+                String label = source.columnName(index);
+                Object value = source.value(index);
+                columns.add(index + ":" + label);
+                target.put(label, value == null ? "absent" : value);
+            }
+            target.put("display", target.get("id") + ":" + target.get("name"));
+            return target;
+        };
+        List<Map<String, Object>> expected = List.of(
+                Map.of("id", 1, "name", "Alice", "display", "1:Alice"),
+                Map.of("id", 2, "name", "absent", "display", "2:absent"));
+        assertEquals(expected, clients.syncOperator().dml().query(USERS)
+                .select("id", "name").orderByAsc("id").fetch(mapper));
+        assertEquals(List.of("0:id", "1:name", "0:id", "1:name"), columns);
+        assertEquals(jdbcAcquired.get(), jdbcReleased.get());
+        columns.clear();
+        Flux<Map<String, Object>> pending = clients.operator().dml().query(USERS)
+                .select("id", "name").orderByAsc("id").fetch(mapper);
+        assertTrue(columns.isEmpty());
+        assertEquals(0, reactiveAcquired.get());
+        assertEquals(expected, pending.collectList().block(WAIT));
+        assertEquals(List.of("0:id", "1:name", "0:id", "1:name"), columns);
+        assertEquals(SignalType.ON_COMPLETE, reactiveReleased.poll(10, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void mappedCompletionCanStopNormallyWithoutAnException() throws Exception {
+        clients.syncOperator().dml().insertBatch(USERS, List.of(row(1, "Alice"), row(2, "Bob")));
+        List<Integer> mapped = new ArrayList<>();
+        RowMapper<Integer> mapper = source -> {
+            Integer id = (Integer) source.get("id");
+            mapped.add(id);
+            return id;
+        };
+        List<Integer> consumed = new ArrayList<>();
+        assertEquals(1L, clients.syncOperator().dml().query(USERS).orderByAsc("id")
+                .forEachWhile(mapper, id -> { consumed.add(id); return false; }));
+        assertEquals(List.of(1), mapped);
+        assertEquals(mapped, consumed);
+        assertEquals(jdbcAcquired.get(), jdbcReleased.get());
+        mapped.clear();
+        assertEquals(List.of(1), clients.operator().dml().query(USERS).orderByAsc("id")
+                .fetch(mapper).takeUntil(id -> id == 1).collectList().block(WAIT));
+        assertEquals(List.of(1), mapped);
+        assertEquals(SignalType.CANCEL, reactiveReleased.poll(10, TimeUnit.SECONDS));
+    }
+
+    @Test
     void reactiveQueryFreezesBuilderAndOwnsAConnectionPerSubscription() {
         clients.syncOperator().dml().insertBatch(USERS, List.of(row(1, "Alice"), row(2, "Bob")));
         var query = clients.operator().dml().query(USERS).where("id", 1);
-        var pending = query.fetchMap();
+        var pending = query.fetch();
         query.where("id", 2);
         assertEquals(0, reactiveAcquired.get());
         for (int i = 0; i < 2; i++) {
@@ -108,13 +166,45 @@ class OperatorLifecycleAcceptanceTest {
     }
 
     @Test
+    void asynchronousPreparationFinishesBeforeThePublicQueryIsBuiltAndExecuted() throws Exception {
+        clients.syncOperator().dml().insertBatch(USERS, List.of(row(1, "Alice"), row(2, "Bob")));
+        CompletableFuture<Integer> preparedId = new CompletableFuture<>();
+        CompletableFuture<UserRow> result = Mono.fromFuture(preparedId)
+                .flatMap(id -> clients.operator().dml().query(USERS).where("id", id).one(UserRow.class))
+                .toFuture();
+
+        assertEquals(0, reactiveAcquired.get());
+        preparedId.complete(2);
+        assertEquals("Bob", result.get(10, TimeUnit.SECONDS).name());
+        assertEquals(1, reactiveAcquired.get());
+        assertEquals(SignalType.ON_COMPLETE, reactiveReleased.poll(10, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void failedOrCancelledPreparationDoesNotAcquireADatabaseConnection() {
+        IllegalStateException failure = new IllegalStateException("query preparation failed");
+        Mono<UserRow> failed = Mono.<Integer>error(failure)
+                .flatMap(id -> clients.operator().dml().query(USERS).where("id", id).one(UserRow.class));
+        assertSame(failure, assertThrows(IllegalStateException.class, () -> failed.block(WAIT)));
+
+        CompletableFuture<Integer> preparedId = new CompletableFuture<>();
+        CompletableFuture<UserRow> cancelled = Mono.fromFuture(preparedId)
+                .flatMap(id -> clients.operator().dml().query(USERS).where("id", id).one(UserRow.class))
+                .toFuture();
+        assertTrue(cancelled.cancel(false));
+        assertTrue(preparedId.isCancelled());
+        assertEquals(0, reactiveAcquired.get());
+        assertTrue(reactiveReleased.isEmpty());
+    }
+
+    @Test
     void typedTerminalsFreezeBuilderAndStayColdUntilEachSubscription() {
         clients.syncOperator().dml().insertBatch(USERS, List.of(row(1, "Alice"), row(2, "Bob")));
         QueryOperator query = clients.operator().dml().query(USERS).where("id", 1);
         List<Mono<UserRow>> reads = List.of(
                 query.one(UserRow.class),
                 query.page(1, 10, UserRow.class).map(page -> page.rows().getFirst()),
-                query.cursorPage(CursorPageQuery.first(10, CursorSort.asc("id")), UserRow.class)
+                query.keysetPage(KeysetPageQuery.first(10, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST)), UserRow.class)
                         .map(page -> page.rows().getFirst()),
                 query.keysetPage(KeysetPageQuery.first(10, KeysetSort.asc("id", NullOrder.LAST)), UserRow.class)
                         .map(page -> page.rows().getFirst()));
@@ -131,7 +221,7 @@ class OperatorLifecycleAcceptanceTest {
     @Test
     void cancelledQueryReleasesItsConnectionOnce() throws Exception {
         clients.syncOperator().dml().insertBatch(USERS, List.of(row(1, "Alice"), row(2, "Bob")));
-        var rows = clients.operator().dml().query(USERS).orderByAsc("id").fetchMap();
+        var rows = clients.operator().dml().query(USERS).orderByAsc("id").fetch();
         assertEquals(1, rows.take(1).single().block(WAIT).get("id"));
         assertEquals(SignalType.CANCEL, reactiveReleased.poll(10, TimeUnit.SECONDS));
         assertEquals(1, reactiveAcquired.get());
@@ -180,7 +270,7 @@ class OperatorLifecycleAcceptanceTest {
         assertEquals(2, consumed.get());
         assertEquals(2, reactiveAcquired.get());
         assertEquals(2, reactiveReleased.size());
-        assertEquals(1, clients.syncOperator().dml().query(USERS).fetchMap().size());
+        assertEquals(1, clients.syncOperator().dml().query(USERS).fetch().size());
     }
 
     @Test
@@ -188,14 +278,14 @@ class OperatorLifecycleAcceptanceTest {
         clients.syncOperator().dml().insertBatch(USERS, List.of(row(1, "Alice"), row(2, "Bob")));
         var scope = DataScope.orgOnly("id", 1);
         var query = QuerySpec.of(USERS, ConditionGroup.and().build());
-        assertEquals(1, clients.syncOperator().withDefaultDataScope(scope).dml().query(USERS).fetchMap().size());
+        assertEquals(1, clients.syncOperator().withDefaultDataScope(scope).dml().query(USERS).fetch().size());
         assertEquals(2, clients.syncForms().select(query).size());
         var scoped = clients.withDefaultDataScope(scope);
         assertAll(
-                () -> assertEquals(1, scoped.syncOperator().dml().query(USERS).fetchMap().size()),
+                () -> assertEquals(1, scoped.syncOperator().dml().query(USERS).fetch().size()),
                 () -> assertEquals(1, scoped.syncForms().select(query).size()),
                 () -> assertEquals(1, scoped.syncRepository(UserRow.class).createQuery().fetch().size()),
-                () -> assertEquals(1L, scoped.operator().dml().query(USERS).fetchMap().count().block(WAIT)),
+                () -> assertEquals(1L, scoped.operator().dml().query(USERS).fetch().count().block(WAIT)),
                 () -> assertEquals(1L, scoped.forms().select(query).count().block(WAIT)),
                 () -> assertEquals(1L, scoped.repository(UserRow.class).createQuery().fetch().count().block(WAIT)),
                 () -> assertEquals(2, clients.syncRepository(UserRow.class).createQuery().fetch().size()));
@@ -250,7 +340,7 @@ class OperatorLifecycleAcceptanceTest {
                 () -> assertEquals(0, evidence.failedOffsets().count()),
                 () -> assertEquals(1, jdbcAcquired.get()),
                 () -> assertEquals(1, jdbcReleased.get()));
-        long changed = clients.syncOperator().dml().query(USERS).where("name", "Changed").fetchMap().size();
+        long changed = clients.syncOperator().dml().query(USERS).where("name", "Changed").fetch().size();
         assertEquals(changed, evidence.successfulCount());
         assertEquals(changed, evidence.affectedRows().value());
     }
@@ -260,7 +350,7 @@ class OperatorLifecycleAcceptanceTest {
         return switch (operation) {
             case INSERT -> dml.insertBatch(USERS, failingList(i -> row(i + 1, "Changed"), failure, failAt));
             case UPSERT -> dml.upsertBatch(USERS, failingList(i -> row(i + 1, "Changed"), failure, failAt));
-            case UPDATE -> dml.updateBatch(USERS, failingList(i -> new BatchOptimisticUpdate(
+            case UPDATE -> dml.updateBatch(USERS, failingList(i -> new BatchUpdate(
                     Map.of("name", "Changed"), ConditionGroup.and().where("id", "=", i + 1).build(),
                     OptimisticLockOptions.increment("version", 0)), failure, failAt));
         };

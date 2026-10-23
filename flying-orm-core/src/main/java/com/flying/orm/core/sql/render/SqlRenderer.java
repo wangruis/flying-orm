@@ -6,12 +6,16 @@ import com.flying.orm.core.condition.ConditionNode;
 import com.flying.orm.core.condition.LogicalOperator;
 import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.condition.TermRegistry;
+import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.internal.Names;
 import com.flying.orm.core.internal.condition.ConditionExecutionViews;
 import com.flying.orm.core.internal.value.OwnedBindableValues;
+import com.flying.orm.core.metadata.Feature;
+import com.flying.orm.core.sql.expression.SqlExpressionFunctions;
 
 import java.util.ArrayDeque;
 import java.util.Objects;
+import java.util.function.Function;
 import java.util.function.UnaryOperator;
 
 /**
@@ -28,45 +32,28 @@ import java.util.function.UnaryOperator;
 public final class SqlRenderer implements SqlRenderContext {
 
     private final SqlTermRegistry termRegistry;
+    private final SqlExpressionFunctions expressionFunctions;
     private final long standardConditionTermMask;
     private final ValueCodecRegistry valueCodecs;
     private final UnaryOperator<String> identifierRenderer;
     private final UnaryOperator<String> structureIdentifierRenderer;
-
-    /** 仍以实例身份隔离；只有启用 descriptor 时才把冻结声明混入现有缓存键哈希。 */
-    private final int cacheHashCode;
+    private final Function<String, DynamicField> fields;
 
     private SqlRenderer(SqlTermRegistry termRegistry,
                         ValueCodecRegistry valueCodecs,
                         UnaryOperator<String> identifierRenderer,
-                        UnaryOperator<String> structureIdentifierRenderer) {
+                        UnaryOperator<String> structureIdentifierRenderer,
+                        SqlExpressionFunctions expressionFunctions,
+                        Function<String, DynamicField> fields) {
         this.termRegistry = Objects.requireNonNull(termRegistry, "sql term registry must not be null");
+        this.expressionFunctions = Objects.requireNonNull(expressionFunctions, "expression functions must not be null");
         this.standardConditionTermMask = ConditionExecutionViews.standardTermMask(termRegistry.conditionTerms());
         this.valueCodecs = Objects.requireNonNull(valueCodecs, "value codec registry must not be null");
         this.identifierRenderer = Objects.requireNonNull(identifierRenderer,
                                                          "sql identifier renderer must not be null");
         this.structureIdentifierRenderer = Objects.requireNonNull(
                 structureIdentifierRenderer, "sql structure identifier renderer must not be null");
-        int identityHash = System.identityHashCode(this);
-        if (this.termRegistry.hasDescriptors()) {
-            identityHash = 31 * identityHash + this.termRegistry.descriptorFingerprint().hashCode();
-        }
-        if (this.valueCodecs.hasDescriptors()) {
-            identityHash = 31 * identityHash + this.valueCodecs.descriptorFingerprint().hashCode();
-        }
-        this.cacheHashCode = identityHash;
-    }
-
-    /** SqlRenderer 继续按对象身份判等；哈希只在构造时计算一次，不触碰请求值。 */
-    @Override
-    public int hashCode() {
-        return cacheHashCode;
-    }
-
-    /** 与既有 Object 语义一致：不同装配实例即使 descriptor 相同也不能共享 renderer 缓存身份。 */
-    @Override
-    public boolean equals(Object other) {
-        return this == other;
+        this.fields = fields;
     }
 
     /**
@@ -122,14 +109,19 @@ public final class SqlRenderer implements SqlRenderContext {
         return accumulator.publish();
     }
 
-    /** 装配时确定的关系 term 标记；未启用的普通 CRUD 不创建关联上下文。 */
+    /** 全局或字段扩展可能声明关联 term；无字段绑定的普通 CRUD 保留装配期快路。 */
     public boolean hasCorrelatedTerms() {
-        return termRegistry.hasCorrelatedTerms();
+        return fields != null || termRegistry.hasCorrelatedTerms();
+    }
+
+    /** 判断指定 term 是否使用关联子查询，供组合查询确定外层表达式归属。 */
+    public boolean isCorrelatedTerm(String operator) {
+        return termRegistry.handler(operator) instanceof CorrelatedSqlTermHandler;
     }
 
     @Override
     public String identifier(String name) {
-        String safeName = SqlIdentifiers.requireIdentifier(name, "sql identifier");
+        String safeName = SqlIdentifiers.requireIdentifier(name);
         return Objects.requireNonNull(identifierRenderer.apply(safeName),
                                       "rendered sql identifier must not be null");
     }
@@ -161,13 +153,27 @@ public final class SqlRenderer implements SqlRenderContext {
         return SqlFragment.encodedParameter(valueCodecs.write(value));
     }
 
+    @Override
+    public DynamicField field(String name) {
+        if (fields == null) {
+            throw new IllegalStateException("SQL render context has no field metadata");
+        }
+        return Objects.requireNonNull(fields.apply(name), "condition field metadata must not be null");
+    }
+
+    /** 绑定当前查询的字段解析器，不修改共享渲染器或复制字段模型。 */
+    public SqlRenderer withFields(Function<String, DynamicField> fields) {
+        return new SqlRenderer(termRegistry, valueCodecs, identifierRenderer, structureIdentifierRenderer,
+                expressionFunctions, Objects.requireNonNull(fields, "condition fields must not be null"));
+    }
+
     /** 供条件计划缓存 O(1) 判断标准结构 term 是否被覆盖。 */
     public long standardConditionTermMask() {
-        return standardConditionTermMask;
+        return fields == null ? standardConditionTermMask : 0;
     }
 
     String structureIdentifier(String name) {
-        String safeName = SqlIdentifiers.requireIdentifier(name, "sql structure identifier");
+        String safeName = SqlIdentifiers.requireIdentifier(name);
         return Objects.requireNonNull(structureIdentifierRenderer.apply(safeName),
                                       "rendered sql structure identifier must not be null");
     }
@@ -181,6 +187,11 @@ public final class SqlRenderer implements SqlRenderContext {
         return valueCodecs;
     }
 
+    /** 返回装配时冻结的表达式函数，与客户端及所有方言化视图共享。 */
+    public SqlExpressionFunctions expressionFunctions() {
+        return expressionFunctions;
+    }
+
     /**
      * 保留当前 term 注册表，只替换参数转换规则。返回新实例，原渲染器和正在执行的请求不受影响。
      *
@@ -188,7 +199,7 @@ public final class SqlRenderer implements SqlRenderContext {
      * @return 使用新 codec 的只读渲染器
      */
     public SqlRenderer withValueCodecs(ValueCodecRegistry valueCodecs) {
-        return new SqlRenderer(termRegistry, valueCodecs, identifierRenderer, structureIdentifierRenderer);
+        return new SqlRenderer(termRegistry, valueCodecs, identifierRenderer, structureIdentifierRenderer, expressionFunctions, fields);
     }
 
     /**
@@ -203,7 +214,7 @@ public final class SqlRenderer implements SqlRenderContext {
     public SqlRenderer withIdentifierRenderer(UnaryOperator<String> identifierRenderer) {
         UnaryOperator<String> safeRenderer = Objects.requireNonNull(
                 identifierRenderer, "sql identifier renderer must not be null");
-        return new SqlRenderer(termRegistry, valueCodecs, safeRenderer, safeRenderer);
+        return new SqlRenderer(termRegistry, valueCodecs, safeRenderer, safeRenderer, expressionFunctions, fields);
     }
 
     /**
@@ -213,14 +224,17 @@ public final class SqlRenderer implements SqlRenderContext {
      * {@link #withIdentifierRenderer(UnaryOperator)} 同时配置所有标识符。</p>
      *
      * @param identifierRenderer 当前条件字段的安全渲染器
+     * @param fields 当前条件字段的已解析声明
      * @return 只替换条件字段规则的新渲染器
      */
-    public SqlRenderer withFieldIdentifierRenderer(UnaryOperator<String> identifierRenderer) {
+    public SqlRenderer withFieldIdentifierRenderer(UnaryOperator<String> identifierRenderer,
+            Function<String, DynamicField> fields) {
         return new SqlRenderer(termRegistry,
                                valueCodecs,
                                Objects.requireNonNull(identifierRenderer,
                                                       "sql field identifier renderer must not be null"),
-                               structureIdentifierRenderer);
+                               structureIdentifierRenderer, expressionFunctions,
+                               Objects.requireNonNull(fields, "condition fields must not be null"));
     }
 
     private boolean renderTerm(ConditionNode node, RenderAccumulator accumulator,
@@ -229,13 +243,18 @@ public final class SqlRenderer implements SqlRenderContext {
         // AST 目前只有叶子 term 和逻辑分组。遇到未知实现立即失败，不能悄悄漏掉安全条件。
         if (node instanceof TermCondition term) {
             SqlTermHandler handler = termRegistry.handler(term.operator());
+            if (fields != null) {
+                DynamicField field = fields.apply(term.field());
+                Feature feature = field == null ? null : field.features().find(term.operator()).orElse(null);
+                if (feature instanceof SqlTermHandler local) handler = local;
+            }
             if (handler instanceof SimpleSqlTermHandler simple
                     && simple.appendTo(term, this, accumulator)) {
                 return true;
             }
-            if (correlatedFields != null && handler instanceof RelationExistsTermHandler relation) {
+            if (correlatedFields != null && handler instanceof CorrelatedSqlTermHandler relation) {
                 return appendTerm(term, relation.render(
-                        term, this, correlatedFields.apply(term.field()), outerQualifiers.apply(term.field())),
+                        term, this, correlatedFields, outerQualifiers),
                         accumulator);
             }
             return appendTerm(term, handler.render(term, this), accumulator);
@@ -376,6 +395,7 @@ public final class SqlRenderer implements SqlRenderContext {
         private final SqlTermRegistry.Builder terms = SqlTermRegistry.builder();
 
         private ValueCodecRegistry valueCodecs = ValueCodecRegistry.standard();
+        private SqlExpressionFunctions expressionFunctions = SqlExpressionFunctions.defaults();
 
         private Builder() {
         }
@@ -431,7 +451,13 @@ public final class SqlRenderer implements SqlRenderContext {
          */
         public SqlRenderer build() {
             UnaryOperator<String> identifiers = UnaryOperator.identity();
-            return new SqlRenderer(terms.build(), valueCodecs, identifiers, identifiers);
+            return new SqlRenderer(terms.build(), valueCodecs, identifiers, identifiers, expressionFunctions, null);
+        }
+
+        /** 配置可信后端表达式函数，不向请求开放 SQL 文本入口。 */
+        public Builder expressionFunctions(SqlExpressionFunctions functions) {
+            this.expressionFunctions = Objects.requireNonNull(functions, "expression functions must not be null");
+            return this;
         }
     }
 }

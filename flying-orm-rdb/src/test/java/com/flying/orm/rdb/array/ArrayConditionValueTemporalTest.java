@@ -53,10 +53,9 @@ class ArrayConditionValueTemporalTest {
     }
 
     @Test
-    void keepsTheLegacyStringDataTypeAccessorForBinaryCompatibility() throws Exception {
-        var accessor = ArrayConditionValue.class.getMethod("dataType");
-        assertEquals(String.class, accessor.getReturnType());
+    void exposesTheCanonicalDatabaseTypeUsedForBinding() {
         ArrayConditionValue condition = new ArrayConditionValue(List.of(1), "INTEGER[]");
-        assertEquals("INTEGER[]", accessor.invoke(condition));
+        assertEquals("INTEGER[]", condition.databaseType().declaration());
+        assertEquals(Integer[].class, condition.parameter().getClass());
     }
 }

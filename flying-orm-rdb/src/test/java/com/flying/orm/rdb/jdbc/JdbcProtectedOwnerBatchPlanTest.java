@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.jdbc;
 
+import com.flying.orm.rdb.internal.protection.ProtectedReplacementBatchPlan;
 import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
@@ -81,7 +82,7 @@ class JdbcProtectedOwnerBatchPlanTest {
                     row(updateWork("select id from business_row where id = ?", List.of(1L))),
                     row(updateWork("select id from business_row where id = ?", List.of(2L))));
 
-            JdbcProtectedBatchSideIndex.Prepared prepared = new JdbcProtectedBatchSideIndex().prepare(
+            ProtectedReplacementBatchPlan.Prepared prepared = new JdbcProtectedBatchSideIndex().prepare(
                     connection, request(), rows);
 
             assertEquals(Map.of("id", 1L), prepared.rows().get(0).owners().getFirst());

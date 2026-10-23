@@ -48,17 +48,33 @@ class TermExtensionCapabilityAndBudgetTest {
     }
 
     @Test
-    void structuredCustomTermWithoutDescriptorFailsClosedBeforeRendering() {
+    void explicitlyAllowedCustomTermDoesNotRequireGovernanceMetadata() {
         TermRegistry terms = TermRegistry.builder()
-                                         .add(TermHandler.simple("trusted-only"))
+                                         .add(TermHandler.simple("user-in-org"))
                                          .build();
         StructuredConditionPolicy policy = StructuredConditionPolicy.defaults()
-                                                                      .allowOperator("trusted-only")
-                                                                      .withTerms(terms);
+                                                                      .allowOperator("user-in-org")
+                                                                      .withTerms(terms)
+                                                                      .withMaxNodes(1);
 
-        assertThrows(IllegalArgumentException.class,
-                     () -> StructuredConditionCompiler.create().compile(
-                             form(), StructuredConditionInput.term("id", "trusted-only", 7L), policy));
+        ConditionGroup compiled = StructuredConditionCompiler.create().compile(
+                form(), StructuredConditionInput.term("id", "user-in-org", "org-a"), policy);
+        assertEquals("org-a", ((TermCondition) compiled.children().getFirst()).value());
+        StructuredConditionException error = assertThrows(StructuredConditionException.class,
+                () -> StructuredConditionCompiler.create().compile(form(),
+                        StructuredConditionInput.and(
+                                StructuredConditionInput.term("id", "user-in-org", "org-a")), policy));
+        assertEquals(StructuredConditionErrorCode.NODE_COUNT_EXCEEDED, error.code());
+    }
+
+    @Test
+    void termMetadataDoesNotImplicitlyAllowExternalOperators() {
+        TermRegistry terms = TermRegistry.builder().add(TermHandler.simple("user-in-org")).build();
+        StructuredConditionException error = assertThrows(StructuredConditionException.class,
+                () -> StructuredConditionCompiler.create().compile(form(),
+                        StructuredConditionInput.term("id", "user-in-org", "org-a"),
+                        StructuredConditionPolicy.defaults().withTerms(terms)));
+        assertEquals(StructuredConditionErrorCode.OPERATOR_NOT_ALLOWED, error.code());
     }
 
     private static DynamicForm form() {

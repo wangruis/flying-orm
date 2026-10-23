@@ -2,22 +2,26 @@ package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.expression.ValueExpression;
+import com.flying.orm.core.sql.expression.SqlExpressionCompiler;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.page.CursorPageQuery;
+import com.flying.orm.core.join.JoinQuerySpec;
+import com.flying.orm.core.page.KeysetPageQuery;
 import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.sql.render.SqlFragment;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.core.sql.render.SqlTermHandler;
 import com.flying.orm.core.internal.value.OwnedBindableValues;
+import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.cache.OrmCachePolicy;
-import com.flying.orm.rdb.codec.DialectScalarValueCodec;
 import com.flying.orm.rdb.dialect.DialectCapabilities;
-import com.flying.orm.rdb.dialect.DialectFeature;
+import com.flying.orm.rdb.dialect.DialectCapabilityId;
 import com.flying.orm.rdb.dialect.PaginationDialect;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.dialect.UpsertDialect;
@@ -25,11 +29,16 @@ import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.internal.plan.StructuralPlanCaches;
 import com.flying.orm.rdb.lock.LockingReadDialect;
 import com.flying.orm.rdb.lock.OptimisticLockOptions;
+import com.flying.orm.rdb.lock.ReadLock;
 import com.flying.orm.rdb.metadata.MetadataCacheInvalidator;
 import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
+import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.mapping.EntityFieldMetadata;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 
 import java.util.List;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Function;
@@ -50,11 +59,11 @@ import java.util.function.UnaryOperator;
  */
 public final class FormDataSqlRenderer {
 
-    private final FormSqlRenderSupport support;
+    final FormSqlRenderSupport support;
     private final PaginationDialect paginationDialect;
     private final UpsertDialect upsertDialect;
     private final LockingReadDialect lockingReadDialect;
-    private final FormQuerySqlRenderer queryRenderer;
+    final FormQuerySqlRenderer queryRenderer;
     private final JoinQuerySqlRenderer joinRenderer;
     final FormBatchSqlRenderer batchRenderer;
     private final FormWriteSqlRenderer writeRenderer;
@@ -82,8 +91,7 @@ public final class FormDataSqlRenderer {
         this.decodingPlans = Objects.requireNonNull(
                 decodingPlans, "form field decoding plan cache must not be null");
         this.protection = new FormProtectionSqlSupport(
-                this.support, this.queryRenderer, this.writeRenderer, this.protectedFields,
-                this.paginationDialect);
+                this.support, this.queryRenderer, this.protectedFields);
     }
 
     /**
@@ -105,8 +113,41 @@ public final class FormDataSqlRenderer {
         return "sqlserver".equals(support.dialectName);
     }
 
+    SqlExpressionCompiler.Operand compileExpression(ValueExpression expression,
+            Function<ValueExpression.Field, SqlExpressionCompiler.Operand> fields) {
+        return support.expression(expression, fields);
+    }
+
+    static DynamicField expressionField(String name, LogicalType type) {
+        String declaration = type == null ? "OTHER" : switch (type) {
+            case SMALL_INTEGER -> "SMALLINT";
+            case INTEGER -> "INTEGER";
+            case BIG_INTEGER -> "BIGINT";
+            case FLOAT -> "DOUBLE PRECISION";
+            case TEXT -> "VARCHAR";
+            case OFFSET_TIME -> "TIME WITH TIME ZONE";
+            case OFFSET_TIMESTAMP -> "TIMESTAMP WITH TIME ZONE";
+            default -> type.name();
+        };
+        return DynamicField.of(name, declaration);
+    }
+
+    SqlRequest selectExpressions(DynamicForm form, ConditionGroup where, FormQueryExpressions.Projection projection,
+                                  List<String> groups, List<PageSort> sorts,
+                                  boolean first, ReadLock lock) {
+        return queryRenderer.selectExpressions(form, where, projection, groups, sorts,
+                first, lockingReadDialect(), lock);
+    }
+
     boolean postgresqlDialect() {
         return "postgresql".equals(support.dialectName);
+    }
+
+    SqlRequest selectKeysetExpressions(DynamicForm form, ConditionGroup where, SqlFragment columns,
+                                       HiddenProjectionLayout layout, KeysetPageNormalizer.NormalizedKeysetPage page,
+                                       LockingReadDialect dialect, ReadLock lock) {
+        return FormKeysetSqlRenderer.selectExpressions(support, paginationDialect, form, where, columns,
+                layout, page, dialect, lock);
     }
 
     /** 聚合内部桥接复用普通查询已经确立的稳定时间排序约束。 */
@@ -154,6 +195,16 @@ public final class FormDataSqlRenderer {
      * @return 可并发复用的 SQL 渲染门面
      */
     public static FormDataSqlRenderer create(SqlRenderer conditionRenderer, RdbDialect dialect) {
+        return create(conditionRenderer, dialect, StructuralPlanCaches.create(OrmCachePolicy.safeDefaults()),
+                CacheRegionPolicy.sqlPlanDefaults(), ProtectedFieldRuntime.withoutKeys(), List.of());
+    }
+
+    /** 客户端按最终配置一次构造渲染与解码组件，不创建随后丢弃的默认组件图。 */
+    @InternalApi
+    public static FormDataSqlRenderer create(SqlRenderer conditionRenderer, RdbDialect dialect,
+                                             StructuralPlanCaches caches, CacheRegionPolicy resultCachePolicy,
+                                             ProtectedFieldRuntime protectedFields,
+                                             Iterable<? extends EntityMetadata<?>> models) {
         RdbDialect safeDialect = Objects.requireNonNull(dialect, "rdb dialect must not be null");
         UnaryOperator<String> identifiers = safeDialect.schema()::identifier;
         SqlRenderer dialectConditions = Objects.requireNonNull(conditionRenderer, "sql renderer must not be null")
@@ -161,37 +212,46 @@ public final class FormDataSqlRenderer {
         FormSqlRenderSupport support = new FormSqlRenderSupport(dialectConditions,
                                                                 safeDialect.json(),
                                                                 safeDialect.name(),
-                                                                safeDialect.supports(DialectFeature.NATIVE_BOOLEAN),
+                                                                safeDialect.supports(DialectCapabilityId.NATIVE_BOOLEAN),
                                                                 identifiers,
-                                                                StructuralPlanCaches.create(
-                                                                        OrmCachePolicy.safeDefaults()),
-                                                                Map.of(),
+                                                                caches,
+                                                                entityFieldCodecs(models),
                                                                 safeDialect.capabilities(),
                                                                 safeDialect.schema()::relationIdentifier);
         return new FormDataSqlRenderer(support, safeDialect.pagination(), safeDialect.upsert(),
                                        safeDialect.lockingReadDialect(),
-                                       ProtectedFieldRuntime.withoutKeys(),
-                                       FormFieldDecodingPlanCache.create(CacheRegionPolicy.sqlPlanDefaults()));
+                                       protectedFields,
+                                       FormFieldDecodingPlanCache.create(resultCachePolicy));
     }
 
-    /**
-     * 使用调用方管理的结构计划缓存创建等价门面，用于让元数据失效和 SQL 计划失效落在同一张缓存图中。
-     *
-     * @param caches 结构计划缓存
-     * @return 使用指定缓存的新门面
-     */
+    /** 从已编译实体字段一次绑定执行所需的 codec；不构造或依赖 Schema 描述。 */
     @InternalApi
-    public FormDataSqlRenderer withPlanCaches(StructuralPlanCaches caches) {
-        return new FormDataSqlRenderer(support.withPlanCaches(caches), paginationDialect, upsertDialect,
-                                       lockingReadDialect,
-                                       protectedFields, decodingPlans);
+    public FormDataSqlRenderer withEntityModels(Iterable<? extends EntityMetadata<?>> models) {
+        return withEntityFieldCodecs(entityFieldCodecs(models));
     }
 
-    /** 启动期挂接 descriptor 已解析的字段 codec；普通客户端继续复用共享空映射。 */
+    private static Map<DynamicField, EntityTypeMappingRegistry.Mapping> entityFieldCodecs(
+            Iterable<? extends EntityMetadata<?>> models) {
+        Map<DynamicField, EntityTypeMappingRegistry.Mapping> mappings = null;
+        for (EntityMetadata<?> model : models) {
+            for (EntityFieldMetadata field : model.fields()) {
+                EntityTypeMappingRegistry.Mapping mapping = field.customMapping();
+                if (mapping != null) {
+                    if (mappings == null) mappings = new IdentityHashMap<>();
+                    mappings.put(field.field(), mapping);
+                }
+            }
+        }
+        return mappings == null ? Map.of() : Collections.unmodifiableMap(mappings);
+    }
+
+    /** 按字段实例快照显式 codec 绑定；实体客户端使用已编译模型入口。 */
     @InternalApi
     public FormDataSqlRenderer withEntityFieldCodecs(
             Map<DynamicField, EntityTypeMappingRegistry.Mapping> mappings) {
-        return new FormDataSqlRenderer(support.withCustomFieldCodecs(mappings),
+        Map<DynamicField, EntityTypeMappingRegistry.Mapping> owned = mappings.isEmpty()
+                ? Map.of() : Collections.unmodifiableMap(new IdentityHashMap<>(mappings));
+        return new FormDataSqlRenderer(support.withCustomFieldCodecs(owned),
                                        paginationDialect, upsertDialect, lockingReadDialect,
                                        protectedFields, decodingPlans.emptyCopy());
     }
@@ -202,14 +262,6 @@ public final class FormDataSqlRenderer {
         return new FormDataSqlRenderer(support, paginationDialect, upsertDialect, lockingReadDialect,
                                        Objects.requireNonNull(runtime,
                                                               "protected field runtime must not be null"), decodingPlans);
-    }
-
-    /** 使用客户端 SQL 计划区域的有界策略保存结果解码结构计划。 */
-    @InternalApi
-    public FormDataSqlRenderer withResultPlanCachePolicy(CacheRegionPolicy policy) {
-        return new FormDataSqlRenderer(support, paginationDialect, upsertDialect, lockingReadDialect,
-                                       protectedFields,
-                                       FormFieldDecodingPlanCache.create(policy));
     }
 
     /**
@@ -274,15 +326,16 @@ public final class FormDataSqlRenderer {
     }
 
     public SqlRequest select(DynamicForm form, ConditionGroup where) {
-        return queryRenderer.select(form, where);
+        return queryRenderer.select(form, where, null, List.of(), List.of(), null, false, null, null);
     }
 
     public SqlRequest select(DynamicForm form, ConditionGroup where, PageQuery page) {
-        return queryRenderer.select(form, where, page);
+        Objects.requireNonNull(page, "page query must not be null");
+        return queryRenderer.select(form, where, null, List.of(), page.sorts(), page, false, null, null);
     }
 
     public SqlRequest selectOrdered(DynamicForm form, ConditionGroup where, List<PageSort> sorts) {
-        return queryRenderer.selectOrdered(form, where, sorts);
+        return queryRenderer.select(form, where, null, List.of(), sorts, null, false, null, null);
     }
 
     public SqlRequest selectProjected(DynamicForm form,
@@ -290,15 +343,48 @@ public final class FormDataSqlRenderer {
                                       List<String> projections,
                                       List<String> groups,
                                       List<PageSort> sorts) {
-        return queryRenderer.selectProjected(form, where, projections, groups, sorts);
+        return queryRenderer.select(form, where, Objects.requireNonNull(projections, "query projections must not be null"),
+                groups, sorts, null, false, null, null);
     }
 
-    public SqlRequest select(DynamicForm form, ConditionGroup where, CursorPageQuery page) {
-        return queryRenderer.select(form, where, page);
+    public SqlRequest select(DynamicForm form, ConditionGroup where, KeysetPageQuery page) {
+        KeysetPageNormalizer.NormalizedKeysetPage normalized = KeysetPageNormalizer.normalize(form, page);
+        return queryRenderer.selectKeyset(form, where,
+                HiddenProjectionLayout.of(support.fieldNames(form.fields()), normalized), normalized);
     }
 
     public SqlRequest count(DynamicForm form, ConditionGroup where) {
-        return queryRenderer.count(form, where);
+        return queryRenderer.count(form, where, List.of());
+    }
+
+    /**
+     * 注册用 Java 查询描述的 EXISTS 条件。子查询投影的别名对应外层字段名，多个投影组成复合关联键。
+     * 子查询条件、JOIN、显式 Scope 和字段编码复用当前渲染器；不继承外层客户端的默认 Scope。
+     * 这是可信服务端扩展，注册到与当前渲染器相同方言的 SqlRenderer 后使用。
+     */
+    public SqlTermHandler relationExists(String id, Function<Object, JoinQuerySpec> query) {
+        return new RelatedQueryTermHandler(id, this, query, false);
+    }
+
+    /** 与 {@link #relationExists(String, Function)} 使用相同的关联键和查询规则，生成 NOT EXISTS。 */
+    public SqlTermHandler relationNotExists(String id, Function<Object, JoinQuerySpec> query) {
+        return new RelatedQueryTermHandler(id, this, query, true);
+    }
+
+    SqlRequest paginate(SqlRequest request, PageQuery page) {
+        return paginationDialect.paginate(request.sql(),
+                com.flying.orm.core.internal.value.OwnedBindableValues.ownedValues(request.parameters()), page);
+    }
+
+    /** 最终 SQL 复用统一编译器；参数仍属于当前请求，不进入结构缓存。 */
+    SqlRequest compileRequest(String sql, List<Object> parameters) {
+        return support.compiledRequest(sql, parameters);
+    }
+
+    /** 保留自定义分页方言的参数标记风格及请求参数所有权。 */
+    SqlRequest compileRequest(SqlRequest request) {
+        return new SqlRequest(support.compiledStatement(request.sql(), request.statement().parameterCount(),
+                request.bindMarkerStyle()), request.parameters());
     }
 
     /** 同包 JOIN 执行链复用的独立渲染入口。 */
@@ -329,14 +415,13 @@ public final class FormDataSqlRenderer {
     }
 
     /**
-     * 固定批量乐观更新的 SQL 和参数类型；后续行必须保持同一字段和条件布局。
+     * 固定批量更新的 SQL、参数类型和行数契约；后续行必须保持同一字段和条件布局。
      */
-    BatchUpdatePlan optimisticUpdatePlan(DynamicForm form,
+    BatchUpdatePlan batchUpdatePlan(DynamicForm form,
                                          Map<String, Object> values,
-                                         ConditionGroup where,
                                          OptimisticLockOptions lock,
                                          SqlRequest request) {
-        return writeRenderer.optimisticUpdatePlan(form, values, where, lock, request);
+        return writeRenderer.batchUpdatePlan(form, values, lock, request);
     }
 
     public SqlRequest delete(DynamicForm form, ConditionGroup where) {
@@ -353,13 +438,6 @@ public final class FormDataSqlRenderer {
     FormScalarReadPlan scalarReadPlan(DynamicField field) {
         return FormScalarReadPlan.compile(
                 field, support.dialectName, support.nativeBoolean, support.valueCodecs);
-    }
-
-    Object readScalarValue(DynamicField field, Object value) {
-        FormScalarReadPlan plan = scalarReadPlan(field);
-        return plan == null
-                ? DialectScalarValueCodec.read(value, field.databaseType(), support.valueCodecs)
-                : plan.read(value);
     }
 
     FormFieldDecodingPlan resultDecodingPlan(DynamicForm form) {

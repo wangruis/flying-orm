@@ -33,7 +33,7 @@ class JdbcSqlReleaseFactsTest {
             var executor = JdbcSqlExecutor.create(access,RdbDialect.h2()).withObserver(events::add);
             SqlRequest request = new SqlRequest("update sample set value_col=?",List.of(1));
             assertThrows(RuntimeException.class, () -> {
-                if (keys) executor.rowsUpdatedReturningKeys(request,SqlExecutionOptions.safeDefaults());
+                if (keys) executor.rowsUpdatedReturningKeys(request,SqlExecutionOptions.unlimited());
                 else executor.rowsUpdated(request);
             });
             assertEquals(1,events.size());

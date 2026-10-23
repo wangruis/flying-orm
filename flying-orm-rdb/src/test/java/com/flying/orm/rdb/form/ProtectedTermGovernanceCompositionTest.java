@@ -36,9 +36,9 @@ class ProtectedTermGovernanceCompositionTest {
     void unusedRelationRegistrationPreservesProtectedFilterApproval() {
         try (ProtectedFieldRuntime runtime = runtime()) {
             for (String operator : protectedOperators()) {
-                var plan = planner(runtime, true).selectGoverned(
+                var plan = planner(runtime, true).reads.selectGoverned(
                         query(operator), policy(true), QueryShapeLimits.defaults());
-                var baseline = planner(runtime, false).selectGoverned(
+                var baseline = planner(runtime, false).reads.selectGoverned(
                         query(operator), policy(true), QueryShapeLimits.defaults());
 
                 assertEquals(baseline.plan().request().sql(), plan.plan().request().sql());
@@ -54,7 +54,7 @@ class ProtectedTermGovernanceCompositionTest {
     void unusedRelationRegistrationPreservesProtectedFilterDenial() {
         try (ProtectedFieldRuntime runtime = runtime()) {
             for (String operator : protectedOperators()) {
-                assertThrows(ScopeAccessException.class, () -> planner(runtime, true).selectGoverned(
+                assertThrows(ScopeAccessException.class, () -> planner(runtime, true).reads.selectGoverned(
                         query(operator), policy(false), QueryShapeLimits.defaults()));
             }
         }
@@ -90,7 +90,7 @@ class ProtectedTermGovernanceCompositionTest {
                 .withProtectedFields(runtime);
         return new FormOperationPlanner(renderer,
                 new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
-                SqlExecutionOptions.safeDefaults());
+                SqlExecutionOptions.unlimited());
     }
 
     private static SqlRenderer conditions(boolean relation) {

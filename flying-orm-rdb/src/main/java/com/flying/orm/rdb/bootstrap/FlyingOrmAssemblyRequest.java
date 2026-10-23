@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.bootstrap;
 
 import com.flying.orm.core.sql.render.SqlRenderer;
+import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.cache.OrmCachePolicy;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
@@ -8,8 +9,11 @@ import com.flying.orm.rdb.form.StructuredConditionResolver;
 import com.flying.orm.rdb.id.IdGenerator;
 import com.flying.orm.rdb.mapping.EntityFieldFiller;
 import com.flying.orm.rdb.mapping.EntitySchemaDescriptor;
+import com.flying.orm.rdb.metadata.JdbcFormMetadataReader;
+import com.flying.orm.rdb.metadata.ReactiveFormMetadataReader;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
+import com.flying.orm.rdb.schema.SchemaMigrationObserver;
 import com.flying.orm.rdb.sync.SyncBatchExecutor;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
 import com.flying.orm.rdb.template.SqlTemplateParameterProvider;
@@ -34,7 +38,12 @@ record FlyingOrmAssemblyRequest(ReactiveSqlExecutor reactiveExecutor,
                                 SqlTemplateParameterProvider reactiveTemplateParameters,
                                 SyncSqlTemplateParameterProvider syncTemplateParameters,
                                 ProtectedFieldRuntime protectedFields,
-                                Map<Class<?>, EntitySchemaDescriptor<?>> entitySchemas) {
+                                Map<Class<?>, EntitySchemaDescriptor<?>> entitySchemas,
+                                JdbcFormMetadataReader jdbcMetadata,
+                                ReactiveFormMetadataReader reactiveMetadata,
+                                BatchWriteOptions batchWriteOptions,
+                                SqlExecutionOptions migrationOptions,
+                                SchemaMigrationObserver migrationObserver) {
 
     FlyingOrmAssemblyRequest {
         if ((syncExecutor == null) != (syncBatchExecutor == null)) {

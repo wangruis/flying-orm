@@ -13,10 +13,10 @@ import java.util.Optional;
 import java.util.UUID;
 
 /**
- * 不携带任意 SQL 文本的受控列默认值。
+ * 区分字面量、数据库时间关键字和可信后端原生表达式的列默认值。
  *
  * <p>字面量只接受稳定、不可变的常用标量；数据库时间关键字由明确的 kind 表达。方言编译器因此不需要
- * 把调用方字符串当 SQL 拼接，也不会在生成 DDL 时重新猜测值的含义。</p>
+ * 把普通字符串当 SQL 拼接。原生表达式必须通过 {@link #nativeExpression(String)} 显式声明。</p>
  *
  * @author wangr
  * @version v3.2
@@ -29,7 +29,8 @@ public final class ColumnDefault {
         LITERAL,
         CURRENT_DATE,
         CURRENT_TIME,
-        CURRENT_TIMESTAMP
+        CURRENT_TIMESTAMP,
+        NATIVE_EXPRESSION
     }
 
     private static final ColumnDefault NONE = new ColumnDefault(Kind.NONE, null);
@@ -65,6 +66,21 @@ public final class ColumnDefault {
 
     public static ColumnDefault currentTimestamp() {
         return CURRENT_TIMESTAMP;
+    }
+
+    /**
+     * 声明由后端开发者提供的数据库默认表达式，例如 {@code gen_random_uuid()}。
+     *
+     * <p>表达式使用目标数据库语法，不绑定参数，不保证跨方言可移植，也不是不可信 SQL 的沙箱。
+     * 禁止传入前端 SQL 或拼接请求值；普通值请使用 {@link #literal(Object)}。数据库目录回读的
+     * 原生表达式也按此种类保留，结构比较不会猜测不同 SQL 的语义等价性。</p>
+     */
+    public static ColumnDefault nativeExpression(String sql) {
+        String expression = Objects.requireNonNull(sql, "column default expression must not be null").trim();
+        if (expression.isEmpty()) {
+            throw new IllegalArgumentException("column default expression must not be blank");
+        }
+        return new ColumnDefault(Kind.NATIVE_EXPRESSION, expression);
     }
 
     public Kind kind() {

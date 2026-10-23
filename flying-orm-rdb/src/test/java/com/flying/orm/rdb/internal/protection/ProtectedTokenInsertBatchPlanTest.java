@@ -74,10 +74,7 @@ class ProtectedTokenInsertBatchPlanTest {
     }
 
     private static ProtectedReplacementBatchPlan.Row row(ProtectedWriteWork work) {
-        return new ProtectedReplacementBatchPlan.Row() {
-            public ProtectedWriteWork work() { return work; }
-            public List<Map<String, Object>> owners() { return List.of(); }
-        };
+        return new ProtectedReplacementBatchPlan.Row(work, List.of());
     }
 
     private static ProtectedWriteWork work(Object id, String table) {

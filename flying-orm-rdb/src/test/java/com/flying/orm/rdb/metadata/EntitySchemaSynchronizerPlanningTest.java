@@ -1,10 +1,11 @@
 package com.flying.orm.rdb.metadata;
 
+import com.flying.orm.core.metadata.RelationalTableDefinition;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.annotation.TableId;
 import com.flying.orm.core.annotation.TableName;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.ColumnMetadata;
-import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.dialect.RdbDialect;
@@ -18,42 +19,35 @@ import com.flying.orm.rdb.schema.EntitySchemaSyncReport;
 import com.flying.orm.rdb.schema.EntitySchemaSynchronizer;
 import com.flying.orm.rdb.schema.JdbcSchemaClient;
 import com.flying.orm.rdb.schema.ReactiveSchemaClient;
-import com.flying.orm.rdb.schema.ReviewedSchemaMigrationPlan;
-import com.flying.orm.rdb.schema.SchemaMigrationApproval;
-import com.flying.orm.rdb.schema.SchemaMigrationFailureCode;
+import com.flying.orm.rdb.schema.SchemaMigrationPlan;
 import com.flying.orm.rdb.schema.SchemaMigrationOptions;
-import com.flying.orm.rdb.schema.SchemaMigrationRejectedException;
-import com.flying.orm.rdb.schema.SchemaMigrationReviewPolicy;
 import com.flying.orm.rdb.schema.SchemaSnapshot;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EntitySchemaSynchronizerPlanningTest {
 
     private static final List<Class<?>> TYPES = List.of(First.class, Second.class, Third.class);
     private static final SchemaMigrationOptions FULL_OPTIONS = SchemaMigrationOptions.safe()
-            .allowDropColumn().allowColumnChange().allowPrimaryKeyChange().allowDropIndex().allowRebuildIndex();
+            .allowDropColumn().allowColumnChange().allowDropIndex().allowRebuildIndex();
 
     @Test
     void jdbcFullUpdateReadsEachTargetOnceAndRetainsTheFullReview() {
         try (Fixture fixture = new Fixture(false)) {
-            List<String> fingerprints = fixture.fingerprints(false);
+            List<SchemaMigrationPlan> expectedPlans = fixture.expectedPlans(false);
             fixture.reads = 0;
 
-            EntitySchemaSyncReport report = fixture.synchronize(false, EntitySchemaSyncMode.FULL_UPDATE, Map.of());
+            EntitySchemaSyncReport report = fixture.synchronize(false, EntitySchemaSyncMode.FULL_UPDATE);
 
-            assertNoDifferences(report, fingerprints);
+            assertNoDifferences(report, expectedPlans);
             assertEquals(3, fixture.reads, "FULL_UPDATE must not read an abandoned SAFE plan first");
             assertEquals(0, fixture.ddl);
         }
@@ -62,95 +56,83 @@ class EntitySchemaSynchronizerPlanningTest {
     @Test
     void reactiveFullUpdateIsColdAndReadsEachTargetOncePerSubscription() {
         try (Fixture fixture = new Fixture(false)) {
-            List<String> fingerprints = fixture.fingerprints(true);
+            List<SchemaMigrationPlan> expectedPlans = fixture.expectedPlans(true);
             fixture.reads = 0;
             Mono<EntitySchemaSyncReport> pending = fixture.synchronizer.synchronizeReactive(
-                    EntitySchemaSyncMode.FULL_UPDATE, Map.of(), TYPES);
+                    database(), EntitySchemaSyncMode.FULL_UPDATE, TYPES);
             assertEquals(0, fixture.reads);
 
-            assertNoDifferences(pending.block(), fingerprints);
+            assertNoDifferences(pending.block(), expectedPlans);
             assertEquals(3, fixture.reads, "FULL_UPDATE must not read an abandoned SAFE plan first");
-            assertNoDifferences(pending.block(), fingerprints);
+            assertNoDifferences(pending.block(), expectedPlans);
             assertEquals(6, fixture.reads, "each subscription must independently review current metadata");
             assertEquals(0, fixture.ddl);
         }
     }
 
     @Test
-    void jdbcValidateAndSafeUpdateKeepTheirExistingPlanningPasses() {
+    void jdbcValidateAndSafeUpdateReadEachTargetOnce() {
         assertOtherModes(false);
     }
 
     @Test
-    void reactiveValidateAndSafeUpdateKeepTheirExistingPlanningPasses() {
+    void reactiveValidateAndSafeUpdateReadEachTargetOnce() {
         assertOtherModes(true);
     }
 
     @Test
-    void jdbcChecksEveryDangerousApprovalBeforeExecutingAnyDdl() {
-        assertApprovalsBeforeDdl(false);
+    void jdbcFullUpdateExecutesAllExplicitChanges() {
+        assertFullUpdateExecutes(false);
     }
 
     @Test
-    void reactiveChecksEveryDangerousApprovalBeforeExecutingAnyDdl() {
-        assertApprovalsBeforeDdl(true);
+    void reactiveFullUpdateExecutesAllExplicitChanges() {
+        assertFullUpdateExecutes(true);
     }
 
-    private static void assertNoDifferences(EntitySchemaSyncReport report, List<String> fingerprints) {
+    private static void assertNoDifferences(EntitySchemaSyncReport report, List<SchemaMigrationPlan> expectedPlans) {
         assertEquals(EntitySchemaSyncMode.FULL_UPDATE, report.mode());
         assertEquals(3, report.plans().size());
         assertEquals(3, report.results().size());
         assertFalse(report.hasDifferences());
-        assertEquals(fingerprints, report.reviewedPlans().stream()
-                                        .map(ReviewedSchemaMigrationPlan::fingerprint).toList());
+        assertEquals(expectedPlans.size(), report.plans().size());
+        for (int index = 0; index < expectedPlans.size(); index++) {
+            SchemaMigrationPlan expected = expectedPlans.get(index);
+            SchemaMigrationPlan actual = report.plans().get(index);
+            assertEquals(expected.target().name(), actual.target().name());
+            assertEquals(expected.target().columns(), actual.target().columns());
+            assertEquals(expected.requests(), actual.requests());
+            assertEquals(expected.skippedChanges(), actual.skippedChanges());
+        }
     }
 
     private static void assertOtherModes(boolean reactive) {
         try (Fixture fixture = new Fixture(false)) {
-            EntitySchemaSyncReport validation = fixture.synchronize(reactive, EntitySchemaSyncMode.VALIDATE, Map.of());
+            EntitySchemaSyncReport validation = fixture.synchronize(reactive, EntitySchemaSyncMode.VALIDATE);
             assertEquals(3, fixture.reads);
             assertEquals(3, validation.plans().size());
-            assertTrue(validation.reviewedPlans().isEmpty());
             assertTrue(validation.results().isEmpty());
 
             fixture.reads = 0;
-            EntitySchemaSyncReport safe = fixture.synchronize(reactive, EntitySchemaSyncMode.SAFE_UPDATE, Map.of());
-            assertEquals(6, fixture.reads);
+            EntitySchemaSyncReport safe = fixture.synchronize(reactive, EntitySchemaSyncMode.SAFE_UPDATE);
+            assertEquals(3, fixture.reads, "SAFE_UPDATE executes the planned SQL without reading it again");
             assertEquals(3, safe.plans().size());
-            assertTrue(safe.reviewedPlans().isEmpty());
             assertEquals(3, safe.results().size());
             assertEquals(0, fixture.ddl);
         }
     }
 
-    private static void assertApprovalsBeforeDdl(boolean reactive) {
+    private static void assertFullUpdateExecutes(boolean reactive) {
         try (Fixture fixture = new Fixture(true)) {
-            ReviewedSchemaMigrationPlan first = fixture.review(reactive, First.class);
-            ReviewedSchemaMigrationPlan second = fixture.review(reactive, Second.class);
-            assertTrue(first.requiresExplicitApproval());
-            assertTrue(second.requiresExplicitApproval());
-            Map<String, SchemaMigrationApproval> missingSecond = Map.of(
-                    first.migration().target().table(), SchemaMigrationApproval.approve(first, "backup verified"));
-
-            SchemaMigrationRejectedException missing = assertThrows(SchemaMigrationRejectedException.class,
-                    () -> fixture.synchronize(reactive, EntitySchemaSyncMode.FULL_UPDATE, missingSecond));
-            assertEquals(SchemaMigrationFailureCode.APPROVAL_REQUIRED, missing.failureCode());
-            assertEquals(second.fingerprint(), missing.planFingerprint());
-            assertEquals(0, fixture.ddl, "the first approved table must wait for all remaining approvals");
-
-            Map<String, SchemaMigrationApproval> staleSecond = new LinkedHashMap<>(missingSecond);
-            staleSecond.put(second.migration().target().table(),
-                            new SchemaMigrationApproval("stale-plan-fingerprint", "old backup approval"));
-            SchemaMigrationRejectedException stale = assertThrows(SchemaMigrationRejectedException.class,
-                    () -> fixture.synchronize(reactive, EntitySchemaSyncMode.FULL_UPDATE, staleSecond));
-            assertEquals(second.fingerprint(), stale.planFingerprint());
-            assertEquals(0, fixture.ddl);
+            EntitySchemaSyncReport report = fixture.synchronize(reactive, EntitySchemaSyncMode.FULL_UPDATE);
+            assertEquals(3, fixture.ddl);
+            assertEquals(3, report.results().size());
+            assertTrue(report.plans().stream().allMatch(plan -> plan.requests().size() == 1));
         }
     }
-
     private static final class Fixture implements AutoCloseable {
         private final EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults());
-        private final Map<String, TableMetadata> tables = new LinkedHashMap<>();
+        private final Map<String, RelationalTableDefinition> tables = new LinkedHashMap<>();
         private final JdbcSchemaClient jdbc;
         private final ReactiveSchemaClient reactive;
         private final JdbcFormMetadataReader jdbcMetadata;
@@ -162,58 +144,66 @@ class EntitySchemaSynchronizerPlanningTest {
         private Fixture(boolean withLegacyColumn) {
             for (Class<?> type : TYPES) {
                 DynamicForm form = models.metadata(type).toDynamicForm();
-                TableMetadata.Builder table = TableMetadata.builder(form.table());
-                form.toTableMetadata().columns().forEach(table::addColumn);
+                RelationalTableDefinition.Builder table = RelationalTableDefinition.builder(form.table());
+                form.toTableDefinition().columns().forEach(table::addColumn);
+                form.toTableDefinition().primaryKey().ifPresent(table::primaryKey);
                 if (withLegacyColumn) {
-                    table.addColumn(ColumnMetadata.of("legacy", "BIGINT"));
+                    table.addColumn(DynamicField.of("legacy", "BIGINT").column());
                 }
                 tables.put(form.table(), table.build());
             }
-            SyncSqlExecutor syncExecutor = new SyncSqlExecutor() {
+            SyncSqlExecutor syncExecutor = new com.flying.orm.rdb.support.ListQueryFixture() {
                 public List<DynamicRow> query(SqlRequest request) {
-                    reads++;
-                    if (request.sql().equals("select table")) {
-                        Map<String, Object> table = new LinkedHashMap<>();
-                        table.put("TABLE_COMMENT", null);
-                        return List.of(DynamicRow.copyOf(table));
-                    }
-                    if (request.sql().equals("select empty")) return List.of();
-                    return tables.get((String) request.parameters().getFirst()).columns().stream()
-                                 .map(column -> DynamicRow.copyOf(Map.of(
-                                         "COLUMN_NAME", column.name(), "DATA_TYPE", column.dataType(),
-                                         "PRIMARY_KEY", column.primaryKey(), "NULLABLE", column.nullable())))
-                                 .toList();
+                    throw new AssertionError("metadata comes from the explicit reader");
                 }
                 public long rowsUpdated(SqlRequest request) { ddl++; return 1; }
-                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                     throw new AssertionError("schema DDL must not request generated keys");
                 }
             };
-            InformationSchemaFormMetadataReader.Query columns =
-                    (schema, table) -> new SqlRequest("select columns", List.of(table));
-            InformationSchemaFormMetadataReader.Query empty =
-                    (schema, table) -> new SqlRequest("select empty", List.of(table));
-            InformationSchemaFormMetadataReader.Queries queries = withLegacyColumn
-                    ? InformationSchemaFormMetadataReader.Queries.complete(columns, empty, empty, type -> type,
-                            (schema, table) -> new SqlRequest("select table", List.of(table)), empty, empty, empty,
-                            InformationSchemaFormMetadataReader.SnapshotDialect.H2)
-                    : new InformationSchemaFormMetadataReader.Queries(columns, null, null, type -> type);
-            jdbcMetadata = new JdbcFormMetadataReader(syncExecutor, queries);
+            jdbcMetadata = new JdbcFormMetadataReader() {
+                public com.flying.orm.rdb.schema.SchemaSnapshotCoverage snapshotCoverage() {
+                    return com.flying.orm.rdb.schema.SchemaSnapshotCoverage.complete();
+                }
+            public SchemaSnapshot readSnapshot(RelationIdentity identity) {
+                reads++;
+                return SchemaSnapshot.present(tables.get(identity.table()));
+            }
+            public RelationalTableDefinition readTableForSchema(RelationIdentity relation) {
+                String table = relation.qualifiedName();
+                reads++;
+                return tables.get(table);
+            }
+            public DynamicForm readForm(String id, RelationIdentity relation) {
+                throw new AssertionError("use table facts");
+            }
+
+            @Override
+            public RelationalTableDefinition readTable(RelationIdentity relation) {
+                return readForm(relation.table(), relation).toTableDefinition(relation);
+            }
+
+            };
             jdbc = JdbcSchemaClient.create(syncExecutor, RdbDialect.h2());
             reactiveMetadata = new ReactiveFormMetadataReader() {
-                public Mono<TableMetadata> readTable(String table) {
-                    return Mono.fromSupplier(() -> { reads++; return tables.get(table); });
+                public com.flying.orm.rdb.schema.SchemaSnapshotCoverage snapshotCoverage() {
+                    return jdbcMetadata.snapshotCoverage();
                 }
-                public Mono<SchemaSnapshot> readSnapshot(String table) {
-                    // 使用同一份纯内存字典事实；删列审批测试必须具备真实回退所需的完整属性。
-                    return Mono.fromSupplier(() -> jdbcMetadata.readSnapshot(table));
-                }
-                public Mono<DynamicForm> readForm(String formId, String table) {
-                    return Mono.error(new AssertionError("schema review must read table metadata"));
-                }
-                public Mono<DynamicForm> readForm(String formId, String schema, String table) {
-                    return readForm(formId, table);
-                }
+            public Mono<SchemaSnapshot> readSnapshot(RelationIdentity identity) {
+                return Mono.fromSupplier(() -> jdbcMetadata.readSnapshot(identity));
+            }
+            public Mono<RelationalTableDefinition> readTable(RelationIdentity relation) {
+                String table = relation.qualifiedName();
+                return Mono.fromSupplier(() -> {
+                    reads++;
+                    return tables.get(table);
+                });
+            }
+
+            public Mono<DynamicForm> readForm(String formId, RelationIdentity relation) {
+                return Mono.error(new AssertionError("schema review must read table metadata"));
+            }
+
             };
             reactive = ReactiveSchemaClient.create(new ReactiveSqlExecutor() {
                 public Flux<DynamicRow> query(SqlRequest request) {
@@ -226,26 +216,29 @@ class EntitySchemaSynchronizerPlanningTest {
             synchronizer = new EntitySchemaSynchronizer(models, reactive, reactiveMetadata, jdbc, jdbcMetadata);
         }
 
-        private List<String> fingerprints(boolean useReactive) {
-            return TYPES.stream().map(type -> review(useReactive, type).fingerprint()).toList();
+        private List<SchemaMigrationPlan> expectedPlans(boolean useReactive) {
+            return TYPES.stream().map(type -> review(useReactive, type)).toList();
         }
 
-        private ReviewedSchemaMigrationPlan review(boolean useReactive, Class<?> type) {
+        private SchemaMigrationPlan review(boolean useReactive, Class<?> type) {
             var metadata = models.metadata(type);
             return useReactive
-                    ? reactive.reviewCreateOrAlter(metadata.toDynamicForm(), metadata.targetIndexes(), List.of(),
-                            reactiveMetadata, FULL_OPTIONS, SchemaMigrationReviewPolicy.preferOnline()).block()
-                    : jdbc.reviewCreateOrAlter(metadata.toDynamicForm(), metadata.targetIndexes(), List.of(),
-                            jdbcMetadata, FULL_OPTIONS, SchemaMigrationReviewPolicy.preferOnline());
+                    ? reactive.planCreateOrAlter(metadata.toDynamicForm(), metadata.targetIndexes(), List.of(),
+                            reactiveMetadata, FULL_OPTIONS.preferConcurrentIndexes()).block()
+                    : jdbc.planCreateOrAlter(metadata.toDynamicForm(), metadata.targetIndexes(), List.of(),
+                            jdbcMetadata, FULL_OPTIONS.preferConcurrentIndexes());
         }
 
-        private EntitySchemaSyncReport synchronize(boolean useReactive, EntitySchemaSyncMode mode,
-                                                     Map<String, SchemaMigrationApproval> approvals) {
-            return useReactive ? synchronizer.synchronizeReactive(mode, approvals, TYPES).block()
-                    : synchronizer.synchronize(mode, approvals, TYPES);
+        private EntitySchemaSyncReport synchronize(boolean useReactive, EntitySchemaSyncMode mode) {
+            return useReactive ? synchronizer.synchronizeReactive(database(), mode, TYPES).block()
+                    : synchronizer.synchronize(database(), mode, TYPES);
         }
 
         public void close() { models.close(); }
+    }
+
+    private static com.flying.orm.rdb.dialect.DatabaseDescriptor database() {
+        return com.flying.orm.rdb.dialect.DatabaseDescriptor.of("H2", "2.3", RdbDialect.h2());
     }
 
     @TableName("schema_sync_first")

@@ -163,7 +163,7 @@ final class SqlExecutionLogFormatter {
             return "*".repeat(maxLength);
         }
         int visibleStars = Math.min(Math.max(1, length - 2), maxLength - 2);
-        StringBuilder masked = new StringBuilder(maxLength);
+        StringBuilder masked = new StringBuilder(Math.min(length, maxLength));
         masked.append(oneLineCharacter(text.charAt(0)));
         masked.append("*".repeat(visibleStars));
         if (length > 1 && masked.length() < maxLength) {

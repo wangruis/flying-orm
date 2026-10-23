@@ -32,15 +32,13 @@ class SchemaSnapshotRoundTripContractTest {
         assertTrue(snapshot.completeTable().isPresent());
         assertEquals(RelationalMetadataFingerprint.of(table),
                      RelationalMetadataFingerprint.of(snapshot.completeTable().orElseThrow()));
-        assertEquals(SchemaSnapshotFingerprint.of(snapshot),
-                     SchemaSnapshotFingerprint.of(SchemaSnapshot.present(table)));
     }
 
     @Test
     void absentAndUnknownRemainDifferentFacts() {
         RelationIdentity identity = RelationIdentity.table("accounts");
 
-        assertNotEquals(SchemaSnapshotFingerprint.of(SchemaSnapshot.absent(identity)),
-                        SchemaSnapshotFingerprint.of(SchemaSnapshot.unknown(identity)));
+        assertNotEquals(SchemaSnapshot.absent(identity).tableState(),
+                        SchemaSnapshot.unknown(identity).tableState());
     }
 }

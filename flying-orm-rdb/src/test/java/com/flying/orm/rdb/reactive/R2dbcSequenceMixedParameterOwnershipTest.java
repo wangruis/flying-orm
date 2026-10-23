@@ -62,7 +62,7 @@ class R2dbcSequenceMixedParameterOwnershipTest {
         R2dbcSqlExecutor executor = R2dbcSqlExecutor.create(com.flying.orm.rdb.execution.ConnectionAccessTestSupport.reactive(factory(bindings)), RdbDialect.h2()).withObserver(observer);
         Mono<?> execution = executor.executeInConnection(new SqlExecutionSequence(
                 List.of(requests.get(0)), List.of(requests.get(1)), List.of(requests.get(2))),
-                SqlExecutionOptions.safeDefaults());
+                SqlExecutionOptions.unlimited());
         ordinary[0] = 99;
         wrapped[0] = 99;
         for (SqlRequest request : requests) {

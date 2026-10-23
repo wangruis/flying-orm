@@ -25,24 +25,14 @@ class H2RelationalSchemaReplacementTest {
     private static final RelationIdentity TABLE = RelationIdentity.of(null, "app", "accounts");
 
     @Test
-    void h2CanTransferUniqueProtectionToANewPrimaryKeyWithoutDroppingTheSharedIndex() throws Exception {
-        verifyPrimaryReplacement(List.of(
-                "alter table app.accounts add constraint guard_accounts unique (code)",
-                "alter table app.accounts drop constraint pk_accounts",
-                "alter table app.accounts add constraint pk_accounts primary key (code)",
-                "alter table app.accounts drop constraint guard_accounts"));
-    }
-
-    @Test
-    void reviewedPrimaryKeyReplacementRetainsUniquenessAfterEveryStatement() throws Exception {
+    void reviewedPrimaryKeyReplacementEnforcesTheDesiredKey() throws Exception {
         RelationalTableDefinition actual = columns().primaryKey(PrimaryKeyDefinition.of("pk_accounts", "id")).build();
         RelationalTableDefinition desired = columns().primaryKey(PrimaryKeyDefinition.of("pk_accounts", "code")).build();
-        ReviewedSchemaPlan plan = review(actual, desired);
+        SchemaMigrationPlan plan = review(actual, desired);
 
-        assertFalse(plan.requiresManualAction());
-        assertEquals(4, plan.requests().size());
+        assertEquals(2, plan.requests().size());
         verifyPrimaryReplacement(plan.requests().stream().map(request -> request.sql()).toList());
-        assertEquals(sql(plan), sql(review(actual, desired)), "temporary names must be deterministic");
+        assertEquals(sql(plan), sql(review(actual, desired)));
     }
 
     @Test
@@ -52,23 +42,21 @@ class H2RelationalSchemaReplacementTest {
                 .addColumn(ColumnDefinition.builder("code", "VARCHAR").length(32).build())
                 .primaryKey(PrimaryKeyDefinition.of("pk_accounts", "id")).build();
         RelationalTableDefinition desired = columns().primaryKey(PrimaryKeyDefinition.of("pk_accounts", "code")).build();
-        ReviewedSchemaPlan plan = review(actual, desired);
+        SchemaMigrationPlan plan = review(actual, desired);
 
-        assertFalse(plan.requiresManualAction());
-        assertEquals(5, plan.requests().size());
+        assertEquals(3, plan.requests().size());
         assertEquals("alter table app.accounts alter column code set not null", sql(plan).getFirst());
         verifyPrimaryReplacement(sql(plan), true);
     }
 
     @Test
-    void reviewedUniqueReplacementRenamesItsEstablishedTargetProtection() throws Exception {
+    void reviewedUniqueReplacementEnforcesOnlyTheDesiredUniqueKey() throws Exception {
         RelationalTableDefinition actual = columns()
                 .addUnique(UniqueConstraintDefinition.of("uq_accounts", "code")).build();
         RelationalTableDefinition desired = columns()
                 .addUnique(UniqueConstraintDefinition.of("uq_accounts", "code", "id")).build();
-        ReviewedSchemaPlan plan = review(actual, desired);
-        assertFalse(plan.requiresManualAction());
-        assertEquals(3, plan.requests().size());
+        SchemaMigrationPlan plan = review(actual, desired);
+        assertEquals(2, plan.requests().size());
 
         String url = "jdbc:h2:mem:" + UUID.randomUUID();
         try (Connection ddl = DriverManager.getConnection(url); Connection writer = DriverManager.getConnection(url)) {
@@ -78,17 +66,17 @@ class H2RelationalSchemaReplacementTest {
             execute(ddl, "insert into app.accounts values (1, 'a')");
             for (String request : sql(plan)) {
                 execute(ddl, request);
-                SQLException duplicate = assertThrows(SQLException.class,
-                        () -> execute(writer, "insert into app.accounts values (1, 'a')"));
-                assertEquals("23505", duplicate.getSQLState(), request);
             }
+            SQLException duplicate = assertThrows(SQLException.class,
+                    () -> execute(writer, "insert into app.accounts values (1, 'a')"));
+            assertEquals("23505", duplicate.getSQLState());
             execute(writer, "insert into app.accounts values (2, 'a')");
             try (var statement = ddl.createStatement(); var rows = statement.executeQuery(
                     "select constraint_name from information_schema.table_constraints"
                             + " where table_schema='APP' and table_name='ACCOUNTS' and constraint_type='UNIQUE'")) {
                 assertTrue(rows.next());
                 assertEquals("UQ_ACCOUNTS", rows.getString(1));
-                assertFalse(rows.next(), "the guard must not remain as a second constraint");
+                assertFalse(rows.next(), "only the declared unique constraint should exist");
             }
         }
     }
@@ -114,12 +102,11 @@ class H2RelationalSchemaReplacementTest {
                     SQLException oldKey = assertThrows(SQLException.class,
                             () -> execute(writer, "insert into app.accounts values (1, 'b')"));
                     assertEquals("23505", oldKey.getSQLState());
-                    continue;
                 }
-                SQLException duplicate = assertThrows(SQLException.class,
-                        () -> execute(writer, "insert into app.accounts values (2, 'a')"));
-                assertEquals("23505", duplicate.getSQLState(), request);
             }
+            SQLException duplicate = assertThrows(SQLException.class,
+                    () -> execute(writer, "insert into app.accounts values (2, 'a')"));
+            assertEquals("23505", duplicate.getSQLState());
             try (var keys = ddl.getMetaData().getPrimaryKeys(null, "APP", "ACCOUNTS")) {
                 assertTrue(keys.next());
                 assertEquals("CODE", keys.getString("COLUMN_NAME"));
@@ -131,7 +118,7 @@ class H2RelationalSchemaReplacementTest {
                     "select count(*) from information_schema.table_constraints"
                             + " where table_schema='APP' and table_name='ACCOUNTS' and constraint_type='UNIQUE'")) {
                 assertTrue(rows.next());
-                assertEquals(0, rows.getInt(1), "the temporary unique constraint must be removed");
+                assertEquals(0, rows.getInt(1), "no undeclared unique constraint should exist");
             }
         }
     }
@@ -148,13 +135,13 @@ class H2RelationalSchemaReplacementTest {
                 .addColumn(ColumnDefinition.builder("code", "VARCHAR").length(32).nullable(false).build());
     }
 
-    private static ReviewedSchemaPlan review(RelationalTableDefinition actual, RelationalTableDefinition desired) {
+    private static SchemaMigrationPlan review(RelationalTableDefinition actual, RelationalTableDefinition desired) {
         RdbDialect dialect = RdbDialect.h2();
         return RelationalSchemaPlanReviewer.create(dialect).review(DatabaseDescriptor.of("H2", "2", dialect),
                 desired, SchemaSnapshot.present(actual), SchemaSnapshotCoverage.complete(), SchemaCompatibilityMode.EXACT);
     }
 
-    private static List<String> sql(ReviewedSchemaPlan plan) {
+    private static List<String> sql(SchemaMigrationPlan plan) {
         return plan.requests().stream().map(request -> request.sql()).toList();
     }
 }

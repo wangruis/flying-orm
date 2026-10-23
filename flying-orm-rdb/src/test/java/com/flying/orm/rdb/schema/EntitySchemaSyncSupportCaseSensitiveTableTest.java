@@ -6,6 +6,7 @@ import com.flying.orm.core.annotation.TableName;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
+import com.flying.orm.rdb.mapping.EntitySchemaDescriptor;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -18,11 +19,11 @@ class EntitySchemaSyncSupportCaseSensitiveTableTest {
     @Test
     void keepsCatalogDistinctPhysicalTablesAsSeparateTargets() {
         try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.disabled())) {
-            List<EntitySchemaTarget> targets = EntitySchemaSyncSupport.targets(
+            List<EntitySchemaDescriptor<?>> targets = EntitySchemaSyncSupport.targets(
                     models, List.of(FirstCatalog.class, SecondCatalog.class));
             assertEquals(List.of(RelationIdentity.of("first", "dbo", "customers"),
                                  RelationIdentity.of("second", "dbo", "customers")),
-                         targets.stream().map(target -> target.descriptor().table().identity()).toList());
+                         targets.stream().map(target -> target.table().identity()).toList());
         }
     }
 
@@ -59,7 +60,7 @@ class EntitySchemaSyncSupportCaseSensitiveTableTest {
     @Test
     void keepsCaseDistinctPhysicalTablesAsSeparateSynchronizationTargets() {
         try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.disabled())) {
-            List<EntitySchemaTarget> targets = EntitySchemaSyncSupport.targets(
+            List<EntitySchemaDescriptor<?>> targets = EntitySchemaSyncSupport.targets(
                     models, List.of(UpperCaseTable.class, LowerCaseTable.class));
 
             assertEquals(List.of("CustomerData", "customerdata"),

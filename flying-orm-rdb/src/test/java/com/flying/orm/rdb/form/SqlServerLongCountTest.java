@@ -31,14 +31,14 @@ class SqlServerLongCountTest {
             FormDataSqlRenderer renderer = renderer(dialect);
             FormOperationPlanner planner = new FormOperationPlanner(renderer,
                     new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
-                    SqlExecutionOptions.safeDefaults());
-            FormOperationPlanner.PlannedPage page = planner.page(QuerySpec.of(form, ConditionGroup.and().build()),
+                    SqlExecutionOptions.unlimited());
+            FormReadPlanner.PlannedQuery page = planner.reads.page(QuerySpec.of(form, ConditionGroup.and().build()),
                     PageQuery.of(1, 10, PageSort.asc("id")));
 
             assertTrue(page.countRequest().sql().startsWith("select " + countFunction(dialect) + "(*) as total"),
                     page.countRequest().sql());
         }
-        assertEquals(2_147_483_648L, CountResultReader.read(DynamicRow.copyOf(Map.of("total", 2_147_483_648L))));
+        assertEquals(2_147_483_648L, com.flying.orm.rdb.mapping.RowMapper.count().map(DynamicRow.copyOf(Map.of("total", 2_147_483_648L))));
     }
 
     @Test
@@ -53,8 +53,8 @@ class SqlServerLongCountTest {
             FormDataSqlRenderer renderer = renderer(dialect);
             JoinQueryPlanner planner = new JoinQueryPlanner(renderer,
                     new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
-                    SqlExecutionOptions.safeDefaults());
-            JoinQueryPlanner.PlannedJoinPage page = planner.page(spec, PageQuery.of(1, 10), null);
+                    SqlExecutionOptions.unlimited());
+            FormReadPlanner.PlannedQuery page = planner.page(spec, PageQuery.of(1, 10), null);
 
             assertTrue(page.countRequest().sql().startsWith("select " + countFunction(dialect) + "(*) as total"),
                     page.countRequest().sql());

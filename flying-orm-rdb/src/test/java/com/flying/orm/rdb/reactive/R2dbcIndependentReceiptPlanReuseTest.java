@@ -25,15 +25,6 @@ class R2dbcIndependentReceiptPlanReuseTest {
 
     @Test
     void emptyWriteBatchDoesNotAcquireConnections() {
-        emptyInputDoesNotAcquireConnections(false);
-    }
-
-    @Test
-    void emptyWriteBatchEvidenceDoesNotAcquireConnections() {
-        emptyInputDoesNotAcquireConnections(true);
-    }
-
-    private static void emptyInputDoesNotAcquireConnections(boolean streaming) {
         AtomicInteger acquires = new AtomicInteger();
         ConnectionFactory connectionFactory = new ConnectionFactory() {
             @Override
@@ -52,9 +43,7 @@ class R2dbcIndependentReceiptPlanReuseTest {
                 List.of(Integer.class), SqlBindMarkerStyle.CANONICAL,
                 Flux.empty(), BatchWriteOptions.of(1));
         R2dbcSqlExecutor executor = R2dbcSqlExecutor.create(com.flying.orm.rdb.execution.ConnectionAccessTestSupport.reactive(connectionFactory), RdbDialect.h2());
-        Mono<BatchExecutionEvidence> execution = streaming
-                ? executor.writeBatchEvidence(request)
-                : executor.writeBatch(request);
+        Mono<BatchExecutionEvidence> execution = executor.writeBatch(request);
 
         BatchExecutionEvidence result = execution.block(Duration.ofSeconds(2));
 

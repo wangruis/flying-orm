@@ -42,7 +42,11 @@ final class SqlTemplateRenderer {
                                 Backend backend,
                                 boolean owned) {
         this.compiled = Objects.requireNonNull(compiled, "compiled SQL template must not be null");
-        this.values = owned ? ownedValues(values) : snapshotValues(values);
+        Map<String, ?> source = Objects.requireNonNull(values, "SQL template values must not be null");
+        if (!source.keySet().containsAll(compiled.valueSlots())) {
+            throw new IllegalArgumentException("SQL template values do not match placeholders");
+        }
+        this.values = owned ? ownedValues(source) : snapshotValues(source, compiled.valueSlots());
         this.identifiers = owned
                 ? Objects.requireNonNull(identifiers, "SQL template identifiers must not be null")
                 : Map.copyOf(Objects.requireNonNull(
@@ -50,21 +54,6 @@ final class SqlTemplateRenderer {
         this.backend = Objects.requireNonNull(backend, "SQL template backend must not be null");
         this.sql = compiled.statement() == null
                 ? new StringBuilder(compiled.template().sql().length()) : null;
-    }
-
-    static SqlRequest render(SqlTemplate template,
-                             Map<String, ?> values,
-                             Map<String, String> identifiers,
-                             Backend backend) {
-        return new SqlTemplateRenderer(compile(template, backend), values, identifiers, backend, false).render();
-    }
-
-    /** 渲染已经在调用状态/提供器边界取得所有权的参数，不再重复复制可变值。 */
-    static SqlRequest renderOwned(SqlTemplate template,
-                                  Map<String, ?> values,
-                                  Map<String, String> identifiers,
-                                  Backend backend) {
-        return new SqlTemplateRenderer(compile(template, backend), values, identifiers, backend, true).render();
     }
 
     static SqlRequest renderCompiled(CompiledTemplate compiled,
@@ -77,9 +66,6 @@ final class SqlTemplateRenderer {
 
     private SqlRequest render() {
         requireMatchingIdentifierSlots();
-        if (!compiled.valueSlots().equals(values.keySet())) {
-            throw new IllegalArgumentException("SQL template values do not match placeholders");
-        }
         if (compiled.statement() != null) {
             for (Segment segment : compiled.segments()) {
                 if (segment instanceof Value value) {
@@ -116,7 +102,7 @@ final class SqlTemplateRenderer {
     }
 
     private void appendValue(String name) {
-        appendBindMarker();
+        appendBindMarker(sql, backend, parameters.size());
         parameters.add(bindValue(name));
     }
 
@@ -135,21 +121,6 @@ final class SqlTemplateRenderer {
         return codecs.write(value);
     }
 
-    private void appendBindMarker() {
-        if (backend.jdbcBindMarkers()) {
-            sql.append('?');
-            return;
-        }
-        String dialectName = backend.dialect().name();
-        if ("postgresql".equals(dialectName)) {
-            sql.append('$').append(parameters.size() + 1);
-        } else if ("sqlserver".equals(dialectName) || "sql-server".equals(dialectName)) {
-            sql.append("@P").append(parameters.size());
-        } else {
-            sql.append('?');
-        }
-    }
-
     private static int valuePlaceholderEnd(String source, int index) {
         if (source.charAt(index) != ':'
                 || index > 0 && source.charAt(index - 1) == ':'
@@ -166,19 +137,9 @@ final class SqlTemplateRenderer {
     }
 
     static CompiledTemplate compile(SqlTemplate template, Backend backend) {
-        return compile(template, backend, false);
-    }
-
-    static CompiledTemplate compileReusable(SqlTemplate template, Backend backend) {
-        return compile(template, backend, true);
-    }
-
-    private static CompiledTemplate compile(SqlTemplate template,
-                                             Backend backend,
-                                             boolean reusable) {
         SqlTemplate safeTemplate = Objects.requireNonNull(template, "SQL template must not be null");
         Backend safeBackend = Objects.requireNonNull(backend, "SQL template backend must not be null");
-        boolean reusableStatement = reusable && safeTemplate.identifierSlots().isEmpty();
+        boolean reusableStatement = safeTemplate.identifierSlots().isEmpty();
         // 静态模板由最终 SqlStatementCompiler 完成唯一一次方言边界校验；动态标识符模板仍先校验模板正文。
         String source = reusableStatement
                 ? safeTemplate.sql() : SqlStatements.requireSingle(safeTemplate.sql(), safeBackend.dialect());
@@ -302,10 +263,9 @@ final class SqlTemplateRenderer {
         }
     }
 
-    private static Map<String, Object> snapshotValues(Map<String, ?> values) {
+    private static Map<String, Object> snapshotValues(Map<String, ?> values, Set<String> slots) {
         Map<String, Object> snapshots = new LinkedHashMap<>();
-        Objects.requireNonNull(values, "SQL template values must not be null")
-               .forEach((name, value) -> snapshots.put(name, BindableValueSnapshots.logicalValue(value)));
+        for (String name : slots) snapshots.put(name, BindableValueSnapshots.logicalValue(values.get(name)));
         return snapshots;
     }
 

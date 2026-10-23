@@ -51,7 +51,7 @@ class JdbcAdvancedOperationsBoundaryTest {
         Fixture fixture = new Fixture();
 
         String value = fixture.advanced(true).scroll(request(),
-                SqlExecutionOptions.safeDefaults().withMaxRows(7).withFetchSize(3), resultSet -> {
+                SqlExecutionOptions.unlimited().withMaxRows(7).withFetchSize(3), resultSet -> {
                     assertSame(fixture.resultSet, resultSet);
                     assertTrue(resultSet.next());
                     assertEquals("value", resultSet.getString(1));
@@ -110,6 +110,24 @@ class JdbcAdvancedOperationsBoundaryTest {
     }
 
     @Test
+    void metadataCleanupErrorRetainsTheSharedResourceFailureSemantics() {
+        Fixture fixture = new Fixture();
+        IllegalArgumentException callbackFailure = new IllegalArgumentException("metadata failed");
+        AssertionError releaseFailure = new AssertionError("release failed");
+        fixture.connectionCloseFailure = releaseFailure;
+
+        AssertionError thrown = assertThrows(AssertionError.class,
+                () -> fixture.advanced(false).metadata(metadata -> {
+                    throw callbackFailure;
+                }));
+
+        assertSame(releaseFailure, thrown);
+        assertEquals(List.of(callbackFailure), List.of(thrown.getSuppressed()));
+        assertEquals(0, callbackFailure.getSuppressed().length);
+        assertEquals(List.of("connection"), fixture.closed);
+    }
+
+    @Test
     void multipleStatementsAreRejectedBeforeConnectionAcquisition() {
         Fixture fixture = new Fixture();
 
@@ -132,7 +150,7 @@ class JdbcAdvancedOperationsBoundaryTest {
         private List<Object> prepared;
         private List<Object> bound;
         private SQLException resultSetCloseFailure;
-        private SQLException connectionCloseFailure;
+        private Throwable connectionCloseFailure;
         private final DatabaseMetaData metadata = proxy(DatabaseMetaData.class, (view, method, arguments) -> {
             if (method.getName().equals("getDatabaseProductName")) {
                 return "test-database";

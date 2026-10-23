@@ -23,13 +23,19 @@ final class BatchMemoryLimitedSyncBatchExecutor implements SyncBatchExecutor {
     private final BatchMemoryLimits limits;
 
     private BatchMemoryLimitedSyncBatchExecutor(SyncBatchExecutor delegate, BatchMemoryLimits limits) {
-        this.delegate = Objects.requireNonNull(delegate, "sync batch executor must not be null");
-        this.limits = Objects.requireNonNull(limits, "batch memory limits must not be null");
+        this.delegate = delegate;
+        this.limits = limits;
     }
 
     static SyncBatchExecutor create(SyncBatchExecutor delegate, BatchMemoryLimits limits) {
+        Objects.requireNonNull(delegate, "sync batch executor must not be null");
+        Objects.requireNonNull(limits, "batch memory limits must not be null");
+        if (limits.maxBufferSize() == Integer.MAX_VALUE && limits.maxBufferedBytes() == Long.MAX_VALUE) return delegate;
         return new BatchMemoryLimitedSyncBatchExecutor(delegate, limits);
     }
+
+    @Override
+    public boolean supportsBatchRowLayouts() { return delegate.supportsBatchRowLayouts(); }
 
     @Override
     public BatchExecutionEvidence writeBatch(BatchWriteRequest request, LongConsumer rowCompleted) {

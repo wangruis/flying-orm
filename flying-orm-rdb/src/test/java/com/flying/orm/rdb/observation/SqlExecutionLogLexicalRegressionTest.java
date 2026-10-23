@@ -18,7 +18,7 @@ class SqlExecutionLogLexicalRegressionTest {
 
     @TestFactory
     Stream<DynamicTest> masksLiteralsInAmbiguousPostgresqlRegionsWithoutDialectMetadata() {
-        return Stream.of(SqlExecutionBackend.JDBC, SqlExecutionBackend.R2DBC, SqlExecutionBackend.UNKNOWN)
+        return Stream.of(SqlExecutionBackend.JDBC, SqlExecutionBackend.R2DBC)
                 .flatMap(backend -> sensitiveSql()
                         .map(sql -> DynamicTest.dynamicTest(backend + "/" + sql, () -> {
                             String message = format(backend, sql);
@@ -28,7 +28,7 @@ class SqlExecutionLogLexicalRegressionTest {
 
     @TestFactory
     Stream<DynamicTest> batchLogsUseTheSameConservativeLiteralBoundaries() {
-        return Stream.of(SqlExecutionBackend.JDBC, SqlExecutionBackend.R2DBC, SqlExecutionBackend.UNKNOWN)
+        return Stream.of(SqlExecutionBackend.JDBC, SqlExecutionBackend.R2DBC)
                 .flatMap(backend -> sensitiveSql().map(sql -> DynamicTest.dynamicTest(backend + "/" + sql, () -> {
                     var request = new BatchExecutionObservation.BatchWriteRequestView(
                             sql, 0, backend);
@@ -45,7 +45,7 @@ class SqlExecutionLogLexicalRegressionTest {
 
     @TestFactory
     Stream<DynamicTest> preservesUnambiguousSqlServerBracketIdentifiersAndEscapedClosers() {
-        return Stream.of(SqlExecutionBackend.JDBC, SqlExecutionBackend.R2DBC, SqlExecutionBackend.UNKNOWN)
+        return Stream.of(SqlExecutionBackend.JDBC, SqlExecutionBackend.R2DBC)
                 .map(backend -> DynamicTest.dynamicTest(backend.toString(), () -> {
                     String sql = "select [order], [escaped]]name], [Price$USD] from [dbo].[items]";
                     assertTrue(format(backend, sql).contains(sql));

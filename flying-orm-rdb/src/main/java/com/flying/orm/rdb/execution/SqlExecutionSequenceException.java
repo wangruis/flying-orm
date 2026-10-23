@@ -7,7 +7,7 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * 同连接序列失败。phase 和 stepIndex 指出失败位置，completedWorkSteps 让上层知道失败前哪些 DDL
+ * SQL 序列失败。phase 和 stepIndex 指出失败位置，completedWorkSteps 让上层知道失败前哪些 SQL
  * 已经被数据库接受；DDL 是否回滚仍由数据库和外部事务决定，本异常不会伪造原子性。
  * @author wangr
  * @date 2026-08-03
@@ -22,7 +22,7 @@ public final class SqlExecutionSequenceException extends RuntimeException implem
                                          int stepIndex,
                                          List<SqlExecutionStepResult> completedWorkSteps,
                                          Throwable cause) {
-        super("connection-scoped SQL failed at " + phase + " step " + stepIndex,
+        super("SQL sequence failed at " + phase + " step " + stepIndex,
               Objects.requireNonNull(cause, "sequence failure cause must not be null"));
         this.phase = Objects.requireNonNull(phase, "sequence failure phase must not be null");
         if (stepIndex < 0) {

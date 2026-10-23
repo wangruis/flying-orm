@@ -3,9 +3,9 @@ package com.flying.orm.core.join;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.RelationIdentity;
-import com.flying.orm.core.page.CursorPageQuery;
-import com.flying.orm.core.page.CursorSort;
 import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetPageResult;
+import com.flying.orm.core.page.CursorPosition;
 import com.flying.orm.core.page.KeysetSort;
 import com.flying.orm.core.page.NullOrder;
 import com.flying.orm.core.page.PageQuery;
@@ -14,12 +14,76 @@ import com.flying.orm.core.page.PageSort;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.ArrayList;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class JoinAndPageContractTest {
+
+    @Test
+    void mapsPageRowsInOrderOnceWithoutChangingPageMetadata() {
+        PageResult<Integer> source = new PageResult<>(List.of(2, 4), 23, 3, 2);
+        List<Number> visited = new ArrayList<>();
+        Function<Number, String> mapper = value -> { visited.add(value); return value.toString(); };
+        PageResult<CharSequence> mapped = source.map(mapper);
+        assertEquals(List.of(2, 4), visited);
+        assertEquals(new PageResult<>(List.of("2", "4"), 23, 3, 2), mapped);
+        assertEquals(List.of(2, 4), source.rows());
+        assertThrows(UnsupportedOperationException.class, () -> mapped.rows().clear());
+    }
+
+    @Test
+    void cursorMappingPreservesPositionWithoutExposingMutableCursorValues() {
+        KeysetPageResult<Integer> source = new KeysetPageResult<>(
+                List.of(2, 4), com.flying.orm.core.page.CursorPosition.of(List.of(new byte[]{4})), true);
+        KeysetPageResult<String> mapped = source.map(Object::toString);
+        ((byte[]) mapped.nextPosition().values().getFirst())[0] = 9;
+        assertEquals(List.of("2", "4"), mapped.rows());
+        assertTrue(mapped.hasMore());
+        assertArrayEquals(new byte[]{4}, (byte[]) mapped.nextPosition().values().getFirst());
+        assertArrayEquals(new byte[]{4}, (byte[]) source.nextPosition().values().getFirst());
+    }
+
+    @Test
+    void keysetMappingRetainsTheOriginalPositionAndNullableSortValues() {
+        CursorPosition position = CursorPosition.of(java.util.Arrays.asList(null, 4L));
+        KeysetPageResult<Integer> source = new KeysetPageResult<>(List.of(2, 4), position, true);
+        KeysetPageResult<String> mapped = source.map(Object::toString);
+        assertEquals(List.of("2", "4"), mapped.rows());
+        assertSame(position, mapped.nextPosition());
+        assertTrue(mapped.hasMore());
+    }
+
+    @Test
+    void emptyPagesDoNotInvokeTheMapperButStillRejectAMissingMapper() {
+        Function<Integer, String> unused = value -> { throw new AssertionError("no rows to map"); };
+        PageResult<Integer> page = new PageResult<>(List.of(), 0, 1, 20);
+        KeysetPageResult<Integer> cursor = new KeysetPageResult<>(List.of(), com.flying.orm.core.page.CursorPosition.of(List.of()), false);
+        KeysetPageResult<Integer> keyset = new KeysetPageResult<>(List.of(), CursorPosition.first(), false);
+        assertTrue(page.map(unused).rows().isEmpty());
+        assertTrue(cursor.map(unused).rows().isEmpty());
+        assertTrue(keyset.map(unused).rows().isEmpty());
+        assertThrows(NullPointerException.class, () -> page.map(null));
+        assertThrows(NullPointerException.class, () -> cursor.map(null));
+        assertThrows(NullPointerException.class, () -> keyset.map(null));
+    }
+
+    @Test
+    void mappingFailuresAreNotHiddenOrConvertedToEmptyPages() {
+        IllegalStateException failure = new IllegalStateException("mapping failed");
+        Function<Integer, String> mapper = value -> { throw failure; };
+        assertSame(failure, assertThrows(IllegalStateException.class,
+                () -> new PageResult<>(List.of(1), 1, 1, 20).map(mapper)));
+        assertSame(failure, assertThrows(IllegalStateException.class,
+                () -> new KeysetPageResult<>(List.of(1), com.flying.orm.core.page.CursorPosition.of(List.of()), false).map(mapper)));
+        assertSame(failure, assertThrows(IllegalStateException.class,
+                () -> new KeysetPageResult<>(List.of(1), CursorPosition.first(), false).map(mapper)));
+    }
 
     @Test
     void explicitProjectionAliasIsNotLimitedByGeneratedAliasLength() {
@@ -66,7 +130,7 @@ class JoinAndPageContractTest {
 
         for (int size : new int[]{1000, 1001, 5000, Integer.MAX_VALUE}) {
             assertEquals(size, PageQuery.of(1, size).size());
-            assertEquals(size, CursorPageQuery.first(size, CursorSort.asc("id")).size());
+            assertEquals(size, KeysetPageQuery.first(size, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST)).size());
             assertEquals(size, KeysetPageQuery.first(size, KeysetSort.asc("id", NullOrder.LAST)).size());
         }
     }
@@ -75,7 +139,7 @@ class JoinAndPageContractTest {
     void paginationStillRejectsNonPositiveSizesAndPageNumbers() {
         for (int size : new int[]{0, -1, Integer.MIN_VALUE}) {
             assertThrows(IllegalArgumentException.class, () -> PageQuery.of(1, size));
-            assertThrows(IllegalArgumentException.class, () -> CursorPageQuery.first(size, CursorSort.asc("id")));
+            assertThrows(IllegalArgumentException.class, () -> KeysetPageQuery.first(size, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST)));
             assertThrows(IllegalArgumentException.class,
                     () -> KeysetPageQuery.first(size, KeysetSort.asc("id", NullOrder.LAST)));
         }

@@ -4,7 +4,6 @@ import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.form.RelationalFormDefinition;
-import com.flying.orm.core.metadata.ColumnDefinition;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.EncryptedSearchMode;
@@ -28,9 +27,7 @@ class RelationalFormCrudIdentityTest {
     void crudRendersEveryRelationIdentitySegmentIndependently() {
         RelationalFormDefinition definition = RelationalFormDefinition.builder(
                         "orders", RelationIdentity.of("tenant.db", "sales.data", "order.items"))
-                .addField(
-                        DynamicField.of("code", "VARCHAR"),
-                        ColumnDefinition.builder("code", "VARCHAR").build())
+                .addField(DynamicField.of("code", "VARCHAR"))
                 .build();
         FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
                 SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql());
@@ -89,9 +86,10 @@ class RelationalFormCrudIdentityTest {
                     .prepareContainsQuery(form, form, where, DataScope.none())
                     .orElseThrow();
 
-            String sql = renderer.protection().containsCandidates(query, 10).getFirst().sql();
-
-            assertTrue(sql.contains(" from \"tenant.db\".\"sales.data\".\"__fop_c_"), sql);
+            for (String sql : List.of(renderer.protection().contains.rows(query, List.of()).sql(),
+                    renderer.protection().contains.verificationRows(query).sql())) {
+                assertTrue(sql.contains(" from \"tenant.db\".\"sales.data\".\"__fop_c_"), sql);
+            }
         }
     }
 }

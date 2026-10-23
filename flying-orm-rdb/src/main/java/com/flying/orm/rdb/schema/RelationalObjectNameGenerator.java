@@ -5,12 +5,8 @@ import com.flying.orm.core.internal.hash.StableDigest;
 import com.flying.orm.core.internal.hash.StableEncoder;
 import com.flying.orm.rdb.dialect.RdbDialect;
 
-import java.util.Collection;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Locale;
 import java.util.Objects;
-import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -44,7 +40,7 @@ public final class RelationalObjectNameGenerator {
 
     private final int maximumLength;
 
-    /** 0 表示当前数据库没有提供可信上限；生成或校验名称时会 fail closed。 */
+    /** 0 表示数据库上限未知，不额外施加 ORM 长度限制。 */
     public RelationalObjectNameGenerator(int maximumLength) {
         if (maximumLength < 0) {
             throw new IllegalArgumentException("maximum identifier length must not be negative");
@@ -93,19 +89,19 @@ public final class RelationalObjectNameGenerator {
         if (safeParts.isEmpty()) {
             throw new IllegalArgumentException("relational object name parts must not be empty");
         }
-        requireKnownLimit();
         boolean encoded = safeParts.stream().anyMatch(part -> part.indexOf('.') >= 0);
         String full = safeKind.prefix + '_' + safeParts.stream()
                 .map(part -> part.replace('.', '_'))
                 .collect(Collectors.joining("_"));
-        if (!encoded && length(full) <= maximumLength) {
+        if (!encoded && (maximumLength == 0 || length(full) <= maximumLength)) {
             return full;
         }
-        if (maximumLength <= DIGEST_LENGTH + 1) {
+        if (maximumLength > 0 && maximumLength <= DIGEST_LENGTH + 1) {
             throw new IllegalArgumentException("maximum identifier length is too small for stable truncation");
         }
         String digest = digest(safeKind, safeParts).substring(0, DIGEST_LENGTH);
-        int prefixLength = Math.min(length(full), maximumLength - DIGEST_LENGTH - 1);
+        int prefixLength = maximumLength == 0 ? length(full)
+                : Math.min(length(full), maximumLength - DIGEST_LENGTH - 1);
         return prefix(full, prefixLength) + '_' + digest;
     }
 
@@ -113,33 +109,12 @@ public final class RelationalObjectNameGenerator {
         return generate(kind, List.of(parts));
     }
 
-    /**
-     * 在整份计划生成完后一次检查名称碰撞。数据库通常折叠未引用名称的大小写，因此这里保守地
-     * 使用小写键；宁可要求调用方显式改名，也不让迁移执行到一半才撞库。
-     */
-    public void requireNoCollisions(Collection<String> names) {
-        Set<String> seen = new HashSet<>();
-        for (String name : Objects.requireNonNull(names, "relational object names must not be null")) {
-            String safeName = exact(name, "relational object name");
-            if (!seen.add(safeName.toLowerCase(Locale.ROOT))) {
-                throw new IllegalArgumentException("relational object names collide after database normalization");
-            }
-        }
-    }
-
     private String exact(String value, String role) {
         String name = Names.requireText(value, role);
-        requireKnownLimit();
-        if (length(name) > maximumLength) {
+        if (maximumLength > 0 && length(name) > maximumLength) {
             throw new IllegalArgumentException(role + " exceeds the database identifier limit");
         }
         return name;
-    }
-
-    private void requireKnownLimit() {
-        if (maximumLength == 0) {
-            throw new IllegalStateException("database identifier length is unknown");
-        }
     }
 
     private static String digest(Kind kind, List<String> parts) {

@@ -78,6 +78,40 @@ class KeysetHiddenTieBreakerTest {
     }
 
     @Test
+    void finishesTypedRowsAfterStrippingHiddenColumnsAndSkipsTheLookahead() {
+        DynamicForm form = DynamicForm.builder("events", "events")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("payload", "VARCHAR")).build();
+        HiddenProjectionLayout layout = HiddenProjectionLayout.of(List.of("payload"),
+                KeysetPageNormalizer.normalize(form, KeysetPageQuery.first(1, KeysetSort.asc("id", NullOrder.LAST))));
+        String hidden = layout.selections().getLast().label();
+        KeysetPageResult<String> result = layout.finish(List.of(
+                DynamicRow.copyOf(Map.of("payload", "first", hidden, 1L)),
+                DynamicRow.copyOf(Map.of("payload", "lookahead", hidden, 2L))), 1, row -> {
+            assertEquals(Map.of("payload", "first"), row);
+            return row.get("payload").toString();
+        });
+        assertEquals(List.of("first"), result.rows());
+        assertEquals(List.of(1L), result.nextPosition().values());
+        org.junit.jupiter.api.Assertions.assertTrue(result.hasMore());
+    }
+
+    @Test
+    void snapshotsPositionBeforeTheResultMapperCanMutateItsValues() {
+        DynamicForm form = DynamicForm.builder("events", "events")
+                .addField(DynamicField.primaryKey("id", "BIGINT")).build();
+        HiddenProjectionLayout layout = HiddenProjectionLayout.of(List.of("id"),
+                KeysetPageNormalizer.normalize(form, KeysetPageQuery.first(1, KeysetSort.asc("id", NullOrder.LAST))));
+        KeysetPageResult<String> result = layout.finish(List.of(
+                DynamicRow.copyOf(Map.of("id", new byte[]{1})),
+                DynamicRow.copyOf(Map.of("id", new byte[]{2}))), 1, row -> {
+            ((byte[]) row.get("id"))[0] = 9;
+            return "mapped";
+        });
+        org.junit.jupiter.api.Assertions.assertArrayEquals(new byte[]{1}, (byte[]) result.nextPosition().values().getFirst());
+    }
+
+    @Test
     void duplicateCallerSortDoesNotReclassifyTheAppendedTieBreaker() {
         DynamicForm form = DynamicForm.builder("events", "events")
                 .addField(DynamicField.of("created_at", "TIMESTAMP").withNullable(false))
@@ -89,7 +123,8 @@ class KeysetHiddenTieBreakerTest {
                 form, KeysetPageQuery.first(20, sort, sort));
 
         assertEquals(1, page.callerSortCount());
-        assertEquals(List.of("id"), page.hiddenTieBreakers());
+        assertEquals(List.of("id"), page.sorts().stream()
+                .skip(page.callerSortCount()).map(KeysetSort::field).toList());
     }
 
     @Test
@@ -129,8 +164,7 @@ class KeysetHiddenTieBreakerTest {
                 List.of(DynamicRow.copyOf(Map.of("id", 7L))),
                 com.flying.orm.core.page.CursorPosition.of(List.of(7L)), true);
 
-        KeysetPageResult<Long> mapped = FormResultMappingSupport.mapKeysetPage(
-                source, row -> (Long) row.get("id"));
+        KeysetPageResult<Long> mapped = source.map(row -> (Long) row.get("id"));
 
         assertEquals(List.of(7L), mapped.rows());
         assertSame(source.nextPosition(), mapped.nextPosition());
@@ -146,10 +180,13 @@ class KeysetHiddenTieBreakerTest {
 
     private static SyncSqlExecutor syncExecutor(List<DynamicRow> rows) {
         return (SyncSqlExecutor) Proxy.newProxyInstance(
-                SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{SyncSqlExecutor.class},
+                SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{com.flying.orm.rdb.support.ListQueryFixture.class},
                 (proxy, method, arguments) -> {
                     if (method.getName().equals("query")) {
                         return rows;
+                    }
+                    if (method.isDefault()) {
+                        return java.lang.reflect.InvocationHandler.invokeDefault(proxy, method, arguments);
                     }
                     throw new UnsupportedOperationException(method.toString());
                 });

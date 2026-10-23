@@ -1,19 +1,22 @@
 package com.flying.orm.rdb.repository;
 
+import com.flying.orm.core.page.PageResult;
 import com.flying.orm.rdb.lifecycle.EntityPostWriteException;
 import com.flying.orm.rdb.lifecycle.EntityLifecycleEvent;
 import com.flying.orm.rdb.lifecycle.EntityLifecyclePhase;
 import com.flying.orm.rdb.lifecycle.ReactiveEntityListener;
 import com.flying.orm.rdb.mapping.EntityMetadata;
 import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.Objects;
+import java.util.function.Supplier;
 
 /**
- * 把实体写入阶段交给 flying-orm 自己的响应式监听器。
+ * 统一分发实体生命周期事件，并组合响应式 CRUD 的回调顺序。
  *
- * <p>V2 不再扫描 Jakarta Persistence 回调注解。需要审计、补值或联动业务时，调用方显式注册
+ * <p>需要审计、补值或联动业务时，调用方显式注册
  * {@link ReactiveEntityListener}，同一套监听器可以同时用于 JDBC 和 R2DBC Repository。没有监听器时
  * 直接返回空完成，不做反射扫描，也不会为了不存在的回调保留批量实体。</p>
  */
@@ -23,17 +26,14 @@ final class EntityLifecycleDispatcher<T> {
 
     private final ReactiveEntityListener<T> listener;
 
-    private final boolean listenerConfigured;
-
     EntityLifecycleDispatcher(EntityMetadata<T> metadata, ReactiveEntityListener<T> listener) {
         this.metadata = Objects.requireNonNull(metadata, "entity lifecycle metadata must not be null");
-        this.listenerConfigured = listener != null;
-        this.listener = listenerConfigured ? listener : ReactiveEntityListener.none();
+        this.listener = listener == ReactiveEntityListener.<T>none() ? null : listener;
     }
 
     /** 分发一次生命周期事件；写入后的 POST 失败保留实际执行结果。 */
     Mono<Void> fire(EntityLifecyclePhase phase, T entity, Object result) {
-        if (!listenerConfigured) {
+        if (listener == null) {
             return Mono.empty();
         }
         EntityLifecyclePhase safePhase = Objects.requireNonNull(
@@ -61,8 +61,63 @@ final class EntityLifecycleDispatcher<T> {
     }
 
     /** 没有监听器就没有生命周期工作，批量路径也不需要暂存实体引用。 */
-    boolean hasWork(EntityLifecyclePhase phase) {
-        Objects.requireNonNull(phase, "entity lifecycle phase must not be null");
-        return listenerConfigured;
+    boolean hasWork() {
+        return listener != null;
+    }
+
+    Mono<Long> persist(T entity, Supplier<Mono<Long>> operation) {
+        T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
+        return write(safeEntity, EntityLifecyclePhase.PRE_PERSIST, EntityLifecyclePhase.POST_PERSIST,
+                     operation);
+    }
+
+    Mono<Long> update(T entity,
+                      Supplier<Mono<Long>> operation) {
+        T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
+        return write(safeEntity, EntityLifecyclePhase.PRE_UPDATE, EntityLifecyclePhase.POST_UPDATE,
+                     operation);
+    }
+
+    Mono<Long> remove(T entity,
+                      Supplier<Mono<Long>> operation) {
+        T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
+        return write(safeEntity, EntityLifecyclePhase.PRE_REMOVE, EntityLifecyclePhase.POST_REMOVE,
+                     operation);
+    }
+
+    Flux<T> postLoad(Flux<T> entities) {
+        Flux<T> safeEntities = Objects.requireNonNull(entities, "repository entities must not be null");
+        if (!hasWork()) {
+            return safeEntities;
+        }
+        // 回调按数据库结果顺序串行完成，避免监听器看到乱序实体。
+        return safeEntities.concatMap(entity ->
+                fire(EntityLifecyclePhase.POST_LOAD, entity, null).thenReturn(entity));
+    }
+
+    Mono<PageResult<T>> postLoad(PageResult<T> page) {
+        PageResult<T> safePage = Objects.requireNonNull(page, "repository page must not be null");
+        if (!hasWork()) {
+            return Mono.just(safePage);
+        }
+        return Flux.fromIterable(safePage.rows())
+                .concatMap(entity -> fire(EntityLifecyclePhase.POST_LOAD, entity, null))
+                .then(Mono.just(safePage));
+    }
+
+    private Mono<Long> write(T entity,
+                             EntityLifecyclePhase prePhase,
+                             EntityLifecyclePhase postPhase,
+                             Supplier<Mono<Long>> operation) {
+        Supplier<Mono<Long>> safeOperation = Objects.requireNonNull(
+                operation, "repository write operation must not be null");
+        Mono<Long> execution = Mono.defer(() -> requireOperation(safeOperation.get()));
+        if (listener == null) return execution;
+        return fire(prePhase, entity, null).then(execution)
+                .flatMap(rows -> fire(postPhase, entity, rows).thenReturn(rows));
+    }
+
+    private static Mono<Long> requireOperation(Mono<Long> operation) {
+        return Objects.requireNonNull(operation, "repository write operation must return a Mono");
     }
 }

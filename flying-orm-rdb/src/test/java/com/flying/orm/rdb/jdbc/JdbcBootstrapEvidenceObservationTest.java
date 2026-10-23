@@ -36,7 +36,7 @@ class JdbcBootstrapEvidenceObservationTest {
 
                     .observers(sqlObserver, observer)
                     .build()) {
-                BatchExecutionEvidence evidence = clients.syncForms().writeBatchEvidence(insertSpec(1));
+                BatchExecutionEvidence evidence = clients.syncForms().writeBatch(insertSpec(1));
 
                 assertEquals(1, state.executions.get());
                 assertEquals(1, observer.evidence.size());
@@ -59,7 +59,7 @@ class JdbcBootstrapEvidenceObservationTest {
                 .observers(SqlExecutionObserver.noop(), observer)
                 .build()) {
             BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
-                    () -> clients.syncForms().writeBatchEvidence(insertSpec(2)));
+                    () -> clients.syncForms().writeBatch(insertSpec(2)));
 
             assertEquals(1, failure.evidence().successfulCount());
             assertEquals(0, state.rollbacks.get());
@@ -77,7 +77,7 @@ class JdbcBootstrapEvidenceObservationTest {
         BatchExecutionEvidence evidence = state.writer()
                 .withBatchObserver(observer)
 
-                .writeBatchEvidence(JdbcBatchEvidenceTestSupport.request(
+                .writeBatch(JdbcBatchEvidenceTestSupport.request(
                         Flux.<Object[]>just(new Object[]{1}), 1));
 
         assertEquals(1, observer.evidence.size());

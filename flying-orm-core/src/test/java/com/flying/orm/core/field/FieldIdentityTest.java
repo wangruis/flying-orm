@@ -62,4 +62,36 @@ class FieldIdentityTest {
         TermCondition term = (TermCondition) where.children().getFirst();
         assertSame(field.identity(), term.identity());
     }
+
+    @Test
+    void formLookupPreservesCanonicalAliasesUnicodeAndMissingNameSemantics() {
+        DynamicField customer = DynamicField.of("CustomerID", "BIGINT");
+        DynamicField unicode = DynamicField.of("İsim", "VARCHAR");
+        DynamicForm form = DynamicForm.builder("customers", "customers")
+                .addField(customer).addField(unicode).build();
+        for (String alias : new String[]{"customerid", "CustomerID", "CUSTOMERID", "  CustomerId  "}) {
+            assertSame(customer, form.findField(alias).orElseThrow());
+            assertSame(customer, form.field(alias));
+        }
+        assertSame(unicode, form.field("i\u0307sim"));
+        assertSame(unicode, form.field("  İSIM  "));
+        assertEquals(java.util.Optional.empty(), form.findField("missing"));
+        assertEquals(java.util.Optional.empty(), form.findField("  MISSING  "));
+        assertThrows(IllegalArgumentException.class, () -> form.field("missing"));
+        for (String invalid : new String[]{null, "", " \t "}) {
+            assertThrows(IllegalArgumentException.class, () -> form.findField(invalid));
+        }
+        DynamicForm empty = DynamicForm.builder("empty", "empty").build();
+        assertEquals(java.util.Optional.empty(), empty.findField("id"));
+        assertThrows(IllegalArgumentException.class, () -> empty.findField(null));
+    }
+
+    @Test
+    void canonicalLookupDoesNotBypassBlankNameRejection() {
+        DynamicForm form = DynamicForm.builder("t", "t")
+                .addField(DynamicField.of("\0", "INT"))
+                .addField(DynamicField.of("\0\u2003", "INT")).build();
+        assertThrows(IllegalArgumentException.class, () -> form.findField(""));
+        assertThrows(IllegalArgumentException.class, () -> form.findField("\u2003"));
+    }
 }

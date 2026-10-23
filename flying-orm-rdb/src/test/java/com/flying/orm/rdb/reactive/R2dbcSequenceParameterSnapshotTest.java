@@ -34,7 +34,7 @@ class R2dbcSequenceParameterSnapshotTest {
                 List.of(new SqlRequest("update sample set payload = ?", List.of(source))),
                 List.of());
 
-        Mono<?> execution = executor.executeInConnection(sequence, SqlExecutionOptions.safeDefaults());
+        Mono<?> execution = executor.executeInConnection(sequence, SqlExecutionOptions.unlimited());
         source[0] = 9;
         execution.block(Duration.ofSeconds(2));
 

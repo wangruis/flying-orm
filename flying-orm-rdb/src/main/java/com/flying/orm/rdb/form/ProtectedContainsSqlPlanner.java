@@ -2,19 +2,18 @@ package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicField;
-import com.flying.orm.core.page.CursorDirection;
-import com.flying.orm.core.page.CursorPageQuery;
+import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.sql.render.SqlFragment;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.core.internal.value.OwnedBindableValues;
-import com.flying.orm.rdb.dialect.PaginationDialect;
 import com.flying.orm.rdb.protection.ProtectedContainsLayout;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -29,75 +28,57 @@ import java.util.stream.Collectors;
 final class ProtectedContainsSqlPlanner {
 
     private final FormSqlRenderSupport support;
-    private final PaginationDialect pagination;
-
-    ProtectedContainsSqlPlanner(FormSqlRenderSupport support, PaginationDialect pagination) {
+    ProtectedContainsSqlPlanner(FormSqlRenderSupport support) {
         this.support = Objects.requireNonNull(support, "form SQL render support must not be null");
-        this.pagination = Objects.requireNonNull(pagination, "pagination dialect must not be null");
-    }
-
-    List<SqlRequest> candidates(ProtectedFieldRuntime.PreparedContainsQuery query, int candidateLimit) {
-        ProtectedFieldRuntime.PreparedContainsQuery safe = Objects.requireNonNull(
-                query, "protected contains query must not be null");
-        if (candidateLimit < 1 || candidateLimit >= Integer.MAX_VALUE) {
-            throw new IllegalArgumentException("protected contains candidate limit must be positive and bounded");
-        }
-        String owners = safe.primaryKeys().stream().map(support::identifier).collect(Collectors.joining(", "));
-        String tokenColumn = support.identifier(ProtectedContainsLayout.tokenHashColumn(safe.primaryKeys()));
-        String base = "select " + owners + " from " + support.derivedRelationIdentifier(
-                safe.physicalForm(), safe.tokenTable())
-                + " where " + support.identifier(ProtectedContainsLayout.fieldTagColumn(safe.primaryKeys()))
-                + " = ? and " + tokenColumn + " in (%s)"
-                + " group by " + owners
-                + " having count(distinct " + tokenColumn + ") = ?"
-                + " order by " + owners;
-        List<SqlRequest> requests = new ArrayList<>(safe.tokenGroups().size());
-        for (ProtectedFieldRuntime.ContainsTokenGroup group : safe.tokenGroups()) {
-            List<byte[]> tokens = group.tokens();
-            String markers = java.util.Collections.nCopies(tokens.size(), "?").stream()
-                                          .collect(Collectors.joining(", "));
-            List<Object> parameters = new ArrayList<>(tokens.size() + 2);
-            parameters.add(safe.fieldTag());
-            parameters.addAll(tokens);
-            parameters.add(safe.distinctTokenCount());
-            requests.add(pagination.limit(base.formatted(markers), parameters, candidateLimit + 1));
-        }
-        return List.copyOf(requests);
     }
 
     SqlRequest rows(ProtectedFieldRuntime.PreparedContainsQuery query,
                     List<PageSort> sorts) {
-        return rows(query, sorts, null);
+        return rows(query, stableSorts(query, sorts), null, query.visibleFields());
+    }
+
+    SqlRequest rows(ProtectedFieldRuntime.PreparedContainsQuery query, List<PageSort> sorts,
+                    FormQueryExpressions.Projection projection) {
+        return rows(query, stableSorts(query, sorts, projection.resultForm()), null,
+                query.visibleFields(), projection);
     }
 
     SqlRequest rows(ProtectedFieldRuntime.PreparedContainsQuery query,
-                    CursorPageQuery page) {
-        ProtectedFieldRuntime.PreparedContainsQuery safeQuery = Objects.requireNonNull(
-                query, "protected contains query must not be null");
-        return rows(safeQuery, CursorPageNormalizer.normalize(
-                safeQuery.physicalForm(), Objects.requireNonNull(page, "cursor page query must not be null")));
+                    KeysetPageNormalizer.NormalizedKeysetPage page, FormQueryExpressions.Projection projection) {
+        for (com.flying.orm.core.page.KeysetSort sort : page.sorts()) {
+            support.requireStableOffsetTimeOrdering(query.physicalForm().field(sort.field()));
+        }
+        return rows(query, List.of(), page, query.visibleFields(), projection);
     }
 
-    SqlRequest rows(ProtectedFieldRuntime.PreparedContainsQuery query,
-                    CursorPageNormalizer.NormalizedCursorPage page) {
-        ProtectedFieldRuntime.PreparedContainsQuery safeQuery = Objects.requireNonNull(
-                query, "protected contains query must not be null");
-        CursorPageNormalizer.NormalizedCursorPage safePage = Objects.requireNonNull(
-                page, "normalized cursor page must not be null");
-        List<PageSort> sorts = safePage.sorts().stream()
-                .map(sort -> sort.direction() == CursorDirection.ASC
-                        ? PageSort.asc(sort.field()) : PageSort.desc(sort.field()))
-                .toList();
-        return rows(safeQuery, sorts, safePage);
+    String projectionField(String field) {
+        return qualified("fop_business", field);
+    }
+
+    /** 计数只需核验搜索字段；不读取其他业务列，也不为候选结果排序。 */
+    SqlRequest verificationRows(ProtectedFieldRuntime.PreparedContainsQuery query) {
+        return rows(query, List.of(), null, List.of(query.fieldName()));
     }
 
     private SqlRequest rows(ProtectedFieldRuntime.PreparedContainsQuery query,
                             List<PageSort> sorts,
-                            CursorPageNormalizer.NormalizedCursorPage cursor) {
+                            KeysetPageNormalizer.NormalizedKeysetPage cursor,
+                            List<String> fields) {
+        return rows(query, sorts, cursor, fields, null);
+    }
+
+    private SqlRequest rows(ProtectedFieldRuntime.PreparedContainsQuery query, List<PageSort> sorts,
+                            KeysetPageNormalizer.NormalizedKeysetPage cursor, List<String> fields,
+                            FormQueryExpressions.Projection projection) {
+        SqlFragment selectedColumns = projection == null ? null : projection.columns();
+        DynamicForm resultForm = projection == null ? query.physicalForm() : projection.resultForm();
         ProtectedFieldRuntime.PreparedContainsQuery safe = Objects.requireNonNull(
                 query, "protected contains query must not be null");
         List<String> candidateColumns = candidateColumns(safe.primaryKeys().size());
         List<Object> parameters = new ArrayList<>();
+        if (selectedColumns != null) {
+            parameters.addAll(OwnedBindableValues.ownedValues(selectedColumns.parameters()));
+        }
         List<String> candidates = new ArrayList<>(safe.tokenGroups().size());
         String fieldTag = ProtectedContainsLayout.fieldTagColumn(safe.primaryKeys());
         String tokenHash = ProtectedContainsLayout.tokenHashColumn(safe.primaryKeys());
@@ -108,19 +89,22 @@ final class ProtectedContainsSqlPlanner {
         SqlFragment where = businessCondition(safe, businessAlias);
         parameters.addAll(OwnedBindableValues.ownedValues(where.parameters()));
         String candidateAlias = "fop_candidate";
-        String projections = safe.visibleFields().stream()
+        String projections = selectedColumns != null ? selectedColumns.sql() : fields.stream()
                                  .map(field -> qualified(businessAlias, field) + " as " + support.identifier(field))
                                  .collect(Collectors.joining(", "));
         String joins = java.util.stream.IntStream.range(0, safe.primaryKeys().size())
                 .mapToObj(index -> qualified(businessAlias, safe.primaryKeys().get(index)) + " = "
                         + qualified(candidateAlias, candidateColumns.get(index)))
                 .collect(Collectors.joining(" and "));
-        List<PageSort> stableSorts = stableSorts(safe, sorts);
-        String orderBy = stableSorts.stream()
-                                    .map(sort -> qualified(businessAlias,
-                                                           safe.physicalForm().field(sort.field()).name())
-                                            + " " + sort.sqlKeyword())
-                                    .collect(Collectors.joining(", ", " order by ", ""));
+        Function<String, String> sortField = field -> safe.physicalForm().findField(field).isPresent()
+                ? qualified(businessAlias, safe.physicalForm().field(field).name())
+                : support.identifier(resultForm.field(field).name());
+        SqlFragment ordering = cursor != null
+                ? new SqlFragment(FormKeysetSqlRenderer.orderBy(cursor, sortField), List.of())
+                : projection != null ? projection.orderBy(sorts, sortField)
+                : new SqlFragment(sorts.isEmpty() ? "" : sorts.stream()
+                        .map(sort -> sortField.apply(sort.field()) + " " + sort.sqlKeyword())
+                        .collect(Collectors.joining(", ", " order by ", "")), List.of());
         StringBuilder sql = new StringBuilder("select ").append(projections)
                 .append(" from ").append(support.identifier(safe.physicalForm()))
                 .append(' ').append(businessAlias)
@@ -130,11 +114,13 @@ final class ProtectedContainsSqlPlanner {
             sql.append(" where ").append(where.sql());
         }
         if (cursor != null && !cursor.firstPage()) {
-            sql.append(where.sql().isBlank() ? " where (" : " and (")
-               .append(cursorWhere(safe, businessAlias, cursor, parameters))
-               .append(')');
+            String seek = FormKeysetSqlRenderer.cursorPredicate(cursor,
+                    field -> qualified(businessAlias, safe.physicalForm().field(field).name()),
+                    (field, value) -> support.writeValue(safe.physicalForm().field(field), value), parameters);
+            sql.append(where.sql().isBlank() ? " where " : " and ").append(seek);
         }
-        sql.append(orderBy);
+        if (!ordering.sql().isEmpty()) sql.append(' ').append(ordering.sql());
+        parameters.addAll(ordering.parameters());
         // Execution options govern candidate rows and bytes; truncation here could hide matches or totals.
         return new SqlRequest(sql.toString(), parameters);
     }
@@ -147,35 +133,12 @@ final class ProtectedContainsSqlPlanner {
                                            String businessAlias) {
         ConditionGroup normalized = support.normalizeCondition(query.physicalForm(), query.remainingWhere());
         var renderer = support.normalizedConditionRenderer().withFieldIdentifierRenderer(name -> qualified(
-                        businessAlias, query.physicalForm().field(name).name()));
+                        businessAlias, query.physicalForm().field(name).name()), query.physicalForm()::field);
         return renderer.hasCorrelatedTerms()
-                ? renderer.renderWhere(normalized, renderer::identifier, name -> support.identifier(businessAlias))
+                ? renderer.renderWhere(normalized,
+                        name -> qualified(businessAlias, FormSqlRenderSupport.correlatedField(query.physicalForm(), name)),
+                        name -> support.identifier(businessAlias))
                 : renderer.renderWhere(normalized);
-    }
-
-    private String cursorWhere(ProtectedFieldRuntime.PreparedContainsQuery query,
-                               String alias,
-                               CursorPageNormalizer.NormalizedCursorPage page,
-                               List<Object> parameters) {
-        java.util.StringJoiner alternatives = new java.util.StringJoiner(" or ");
-        List<Object> cursor = page.cursor();
-        for (int pivot = 0; pivot < page.sorts().size(); pivot++) {
-            java.util.StringJoiner terms = new java.util.StringJoiner(" and ");
-            for (int prefix = 0; prefix < pivot; prefix++) {
-                com.flying.orm.core.form.DynamicField dynamicField = query.physicalForm().field(
-                        page.sorts().get(prefix).field());
-                String field = dynamicField.name();
-                terms.add(qualified(alias, field) + " = ?");
-                parameters.add(support.writeValue(dynamicField, cursor.get(prefix)));
-            }
-            com.flying.orm.core.page.CursorSort sort = page.sorts().get(pivot);
-            com.flying.orm.core.form.DynamicField dynamicField = query.physicalForm().field(sort.field());
-            String field = dynamicField.name();
-            terms.add(qualified(alias, field) + (sort.direction() == CursorDirection.ASC ? " > ?" : " < ?"));
-            parameters.add(support.writeValue(dynamicField, cursor.get(pivot)));
-            alternatives.add(pivot == 0 ? terms.toString() : "(" + terms + ")");
-        }
-        return alternatives.toString();
     }
 
     private String candidateSubquery(ProtectedFieldRuntime.PreparedContainsQuery query,
@@ -208,15 +171,20 @@ final class ProtectedContainsSqlPlanner {
 
     private List<PageSort> stableSorts(ProtectedFieldRuntime.PreparedContainsQuery query,
                                        List<PageSort> sorts) {
+        return stableSorts(query, sorts, query.physicalForm());
+    }
+
+    private List<PageSort> stableSorts(ProtectedFieldRuntime.PreparedContainsQuery query,
+                                       List<PageSort> sorts, DynamicForm resultForm) {
         List<PageSort> result = new ArrayList<>(Objects.requireNonNull(sorts, "page sorts must not be null"));
         for (String primaryKey : query.primaryKeys()) {
-            if (result.stream().noneMatch(sort -> query.physicalForm().field(sort.field()).name()
+            if (result.stream().noneMatch(sort -> resultForm.field(sort.field()).name()
                                                        .equals(primaryKey))) {
                 result.add(PageSort.asc(primaryKey));
             }
         }
         for (PageSort sort : result) {
-            DynamicField field = query.physicalForm().field(sort.field());
+            DynamicField field = resultForm.field(sort.field());
             if (query.encryptedFields().stream().anyMatch(name -> name.equalsIgnoreCase(field.name()))) {
                 throw new IllegalArgumentException("encrypted field cannot be used for protected contains ordering");
             }

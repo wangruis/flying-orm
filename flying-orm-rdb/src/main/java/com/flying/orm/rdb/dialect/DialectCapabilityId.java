@@ -29,6 +29,7 @@ public final class DialectCapabilityId implements Comparable<DialectCapabilityId
     public static final DialectCapabilityId LARGE_OBJECTS = of("large-objects");
     public static final DialectCapabilityId MYSQL_RELATIONAL_METADATA = of("mysql-relational-metadata");
     public static final DialectCapabilityId POSTGRESQL_VECTOR = of("postgresql-vector");
+    public static final DialectCapabilityId FULL_OUTER_JOIN = of("full-outer-join");
 
     private final String value;
 
@@ -50,21 +51,6 @@ public final class DialectCapabilityId implements Comparable<DialectCapabilityId
             throw new IllegalArgumentException("invalid dialect capability id: " + normalized);
         }
         return new DialectCapabilityId(normalized);
-    }
-
-    static DialectCapabilityId from(DialectFeature feature) {
-        return switch (Objects.requireNonNull(feature, "dialect feature must not be null")) {
-            case OFFSET_FETCH_PAGINATION -> OFFSET_FETCH_PAGINATION;
-            case MERGE_UPSERT -> MERGE_UPSERT;
-            case IDENTITY_COLUMNS -> IDENTITY_COLUMNS;
-            case SEQUENCES -> SEQUENCES;
-            case JSON_FUNCTIONS -> JSON_FUNCTIONS;
-            case NATIVE_JSON -> NATIVE_JSON;
-            case NATIVE_BOOLEAN -> NATIVE_BOOLEAN;
-            case LARGE_OBJECTS -> LARGE_OBJECTS;
-            case MYSQL_RELATIONAL_METADATA -> MYSQL_RELATIONAL_METADATA;
-            case POSTGRESQL_VECTOR -> POSTGRESQL_VECTOR;
-        };
     }
 
     /** @return 规范化后的稳定字符串 */

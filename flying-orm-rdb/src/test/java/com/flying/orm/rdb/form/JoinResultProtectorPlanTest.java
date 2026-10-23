@@ -4,6 +4,11 @@ import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.join.JoinSource;
+import com.flying.orm.core.join.QueryRelation;
+import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetSort;
+import com.flying.orm.core.page.NullOrder;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.MaskedFieldDefinition;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
@@ -14,6 +19,8 @@ import com.flying.orm.rdb.protection.ProtectedFieldKeyRing;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 import com.flying.orm.rdb.protection.ProtectedFormLayout;
 import com.flying.orm.rdb.result.DynamicRow;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.form.spec.QuerySpec;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -26,6 +33,41 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
 class JoinResultProtectorPlanTest {
+
+    @Test
+    void relatedKeysetHiddenAliasesCannotBeMistakenForAnotherSourcesEncryptedField() {
+        DynamicForm related = DynamicForm.builder("related", "related")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("phone", "VARCHAR"))
+                .addField(DynamicField.of("__fo_ks_1", "VARCHAR"))
+                .encrypted("phone", EncryptedFieldDefinition.builder().build())
+                .encrypted("__fo_ks_1", EncryptedFieldDefinition.builder().build())
+                .masked("phone", MaskedFieldDefinition.builder("partial").prefix(3).suffix(2).build()).build();
+        DynamicForm root = DynamicForm.builder("root", "root")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .relation("related", QueryRelation.of(related, "id", "id")).build();
+        try (ProtectedFieldRuntime runtime = ProtectedFieldRuntime.create(
+                ProtectedFieldKeyRing.single("v1", new byte[32]))) {
+            FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                    SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.h2()).withProtectedFields(runtime);
+            FormReadPlanner planner = new FormReadPlanner(renderer, new FormScopeSupport(renderer,
+                    StructuredConditionResolver.defaults(), DataScope.none()), SqlExecutionOptions.unlimited());
+            FormReadPlanner.PlannedKeysetPage plan = planner.keysetPage(
+                    QuerySpec.of(root, ConditionGroup.and().build()).withProjection(List.of("related.phone"), List.of()),
+                    KeysetPageQuery.first(1, KeysetSort.asc("id", NullOrder.LAST)));
+            Object ciphertext = runtime.writeOperation(related, ProtectedFormLayout.physical(related),
+                    DataScope.none(), renderer.valueCodecs()).prepare(Map.of("phone", "13800138000"))
+                    .ownedValues().get("phone");
+            Map<String, Object> values = new LinkedHashMap<>();
+            values.put("phone", ciphertext);
+            plan.layout().selections().stream().filter(HiddenProjectionLayout.Projection::hidden)
+                    .forEach(selection -> values.put(selection.label(), 7L));
+            DynamicRow transformed = plan.joinResultPlan().transform(DynamicRow.copyOf(values));
+            assertEquals("138******00", transformed.get("phone"));
+            assertEquals(List.of(7L, 7L), plan.layout().nextPosition(transformed).values());
+            assertEquals(Map.of("phone", "138******00"), plan.layout().visibleRow(transformed));
+        }
+    }
 
     @Test
     void h2CatalogFoldingDoesNotChangeProtectedSelfJoinProjectionAliases() throws Exception {
@@ -55,7 +97,7 @@ class JoinResultProtectorPlanTest {
                 DynamicRow row = com.flying.orm.rdb.sync.SyncSqlExecutor.jdbc(
                         com.flying.orm.rdb.execution.ConnectionAccessTestSupport.jdbc(source), RdbDialect.h2()).query(request).getFirst();
                 DynamicRow transformed = new JoinResultProtector(renderer)
-                        .plan(spec, Map.of(owner, DataScope.none(), peer, DataScope.none()), SensitiveDisplayMode.MASKED)
+                        .plan(spec.projections(), Map.of(owner, DataScope.none(), peer, DataScope.none()), SensitiveDisplayMode.MASKED)
                         .transform(row);
                 assertEquals(List.of("owner_id", "OwnerPhone", "peer_phone"), new ArrayList<>(transformed.keySet()));
                 assertEquals(1L, ((Number) transformed.get("owner_id")).longValue());
@@ -81,7 +123,7 @@ class JoinResultProtectorPlanTest {
                 SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.h2());
 
         DynamicRow transformed = new JoinResultProtector(renderer)
-                .plan(spec, Map.of(root, DataScope.none()), spec.sensitiveDisplayMode())
+                .plan(spec.projections(), Map.of(root, DataScope.none()), spec.sensitiveDisplayMode())
                 .transform(row);
 
         assertSame(row, transformed,
@@ -108,7 +150,7 @@ class JoinResultProtectorPlanTest {
                 SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.h2());
 
         DynamicRow transformed = new JoinResultProtector(renderer)
-                .plan(spec, Map.of(root, DataScope.none()), SensitiveDisplayMode.FULL)
+                .plan(spec.projections(), Map.of(root, DataScope.none()), SensitiveDisplayMode.FULL)
                 .transform(row);
 
         assertSame(row, transformed,
@@ -156,7 +198,7 @@ class JoinResultProtectorPlanTest {
             DynamicRow row = DynamicRow.copyOf(values);
 
             DynamicRow transformed = new JoinResultProtector(renderer)
-                    .plan(spec,
+                    .plan(spec.projections(),
                           Map.of(person, DataScope.none(), owner, DataScope.none()),
                           SensitiveDisplayMode.MASKED)
                     .transform(row);

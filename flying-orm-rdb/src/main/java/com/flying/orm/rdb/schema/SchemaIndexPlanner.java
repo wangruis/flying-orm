@@ -2,26 +2,22 @@ package com.flying.orm.rdb.schema;
 
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.IndexDefinition;
-import com.flying.orm.core.metadata.IndexMetadata;
+import com.flying.orm.core.metadata.ForeignKeyDefinition;
+import com.flying.orm.core.metadata.IndexKeyPart;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
-import com.flying.orm.core.metadata.TableMetadata;
-import com.flying.orm.core.sql.render.SqlRequest;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.function.BiConsumer;
-import java.util.function.Consumer;
 
-/** 只负责索引差异的匹配、重建和删除规划。 */
+/** 增量索引的输入适配与显式选项；差异规则归 SchemaDiffer。 */
 final class SchemaIndexPlanner {
 
-    private final SchemaTableSqlRenderer tables;
-
-    SchemaIndexPlanner(SchemaTableSqlRenderer tables) {
-        this.tables = Objects.requireNonNull(tables, "schema table renderer must not be null");
+    private SchemaIndexPlanner() {
     }
 
     /** 多表冷规划路径只发布规范 operation，不提前渲染方言 SQL。 */
@@ -40,178 +36,87 @@ final class SchemaIndexPlanner {
                 .toList();
     }
 
-    void addChanges(List<SqlRequest> requests,
-                    List<SkippedSchemaChange> skipped,
-                    TableMetadata current,
-                    DynamicForm target,
-                    List<IndexMetadata> indexes,
-                    SchemaMigrationOptions options) {
-        addChanges(requests, skipped, current, target, indexes, options, Set.of());
-    }
-
-    void addChanges(List<SqlRequest> requests,
-                    List<SkippedSchemaChange> skipped,
-                    TableMetadata current,
-                    DynamicForm target,
-                    List<IndexMetadata> indexes,
-                    SchemaMigrationOptions options,
-                    Set<String> alreadyDropped) {
-        forEachChange(current, target, indexes, (source, index) -> {
-            if (source == null) {
-                requests.add(tables.createIndex(target.table(), index));
-            } else if (alreadyDropped.contains(source.name())) {
-                requests.add(tables.createIndex(target.table(), index));
-            } else {
-                addChange(requests, skipped, target.table(), source, index, options);
+    static Changes planChanges(List<SkippedSchemaChange> skipped,
+                               RelationalTableDefinition current,
+                               DynamicForm target,
+                               List<IndexDefinition> indexes,
+                               SchemaMigrationOptions options,
+                               Set<String> removedColumns,
+                               List<ForeignKeyDefinition> retainedForeignKeys,
+                               SchemaDialect dialect) {
+        RelationIdentity relation = target.relationIdentity();
+        List<SchemaOperation> operations = differences(current, indexes, options.columnRenames(), relation);
+        Set<String> replaced = new HashSet<>();
+        operations.removeIf(operation -> {
+            if (operation.kind() == SchemaOperation.Kind.ADD_INDEX) return false;
+            boolean drop = operation.kind() == SchemaOperation.Kind.DROP_INDEX;
+            SkippedSchemaChange.Kind kind = drop
+                    ? SkippedSchemaChange.Kind.DROP_INDEX : SkippedSchemaChange.Kind.CHANGE_INDEX;
+            if (drop ? !options.dropIndexAllowed() : !options.rebuildIndexAllowed()) {
+                skipped.add(new SkippedSchemaChange(kind, operation.objectName(), drop
+                        ? "SAFE mode does not drop existing indexes" : "SAFE mode does not rebuild existing indexes"));
+                return true;
             }
-        }, index -> {
-            if (alreadyDropped.contains(index.name())) {
-                return;
+            List<String> candidate = SchemaForeignKeyPlanner.removedCandidateKey(operation);
+            if (candidate == null || retainedForeignKeys.stream().noneMatch(key -> key.reference().equals(relation)
+                    && SchemaDefinitionEquality.sameCandidateKeyColumns(candidate,
+                        SchemaMigrationSupport.renamedNames(key.referenceColumns(), options.columnRenames()), dialect))) {
+                replaced.add(((IndexDefinition) operation.actual()).name());
+                return false;
             }
-            if (options.dropIndexAllowed()) {
-                requests.add(tables.dropIndex(target.table(), index));
-            } else {
-                skipped.add(new SkippedSchemaChange(SkippedSchemaChange.Kind.DROP_INDEX,
-                                                    index.name(),
-                                                    "SAFE mode does not drop existing indexes"));
-            }
+            skipped.add(new SkippedSchemaChange(kind,
+                    operation.objectName(), "candidate index is still referenced by a retained foreign key"));
+            return true;
         });
-    }
-
-    DependencyDrops addDependentDrops(List<SqlRequest> requests,
-                                      TableMetadata current,
-                                      DynamicForm target,
-                                      List<IndexMetadata> indexes,
-                                      SchemaMigrationOptions options,
-                                      Set<String> removedColumns) {
-        if (removedColumns.isEmpty()) {
-            return DependencyDrops.NONE;
-        }
-        Set<String> dropped = new HashSet<>();
         Set<String> blockedColumns = new HashSet<>();
-        forEachChange(current, target, indexes, (source, index) -> {
-            if (source == null || !dependsOn(source, removedColumns)) {
-                return;
+        if (!removedColumns.isEmpty()) {
+            for (IndexDefinition index : current.indexes()) {
+                if (!replaced.contains(index.name())) {
+                    index.columns().stream().filter(removedColumns::contains).forEach(blockedColumns::add);
+                }
             }
-            if (!sameIndex(source, index, options.columnRenames())
-                    && options.rebuildIndexAllowed()) {
-                requests.add(tables.dropIndex(target.table(), source));
-                dropped.add(source.name());
-            } else {
-                addDependencies(blockedColumns, source, removedColumns);
-            }
-        }, index -> {
-            if (!dependsOn(index, removedColumns)) {
-                return;
-            }
-            if (options.dropIndexAllowed()) {
-                requests.add(tables.dropIndex(target.table(), index));
-                dropped.add(index.name());
-            } else {
-                addDependencies(blockedColumns, index, removedColumns);
-            }
-        });
-        return new DependencyDrops(Set.copyOf(dropped), Set.copyOf(blockedColumns));
+        }
+        return new Changes(operations, blockedColumns);
     }
 
-    private static boolean dependsOn(IndexMetadata index, Set<String> columns) {
-        return index.columns().stream().anyMatch(columns::contains);
+    record Changes(List<SchemaOperation> operations, Set<String> blockedColumns) {
     }
 
-    private static void addDependencies(Set<String> target,
-                                        IndexMetadata index,
-                                        Set<String> columns) {
-        index.columns().stream().filter(columns::contains).forEach(target::add);
+    /** 列改名已先执行，索引演进必须比较此时的物理列名。 */
+    private static IndexDefinition renamedIndex(IndexDefinition index, Map<String, String> renames) {
+        if (index.columns().stream().noneMatch(renames::containsKey)) {
+            return index;
+        }
+        IndexDefinition.Builder renamed = IndexDefinition.builder(index.name()).unique(index.unique());
+        index.keys().forEach(key -> renamed.addKey(new IndexKeyPart(
+                renames.getOrDefault(key.column(), key.column()), key.direction())));
+        return renamed.build();
     }
 
-    record DependencyDrops(Set<String> droppedIndexes, Set<String> blockedColumns) {
-        private static final DependencyDrops NONE = new DependencyDrops(Set.of(), Set.of());
-    }
-
-    /**
-     * 正向和回滚共用索引身份匹配，但各自决定已匹配索引是否需要重建。
-     * 先按目标顺序交付匹配项（source 为 null 表示新增），再按当前顺序交付移除项；
-     * 已有的等价旧版生成索引只保留，不交付变更，避免将兼容别名误当作新增或删除。
-     */
-    static void forEachChange(TableMetadata current,
-                              DynamicForm target,
-                              List<IndexMetadata> indexes,
-                              BiConsumer<IndexMetadata, IndexMetadata> matched,
-                              Consumer<IndexMetadata> removed) {
-        List<IndexMetadata> generatedIndexes = target.toTableMetadata().indexes();
-        Set<String> targetIndexNames = new HashSet<>();
-        indexes.forEach(index -> targetIndexNames.add(index.normalizedName()));
-        Set<String> targetPhysicalIndexNames = new HashSet<>();
-        indexes.forEach(index -> targetPhysicalIndexNames.add(index.name()));
+    /** 按声明的物理索引名称匹配，并使用列改名后的定义比较。 */
+    private static List<SchemaOperation> differences(RelationalTableDefinition current,
+                                                      List<IndexDefinition> indexes, Map<String, String> renames,
+                                                      RelationIdentity relation) {
         Set<String> ambiguousTargetIndexNames = SchemaMigrationSupport.ambiguousFoldedNames(
-                indexes.stream().map(IndexMetadata::name).toList());
-        Set<String> consumedLegacyIndexNames = new HashSet<>();
-        Set<String> matchedCurrentIndexNames = new HashSet<>();
-
-        for (IndexMetadata index : indexes) {
-            IndexMetadata currentIndex = matchingIndex(current, index, ambiguousTargetIndexNames);
-            if (currentIndex != null) {
-                matchedCurrentIndexNames.add(currentIndex.name());
-                matched.accept(currentIndex, index);
-                continue;
-            }
-            IndexMetadata legacyIndex = SchemaMigrationSupport.findLegacyGeneratedUniqueIndex(
-                    current.indexes(),
-                    generatedIndexes,
-                    index,
-                    targetIndexNames,
-                    consumedLegacyIndexNames);
-            if (legacyIndex != null) {
-                consumedLegacyIndexNames.add(legacyIndex.normalizedName());
-            } else {
-                matched.accept(null, index);
-            }
-        }
-        for (IndexMetadata index : current.indexes()) {
-            boolean retained = consumedLegacyIndexNames.contains(index.normalizedName())
-                    || matchedCurrentIndexNames.contains(index.name())
-                    || targetPhysicalIndexNames.contains(index.name());
-            if (!retained) {
-                removed.accept(index);
-            }
-        }
+                indexes.stream().map(IndexDefinition::name).toList());
+        List<SchemaOperation> operations = new ArrayList<>();
+        List<IndexDefinition> actual = renames.isEmpty() ? current.indexes()
+                : current.indexes().stream().map(index -> renamedIndex(index, renames)).toList();
+        SchemaDiffer.diffIndexes(relation, indexes, actual, index -> {
+            IndexDefinition currentIndex = matchingIndex(current, index, ambiguousTargetIndexNames);
+            return currentIndex == null ? null : renamedIndex(currentIndex, renames);
+        }, (source, desired) -> SchemaDefinitionEquality.sameIndex(source, desired, null), operations);
+        return operations;
     }
 
-    private static IndexMetadata matchingIndex(TableMetadata current,
-                                                IndexMetadata target,
+    private static IndexDefinition matchingIndex(RelationalTableDefinition current,
+                                                IndexDefinition target,
                                                 Set<String> ambiguousTargetNames) {
-        IndexMetadata exact = SchemaMigrationSupport.exactIndex(current, target.name());
+        IndexDefinition exact = SchemaMigrationSupport.exactIndex(current, target.name());
         if (exact != null || ambiguousTargetNames.contains(target.normalizedName())) {
             return exact;
         }
         return current.findIndex(target.name()).orElse(null);
     }
 
-    private void addChange(List<SqlRequest> requests,
-                           List<SkippedSchemaChange> skipped,
-                           String table,
-                           IndexMetadata current,
-                           IndexMetadata target,
-                           SchemaMigrationOptions options) {
-        if (sameIndex(current, target, options.columnRenames())) {
-            return;
-        }
-        if (options.rebuildIndexAllowed()) {
-            requests.add(tables.dropIndex(table, current));
-            requests.add(tables.createIndex(table, target));
-        } else {
-            skipped.add(new SkippedSchemaChange(SkippedSchemaChange.Kind.CHANGE_INDEX,
-                                                target.name(),
-                                                "SAFE mode does not rebuild existing indexes"));
-        }
-    }
-
-    /** 正向和回滚必须按同一份列重命名事实判断索引是否真的发生变化。 */
-    static boolean sameIndex(IndexMetadata current,
-                             IndexMetadata target,
-                             Map<String, String> columnRenames) {
-        return current.name().equals(target.name())
-                && current.unique() == target.unique()
-                && SchemaMigrationSupport.sameIndexColumns(current, target, columnRenames);
-    }
 }

@@ -87,6 +87,25 @@ class EntityFieldCodecConditionH2Test {
         }));
     }
 
+    @TestFactory
+    Stream<DynamicTest> conditionalUpsertUsesFieldCodecAndSkipsNonMatchingRows() {
+        return Stream.of(false, true).map(reactive -> DynamicTest.dynamicTest("conditional/" + reactive, () -> {
+            try (Database database = new Database()) {
+                database.insert(reactive);
+                BatchSpec request = BatchSpec.upsert(database.descriptor.form(), Flux.just(
+                                Map.of("id", 1L, "text", "changed"),
+                                Map.of("id", 2L, "text", "must-not-write"),
+                                Map.of("id", 3L, "text", "inserted")))
+                        .withUpdateCondition(ConditionGroup.and().where("text", "=", "old").build())
+                        .withOptions(BatchWriteOptions.of(3));
+                database.execute(request, reactive);
+                assertEquals("db:changed", database.rawText(1L));
+                assertEquals("db:other", database.rawText(2L));
+                assertEquals("db:inserted", database.rawText(3L));
+            }
+        }));
+    }
+
     @TableName("coded_scope_rows")
     private record CodedRow(@TableId(type = IdType.INPUT) Long id,
                              @TableColumn(databaseTypeId = "coded-text") CharSequence text) {

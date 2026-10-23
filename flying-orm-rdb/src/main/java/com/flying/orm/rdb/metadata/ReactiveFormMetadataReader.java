@@ -2,123 +2,85 @@ package com.flying.orm.rdb.metadata;
 
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.RelationIdentity;
-import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.rdb.schema.SchemaSnapshot;
 import com.flying.orm.rdb.schema.SchemaSnapshotCoverage;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.util.Objects;
-
 /**
- * 从真实数据库把表结构读回动态表单。它只负责读取和转换，不负责建表、迁移或缓存。
+ * 响应式元数据端口。读取保留分段关系身份，订阅时访问数据库。
+ * 表单读取只需列事实；表结构读取不通过表单反向还原。
  *
  * @author wangr
- * @date 2026-07-28
- * @version v1.0
+ * @version v4.1.2
  */
-public interface ReactiveFormMetadataReader {
+public interface ReactiveFormMetadataReader extends MetadataCacheInvalidator {
 
-    /**
-     * 声明该 reader 能稳定回读的结构事实。默认保守为无覆盖；只有确实返回完整规范快照的自定义
-     * reader 才应显式返回 {@link SchemaSnapshotCoverage#complete()}。
-     */
     default SchemaSnapshotCoverage snapshotCoverage() {
         return SchemaSnapshotCoverage.none();
     }
 
-    /**
-     * 按物理表名读取动态表单结构。
-     *
-     * @param formId 表单 ID，由调用方决定怎么命名
-     * @param table  物理表名，可以是 table 或 schema.table
-     * @return 数据库里当前能看到的表单结构
-     */
-    Mono<DynamicForm> readForm(String formId, String table);
-
-    /**
-     * 读取表元数据。默认只包含字段；具体数据库实现可以覆盖它，把索引也读回来。
-     *
-     * @param table 物理表名，可以是 table 或 schema.table
-     * @return 表元数据
-     */
-    default Mono<TableMetadata> readTable(String table) {
-        return readForm(table, table).map(DynamicForm::toTableMetadata);
+    default Flux<String> readTableNames() {
+        return readTableNames(null);
     }
 
-    /**
-     * 读取 Schema 规划使用的当前完整表元数据，不命中也不写入普通 CRUD 缓存。
-     * 默认在订阅时调用无缓存的 {@link #readTable(String)}；自定义缓存 reader 必须覆盖本方法，
-     * 将读取委托给自身的无缓存加载路径或下层 reader 的本方法，保留列、索引、外键和生成策略。
-     *
-     * @param table 物理表名，可以是 table 或 schema.table
-     * @return 每次订阅重新读取的表元数据
-     */
-    default Mono<TableMetadata> readTableForSchema(String table) {
-        return Mono.defer(() -> readTable(table));
+    default Flux<String> readTableNames(String schema) {
+        return Flux.error(new UnsupportedOperationException(
+                "metadata reader does not support table name enumeration"));
     }
 
-    /**
-     * 读取不会伪造未知属性的 Schema 快照。旧的自定义 reader 通过默认适配继续二进制兼容；内建 reader
-     * 会覆盖本方法，直接区分表不存在和字典属性未知。
-     */
+    default Flux<RelationalTableDefinition> readTables() {
+        return readTables(null);
+    }
+
+    default Flux<RelationalTableDefinition> readTables(String schema) {
+        return Flux.error(new UnsupportedOperationException("metadata reader does not support schema enumeration"));
+    }
+
+    default Mono<DynamicForm> readForm(String formId, String table) {
+        return Mono.defer(() -> readForm(formId, RelationIdentity.parse(table)));
+    }
+
+    default Mono<DynamicForm> readForm(String formId, String schema, String table) {
+        return Mono.defer(() -> readForm(formId, RelationIdentity.of(null, schema, table)));
+    }
+
+    Mono<DynamicForm> readForm(String formId, RelationIdentity relation);
+
+    default Mono<RelationalTableDefinition> readTable(String table) {
+        return Mono.defer(() -> readTable(RelationIdentity.parse(table)));
+    }
+
+    default Mono<RelationalTableDefinition> readTable(String schema, String table) {
+        return Mono.defer(() -> readTable(RelationIdentity.of(null, schema, table)));
+    }
+
+    Mono<RelationalTableDefinition> readTable(RelationIdentity relation);
+
+    /** 不使用或填充普通元数据缓存；缓存实现应委托给底层直读入口。 */
+    default Mono<RelationalTableDefinition> readTableForSchema(RelationIdentity relation) {
+        return Mono.defer(() -> readTable(relation));
+    }
+
     default Mono<SchemaSnapshot> readSnapshot(String table) {
-        return readTable(table).map(metadata -> SchemaSnapshot.fromLegacy(
-                RelationIdentity.table(table), metadata));
+        return Mono.defer(() -> readSnapshot(RelationIdentity.parse(table)));
     }
 
-    /**
-     * 按 schema 和物理表名读取动态表单结构。
-     *
-     * @param formId 表单 ID，由调用方决定怎么命名
-     * @param schema 数据库 schema
-     * @param table  物理表名
-     * @return 数据库里当前能看到的表单结构
-     */
-    Mono<DynamicForm> readForm(String formId, String schema, String table);
-
-    /**
-     * 按 schema 和物理表名读取表元数据。默认只包含字段；具体数据库实现可以覆盖它，把索引也读回来。
-     *
-     * @param schema 数据库 schema
-     * @param table  物理表名
-     * @return 表元数据
-     */
-    default Mono<TableMetadata> readTable(String schema, String table) {
-        return readForm(table, schema, table).map(DynamicForm::toTableMetadata);
-    }
-
-    /** 按明确 schema 读取三态 Schema 快照。 */
     default Mono<SchemaSnapshot> readSnapshot(String schema, String table) {
-        return readTable(schema, table).map(metadata -> SchemaSnapshot.fromLegacy(
-                RelationIdentity.of(null, schema, table), metadata));
+        return Mono.defer(() -> readSnapshot(RelationIdentity.of(null, schema, table)));
     }
 
-    /**
-     * 按已经分段的关系身份读取结构。旧实现可继续承接普通名称；无 schema 且名称含点号时，旧的
-     * 单字符串契约无法证明身份，因而明确失败而不是猜成 schema.table。
-     */
+    /** 不把未读取的事实伪造为不存在。 */
     default Mono<SchemaSnapshot> readSnapshot(RelationIdentity relation) {
-        RelationIdentity target = Objects.requireNonNull(
-                relation, "schema relation identity must not be null");
-        if (target.catalog().isPresent()) {
-            return Mono.error(new UnsupportedOperationException(
-                    "custom metadata reader must implement catalog-aware relation identity"));
-        }
-        if (target.schema().isPresent()) {
-            return readSnapshot(target.schema().orElseThrow(), target.table());
-        }
-        if (target.table().contains(".")) {
-            return Mono.error(new UnsupportedOperationException(
-                    "custom metadata reader must implement literal-dot relation identity"));
-        }
-        return readSnapshot(target.table());
+        return Mono.defer(() -> readTableForSchema(relation)).map(SchemaSnapshot::fromPartial);
     }
 
-    /**
-     * 精确清理一个物理表的元数据缓存。无缓存 reader 默认什么也不做，Caffeine 包装器会覆盖这个方法。
-     *
-     * @param table 迁移成功的物理表名，可以是 table 或 schema.table
-     */
-    default void invalidate(String table) {
+    @Override
+    default void invalidate(RelationIdentity relation) {
+    }
+
+    @Override
+    default void invalidateAll() {
     }
 }

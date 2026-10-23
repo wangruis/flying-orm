@@ -12,11 +12,14 @@ import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.lock.OptimisticLockConflictException;
 import com.flying.orm.rdb.lock.OptimisticLockOptions;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
+import com.flying.orm.rdb.protection.ProtectedContainsLayout;
 import org.junit.jupiter.api.Test;
 
 import java.util.Date;
+import java.lang.management.ManagementFactory;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -27,6 +30,56 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PlainFormProtectionPlanningTest {
+    private static volatile Optional<ProtectedContainsLayout> layoutSink;
+
+    @Test
+    void protectionDoesNotOwnOrdinaryCrudSqlRendering() {
+        assertFalse(java.util.Arrays.stream(FormProtectionSqlSupport.class.getDeclaredMethods())
+                .anyMatch(method -> method.getReturnType() == com.flying.orm.core.sql.render.SqlRequest.class),
+                "protected values must use the ordinary query and write renderers");
+    }
+
+    @Test
+    void writeGuardsRetainActionSpecificErrorsBeforePlanning() {
+        FormDataSqlRenderer renderer = renderer();
+        FormOperationPlanner planner = new FormOperationPlanner(renderer,
+                new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
+                SqlExecutionOptions.unlimited());
+        assertEquals("insert spec must not be null",
+                assertThrows(NullPointerException.class, () -> planner.insert(null)).getMessage());
+        assertEquals("update spec must not be null",
+                assertThrows(NullPointerException.class, () -> planner.update(null)).getMessage());
+        assertEquals("delete spec must not be null",
+                assertThrows(NullPointerException.class, () -> planner.delete(null)).getMessage());
+        assertEquals("delete spec must not be null",
+                assertThrows(NullPointerException.class, () -> planner.physicalDelete(null)).getMessage());
+        WriteSpec update = WriteSpec.update(form(), Map.of("name", "changed"), ConditionGroup.and().build());
+        assertEquals("write spec operation UPDATE cannot execute as INSERT",
+                assertThrows(IllegalArgumentException.class, () -> planner.insert(update)).getMessage());
+        assertEquals("write spec operation UPDATE cannot execute as DELETE",
+                assertThrows(IllegalArgumentException.class, () -> planner.delete(update)).getMessage());
+        assertEquals("write spec operation UPDATE cannot execute as DELETE",
+                assertThrows(IllegalArgumentException.class, () -> planner.physicalDelete(update)).getMessage());
+        assertEquals("write spec operation INSERT cannot execute as UPDATE",
+                assertThrows(IllegalArgumentException.class, () -> planner.update(
+                        WriteSpec.insert(form(), Map.of("name", "changed")))).getMessage());
+    }
+
+    @Test
+    void unencryptedFormsDoNotAllocateContainsDiscoveryPipelines() {
+        DynamicForm plain = form();
+        com.sun.management.ThreadMXBean allocation =
+                (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
+        allocation.setThreadAllocatedMemoryEnabled(true);
+        int iterations = 50_000;
+        for (int index = 0; index < iterations; index++) layoutSink = ProtectedContainsLayout.resolve(plain);
+        long thread = Thread.currentThread().threadId();
+        long before = allocation.getThreadAllocatedBytes(thread);
+        for (int index = 0; index < iterations; index++) layoutSink = ProtectedContainsLayout.resolve(plain);
+        long bytes = allocation.getThreadAllocatedBytes(thread) - before;
+        assertTrue(bytes < iterations * 32L, "bytes per discovery: " + bytes / (double) iterations);
+        assertTrue(layoutSink.isEmpty());
+    }
 
     @Test
     void absentProtectionAndScopeDoNotSnapshotQueryValuesAgain() {
@@ -82,7 +135,7 @@ class PlainFormProtectionPlanningTest {
         FormDataSqlRenderer renderer = renderer();
         FormScopeSupport scopes = new FormScopeSupport(renderer,
                 StructuredConditionResolver.defaults(), DataScope.none());
-        BatchOptimisticUpdate update = new BatchOptimisticUpdate(
+        BatchUpdate update = new BatchUpdate(
                 Map.of("name", "changed"),
                 ConditionGroup.or().where("id", "=", 1L).where("id", "=", 2L).build(),
                 OptimisticLockOptions.increment("version", 7L));
@@ -95,6 +148,7 @@ class PlainFormProtectionPlanningTest {
         assertTrue(prepared.request().sql().contains(
                 "where (\"id\" = ? or \"id\" = ?) and \"tenant_id\" = ? and \"version\" = ?"));
         assertNull(prepared.ownerQuery(), "ordinary updates do not consume a CONTAINS owner query");
+        assertNull(prepared.write(), "ordinary batch rows must not allocate a protected-write carrier");
     }
 
     @Test
@@ -102,7 +156,7 @@ class PlainFormProtectionPlanningTest {
         FormDataSqlRenderer renderer = renderer();
         FormOperationPlanner planner = new FormOperationPlanner(renderer,
                 new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
-                SqlExecutionOptions.safeDefaults());
+                SqlExecutionOptions.unlimited());
         ConditionGroup where = ConditionGroup.or().where("id", "=", 1L).where("id", "=", 2L).build();
         OptimisticLockOptions lock = OptimisticLockOptions.increment("version", 7L);
 

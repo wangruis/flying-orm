@@ -14,6 +14,34 @@ import org.junit.jupiter.api.Test;
 class ThrowableGraphTest {
 
     @Test
+    void knownWrappersDoNotHideDeepFatalErrors() {
+        InternalError fatal = new InternalError("fatal");
+        Throwable wrapped = fatal;
+        for (int index = 0; index < 40; index++) wrapped = new CompletionException(wrapped);
+        assertSame(fatal, ThrowableGraph.findVirtualMachineError(wrapped));
+        ThrowableGraph.addSuppressedIfAcyclic(fatal, wrapped);
+        assertEquals(0, fatal.getSuppressed().length);
+    }
+
+    @Test
+    void causeClassificationDoesNotDropDeepDomainFailures() {
+        IllegalArgumentException target = new IllegalArgumentException("domain failure");
+        Throwable wrapped = target;
+        for (int index = 0; index < 100; index++) wrapped = new RuntimeException("context", wrapped);
+        assertSame(target, ThrowableGraph.findCause(wrapped, IllegalArgumentException.class));
+    }
+
+    @Test
+    void cyclicKnownWrappersTerminateWithoutInventingAFailure() {
+        CompletionException root = new CompletionException("first", null) {
+            private final Throwable second = new CompletionException(this);
+            @Override public synchronized Throwable getCause() { return second; }
+        };
+        assertNull(ThrowableGraph.findVirtualMachineError(root));
+        assertNull(ThrowableGraph.findCause(root, IllegalArgumentException.class));
+    }
+
+    @Test
     void doesNotMineSuppressedFailuresForFatalErrors() {
         RuntimeException root = new RuntimeException("root");
         OutOfMemoryError fatal = new OutOfMemoryError("fatal");

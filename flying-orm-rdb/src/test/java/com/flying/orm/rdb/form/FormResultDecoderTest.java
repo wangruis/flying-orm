@@ -1,17 +1,21 @@
 package com.flying.orm.rdb.form;
 
+import com.flying.orm.core.codec.ValueCodec;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.protection.MaskedFieldDefinition;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.rdb.internal.binding.SqlNullParameter;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlLargeObjectLimitExceededException;
+import com.flying.orm.rdb.execution.SqlResultMemoryLimitExceededException;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
+import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
 import com.flying.orm.rdb.result.DynamicRow;
 import io.r2dbc.spi.Blob;
 import io.r2dbc.spi.Clob;
@@ -40,6 +44,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -54,6 +59,117 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class FormResultDecoderTest {
 
     @Test
+    void customCodecRunsAndKeepsItsOutputIdentityEvenWhenValuesAreEqual() {
+        AtomicInteger calls = new AtomicInteger();
+        AtomicReference<Object> output = new AtomicReference<>();
+        AtomicBoolean copy = new AtomicBoolean();
+        EntityTypeMappingRegistry mappings = EntityTypeMappingRegistry.builder()
+                .registerNamed("copy-text", String.class, DatabaseType.of("VARCHAR"), new ValueCodec() {
+                    @Override public boolean supports(Class<?> type) { return type == String.class; }
+                    @Override public Object write(Object value) { return value; }
+                    @Override public Object read(Object value, Class<?> type) {
+                        calls.incrementAndGet();
+                        Object decoded = copy.get() ? new String(value.toString()) : value;
+                        output.set(decoded);
+                        return decoded;
+                    }
+                }).build();
+        DynamicForm form = DynamicForm.builder("items", "items")
+                .addField(DynamicField.of("name", "VARCHAR")).build();
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql())
+                .withEntityFieldCodecs(Map.of(form.field("name"), mappings.resolve("copy-text", String.class)));
+        DynamicRow source = DynamicRow.copyOf(Map.of("name", "value"));
+        try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())) {
+            FormResultDecoder decoder = new FormResultDecoder(renderer, models);
+            SqlExecutionOptions options = SqlExecutionOptions.unlimited();
+            for (boolean shouldCopy : List.of(false, true)) {
+                copy.set(shouldCopy);
+                DynamicRow sync = decoder.rowDecoder(form, options, DataScope.none(), SensitiveDisplayMode.DECLARED).map(source);
+                assertSame(output.get(), sync.get("name"));
+                assertEquals(shouldCopy, sync != source);
+                DynamicRow reactive = decoder.decodeRows(form, Flux.just(source), options).blockFirst();
+                assertSame(output.get(), reactive.get("name"));
+                assertEquals(shouldCopy, reactive != source);
+            }
+            assertEquals(4, calls.get());
+            copy.set(false);
+            assertThrows(SqlResultMemoryLimitExceededException.class, () -> decoder.rowDecoder(
+                    form, options.withMaxResultBytes(1), DataScope.none(), SensitiveDisplayMode.DECLARED).map(source));
+            assertThrows(SqlResultMemoryLimitExceededException.class, () -> decoder.decodeRows(
+                    form, Flux.just(source), options.withMaxResultBytes(1)).blockFirst());
+            assertEquals(6, calls.get());
+        }
+    }
+
+    @Test
+    void unchangedScalarDecodingReusesRowsAcrossSyncAndReactivePaths() {
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql());
+        DynamicForm form = DynamicForm.builder("items", "items")
+                .addField(DynamicField.of("id", "BIGINT"))
+                .addField(DynamicField.of("amount", "DECIMAL"))
+                .build();
+        DynamicRow source = DynamicRow.copyOf(Map.of(
+                "id", 1000L, "amount", new java.math.BigDecimal("1.25"), "alias", "unchanged"));
+
+        try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())) {
+            FormResultDecoder decoder = new FormResultDecoder(renderer, models);
+            SqlExecutionOptions options = SqlExecutionOptions.unlimited();
+
+            assertSame(source, decoder.rowDecoder(form, options, DataScope.none(),
+                    SensitiveDisplayMode.DECLARED).map(source));
+            assertSame(source, decoder.rowDecoder(form, options, DataScope.none(), SensitiveDisplayMode.DECLARED).map(source));
+            assertSame(source, decoder.decodeRows(form, Flux.just(source), options).blockFirst());
+        }
+    }
+
+    @Test
+    void changedScalarAndJsonNullStillReplaceValuesWithoutChangingTheSource() {
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql());
+        DynamicForm form = DynamicForm.builder("items", "items")
+                .addField(DynamicField.of("id", "BIGINT"))
+                .addField(DynamicField.of("payload", "JSON"))
+                .build();
+        DynamicRow source = DynamicRow.copyOf(Map.of("id", 1000, "payload", "null", "alias", "same"));
+
+        try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())) {
+            FormResultDecoder decoder = new FormResultDecoder(renderer, models);
+            SqlExecutionOptions options = SqlExecutionOptions.unlimited();
+            List<DynamicRow> results = List.of(
+                    decoder.rowDecoder(form, options, DataScope.none(), SensitiveDisplayMode.DECLARED).map(source),
+                    decoder.decodeRows(form, Flux.just(source), options).blockFirst());
+            for (DynamicRow result : results) {
+                assertEquals(1000L, result.get("id"));
+                assertTrue(result.containsKey("payload"));
+                assertEquals(null, result.get("payload"));
+                assertEquals("same", result.get("alias"));
+            }
+            assertEquals(1000, source.get("id"));
+            assertEquals("null", source.get("payload"));
+        }
+    }
+
+    @Test
+    void unprotectedScalarDecodingDoesNotCaptureProtectionOrBudgetOperations() {
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql());
+        DynamicForm form = DynamicForm.builder("items", "items")
+                .addField(DynamicField.of("id", "BIGINT")).build();
+        try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())) {
+            com.flying.orm.rdb.mapping.RowMapper<DynamicRow> mapper = new FormResultDecoder(renderer, models)
+                    .rowDecoder(form, SqlExecutionOptions.unlimited(), DataScope.none(), SensitiveDisplayMode.DECLARED);
+            assertEquals(1L, mapper.map(DynamicRow.copyOf(Map.of("id", 1))).get("id"));
+            for (Field field : mapper.getClass().getDeclaredFields()) {
+                assertFalse(java.util.function.UnaryOperator.class.isAssignableFrom(field.getType())
+                                || field.getType() == FormResultDecoder.DecodedResultBudget.class,
+                        "ordinary decoding must not capture protection or unused budget: " + field.getName());
+            }
+        }
+    }
+
+    @Test
     void ordinaryUnprotectedRowsKeepTheOriginalQueryContainers() {
         FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
                 SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.h2());
@@ -66,8 +182,9 @@ class FormResultDecoderTest {
         try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())) {
             FormResultDecoder decoder = new FormResultDecoder(renderer, models);
 
-            assertSame(rows, decoder.decodeRows(form, rows, SqlExecutionOptions.safeDefaults()));
-            assertSame(rowFlux, decoder.decodeRows(form, rowFlux, SqlExecutionOptions.safeDefaults()));
+            assertSame(FormResultDecoder.IDENTITY, decoder.rowDecoder(form, SqlExecutionOptions.unlimited(),
+                    DataScope.none(), SensitiveDisplayMode.DECLARED));
+            assertSame(rowFlux, decoder.decodeRows(form, rowFlux, SqlExecutionOptions.unlimited()));
         }
     }
 
@@ -81,7 +198,7 @@ class FormResultDecoderTest {
                 .build();
         byte[] content = {1, 2, 3};
         DynamicRow rawRow = DynamicRow.copyOf(Map.of("body", "text", "content", content));
-        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults();
+        SqlExecutionOptions options = SqlExecutionOptions.unlimited();
         AtomicInteger scheduledTasks = new AtomicInteger();
         String hook = getClass().getName() + ".materializedLargeObjects";
 
@@ -112,7 +229,7 @@ class FormResultDecoderTest {
                 .addField(DynamicField.of("body", "CLOB"))
                 .addField(DynamicField.of("content", "BLOB"))
                 .build();
-        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
+        SqlExecutionOptions options = SqlExecutionOptions.unlimited()
                 .withMaxLargeObjectBytes(2).withMaxLargeObjectChars(2);
 
         try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())) {
@@ -147,7 +264,7 @@ class FormResultDecoderTest {
             Object locator = dataType.equals("BLOB")
                     ? Blob.from(Flux.<ByteBuffer>never().doOnCancel(() -> cancelled.set(true)))
                     : Clob.from(Flux.<CharSequence>never().doOnCancel(() -> cancelled.set(true)));
-            SqlExecutionOptions options = SqlExecutionOptions.safeDefaults();
+            SqlExecutionOptions options = SqlExecutionOptions.unlimited();
             AtomicInteger scheduledTasks = new AtomicInteger();
             String hook = getClass().getName() + ".rawLargeObjects";
 
@@ -194,10 +311,10 @@ class FormResultDecoderTest {
         try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())) {
             FormResultDecoder decoder = new FormResultDecoder(renderer, models);
 
-            DynamicRow jdbcRow = decoder.decodeRows(
-                    form, List.of(rawRow), SqlExecutionOptions.safeDefaults()).getFirst();
+            DynamicRow jdbcRow = decoder.rowDecoder(
+                    form, SqlExecutionOptions.unlimited(), DataScope.none(), SensitiveDisplayMode.DECLARED).map(rawRow);
             DynamicRow reactiveRow = decoder.decodeRows(
-                    form, Flux.just(rawRow), SqlExecutionOptions.safeDefaults()).blockFirst();
+                    form, Flux.just(rawRow), SqlExecutionOptions.unlimited()).blockFirst();
 
             OffsetDateTime expected = rawTime.atOffset(ZoneOffset.UTC);
             assertEquals(expected, assertInstanceOf(OffsetDateTime.class, jdbcRow.value(0)));
@@ -213,8 +330,9 @@ class FormResultDecoderTest {
                 SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.mysql());
         LocalDateTime rawTime = LocalDateTime.of(2026, 8, 21, 3, 4, 5, 123456000);
 
-        Object decoded = renderer.readScalarValue(
-                DynamicField.of("created_at", "TIMESTAMPTZ(6) INVALID"), rawTime);
+        Object decoded = new FormAggregateReadSupport(renderer,
+                new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()))
+                .decoder(DynamicField.of("created_at", "TIMESTAMPTZ(6) INVALID"), null).apply(rawTime);
 
         assertEquals(rawTime, decoded);
     }
@@ -246,10 +364,10 @@ class FormResultDecoderTest {
         DynamicRow rawRow = DynamicRow.copyOf(Map.of("local_clock", expected.toString()));
         try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())) {
             FormResultDecoder decoder = new FormResultDecoder(renderer, models);
-            DynamicRow jdbcRow = decoder.decodeRows(
-                    form, List.of(rawRow), SqlExecutionOptions.safeDefaults()).getFirst();
+            DynamicRow jdbcRow = decoder.rowDecoder(
+                    form, SqlExecutionOptions.unlimited(), DataScope.none(), SensitiveDisplayMode.DECLARED).map(rawRow);
             DynamicRow reactiveRow = decoder.decodeRows(
-                    form, Flux.just(rawRow), SqlExecutionOptions.safeDefaults()).blockFirst();
+                    form, Flux.just(rawRow), SqlExecutionOptions.unlimited()).blockFirst();
 
             assertEquals(expected, assertInstanceOf(OffsetTime.class, jdbcRow.value(0)));
             assertEquals(expected, assertInstanceOf(OffsetTime.class, reactiveRow.value(0)));
@@ -276,10 +394,10 @@ class FormResultDecoderTest {
 
         try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())) {
             FormResultDecoder decoder = new FormResultDecoder(renderer, models);
-            DynamicRow jdbcRow = decoder.decodeRows(
-                    form, List.of(rawRow), SqlExecutionOptions.safeDefaults()).getFirst();
+            DynamicRow jdbcRow = decoder.rowDecoder(
+                    form, SqlExecutionOptions.unlimited(), DataScope.none(), SensitiveDisplayMode.DECLARED).map(rawRow);
             DynamicRow reactiveRow = decoder.decodeRows(
-                    form, Flux.just(rawRow), SqlExecutionOptions.safeDefaults()).blockFirst();
+                    form, Flux.just(rawRow), SqlExecutionOptions.unlimited()).blockFirst();
 
             assertEquals(List.of(LocalTime.of(12, 34, 56)), jdbcRow.get("local_times"));
             assertEquals(List.of(expectedLocalTimestamp), jdbcRow.get("local_stamps"));
@@ -301,8 +419,8 @@ class FormResultDecoderTest {
 
         try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())) {
             FormResultDecoder decoder = new FormResultDecoder(renderer, models);
-            assertThrows(IllegalArgumentException.class, () -> decoder.decodeRows(
-                    form, List.of(rawRow), SqlExecutionOptions.safeDefaults()));
+            assertThrows(IllegalArgumentException.class, () -> decoder.rowDecoder(
+                    form, SqlExecutionOptions.unlimited(), DataScope.none(), SensitiveDisplayMode.DECLARED).map(rawRow));
         }
     }
 
@@ -321,8 +439,8 @@ class FormResultDecoderTest {
 
         try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())) {
             FormResultDecoder decoder = new FormResultDecoder(renderer, models);
-            List<DynamicRow> decoded = decoder.decodeRows(
-                    form, rows, SqlExecutionOptions.safeDefaults());
+            List<DynamicRow> decoded = rows.stream().map(decoder.rowDecoder(
+                    form, SqlExecutionOptions.unlimited(), DataScope.none(), SensitiveDisplayMode.DECLARED)::map).toList();
 
             assertInstanceOf(OffsetDateTime.class, decoded.getFirst().get("created_at"));
             Map<?, ?> bindings = layoutBindings(first);
@@ -349,7 +467,7 @@ class FormResultDecoderTest {
             Flux<DynamicRow> decoded = decoder.decodeRows(
                     form,
                     Flux.fromIterable(rows).doOnRequest(requested -> firstRequest.compareAndSet(0L, requested)),
-                    SqlExecutionOptions.safeDefaults());
+                    SqlExecutionOptions.unlimited());
 
             assertEquals(2, decoded.collectList().block().size());
             assertEquals(Long.MAX_VALUE, firstRequest.get());
@@ -375,7 +493,7 @@ class FormResultDecoderTest {
             List<DynamicRow> decoded = decoder.decodeRows(
                     form,
                     Flux.fromIterable(rows).doOnRequest(requests::add),
-                    SqlExecutionOptions.safeDefaults(), DataScope.none(), SensitiveDisplayMode.DECLARED,
+                    SqlExecutionOptions.unlimited(), DataScope.none(), SensitiveDisplayMode.DECLARED,
                     List.of("created_at")).collectList().block();
 
             assertEquals(2, decoded.size());
@@ -399,8 +517,8 @@ class FormResultDecoderTest {
 
         try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())) {
             FormResultDecoder decoder = new FormResultDecoder(renderer, models);
-            List<DynamicRow> decoded = decoder.decodeRows(
-                    form, rows, SqlExecutionOptions.safeDefaults(), DataScope.none(), SensitiveDisplayMode.MASKED);
+            List<DynamicRow> decoded = rows.stream().map(decoder.rowDecoder(
+                    form, SqlExecutionOptions.unlimited(), DataScope.none(), SensitiveDisplayMode.MASKED)::map).toList();
 
             assertEquals("************", decoded.getFirst().get("secret"));
             assertEquals("*************", decoded.get(1).get("secret"));

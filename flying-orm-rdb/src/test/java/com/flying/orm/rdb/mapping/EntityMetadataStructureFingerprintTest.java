@@ -4,16 +4,52 @@ import com.flying.orm.core.annotation.FieldFill;
 import com.flying.orm.core.annotation.FieldStrategy;
 import com.flying.orm.core.annotation.IdType;
 import com.flying.orm.core.form.TenantStrategy;
-import com.flying.orm.core.metadata.ValueGeneration;
+import com.flying.orm.core.form.DynamicField;
+import com.flying.orm.core.metadata.ColumnDefinition;
+import com.flying.orm.core.metadata.ColumnDefault;
 import com.flying.orm.core.protection.FieldProtectionRegistry;
-import com.flying.orm.core.type.DatabaseType;
+import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestFactory;
 
 import java.util.List;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class EntityMetadataStructureFingerprintTest {
+
+    @Test
+    void physicalFingerprintIgnoresEntityDeclarationOrder() {
+        EntityFieldMetadata first = field("first", "VARCHAR");
+        EntityFieldMetadata second = field("second", "BIGINT");
+        assertEquals(metadata("records", first, second).structureFingerprint(),
+                metadata("records", second, first).structureFingerprint());
+    }
+
+    @Test
+    void literalDefaultContentsAffectThePhysicalFingerprint() {
+        ColumnDefinition base = ColumnDefinition.builder("value", "VARCHAR").build();
+        assertNotEquals(metadata("records", field(base.toBuilder()
+                        .defaultValue(ColumnDefault.literal("ready")).build())).structureFingerprint(),
+                metadata("records", field(base.toBuilder()
+                        .defaultValue(ColumnDefault.literal("pending")).build())).structureFingerprint());
+    }
+
+    @TestFactory
+    Stream<DynamicTest> distinguishesDefaultsAndTextStorageOptions() {
+        ColumnDefinition base = ColumnDefinition.builder("value", "VARCHAR").build();
+        return Stream.of(
+                base.toBuilder().defaultValue(ColumnDefault.literal("ready")).build(),
+                base.toBuilder().defaultValue(ColumnDefault.literal("pending")).build(),
+                base.toBuilder().defaultConstraintName("df_value").build(),
+                base.toBuilder().charset("utf8").build(),
+                base.toBuilder().collation("utf8_bin").build())
+                .map(column -> DynamicTest.dynamicTest(column.toString(), () ->
+                        assertNotEquals(metadata("records", field(base)).structureFingerprint(),
+                                metadata("records", field(column)).structureFingerprint())));
+    }
 
     @Test
     void distinguishesPhysicalTableNamesThatDifferOnlyByCase() {
@@ -47,21 +83,25 @@ class EntityMetadataStructureFingerprintTest {
         return EntityMetadata.create(
                 Object.class,
                 "customer-form",
+                com.flying.orm.core.metadata.RelationIdentity.table(table),
                 table,
                 List.of(fields),
                 null,
                 TenantStrategy.NONE,
-                FieldProtectionRegistry.empty());
+                FieldProtectionRegistry.empty(), java.util.Map.of());
     }
 
     private static EntityFieldMetadata field(String columnName, String dataType) {
+        return field(ColumnDefinition.builder(columnName, dataType).build());
+    }
+
+    private static EntityFieldMetadata field(ColumnDefinition column) {
         return new EntityFieldMetadata(
-                "value", columnName, DatabaseType.of(dataType),
-                false, false, false, null, null,
-                null, null, null, ValueGeneration.none(), IdType.NONE,
+                column.name(), Object.class, new DynamicField(column, false, false), null,
+                false, false, null, null, IdType.NONE,
                 EntityEnumStorage.NONE, null,
                 true, false, true, 0,
                 FieldFill.DEFAULT, FieldStrategy.DEFAULT, FieldStrategy.DEFAULT,
-                true, true, true, false);
+                true, true);
     }
 }

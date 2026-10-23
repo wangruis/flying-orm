@@ -64,7 +64,7 @@ class FullAuditR2dbcLobRegressionTest {
         });
 
         Mono<DynamicRow> mapped = R2dbcLargeObjectRows.mapper(
-                metadata, SqlExecutionOptions.safeDefaults(), scope).map(row);
+                metadata, SqlExecutionOptions.unlimited(), scope).map(row);
 
         assertThrows(IllegalStateException.class, () -> mapped.block(TEST_WAIT));
         assertEquals(0, reads.get());
@@ -80,7 +80,7 @@ class FullAuditR2dbcLobRegressionTest {
         });
 
         Mono<DynamicRow> mapped = R2dbcLargeObjectRows.mapper(
-                metadata, SqlExecutionOptions.safeDefaults(),
+                metadata, SqlExecutionOptions.unlimited(),
                 () -> {
                     throw new AssertionError("scalar rows must not create a LOB scope");
                 }).map(row);
@@ -155,7 +155,7 @@ class FullAuditR2dbcLobRegressionTest {
             return 7;
         });
         R2dbcLargeObjectRows.Mapper mapper =
-                R2dbcLargeObjectRows.mapper(metadata, SqlExecutionOptions.safeDefaults(), scope);
+                R2dbcLargeObjectRows.mapper(metadata, SqlExecutionOptions.unlimited(), scope);
         ExecutorService workers = Executors.newFixedThreadPool(2);
         try {
             Future<Mono<DynamicRow>> mapped = workers.submit(() -> {

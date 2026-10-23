@@ -42,7 +42,7 @@ class R2dbcBatchEvidenceBoundaryTest {
         Flux<Object[]> rows = Flux.<Object[]>just(new Object[]{1}).concatWith(Flux.error(inputFailure));
 
         BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
-                () -> executor.writeBatchEvidence(request(rows, BatchWriteOptions.of(1))).block(WAIT));
+                () -> executor.writeBatch(request(rows, BatchWriteOptions.of(1))).block(WAIT));
 
         assertEquals(BatchExecutionState.PARTIAL, failure.evidence().state());
         assertEquals(0, commits.get());

@@ -69,7 +69,7 @@ class SchemaCheckReadbackConvergenceTest {
             RelationalSchemaSqlRenderer.create(dialect.schema()).render(SchemaOperation.of(
                     SchemaOperation.Kind.CREATE_TABLE, desired.identity(), "events", null, desired,
                     SchemaOperation.Compatibility.SAFE_INCREMENTAL)).forEach(jdbc::rowsUpdated);
-            ReviewedSchemaPlan plan = JdbcSchemaClient.create(jdbc, dialect).reviewRelational(
+            SchemaMigrationPlan plan = JdbcSchemaClient.create(jdbc, dialect).reviewRelational(
                     DatabaseDescriptor.of("H2", "2.4.240", dialect), desired,
                     JdbcFormMetadataReaders.create(jdbc, dialect), SchemaCompatibilityMode.EXACT);
             assertTrue(plan.operations().isEmpty(), () -> plan.operations().toString());

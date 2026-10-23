@@ -8,11 +8,16 @@ import com.flying.orm.core.annotation.OrderBy;
 import com.flying.orm.core.annotation.TableField;
 import com.flying.orm.core.annotation.TableId;
 import com.flying.orm.core.annotation.TableLogic;
+import com.flying.orm.core.annotation.TableColumn;
+import com.flying.orm.core.form.DynamicField;
+import com.flying.orm.core.metadata.ColumnDefinition;
+import com.flying.orm.core.metadata.ColumnDefault;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.rdb.mapping.EntityEnumStorage;
 import com.flying.orm.rdb.mapping.EntityFieldMetadata;
-import com.flying.orm.rdb.mapping.FlyingLogicDelete;
+import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
+import com.flying.orm.rdb.mapping.MappingException;
 
 import java.lang.reflect.Field;
 import java.util.Optional;
@@ -30,15 +35,18 @@ final class EntityFieldMetadataCompiler {
 
     static EntityFieldMetadata compile(Class<?> entityType,
                                        Field field,
-                                       Optional<FlyingLogicDelete> classLogicDelete,
-                                       boolean deferLogicDeleteLiteralDecoding) {
+                                       Optional<TableLogic> classLogicDelete,
+                                       EntityTypeMappingRegistry mappings) {
         Optional<TableField> flyingField = FlyingAnnotationReader.tableField(field);
         Optional<TableId> flyingId = FlyingAnnotationReader.tableId(field);
         String columnName = columnName(field, flyingId, flyingField);
-        Optional<LogicDeleteValues> logicDelete = logicDelete(field, columnName, classLogicDelete);
-        EntityFieldTypeResolver.EnumValueDefinition enumValue = EntityFieldTypeResolver.enumValue(field);
-        EntityEnumStorage enumStorage = EntityFieldTypeResolver.enumStorage(field, enumValue);
-        Class<?> logicDeleteType = enumValue.valueType() == null ? field.getType() : enumValue.valueType();
+        Optional<TableLogic> logicDelete = logicDelete(field, columnName, classLogicDelete);
+        Class<?> javaType = EntityMetadataHierarchy.memberClass(entityType, field.getGenericType());
+        EntityFieldTypeResolver.EnumValueDefinition enumValue = EntityFieldTypeResolver.enumValue(javaType);
+        EntityEnumStorage enumStorage = EntityFieldTypeResolver.enumStorage(javaType, enumValue);
+        Class<?> logicDeleteType = enumValue.valueType() == null ? javaType : enumValue.valueType();
+        TableColumn column = field.getAnnotation(TableColumn.class);
+        EntityTypeMappingRegistry.Mapping mapping = mapping(field, logicDeleteType, column, mappings);
         boolean primaryKey = flyingId.isPresent();
         ValueGeneration generation = valueGeneration(entityType, flyingId);
         boolean selectable = flyingField.map(TableField::select).orElse(true);
@@ -52,25 +60,23 @@ final class EntityFieldMetadataCompiler {
                 ? FieldStrategy.NEVER
                 : flyingField.map(TableField::updateStrategy).orElse(FieldStrategy.DEFAULT);
 
+        IdType idType = flyingId.map(TableId::type).orElse(IdType.NONE);
+        DynamicField dynamicField = column(columnName, column, mapping, primaryKey, generation, idType);
         return new EntityFieldMetadata(field.getName(),
-                                       columnName,
-                                       DatabaseType.of(EntityFieldTypeResolver.dataType(field, enumStorage, enumValue)),
-                                       primaryKey,
+                                       field.getGenericType(),
+                                       dynamicField,
+                                       mapping,
                                        isVersion(field),
                                        logicDelete.isPresent(),
-                                       logicDelete.map(LogicDeleteValues::notDeletedValue)
+                                       logicDelete.map(TableLogic::value)
                                                   .map(value -> logicDeleteValue(
-                                                          value, logicDeleteType, deferLogicDeleteLiteralDecoding))
+                                                          value, logicDeleteType, mapping))
                                                   .orElse(null),
-                                       logicDelete.map(LogicDeleteValues::deletedValue)
+                                       logicDelete.map(TableLogic::delval)
                                                   .map(value -> logicDeleteValue(
-                                                          value, logicDeleteType, deferLogicDeleteLiteralDecoding))
+                                                          value, logicDeleteType, mapping))
                                                   .orElse(null),
-                                       null,
-                                       null,
-                                       null,
-                                       generation,
-                                       flyingId.map(TableId::type).orElse(IdType.NONE),
+                                       idType,
                                        enumStorage,
                                        enumValue.memberName(),
                                        selectable,
@@ -81,17 +87,106 @@ final class EntityFieldMetadataCompiler {
                                        insertStrategy,
                                        updateStrategy,
                                        insertStrategy != FieldStrategy.NEVER,
-                                       updateStrategy != FieldStrategy.NEVER,
-                                       true,
-                                       false);
+                                       updateStrategy != FieldStrategy.NEVER);
     }
 
-    private static Object logicDeleteValue(String literal,
-                                           Class<?> fieldType,
-                                           boolean deferLiteralDecoding) {
-        // 严格 descriptor 还要先解析 EntityTypeMappingRegistry，原始文本必须留到映射确定后再交给它的 codec。
-        // 普通 CRUD 按存储类型解读字面量，@EnumValue 使用成员类型，与严格 descriptor 保持一致。
-        return deferLiteralDecoding ? literal : EntityFieldTypeResolver.typedValue(literal, fieldType);
+    private static Object logicDeleteValue(String literal, Class<?> fieldType,
+                                           EntityTypeMappingRegistry.Mapping mapping) {
+        return mapping == null ? EntityFieldTypeResolver.typedValue(literal, fieldType)
+                : mapping.codec().read(literal, mapping.javaType());
+    }
+
+    private static EntityTypeMappingRegistry.Mapping mapping(
+            Field field, Class<?> storageType, TableColumn column,
+            EntityTypeMappingRegistry mappings) {
+        String id = column == null ? null : FlyingAnnotationReader.text(column.databaseTypeId());
+        EntityTypeMappingRegistry.Mapping mapping;
+        try {
+            mapping = id == null ? mappings.find(storageType).orElse(null) : mappings.resolve(id, storageType);
+        } catch (MappingException error) {
+            throw new MappingException("no entity type mapping for property " + field.getName()
+                    + " with Java type " + storageType.getTypeName(), error);
+        }
+        return mapping;
+    }
+
+    private static DynamicField column(String name, TableColumn annotation,
+                                       EntityTypeMappingRegistry.Mapping mapping, boolean primaryKey,
+                                       ValueGeneration generation, IdType idType) {
+        DatabaseType type = mapping == null ? DatabaseType.of("VARCHAR") : mapping.databaseType();
+        ColumnDefinition.Builder column = ColumnDefinition.builder(name, type)
+                .codecId(mapping == null ? ColumnDefinition.STANDARD_CODEC : mapping.id())
+                .nullable(!primaryKey).generation(generation);
+        if (annotation != null) {
+            applyColumnOptions(column, type, annotation, primaryKey, generation, idType);
+        }
+        try {
+            return new DynamicField(column.build(), primaryKey, false);
+        } catch (IllegalArgumentException error) {
+            throw new MappingException("entity column definition is invalid: " + name, error);
+        }
+    }
+
+    private static void applyColumnOptions(ColumnDefinition.Builder column, DatabaseType type,
+                                           TableColumn annotation, boolean primaryKey,
+                                           ValueGeneration inherited, IdType idType) {
+        Integer precision = optionalNonNegative(annotation.precision());
+        Integer temporal = optionalNonNegative(annotation.temporalPrecision());
+        if (type.logicalType().temporal()) {
+            if (precision != null && temporal != null) {
+                throw new MappingException("temporal column must not declare both precision and temporalPrecision");
+            }
+            column.temporalPrecision(temporal == null ? precision : temporal);
+        } else {
+            if (temporal != null) {
+                throw new MappingException("temporalPrecision requires a temporal database type");
+            }
+            column.precision(precision).scale(optionalNonNegative(annotation.scale()));
+        }
+        if (annotation.nullable() != TableColumn.Nullability.INFER) {
+            boolean nullable = annotation.nullable() == TableColumn.Nullability.NULLABLE;
+            if (primaryKey && nullable) {
+                throw new MappingException("primary key column must not be nullable");
+            }
+            column.nullable(nullable);
+        }
+        if (annotation.generation() != TableColumn.Generation.INFER) {
+            ValueGeneration declared = annotation.generation() == TableColumn.Generation.IDENTITY
+                    ? ValueGeneration.identity() : ValueGeneration.none();
+            if (primaryKey && declared.generated() && idType != IdType.AUTO) {
+                throw new MappingException("TableColumn database generation conflicts with the TableId strategy");
+            }
+            if (inherited.generated() && !inherited.equals(declared)) {
+                throw new MappingException("TableColumn generation conflicts with the existing TableId generation");
+            }
+            column.generation(declared);
+        }
+        column.length(annotation.length() == -1 ? null : annotation.length())
+                .defaultValue(defaultValue(annotation.defaultId()))
+                .comment(FlyingAnnotationReader.text(annotation.comment()))
+                .charset(FlyingAnnotationReader.text(annotation.charset()))
+                .collation(FlyingAnnotationReader.text(annotation.collation()));
+    }
+
+    private static ColumnDefault defaultValue(String defaultId) {
+        String id = FlyingAnnotationReader.text(defaultId);
+        if (id == null || "NONE".equalsIgnoreCase(id)) return ColumnDefault.none();
+        return switch (id.toUpperCase(java.util.Locale.ROOT)) {
+            case "CURRENT_DATE" -> ColumnDefault.currentDate();
+            case "CURRENT_TIME" -> ColumnDefault.currentTime();
+            case "CURRENT_TIMESTAMP" -> ColumnDefault.currentTimestamp();
+            default -> throw new MappingException("unknown controlled column default id");
+        };
+    }
+
+    private static Integer optionalNonNegative(int value) {
+        if (value == -1) return null;
+        if (value < 0) throw new MappingException("column numeric option must be non-negative or -1");
+        return value;
+    }
+
+    static String columnName(Field field) {
+        return columnName(field, FlyingAnnotationReader.tableId(field), FlyingAnnotationReader.tableField(field));
     }
 
     private static String columnName(Field field,
@@ -130,26 +225,12 @@ final class EntityFieldMetadataCompiler {
         return FlyingAnnotationReader.version(field);
     }
 
-    private static Optional<LogicDeleteValues> logicDelete(Field field,
+    private static Optional<TableLogic> logicDelete(Field field,
                                                             String columnName,
-                                                            Optional<FlyingLogicDelete> classLogicDelete) {
+                                                            Optional<TableLogic> classLogicDelete) {
         Optional<TableLogic> tableLogic = FlyingAnnotationReader.tableLogic(field);
-        if (tableLogic.isPresent()) {
-            TableLogic definition = tableLogic.orElseThrow();
-            return Optional.of(new LogicDeleteValues(definition.value(), definition.delval()));
-        }
-        Optional<FlyingLogicDelete> fieldLogicDelete = Optional.ofNullable(field.getAnnotation(FlyingLogicDelete.class));
-        if (fieldLogicDelete.isPresent()) {
-            FlyingLogicDelete definition = fieldLogicDelete.orElseThrow();
-            return Optional.of(new LogicDeleteValues(definition.notDeletedValue(), definition.deletedValue()));
-        }
-        return classLogicDelete.filter(annotation -> EntityFieldNames.matches(annotation.field(), field.getName())
-                        || EntityFieldNames.matches(annotation.field(), columnName))
-                               .map(annotation -> new LogicDeleteValues(annotation.notDeletedValue(),
-                                                                         annotation.deletedValue()));
-    }
-
-    /** 统一成普通值，避免后续元数据代码继续依赖旧的 RDB 注解对象。 */
-    private record LogicDeleteValues(String notDeletedValue, String deletedValue) {
+        return tableLogic.isPresent() ? tableLogic : classLogicDelete.filter(
+                annotation -> EntityFieldNames.matches(annotation.field(), field.getName())
+                        || EntityFieldNames.matches(annotation.field(), columnName));
     }
 }

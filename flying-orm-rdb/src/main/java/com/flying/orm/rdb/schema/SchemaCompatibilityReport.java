@@ -7,7 +7,7 @@ import java.util.Objects;
  * 一次纯结构 diff 的不可变兼容报告。
  *
  * <p>报告始终保留全部 operation；status 只是按指定 mode 对这些事实做出的汇总结论。调用方因而
- * 可以展示不兼容原因或把 operation 交给风险分类器，又不会把 INCOMPATIBLE 误当作执行开关。</p>
+ * 可以展示不兼容原因或查看具体结构操作，又不会把 INCOMPATIBLE 误当作执行开关。</p>
  *
  * @author wangr
  * @version v3.2
@@ -51,11 +51,6 @@ public final class SchemaCompatibilityReport {
 
     public boolean compatible() {
         return status == SchemaCompatibilityStatus.COMPATIBLE;
-    }
-
-    /** JavaBean 风格别名，便于上层策略和模板直接消费。 */
-    public boolean isCompatible() {
-        return compatible();
     }
 
     private boolean accepted() {

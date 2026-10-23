@@ -7,6 +7,7 @@ import com.flying.orm.core.condition.TermHandler;
 import com.flying.orm.core.condition.TermRegistry;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.sql.render.SqlTermHandler;
 import com.flying.orm.rdb.internal.condition.ConditionNodes;
 
 import java.lang.reflect.Array;
@@ -55,13 +56,15 @@ final class FormConditionValueNormalizer {
                     ? value : null;
             Object source = trusted == null ? termValue : trusted.value();
             if (trusted == null) {
-                support.field(form, term.field());
+                form.field(term.field());
             }
             return TermCondition.of(term.field(), term.operator(), source);
         }
         TermHandler handler = TermRegistry.standard().find(term.operator()).orElse(null);
         TermHandler configured = support.conditionTerms().find(term.operator()).orElse(null);
-        if (handler == null || configured != handler) {
+        if (handler == null || configured != handler
+                || (form.hasFieldFeatures()
+                && field.features().find(term.operator()).orElse(null) instanceof SqlTermHandler)) {
             return field.name().equals(term.field())
                     ? term
                     : TermCondition.of(field.name(), term.operator(), term.value());

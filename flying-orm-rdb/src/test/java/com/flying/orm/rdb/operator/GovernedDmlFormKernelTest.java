@@ -38,6 +38,55 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class GovernedDmlFormKernelTest {
 
     @Test
+    void firstAndCountVerifyContainsCandidatesThroughTheSharedFormKernel() {
+        DynamicForm form = DynamicForm.builder("people", "people")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("secret", "VARCHAR"))
+                .encrypted("secret", EncryptedFieldDefinition.builder()
+                        .searchModes(EncryptedSearchMode.CONTAINS).build()).build();
+        SqlRenderer conditions = SqlRenderer.builder().addDefaultTerms().build();
+        AtomicReference<SqlRequest> request = new AtomicReference<>();
+        try (ProtectedFieldRuntime protection = ProtectedFieldRuntime.create(
+                ProtectedFieldKeyRing.single("v1", new byte[32]))) {
+            FormDataSqlRenderer renderer = FormDataSqlRenderer.create(conditions, RdbDialect.postgresql())
+                    .withProtectedFields(protection);
+            List<DynamicRow> candidates = java.util.stream.IntStream.range(0, 3).mapToObj(index -> {
+                Map<String, Object> stored = new LinkedHashMap<>(protection
+                        .writeOperation(form, ProtectedFormLayout.physical(form), DataScope.none(), conditions.valueCodecs())
+                        .prepare(Map.of("secret", List.of("no match", "alphabet", "elephant").get(index))).values());
+                stored.keySet().removeIf(name -> name.startsWith("__fop_"));
+                stored.put("id", (long) index + 1);
+                return DynamicRow.copyOf(stored);
+            }).toList();
+            SyncSqlExecutor jdbc = new com.flying.orm.rdb.support.ListQueryFixture() {
+                public List<DynamicRow> query(SqlRequest sql) { request.set(sql); return candidates; }
+                public long rowsUpdated(SqlRequest sql) { throw new AssertionError("unexpected write"); }
+                public com.flying.orm.rdb.execution.SqlWriteResult rowsUpdatedReturningKeys(
+                        SqlRequest sql, com.flying.orm.rdb.execution.SqlExecutionOptions options, String generatedKeyColumn) {
+                    throw new AssertionError("unexpected write");
+                }
+            };
+            ReactiveSqlExecutor r2dbc = new ReactiveSqlExecutor() {
+                public Flux<DynamicRow> query(SqlRequest sql) {
+                    return Flux.defer(() -> { request.set(sql); return Flux.fromIterable(candidates); });
+                }
+                public Mono<Long> rowsUpdated(SqlRequest sql) { throw new AssertionError("unexpected write"); }
+            };
+            SyncDmlOperator sync = new SyncDmlOperator(SyncFormClient.create(jdbc, syncBatchExecutor(), renderer),
+                    jdbc, conditions, DataScope.none(), RdbDialect.postgresql());
+            DmlOperator reactive = new DmlOperator(ReactiveFormClient.create(r2dbc, renderer),
+                    r2dbc, conditions, DataScope.none(), RdbDialect.postgresql());
+            assertEquals(2L, sync.query(form).where("secret", ProtectedConditions.CONTAINS, "pha").first().get("id"));
+            assertEquals(2L, reactive.query(form).where("secret", ProtectedConditions.CONTAINS, "pha").first().block().get("id"));
+            assertFalse(request.get().sql().contains("limit"), "candidate SQL must not discard genuine matches");
+            assertEquals(2L, sync.query(form).where("secret", ProtectedConditions.CONTAINS, "pha").count());
+            assertEquals(2L, reactive.query(form).where("secret", ProtectedConditions.CONTAINS, "pha").count().block());
+            assertTrue(request.get().sql().startsWith("select fop_business.\"secret\" as \"secret\" from "));
+            assertFalse(request.get().sql().contains("order by"));
+        }
+    }
+
+    @Test
     void governedFormKeepsTheLiteralRelationNameInTheFormKernel() {
         DynamicForm form = DynamicForm.relationalBuilder("orders",
                 com.flying.orm.core.metadata.RelationIdentity.table("orders.archive.history"))
@@ -48,12 +97,12 @@ class GovernedDmlFormKernelTest {
         var raw = DynamicRow.copyOf(Map.of("id", 1L));
         var sync = syncExecutor(request, raw);
         new SyncDmlOperator(SyncFormClient.create(sync, syncBatchExecutor(), renderer),
-                sync, conditions, DataScope.none()).query().from(form, FieldUsePolicy.unrestricted())
-                .fetchMap();
+                sync, conditions, DataScope.none(), RdbDialect.postgresql()).query().from(form, FieldUsePolicy.unrestricted())
+                .fetch();
         assertTrue(request.get().sql().contains("\"orders.archive.history\""));
         var reactive = reactiveExecutor(request, raw);
-        new DmlOperator(ReactiveFormClient.create(reactive, renderer), reactive, conditions, DataScope.none())
-                .query().from(form, FieldUsePolicy.unrestricted()).fetchMap().collectList().block();
+        new DmlOperator(ReactiveFormClient.create(reactive, renderer), reactive, conditions, DataScope.none(), RdbDialect.postgresql())
+                .query().from(form, FieldUsePolicy.unrestricted()).fetch().collectList().block();
         assertTrue(request.get().sql().contains("\"orders.archive.history\""));
     }
 
@@ -83,17 +132,17 @@ class GovernedDmlFormKernelTest {
             ReactiveFormClient reactiveForms = ReactiveFormClient.create(reactiveExecutor, forms);
 
             DynamicRow sync = new SyncDmlOperator(
-                    syncForms, syncExecutor, conditions, DataScope.none())
+                    syncForms, syncExecutor, conditions, DataScope.none(), RdbDialect.postgresql())
                     .query().from(form, FieldUsePolicy.unrestricted())
-                    .where(where -> where.term(
+                    .where(where -> where.where(
                             "secret", ProtectedConditions.EXACT, "classified"))
-                    .fetchMap().getFirst();
+                    .fetch().getFirst();
             DynamicRow reactive = new DmlOperator(
-                    reactiveForms, reactiveExecutor, conditions, DataScope.none())
+                    reactiveForms, reactiveExecutor, conditions, DataScope.none(), RdbDialect.postgresql())
                     .query().from(form, FieldUsePolicy.unrestricted())
-                    .where(where -> where.term(
+                    .where(where -> where.where(
                             "secret", ProtectedConditions.EXACT, "classified"))
-                    .fetchMap().single().block();
+                    .fetch().single().block();
 
             assertKernelRequest(syncRequest.get());
             assertKernelRequest(reactiveRequest.get());
@@ -130,7 +179,7 @@ class GovernedDmlFormKernelTest {
             AtomicReference<SqlRequest> request,
             DynamicRow row) {
         return (SyncSqlExecutor) Proxy.newProxyInstance(
-                SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{SyncSqlExecutor.class},
+                SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{com.flying.orm.rdb.support.ListQueryFixture.class},
                 (proxy, method, arguments) -> {
                     if (method.getName().equals("queryMapped")) {
                         request.set((SqlRequest) arguments[0]);

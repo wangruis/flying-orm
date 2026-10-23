@@ -69,7 +69,7 @@ final class RepositoryEntityIdSupport<T> {
     }
 
     /**
-     * 为已经注册完整关系描述的实体缓存数据库生成键 codec；普通 CRUD 继续使用旧入口和原转换规则。
+     * 为已经注册完整关系描述的实体缓存数据库生成键 codec；未注册自定义映射时使用标准主键转换。
      * 映射只在 Repository 创建时解析并传入，逐次回填不再查注册表。
      */
     static <T> RepositoryEntityIdSupport<T> create(
@@ -78,8 +78,7 @@ final class RepositoryEntityIdSupport<T> {
             EntityTypeMappingRegistry.Mapping generatedKeyMapping) {
         EntityMetadata<T> safeMetadata = Objects.requireNonNull(metadata, "entity metadata must not be null");
         IdGenerator safeGenerator = Objects.requireNonNull(generator, "id generator must not be null");
-        List<PrimaryKey> primaryKeys = safeMetadata.fields().stream()
-                .filter(EntityFieldMetadata::primaryKey)
+        List<PrimaryKey> primaryKeys = safeMetadata.primaryKeyFields().stream()
                 .map(field -> new PrimaryKey(field, resolveAccess(safeMetadata.type(), field)))
                 .toList();
         List<PrimaryKey> generatedKeys = primaryKeys.stream()
@@ -97,34 +96,39 @@ final class RepositoryEntityIdSupport<T> {
 
     /** SQL 生成前完成全部本地主键规则，失败时数据库还没有发生任何写入。 */
     void prepare(T entity) {
+        prepare(entity, false);
+    }
+
+    void prepare(T entity, boolean preserveGeneratedKey) {
         T safeEntity = Objects.requireNonNull(entity, "repository entity must not be null");
-        List<Assignment> assignments = new ArrayList<>();
+        List<Assignment> assignments = List.of();
         for (PrimaryKey primaryKey : primaryKeys) {
-            Assignment assignment = prepare(safeEntity, primaryKey);
+            Assignment assignment = prepare(safeEntity, primaryKey, preserveGeneratedKey);
             if (assignment != null) {
+                if (assignments.isEmpty()) assignments = new ArrayList<>();
                 assignments.add(assignment);
             }
         }
-        assignments.forEach(assignment -> assignment.access().write(safeEntity, assignment.value()));
+        if (!assignments.isEmpty()) {
+            assignments.forEach(assignment -> assignment.access().write(safeEntity, assignment.value()));
+        }
     }
 
-    private Assignment prepare(T entity, PrimaryKey primaryKey) {
+    private Assignment prepare(T entity, PrimaryKey primaryKey, boolean preserveGeneratedKey) {
         EntityFieldMetadata id = primaryKey.field();
         ValueAccess access = primaryKey.access();
         Object current = access.read(entity);
         if (id.generation().generated()) {
-            requireNull(current, "database-generated primary key must be null before insert");
+            if (current != null && !preserveGeneratedKey) throw new MappingException("database-generated primary key must be null before insert");
             return null;
         }
         return switch (id.idType()) {
             case AUTO -> throw new MappingException("AUTO primary key is missing database generation metadata");
             case NONE, INPUT -> {
-                requirePresent(current, "INPUT primary key must be assigned before insert");
+                if (current == null) throw new MappingException("INPUT primary key must be assigned before insert");
                 yield null;
             }
-            case ASSIGN_UUID -> {
-                yield current == null ? new Assignment(access, uuidValue(access.valueType())) : null;
-            }
+            case ASSIGN_UUID -> current == null ? new Assignment(access, uuidValue(access.valueType())) : null;
             case ASSIGN_ID -> {
                 if (current != null) {
                     yield null;
@@ -143,24 +147,8 @@ final class RepositoryEntityIdSupport<T> {
         return generatedKey != null;
     }
 
-    /**
-     * 读取数据库生成主键写回前的原值，仅在本次字段赋值本身失败时恢复。
-     * 已成功应用的生成键不因后续执行失败或取消而撤销。
-     */
-    Object currentGeneratedKey(T entity) {
-        if (!databaseGenerated()) {
-            throw new IllegalStateException("entity does not use a database-generated primary key");
-        }
-        return generatedKey.access().read(Objects.requireNonNull(entity, "repository entity must not be null"));
-    }
-
-    /** 恢复赋值失败前的字段值；不表示数据库执行撤销或上层事务结果。 */
-    void restoreGeneratedKey(T entity, Object originalValue) {
-        if (!databaseGenerated()) {
-            throw new IllegalStateException("entity does not use a database-generated primary key");
-        }
-        generatedKey.access().write(
-                Objects.requireNonNull(entity, "repository entity must not be null"), originalValue);
+    boolean requiresGeneratedKey(T entity) {
+        return generatedKey != null && generatedKey.access().read(entity) == null;
     }
 
     /**
@@ -213,20 +201,7 @@ final class RepositoryEntityIdSupport<T> {
         Object value = keyValue(safeKey);
         ValueAccess access = this.generatedKey.access();
         Object converted = generatedKeyValue(value, access.valueType());
-        Object originalValue = currentGeneratedKey(safeEntity);
-        try {
-            access.write(safeEntity, converted);
-        } catch (RuntimeException failure) {
-            try {
-                restoreGeneratedKey(safeEntity, originalValue);
-            } catch (RuntimeException restorationFailure) {
-                RepositoryFailureSupport.merge(failure, restorationFailure);
-            } catch (Error fatal) {
-                fatal.addSuppressed(failure);
-                throw fatal;
-            }
-            throw failure;
-        }
+        access.write(safeEntity, converted);
     }
 
     private Object generatedKeyValue(Object value, Class<?> type) {
@@ -248,6 +223,8 @@ final class RepositoryEntityIdSupport<T> {
     }
 
     private Object keyValue(DynamicRow row) {
+        // 单列结果没有歧义，也兼容驱动的 GENERATED_KEY 等标签。
+        if (row.columnCount() == 1) return row.value(0);
         EntityFieldMetadata id = generatedKey.field();
         String expected = EntityFieldNames.key(id.columnName());
         Object matched = null;
@@ -261,10 +238,6 @@ final class RepositoryEntityIdSupport<T> {
         if (matches == 1) {
             return matched;
         }
-        // MySQL 等驱动可能使用 GENERATED_KEY 一类标签；单列结果没有歧义，可以安全采用第一列。
-        if (matches == 0 && row.columnCount() == 1) {
-            return row.value(0);
-        }
         throw new MappingException("generated primary key column is missing or ambiguous: " + id.columnName());
     }
 
@@ -272,14 +245,20 @@ final class RepositoryEntityIdSupport<T> {
         Method reader = null;
         Method writer = null;
         try {
-            for (PropertyDescriptor property : Introspector.getBeanInfo(type).getPropertyDescriptors()) {
-                if (property.getName().equals(id.name())) {
-                    reader = accessible(property.getReadMethod(), property.getName());
-                    writer = accessible(property.getWriteMethod(), property.getName());
-                    break;
+            if (type.isRecord()) {
+                reader = accessible(type.getDeclaredMethod(id.name()), id.name());
+            } else {
+                for (PropertyDescriptor property : Introspector.getBeanInfo(type).getPropertyDescriptors()) {
+                    if (EntityFieldNames.matches(property.getName(), id.name())) {
+                        Method read = accessible(property.getReadMethod(), property.getName());
+                        Method write = accessible(property.getWriteMethod(), property.getName());
+                        // 与实体读写计划一致：后出现的有效访问器覆盖同名别名，缺失或排除的访问器不覆盖。
+                        if (read != null) reader = read;
+                        if (write != null) writer = write;
+                    }
                 }
             }
-        } catch (IntrospectionException error) {
+        } catch (IntrospectionException | NoSuchMethodException error) {
             throw new MappingException("primary key property cannot be inspected: " + id.name(), error);
         }
         Field field = findField(type, id.name());
@@ -292,7 +271,8 @@ final class RepositoryEntityIdSupport<T> {
         if (mayWrite && writer == null && (field == null || Modifier.isFinal(field.getModifiers()))) {
             throw new MappingException("generated or assigned primary key needs a mutable bean property: " + id.name());
         }
-        return new ValueAccess(reader, writer, field, reader != null ? reader.getReturnType() : field.getType());
+        return new ValueAccess(reader, writer, field, EntityMetadataHierarchy.memberClass(type,
+                reader != null ? reader.getGenericReturnType() : field.getGenericType()));
     }
 
     private static Field findField(Class<?> type, String name) {
@@ -300,7 +280,7 @@ final class RepositoryEntityIdSupport<T> {
             try {
                 Field field = current.getDeclaredField(name);
                 if (!EntityMetadataHierarchy.isPersistentField(field)) {
-                    // 非持久子字段不能遮住真正的继承主键；回填和赋值失败恢复都必须使用持久成员。
+                    // 非持久子字段不能遮住真正的继承主键；回填必须使用持久成员。
                     continue;
                 }
                 if (!field.trySetAccessible()) {
@@ -370,47 +350,6 @@ final class RepositoryEntityIdSupport<T> {
         throw new MappingException("generated primary key cannot be converted to " + type.getName());
     }
 
-    private static void requireNull(Object value, String message) {
-        if (value != null) throw new MappingException(message);
-    }
-
-    private static void requirePresent(Object value, String message) {
-        if (value == null) throw new MappingException(message);
-    }
-
-    /** 批量保留实体自身持有赋值状态；成功回填不因后续失败或取消而恢复。 */
-    abstract static class BatchState<T> {
-
-        private final T entity;
-        private boolean generatedKeyApplied;
-
-        BatchState(T entity) {
-            this.entity = entity;
-        }
-
-        final T entity() {
-            return entity;
-        }
-
-        final synchronized boolean generatedKeyApplied() {
-            return generatedKeyApplied;
-        }
-
-        final void apply(RepositoryEntityIdSupport<T> ids, DynamicRow key, long offset) {
-            if (!markGeneratedKeyApplied()) {
-                throw new MappingException("generated key was delivered more than once at batch offset " + offset);
-            }
-            ids.applyGeneratedKey(entity, key);
-        }
-
-        private synchronized boolean markGeneratedKeyApplied() {
-            if (generatedKeyApplied) {
-                return false;
-            }
-            generatedKeyApplied = true;
-            return true;
-        }
-    }
 
     /** Repository 创建时解析一次的主键字段与访问器。 */
     private record PrimaryKey(EntityFieldMetadata field, ValueAccess access) {

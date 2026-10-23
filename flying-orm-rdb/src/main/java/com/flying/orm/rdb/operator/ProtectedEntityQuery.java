@@ -15,10 +15,8 @@ import com.flying.orm.rdb.protection.ProtectedConditions;
  * @date 2026-08-10
  * @version v1.0
  */
-public interface ProtectedEntityQuery<T, SELF> {
-
-    /** 使用已注册条件运算符追加一个 AND 条件。 */
-    SELF and(EntityProperty<T, ?> property, String operator, Object value);
+public interface ProtectedEntityQuery<T, SELF extends ProtectedEntityQuery<T, SELF>>
+        extends ConditionDsl<EntityProperty<T, ?>, SELF> {
 
     /** 设置本次查询对已声明脱敏字段的显示方式。 */
     SELF sensitiveDisplay(SensitiveDisplayMode mode);

@@ -17,7 +17,9 @@ final class EntityWriteValuePolicy {
                        EntityFieldFiller.Operation operation,
                        Object currentValue,
                        EntityFieldFiller filler) {
-        if (operation == null || !fills(field.fill(), operation)) {
+        if (operation == null || !fills(field.fill(), operation)
+                || (field.fill() == FieldFill.INSERT_IF_NULL || field.fill() == FieldFill.INSERT_DEFAULT)
+                        && currentValue != null) {
             return currentValue;
         }
         try {
@@ -40,7 +42,7 @@ final class EntityWriteValuePolicy {
     private static boolean fills(FieldFill fill, EntityFieldFiller.Operation operation) {
         return switch (fill) {
             case DEFAULT -> false;
-            case INSERT -> operation == EntityFieldFiller.Operation.INSERT
+            case INSERT, INSERT_IF_NULL, INSERT_DEFAULT -> operation == EntityFieldFiller.Operation.INSERT
                     || operation == EntityFieldFiller.Operation.UPSERT;
             case UPDATE -> operation == EntityFieldFiller.Operation.UPDATE
                     || operation == EntityFieldFiller.Operation.UPSERT;

@@ -57,7 +57,7 @@ class JdbcMixedParameterOwnershipTest {
         switch (path) {
             case QUERY -> executor.query(request);
             case UPDATE -> executor.rowsUpdated(request);
-            case GENERATED_KEYS -> executor.rowsUpdatedReturningKeys(request, SqlExecutionOptions.safeDefaults());
+            case GENERATED_KEYS -> executor.rowsUpdatedReturningKeys(request, SqlExecutionOptions.unlimited());
             case SCROLL -> executor.advanced().scroll(request, ignored -> 0);
         }
 

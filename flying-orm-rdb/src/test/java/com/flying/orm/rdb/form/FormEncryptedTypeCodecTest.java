@@ -10,16 +10,20 @@ import com.flying.orm.core.annotation.TableName;
 import com.flying.orm.core.codec.ValueCodec;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.TermCondition;
+import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.core.page.PageQuery;
-import com.flying.orm.core.page.CursorPageQuery;
-import com.flying.orm.core.page.CursorSort;
+import com.flying.orm.core.page.PageSort;
+import com.flying.orm.core.expression.ValueExpression;
+import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetSort;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.dialect.RdbDialect;
@@ -51,10 +55,91 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FormEncryptedTypeCodecTest {
+
+    @TestFactory
+    Stream<DynamicTest> computedPageSharesProtectedConditionPreparationWithItsCount() {
+        return Stream.of(false, true).flatMap(governed -> Stream.of(false, true).map(grouped ->
+                DynamicTest.dynamicTest("governed=" + governed + ",grouped=" + grouped, () -> {
+                    try (Fixture fixture = new Fixture(false)) {
+                        QuerySpec spec = QuerySpec.of(fixture.form, ConditionGroup.and()
+                                .add(ProtectedConditions.exact("text", "payload")).build())
+                                .withExpression("rank_value", ValueExpression.value(7))
+                                .withProjection(List.of("id", "rank_value"), grouped ? List.of("ID") : List.of());
+                        FormOperationPlanner planner = new FormOperationPlanner(fixture.renderer,
+                                new FormScopeSupport(fixture.renderer, StructuredConditionResolver.defaults(), DataScope.none()),
+                                SqlExecutionOptions.unlimited());
+                        PageQuery page = new PageQuery(2, 10, List.of(PageSort.desc("RANK_VALUE")));
+                        FormReadPlanner.PlannedQuery plan = governed
+                                ? planner.reads.pageGoverned(spec, page, FieldUsePolicy.unrestricted(), QueryShapeLimits.defaults()).plan()
+                                : planner.reads.page(spec, page);
+                        assertEquals(1, fixture.writes.get());
+                        assertEquals(List.of("id", "rank_value"), plan.outputFields());
+                        assertEquals(7, plan.request().parameters().getFirst());
+                        assertEquals(1, plan.countRequest().parameters().size());
+                        assertArrayEquals((byte[]) plan.countRequest().parameters().getFirst(),
+                                (byte[]) plan.request().parameters().get(1));
+                        assertEquals(List.of(10, 10L), plan.request().parameters().subList(2, 4));
+                        assertEquals(grouped, plan.countRequest().sql().contains("group by"));
+                        assertTrue(plan.request().sql().contains("order by"));
+                    }
+                })));
+    }
+
+    @TestFactory
+    Stream<DynamicTest> ordinaryEncryptedReadStillRequiresKeys() {
+        return Stream.of(false, true).map(count -> DynamicTest.dynamicTest("count=" + count, () -> {
+            try (Fixture fixture = new Fixture(false); ProtectedFieldRuntime runtime = ProtectedFieldRuntime.withoutKeys()) {
+                FormDataSqlRenderer renderer = fixture.renderer.withProtectedFields(runtime);
+                FormOperationPlanner planner = new FormOperationPlanner(renderer,
+                        new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
+                        SqlExecutionOptions.unlimited());
+                QuerySpec spec = QuerySpec.of(fixture.form, ConditionGroup.and()
+                        .add(ProtectedConditions.exact("text", "payload")).build());
+                IllegalStateException error = assertThrows(IllegalStateException.class, () -> {
+                    if (count) planner.reads.count(spec, FieldUsePolicy.unrestricted(), QueryShapeLimits.defaults(), false);
+                    else planner.reads.select(spec);
+                });
+                assertEquals("protected field key ring is not configured", error.getMessage());
+            }
+        }));
+    }
+
+    @TestFactory
+    Stream<DynamicTest> ordinaryEncryptedReadEncodesConditionsOnce() {
+        return Stream.of(false, true).flatMap(governed -> Stream.of("select", "first", "count", "page", "cursor")
+                .map(shape -> DynamicTest.dynamicTest(governed + "/" + shape, () -> {
+                    try (Fixture fixture = new Fixture(false)) {
+                        QuerySpec spec = QuerySpec.of(fixture.form, ConditionGroup.and()
+                                .add(ProtectedConditions.exact("text", "payload")).build());
+                        FormOperationPlanner planner = new FormOperationPlanner(fixture.renderer,
+                                new FormScopeSupport(fixture.renderer, StructuredConditionResolver.defaults(), DataScope.none()),
+                                SqlExecutionOptions.unlimited());
+                        FieldUsePolicy policy = FieldUsePolicy.unrestricted();
+                        QueryShapeLimits limits = QueryShapeLimits.defaults();
+                        SqlRequest request = switch (shape) {
+                            case "select" -> governed ? planner.reads.selectGoverned(spec, policy, limits).plan().request()
+                                    : planner.reads.select(spec).request();
+                            case "first" -> governed ? planner.reads.firstGoverned(spec, policy, limits).plan().request()
+                                    : planner.reads.first(spec).request();
+                            case "count" -> planner.reads.count(spec, policy, limits, governed).request();
+                            case "page" -> governed ? planner.reads.pageGoverned(spec, PageQuery.of(1, 10), policy, limits).plan().request()
+                                    : planner.reads.page(spec, PageQuery.of(1, 10)).request();
+                            case "cursor" -> governed ? planner.reads.keysetPageGoverned(spec,
+                                    KeysetPageQuery.first(10, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST)), policy, limits).plan().request()
+                                    : planner.reads.keysetPage(spec, KeysetPageQuery.first(10, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST))).request();
+                            default -> throw new AssertionError(shape);
+                        };
+                        assertEquals(1, fixture.writes.get());
+                        assertTrue(request.parameters().getFirst() instanceof byte[]);
+                        assertTrue(request.sql().contains(" where "));
+                    }
+                })));
+    }
 
     @TestFactory
     Stream<DynamicTest> mixedCaseEncryptedColumnKeepsTheExplicitCodec() {
@@ -63,15 +148,15 @@ class FormEncryptedTypeCodecTest {
                 EntitySchemaDescriptor<MixedCaseRow> descriptor = EntitySchemaDescriptor.builder(MixedCaseRow.class)
                         .typeMappings(fixture.mappings).build();
                 DynamicForm form = descriptor.form();
-                FormDataSqlRenderer renderer = fixture.renderer.withEntityFieldCodecs(descriptor.customFieldCodecs());
+                FormDataSqlRenderer renderer = fixture.renderer.withEntityModels(java.util.List.of(descriptor.metadata()));
                 FormPreparedWrite write = renderer.protection().prepareWrite(
                         form, Map.of("SecretText", "payload"), DataScope.none());
                 DynamicRow raw = DynamicRow.copyOf(Map.of("SecretText", write.values().get("SecretText")));
                 FormResultDecoder decoder = new FormResultDecoder(renderer, fixture.models);
-                DynamicRow decoded = reactive ? decoder.decodeRows(form, Flux.just(raw), SqlExecutionOptions.safeDefaults(),
+                DynamicRow decoded = reactive ? decoder.decodeRows(form, Flux.just(raw), SqlExecutionOptions.unlimited(),
                         DataScope.none(), SensitiveDisplayMode.FULL).single().block()
-                        : decoder.decodeRows(form, List.of(raw), SqlExecutionOptions.safeDefaults(),
-                                DataScope.none(), SensitiveDisplayMode.FULL).getFirst();
+                        : decoder.rowDecoder(form, SqlExecutionOptions.unlimited(),
+                                DataScope.none(), SensitiveDisplayMode.FULL).map(raw);
                 assertEquals("payload", decoded.get("SecretText"));
             }
         }));
@@ -91,7 +176,7 @@ class FormEncryptedTypeCodecTest {
                                 .orderBy(builder.root(), "id", com.flying.orm.core.page.PageSort.Direction.ASC)
                                 .showSensitive().build();
                         DynamicRow raw = DynamicRow.copyOf(Map.of("selected_text", fixture.encryptedRow().get("text")));
-                        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults().withMaxResultBytes(1024);
+                        SqlExecutionOptions options = SqlExecutionOptions.unlimited().withMaxResultBytes(1024);
                         java.util.function.Function<SqlRequest, List<DynamicRow>> rows = request ->
                                 request.sql().toLowerCase(java.util.Locale.ROOT).contains("count(")
                                         ? List.of(DynamicRow.copyOf(Map.of("total", 1L))) : List.of(raw);
@@ -105,10 +190,10 @@ class FormEncryptedTypeCodecTest {
                             assertThrows(SqlResultMemoryLimitExceededException.class, result::block);
                             assertThrows(SqlResultMemoryLimitExceededException.class, result::block);
                         } else {
-                            SyncFormClient forms = SyncFormClient.create(new SyncSqlExecutor() {
+                            SyncFormClient forms = SyncFormClient.create(new com.flying.orm.rdb.support.ListQueryFixture() {
                                 public List<DynamicRow> query(SqlRequest request) { return rows.apply(request); }
                                 public long rowsUpdated(SqlRequest request) { throw new AssertionError(); }
-                                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions settings) {
+                                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions settings, String generatedKeyColumn) {
                                     throw new AssertionError();
                                 }
                             }, (request, completion) -> { throw new AssertionError(); }, fixture.renderer);
@@ -146,9 +231,9 @@ class FormEncryptedTypeCodecTest {
                     FormDataSqlRenderer renderer = fixture.renderer.withProtectedFields(current);
                     FormPreparedWrite rotated = renderer.protection().prepareWrite(
                             fixture.form, spec.ownedValues(), DataScope.none());
-                    DynamicRow decoded = new FormResultDecoder(renderer, fixture.models).decodeRows(
-                            fixture.form, List.of(DynamicRow.copyOf(Map.of("text", rotated.values().get("text")))),
-                            SqlExecutionOptions.safeDefaults(), DataScope.none(), SensitiveDisplayMode.FULL).getFirst();
+                    DynamicRow decoded = new FormResultDecoder(renderer, fixture.models).rowDecoder(
+                            fixture.form, SqlExecutionOptions.unlimited(), DataScope.none(), SensitiveDisplayMode.FULL)
+                            .map(DynamicRow.copyOf(Map.of("text", rotated.values().get("text"))));
                     assertEquals("payload", decoded.get("text"));
                     assertTrue(ProtectedFieldReprotection.create(keys).valuesNeedingReprotection(
                             fixture.form, rotated.values(), DataScope.none(), fixture.mappings.valueCodecs()).isEmpty());
@@ -165,7 +250,7 @@ class FormEncryptedTypeCodecTest {
                         DynamicRow raw = fixture.encryptedRow();
                         QuerySpec spec = QuerySpec.of(fixture.form, ConditionGroup.and()
                                 .add(ProtectedConditions.contains("text", "payload")).build()).showSensitive()
-                                .withExecutionOptions(SqlExecutionOptions.safeDefaults().withMaxResultBytes(1024));
+                                .withExecutionOptions(SqlExecutionOptions.unlimited().withMaxResultBytes(1024));
                         assertThrows(SqlResultMemoryLimitExceededException.class, () -> {
                             if (reactive) {
                                 ReactiveFormClient forms = ReactiveFormClient.create(new ReactiveSqlExecutor() {
@@ -175,21 +260,21 @@ class FormEncryptedTypeCodecTest {
                                 switch (shape) {
                                     case "select" -> forms.select(spec).collectList().block();
                                     case "page" -> forms.page(spec, PageQuery.of(1, 10)).block();
-                                    case "cursor" -> forms.cursorPage(spec, CursorPageQuery.first(10, CursorSort.asc("id"))).block();
+                                    case "cursor" -> forms.keysetPage(spec, KeysetPageQuery.first(10, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST))).block();
                                     default -> throw new AssertionError(shape);
                                 }
                             } else {
-                                SyncFormClient forms = SyncFormClient.create(new SyncSqlExecutor() {
+                                SyncFormClient forms = SyncFormClient.create(new com.flying.orm.rdb.support.ListQueryFixture() {
                                     public List<DynamicRow> query(SqlRequest request) { return List.of(raw); }
                                     public long rowsUpdated(SqlRequest request) { throw new AssertionError(); }
-                                    public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+                                    public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                                         throw new AssertionError();
                                     }
                                 }, (request, completed) -> { throw new AssertionError(); }, fixture.renderer);
                                 switch (shape) {
                                     case "select" -> forms.select(spec);
                                     case "page" -> forms.page(spec, PageQuery.of(1, 10));
-                                    case "cursor" -> forms.cursorPage(spec, CursorPageQuery.first(10, CursorSort.asc("id")));
+                                    case "cursor" -> forms.keysetPage(spec, KeysetPageQuery.first(10, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST)));
                                     default -> throw new AssertionError(shape);
                                 }
                             }
@@ -207,7 +292,7 @@ class FormEncryptedTypeCodecTest {
                             SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql());
                     Object normalized = values.normalizeConditionValue("state", operator, State.ACTIVE,
                             renderer.conditionRenderer().terms());
-                    assertEquals(values.read(new EnumRow(State.ACTIVE)).get("state"), normalized);
+                    assertEquals(values.readRetainedValues(new EnumRow(State.ACTIVE))[0], normalized);
                     assertEquals("active-code", normalized);
                 }));
     }
@@ -231,10 +316,10 @@ class FormEncryptedTypeCodecTest {
                                 assertEquals("db:payload", fixture.plaintext(raw).get("text"));
                                 DynamicRow decoded = reactive
                                         ? fixture.decoder.decodeRows(fixture.form, Flux.just(raw),
-                                                SqlExecutionOptions.safeDefaults(), DataScope.none(), display)
+                                                SqlExecutionOptions.unlimited(), DataScope.none(), display)
                                                 .single().block()
-                                        : fixture.decoder.decodeRows(fixture.form, List.of(raw),
-                                                SqlExecutionOptions.safeDefaults(), DataScope.none(), display).getFirst();
+                                        : fixture.decoder.rowDecoder(fixture.form,
+                                                SqlExecutionOptions.unlimited(), DataScope.none(), display).map(raw);
                                 assertEquals(display == SensitiveDisplayMode.FULL ? "payload" : "*******",
                                         decoded.get("text"));
                                 assertEquals(1, fixture.reads.get());
@@ -251,13 +336,14 @@ class FormEncryptedTypeCodecTest {
                                 ProtectedConditions.contains("text", "payload")).build();
                         ProtectedFieldRuntime.PreparedContainsQuery query = fixture.renderer.protection()
                                 .prepareContainsQuery(fixture.form, fixture.form, where, DataScope.none()).orElseThrow();
+                        assertEquals(1, fixture.writes.get());
                         assertEquals("db:payload", query.normalizedValue());
-                        List<DynamicRow> result = new ProtectedContainsResultSupport(fixture.renderer).finish(
-                                fixture.form, query, List.of(fixture.plaintext(fixture.encryptedRow())),
-                                List.of("id", "text"), display, SqlExecutionOptions.safeDefaults());
-                        assertEquals(1, result.size());
+                        DynamicRow result = new ProtectedContainsResultSupport(fixture.renderer).rowFinisher(
+                                fixture.form, query, List.of("id", "text"), display, SqlExecutionOptions.unlimited())
+                                .apply(fixture.plaintext(fixture.encryptedRow()));
+                        org.junit.jupiter.api.Assertions.assertNotNull(result);
                         assertEquals(display == SensitiveDisplayMode.FULL ? "payload" : "*******",
-                                result.getFirst().get("text"));
+                                result.get("text"));
                         assertEquals(1, fixture.reads.get());
                     }
                 })));
@@ -270,7 +356,7 @@ class FormEncryptedTypeCodecTest {
                 JoinQuerySpec.Builder builder = JoinQuerySpec.builder(fixture.form);
                 JoinQuerySpec query = builder.selectAs(builder.root(), "text", "selected_text").showSensitive().build();
                 DynamicRow result = new JoinResultProtector(fixture.renderer)
-                        .plan(query, Map.of(builder.root(), DataScope.none()), SensitiveDisplayMode.FULL)
+                        .plan(query.projections(), Map.of(builder.root(), DataScope.none()), SensitiveDisplayMode.FULL)
                         .transform(DynamicRow.copyOf(Map.of("selected_text", fixture.encryptedRow().get("text"))));
                 assertEquals("payload", result.get("selected_text"));
                 assertEquals(1, fixture.reads.get());
@@ -287,6 +373,7 @@ class FormEncryptedTypeCodecTest {
 
     private static final class Fixture implements AutoCloseable {
         private final AtomicInteger reads = new AtomicInteger();
+        private final AtomicInteger writes = new AtomicInteger();
         private final ProtectedFieldRuntime runtime = ProtectedFieldRuntime.create(
                 ProtectedFieldKeyRing.single("v1", new byte[32]));
         private final EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults());
@@ -305,7 +392,10 @@ class FormEncryptedTypeCodecTest {
                         public boolean supports(Class<?> type) {
                             return broad ? CharSequence.class.isAssignableFrom(type) : type == CharSequence.class;
                         }
-                        public Object write(Object value) { return value == null ? null : "db:" + value; }
+                        public Object write(Object value) {
+                            writes.incrementAndGet();
+                            return value == null ? null : "db:" + value;
+                        }
                         public Object read(Object value, Class<?> type) {
                             reads.incrementAndGet();
                             return value == null ? null : value.toString().substring(3).repeat(expansion);
@@ -316,7 +406,7 @@ class FormEncryptedTypeCodecTest {
             form = descriptor.form();
             renderer = FormDataSqlRenderer.create(SqlRenderer.builder().addDefaultTerms().build()
                     .withValueCodecs(mappings.valueCodecs()), RdbDialect.postgresql())
-                    .withEntityFieldCodecs(descriptor.customFieldCodecs()).withProtectedFields(runtime);
+                    .withEntityModels(java.util.List.of(descriptor.metadata())).withProtectedFields(runtime);
             decoder = new FormResultDecoder(renderer, models);
         }
 

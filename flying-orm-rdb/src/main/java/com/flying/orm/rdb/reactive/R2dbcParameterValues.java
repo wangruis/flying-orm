@@ -2,6 +2,8 @@ package com.flying.orm.rdb.reactive;
 
 import com.flying.orm.core.internal.value.BindableValueSnapshots;
 import com.flying.orm.rdb.codec.SqlTypedValue;
+import com.flying.orm.rdb.batch.BatchWriteRequest;
+import com.flying.orm.rdb.execution.ProtectedBatchRows;
 import com.flying.orm.rdb.internal.binding.SqlNullParameter;
 import io.r2dbc.spi.Blob;
 import io.r2dbc.spi.Clob;
@@ -9,6 +11,7 @@ import io.r2dbc.spi.Parameter;
 import io.r2dbc.spi.Parameters;
 import io.r2dbc.spi.R2dbcType;
 import io.r2dbc.spi.Type;
+import io.r2dbc.spi.Statement;
 import reactor.core.publisher.Mono;
 
 import java.nio.ByteBuffer;
@@ -26,8 +29,20 @@ final class R2dbcParameterValues {
     private R2dbcParameterValues() {
     }
 
+    /** Ordinary and generated-key batches bind the same owned row prefix. */
+    static void bindBatch(Statement statement, BatchWriteRequest request, ProtectedBatchRows.RowView row, int offset) {
+        for (int index = 0; index < row.parameterCount(); index++) {
+            Object value = row.row()[index];
+            if (value == null) statement.bindNull(offset + index, request.parameterTypes().get(index));
+            else statement.bind(offset + index, forOwnedBinding(value));
+        }
+    }
+
     static Object[] stabilizeBatchParameters(Object[] row, int parameterCount) {
         Objects.requireNonNull(row, "row");
+        if (row.length > 0 && row[row.length - 1] instanceof com.flying.orm.rdb.execution.ProtectedBatchRows.Layout layout) {
+            parameterCount = layout.statement().parameterCount();
+        }
         int boundCount = Math.min(parameterCount, row.length);
         for (int index = 0; index < boundCount; index++) {
             if (row[index] instanceof Parameter) {
@@ -108,24 +123,6 @@ final class R2dbcParameterValues {
         // SqlRequest has already taken ownership of ordinary bindable values. Only wrappers whose
         // payload is opaque to core need an execution-boundary snapshot here.
         return value;
-    }
-
-    static boolean isCharacterLargeObject(Object value) {
-        if (!(value instanceof Parameter parameter)) {
-            return false;
-        }
-        Object parameterValue = parameter.getValue();
-        Type parameterType = parameter.getType();
-        return isCharacterLargeObject(parameterValue, parameterType);
-    }
-
-    static boolean isBinaryLargeObject(Object value) {
-        if (!(value instanceof Parameter parameter)) {
-            return false;
-        }
-        Object parameterValue = parameter.getValue();
-        Type parameterType = parameter.getType();
-        return isBinaryLargeObject(parameterValue, parameterType);
     }
 
     static boolean isLargeObject(Object value) {

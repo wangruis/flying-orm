@@ -1,10 +1,13 @@
 package com.flying.orm.core.form;
 
-import com.flying.orm.core.field.FieldIdentity;
 import com.flying.orm.core.internal.Names;
-import com.flying.orm.core.metadata.IndexMetadata;
+import com.flying.orm.core.join.QueryRelation;
+import com.flying.orm.core.metadata.IndexDefinition;
+import com.flying.orm.core.metadata.FeatureRegistry;
+import com.flying.orm.core.metadata.IndexKeyPart;
+import com.flying.orm.core.metadata.PrimaryKeyDefinition;
 import com.flying.orm.core.metadata.RelationIdentity;
-import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.FieldProtectionRegistry;
 import com.flying.orm.core.protection.MaskedFieldDefinition;
@@ -27,11 +30,15 @@ public final class DynamicForm {
 
     private final String id;
 
-    private final String table;
+    private final RelationIdentity relationIdentity;
 
-    private final Optional<RelationIdentity> relationIdentity;
+    /** 自动数据库对象命名的稳定输入，不参与关系解析或 SQL 标识符渲染。 */
+    private final String namingSource;
 
     private final List<DynamicField> fields;
+    private final List<DynamicField> runtimeDefaultFields;
+    private final FeatureRegistry features;
+    private final boolean hasFieldFeatures;
 
     private final Map<String, DynamicField> fieldsByName;
 
@@ -40,30 +47,50 @@ public final class DynamicForm {
     private final TenantDefinition tenant;
 
     private final FieldProtectionRegistry protections;
+    private final Map<String, QueryRelation> relations;
 
     /** 非缓存表单不支付摘要成本；首次需要缓存键或公开指纹时再稳定发布。 */
     private volatile String structureFingerprint;
 
     private DynamicForm(String id,
-                        String table,
                         RelationIdentity relationIdentity,
+                        String namingSource,
                         List<DynamicField> fields,
                         LogicDeleteDefinition logicDelete,
                         TenantDefinition tenant,
-                        FieldProtectionRegistry protections) {
+                        FieldProtectionRegistry protections,
+                        Map<String, QueryRelation> relations,
+                        FeatureRegistry features) {
         this.id = Names.requireText(id, "dynamic form id");
-        this.table = Names.requireText(table, "dynamic form table");
-        this.relationIdentity = Optional.ofNullable(relationIdentity);
+        this.relationIdentity = Objects.requireNonNull(relationIdentity, "dynamic form relation identity must not be null");
+        this.namingSource = namingSource;
+        this.features = features;
 
         List<DynamicField> copiedFields = List.copyOf(fields);
+        List<DynamicField> boundFields = null;
         Map<String, DynamicField> indexedFields = new LinkedHashMap<>(Names.mapCapacity(copiedFields.size()));
-        for (DynamicField field : copiedFields) {
+        List<DynamicField> defaults = null;
+        boolean fieldFeatures = false;
+        for (int index = 0; index < copiedFields.size(); index++) {
+            DynamicField original = copiedFields.get(index);
+            DynamicField field = original.withFeatures(original.features().withParent(features));
+            fieldFeatures |= !field.features().features().isEmpty();
+            if (field != original) {
+                if (boundFields == null) boundFields = new ArrayList<>(copiedFields);
+                boundFields.set(index, field);
+            }
             DynamicField previous = indexedFields.putIfAbsent(field.normalizedName(), field);
             if (previous != null) {
                 throw new IllegalArgumentException("duplicate dynamic field name");
             }
+            if (field.runtimeDefault() != null) {
+                if (defaults == null) defaults = new ArrayList<>();
+                defaults.add(field);
+            }
         }
-        this.fields = copiedFields;
+        this.fields = boundFields == null ? copiedFields : List.copyOf(boundFields);
+        this.runtimeDefaultFields = defaults == null ? List.of() : List.copyOf(defaults);
+        this.hasFieldFeatures = fieldFeatures;
         this.fieldsByName = Map.copyOf(indexedFields);
         this.logicDelete = logicDelete == null
                 ? null : DynamicFormValidation.logicDelete(logicDelete, fieldsByName);
@@ -71,6 +98,7 @@ public final class DynamicForm {
                 ? null : DynamicFormValidation.tenant(tenant, fieldsByName);
         this.protections = DynamicFormValidation.protections(
                 protections, fieldsByName, this.tenant, this.logicDelete);
+        this.relations = Map.copyOf(relations);
     }
 
     /**
@@ -81,7 +109,7 @@ public final class DynamicForm {
      * @return 动态表单构建器
      */
     public static Builder builder(String id, String table) {
-        return new Builder(id, table, null);
+        return new Builder(id, RelationIdentity.parse(table)).namingSource(table);
     }
 
     /**
@@ -94,7 +122,7 @@ public final class DynamicForm {
     public static Builder relationalBuilder(String id, RelationIdentity identity) {
         RelationIdentity safeIdentity = Objects.requireNonNull(
                 identity, "dynamic form relation identity must not be null");
-        return new Builder(id, safeIdentity.table(), safeIdentity);
+        return new Builder(id, safeIdentity);
     }
 
     /**
@@ -112,15 +140,20 @@ public final class DynamicForm {
      * @return 物理表名
      */
     public String table() {
-        return table;
+        return relationIdentity.qualifiedName();
+    }
+
+    /** 自动索引、检索侧表的持久命名输入；与表名的展示格式分离。 */
+    public String namingSource() {
+        return namingSource;
     }
 
     /**
      * 返回不会猜测点号层级的物理关系身份。
      *
-     * @return catalog、schema、table 的只读分段身份；旧 String 构建入口为空
+     * @return catalog、schema、table 的只读分段身份
      */
-    public Optional<RelationIdentity> relationIdentity() {
+    public RelationIdentity relationIdentity() {
         return relationIdentity;
     }
 
@@ -131,6 +164,21 @@ public final class DynamicForm {
      */
     public List<DynamicField> fields() {
         return fields;
+    }
+
+    /** 已声明应用默认值的字段；普通表单不在每次写入时扫描全部字段。 */
+    public List<DynamicField> runtimeDefaultFields() {
+        return runtimeDefaultFields;
+    }
+
+    /** 表级扩展，可由注册表的 parent 继承 Schema/数据库的共享声明。 */
+    public FeatureRegistry features() {
+        return features;
+    }
+
+    /** 构建时确定是否存在字段扩展；未声明时普通条件继续使用标准计划缓存。 */
+    public boolean hasFieldFeatures() {
+        return hasFieldFeatures;
     }
 
     /**
@@ -149,12 +197,8 @@ public final class DynamicForm {
         synchronized (this) {
             fingerprint = structureFingerprint;
             if (fingerprint == null) {
-                fingerprint = relationIdentity.isEmpty()
-                        ? DynamicFormStructure.fingerprint(
-                                table, fields, logicDelete, tenant, protections)
-                        : DynamicFormStructure.fingerprint(
-                                relationIdentity.orElseThrow(),
-                                fields, logicDelete, tenant, protections);
+                fingerprint = DynamicFormStructure.fingerprint(
+                        relationIdentity, namingSource, fields, logicDelete, tenant, protections);
                 structureFingerprint = fingerprint;
             }
             return fingerprint;
@@ -193,6 +237,11 @@ public final class DynamicForm {
         return protections;
     }
 
+    /** 可复用的查询关系，键按字段命名规则规范化；不参与物理结构或外键生成。 */
+    public Map<String, QueryRelation> relations() {
+        return relations;
+    }
+
     /**
      * 按规范化字段名查找动态字段。
      *
@@ -200,7 +249,7 @@ public final class DynamicForm {
      * @return 匹配字段
      */
     public Optional<DynamicField> findField(String name) {
-        return Optional.ofNullable(fieldsByName.get(FieldIdentity.of(name).key()));
+        return Optional.ofNullable(fieldsByName.get(Names.key(name, "field name")));
     }
 
     /**
@@ -210,25 +259,34 @@ public final class DynamicForm {
      * @return 匹配字段
      */
     public DynamicField field(String name) {
-        return findField(name).orElseThrow(() -> new IllegalArgumentException(
-                "dynamic field does not exist in form"));
+        DynamicField field = fieldsByName.get(Names.key(name, "field name"));
+        if (field == null) {
+            throw new IllegalArgumentException("dynamic field does not exist");
+        }
+        return field;
     }
 
-    /**
-     * 将动态表单发布为表元数据。
-     *
-     * @return 表元数据
-     */
-    public TableMetadata toTableMetadata() {
-        TableMetadata.Builder builder = TableMetadata.builder(table);
+    /** 发布完整表定义；列声明直接共享，不经由轻量列元数据中转。 */
+    public RelationalTableDefinition toTableDefinition() {
+        return toTableDefinition(relationIdentity);
+    }
+
+    /** 按调用方已经解析的物理身份发布列定义，不重新拼接或解析命名空间。 */
+    public RelationalTableDefinition toTableDefinition(RelationIdentity identity) {
+        RelationalTableDefinition.Builder builder = RelationalTableDefinition.builder(identity);
+        List<String> primaryKeys = new ArrayList<>();
         for (DynamicField field : fields) {
-            builder.addColumn(field.toColumnMetadata());
-            if (field.unique()) {
-                builder.addIndex(IndexMetadata.builder(DynamicFormStructure.uniqueIndexName(table, field.name()))
-                                              .unique()
-                                              .addColumn(field.name())
-                                              .build());
+            builder.addColumn(field.column());
+            if (field.primaryKey()) {
+                primaryKeys.add(field.name());
             }
+            if (field.unique()) {
+                builder.addIndex(IndexDefinition.builder(DynamicFormStructure.uniqueIndexName(namingSource, field.name()))
+                        .unique().addKey(IndexKeyPart.asc(field.name())).build());
+            }
+        }
+        if (!primaryKeys.isEmpty()) {
+            builder.primaryKey(PrimaryKeyDefinition.of("pk_" + identity.table(), primaryKeys.toArray(String[]::new)));
         }
         return builder.build();
     }
@@ -255,8 +313,10 @@ public final class DynamicForm {
                 added.add(targetField);
             } else if (!sourceField.name().equals(targetField.name())) {
                 throw new IllegalArgumentException(
-                        "case-only physical field rename must use reviewed schema migration");
-            } else if (!sourceField.equals(targetField)) {
+                        "case-only physical field rename is not an in-place field change");
+            } else if (!sourceField.column().equals(targetField.column())
+                    || sourceField.primaryKey() != targetField.primaryKey()
+                    || sourceField.unique() != targetField.unique()) {
                 changed.add(new FieldChange(sourceField, targetField));
             }
         }
@@ -267,18 +327,14 @@ public final class DynamicForm {
             }
         }
 
-        return DynamicFormChangeSet.ownedDiff(this, safeTarget, added, removed, changed);
+        return new DynamicFormChangeSet(this, safeTarget, added, removed, changed);
     }
 
     /**
-     * 判断两个表单是否映射到同一个物理关系，并保留 legacy 字符串和分段身份的各自语义。
+     * 判断两个表单是否映射到同一个物理关系。
      */
     public boolean mapsToSameRelation(DynamicForm target) {
         DynamicForm safeTarget = Objects.requireNonNull(target, "target form must not be null");
-        if (relationIdentity.isEmpty() || safeTarget.relationIdentity.isEmpty()) {
-            return relationIdentity.isEmpty() && safeTarget.relationIdentity.isEmpty()
-                    && table.equals(safeTarget.table);
-        }
         return relationIdentity.equals(safeTarget.relationIdentity);
     }
 
@@ -293,9 +349,9 @@ public final class DynamicForm {
 
         private final String id;
 
-        private final String table;
-
         private final RelationIdentity relationIdentity;
+
+        private String namingSource;
 
         private final List<DynamicField> fields = new ArrayList<>();
 
@@ -304,11 +360,19 @@ public final class DynamicForm {
         private TenantDefinition tenant;
 
         private final FieldProtectionRegistry.Builder protections = FieldProtectionRegistry.builder();
+        private Map<String, QueryRelation> relations = Map.of();
+        private FeatureRegistry features = FeatureRegistry.empty();
 
-        private Builder(String id, String table, RelationIdentity relationIdentity) {
+        private Builder(String id, RelationIdentity relationIdentity) {
             this.id = Names.requireText(id, "dynamic form id");
-            this.table = Names.requireText(table, "dynamic form table");
             this.relationIdentity = relationIdentity;
+            this.namingSource = relationIdentity.table();
+        }
+
+        /** 复制物理布局时保留命名输入；变更该值意味着变更自动生成的数据库对象名称。 */
+        public Builder namingSource(String source) {
+            this.namingSource = Names.requireText(source, "physical naming source");
+            return this;
         }
 
         /**
@@ -319,6 +383,22 @@ public final class DynamicForm {
          */
         public Builder addField(DynamicField field) {
             fields.add(Objects.requireNonNull(field, "dynamic field must not be null"));
+            return this;
+        }
+
+        /** 配置本表扩展，字段上的同 id 声明优先。 */
+        public Builder features(FeatureRegistry features) {
+            this.features = Objects.requireNonNull(features, "form features");
+            return this;
+        }
+
+        /** 声明查询关系；目标在查询引用该关系时才解析。 */
+        public Builder relation(String name, QueryRelation relation) {
+            String key = Names.key(name, "query relation name");
+            if (relations.isEmpty()) relations = new LinkedHashMap<>();
+            if (relations.putIfAbsent(key, Objects.requireNonNull(relation, "query relation must not be null")) != null) {
+                throw new IllegalArgumentException("duplicate query relation: " + name);
+            }
             return this;
         }
 
@@ -378,7 +458,7 @@ public final class DynamicForm {
          */
         public DynamicForm build() {
             return new DynamicForm(
-                    id, table, relationIdentity, fields, logicDelete, tenant, protections.build());
+                    id, relationIdentity, namingSource, fields, logicDelete, tenant, protections.build(), relations, features);
         }
     }
 }

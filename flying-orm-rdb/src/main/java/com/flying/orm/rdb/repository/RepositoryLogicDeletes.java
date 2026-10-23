@@ -27,10 +27,10 @@ final class RepositoryLogicDeletes {
         if (form.logicDelete().isPresent() || deletion.isEmpty()) {
             return form;
         }
-        DynamicForm.Builder builder = form.relationIdentity()
-                .map(identity -> DynamicForm.relationalBuilder(form.id(), identity))
-                .orElseGet(() -> DynamicForm.builder(form.id(), form.table()));
+        DynamicForm.Builder builder = DynamicForm.relationalBuilder(form.id(), form.relationIdentity())
+                .namingSource(form.namingSource()).features(form.features());
         form.fields().forEach(builder::addField);
+        form.relations().forEach(builder::relation);
         form.tenant().ifPresent(tenant -> builder.tenant(tenant.fieldName(), tenant.strategy()));
         form.protections().encryptedFields().forEach(builder::encrypted);
         form.protections().maskedFields().forEach(builder::masked);
@@ -47,12 +47,7 @@ final class RepositoryLogicDeletes {
         var deletion = effectiveForm.logicDelete().orElseThrow();
         ConditionGroup active = ConditionGroup.and()
                 .where(deletion.fieldName(), "=", deletion.notDeletedValue()).build();
-        AggregateSpec.Builder builder = AggregateSpec.builder(
-                query.withScope(query.scope().and(DataScope.where(active))));
-        spec.groups().forEach(builder::group);
-        spec.aggregates().forEach(builder::aggregate);
-        spec.having().ifPresent(builder::having);
-        return builder.build();
+        return spec.withQueryScope(DataScope.where(active));
     }
 
 }

@@ -2,6 +2,8 @@ package com.flying.orm.rdb.jdbc;
 
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.execution.ProtectedBatchRows;
+import com.flying.orm.rdb.internal.protection.ProtectedReplacementBatchPlan.Prepared;
+import com.flying.orm.rdb.internal.protection.ProtectedReplacementBatchPlan.Row;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlWriteResult;
@@ -34,13 +36,8 @@ final class JdbcProtectedBatchSideIndex {
                      BatchWriteRequest request,
                      List<ProtectedBatchRows.RowView> rows)
             throws SQLException {
-        if (rows.stream().noneMatch(row -> row.work() != null)) {
-            return new Prepared(List.of(), request.options().maxBufferedBytes());
-        }
-        List<RowState> states = new ArrayList<>(rows.size());
-        for (ProtectedBatchRows.RowView rowView : rows) {
-            states.add(new RowState(rowView.work(), List.of()));
-        }
+        List<Row> states = ProtectedReplacementBatchPlan.prepareRows(rows);
+        if (states.isEmpty()) return new Prepared(states, request.options().maxBufferedBytes());
         SqlExecutionOptions options = ownerReadOptions(request);
         for (ProtectedOwnerBatchPlan plan : ProtectedOwnerBatchPlan.plans(
                 rows, request.options().maxBufferedBytes())) {
@@ -54,13 +51,6 @@ final class JdbcProtectedBatchSideIndex {
         if (prepared.rows().isEmpty()) {
             return;
         }
-        for (RowState state : prepared.rows()) {
-            if (state.work() != null
-                    && state.work().kind() == ProtectedWriteWork.Kind.UPDATE
-                    && state.owners().isEmpty()) {
-                throw new SQLException("protected batch update owner was not found", "02000");
-            }
-        }
         completeReplacements(connection, prepared.rows(), prepared.maxBufferedBytes());
     }
 
@@ -69,7 +59,22 @@ final class JdbcProtectedBatchSideIndex {
                               List<Map<String, Object>> owners)
             throws SQLException {
         // 普通写入没有批量字节预算；复用已有参数数量和操作数上限，不增加新的输入限制。
-        completeReplacements(connection, List.of(new RowState(work, owners)), Long.MAX_VALUE);
+        completeReplacements(connection, List.of(new Row(work, owners)), Long.MAX_VALUE);
+    }
+
+    /** Counts have already passed the executor's completeness and failure checks. */
+    void complete(Connection connection, Prepared prepared, int[] updateCounts) throws SQLException {
+        List<Row> rows = prepared.rows();
+        if (rows.isEmpty()) return;
+        List<Row> written = null;
+        for (int index = 0; index < rows.size(); index++) {
+            if (updateCounts[index] == 0) {
+                if (written == null) written = new ArrayList<>(rows.subList(0, index));
+            } else if (written != null) {
+                written.add(rows.get(index));
+            }
+        }
+        completeReplacements(connection, written == null ? rows : written, prepared.maxBufferedBytes());
     }
 
     static void insertOwners(Connection connection,
@@ -90,7 +95,7 @@ final class JdbcProtectedBatchSideIndex {
         if (prepared.rows().isEmpty()) {
             return null;
         }
-        for (RowState state : prepared.rows()) {
+        for (Row state : prepared.rows()) {
             if (state.work() != null && state.work().kind() != ProtectedWriteWork.Kind.INSERT) {
                 return null;
             }
@@ -100,7 +105,7 @@ final class JdbcProtectedBatchSideIndex {
     }
 
     private static void completeReplacements(Connection connection,
-                                              List<RowState> rows,
+                                              List<Row> rows,
                                               long maxBufferedBytes)
             throws SQLException {
         for (ProtectedReplacementBatchPlan.Segment segment
@@ -119,19 +124,21 @@ final class JdbcProtectedBatchSideIndex {
     }
 
     static void completeGeneratedRow(Connection connection,
-                                     RowState state,
+                                     Row state,
                                      long affectedRows,
                                      DynamicRow generatedKey,
                                      long maxBufferedBytes)
             throws SQLException {
         if (state.work() != null && affectedRows > 0L) {
-            replace(connection, state, new SqlWriteResult(affectedRows, List.of(generatedKey)), maxBufferedBytes);
+            completeReplacements(connection,
+                    List.of(state.completed(new SqlWriteResult(affectedRows, List.of(generatedKey)))),
+                    maxBufferedBytes);
         }
     }
 
     private static void readOwners(Connection connection,
                                    ProtectedOwnerBatchPlan plan,
-                                   List<RowState> states,
+                                   List<Row> states,
                                    SqlExecutionOptions options) throws SQLException {
         boolean[] matched = new boolean[plan.size()];
         try (PreparedStatement statement = connection.prepareStatement(plan.sql())) {
@@ -155,7 +162,7 @@ final class JdbcProtectedBatchSideIndex {
                         throw new SQLException("protected batch update owner query returned multiple rows", "21000");
                     }
                     matched[match.slot()] = true;
-                    states.set(match.rowIndex(), new RowState(
+                    states.set(match.rowIndex(), new Row(
                             states.get(match.rowIndex()).work(), List.of(match.owner())));
                 }
             }
@@ -167,56 +174,6 @@ final class JdbcProtectedBatchSideIndex {
         return new SqlExecutionOptions(0, limit, limit, limit, 0);
     }
 
-    private static void replace(Connection connection,
-                                RowState state,
-                                SqlWriteResult result,
-                                long maxBufferedBytes)
-            throws SQLException {
-        ProtectedWriteWork work = state.work();
-        List<Map<String, Object>> owners = switch (work.kind()) {
-            case INSERT -> List.of(work.resolveInsertOwner(result));
-            case UPSERT -> List.of(work.knownOwner());
-            case UPDATE -> state.owners();
-        };
-        if (owners.isEmpty()) {
-            throw new SQLException("protected batch update owner was not found", "02000");
-        }
-        for (Map<String, Object> owner : owners) {
-            for (ProtectedWriteWork.FieldTokens field : work.fields()) {
-                if (work.kind() != ProtectedWriteWork.Kind.INSERT) {
-                    try (PreparedStatement statement = connection.prepareStatement(work.deleteSql())) {
-                        JdbcStatementBinder.bind(statement, work.sideIndexParameters(owner, field, null));
-                        JdbcStatementControl.requireNotInterrupted(statement);
-                        statement.executeUpdate();
-                    }
-                }
-                TokenInsertBatch inserts = new TokenInsertBatch(connection, maxBufferedBytes);
-                inserts.add(work, owner, field);
-                inserts.flush();
-            }
-        }
-    }
-
-    record Prepared(List<RowState> rows, long maxBufferedBytes) {
-        Prepared(List<RowState> rows) {
-            this(rows, com.flying.orm.rdb.batch.BatchWriteOptions.DEFAULT_MAX_BUFFERED_BYTES);
-        }
-
-        Prepared {
-            rows = List.copyOf(rows);
-            if (maxBufferedBytes <= 0L) {
-                throw new IllegalArgumentException("protected batch byte limit must be greater than zero");
-            }
-        }
-    }
-
-    record RowState(ProtectedWriteWork work, List<Map<String, Object>> owners)
-            implements ProtectedReplacementBatchPlan.Row {
-        RowState {
-            owners = List.copyOf(owners);
-        }
-    }
-
     static final class GeneratedTokenBatch {
 
         private final TokenInsertBatch inserts;
@@ -225,7 +182,7 @@ final class JdbcProtectedBatchSideIndex {
             this.inserts = inserts;
         }
 
-        void add(RowState state,
+        void add(Row state,
                  long affectedRows,
                  DynamicRow generatedKey)
                 throws SQLException {
@@ -246,62 +203,30 @@ final class JdbcProtectedBatchSideIndex {
     }
 
     private static final class TokenInsertBatch {
-
         private final Connection connection;
-        private final long maxBufferedBytes;
-        private final List<List<Object>> parameterSets = new ArrayList<>(
-                JdbcProtectedSideIndexDml.MAX_TOKEN_BATCH_SIZE);
-        private String sql;
-        private int parameterCount;
-        private long bufferedBytes;
+        private final ProtectedReplacementBatchPlan.TokenBuffer buffer;
 
-        private TokenInsertBatch(Connection connection,
-                                 long maxBufferedBytes) {
+        private TokenInsertBatch(Connection connection, long maxBufferedBytes) {
             this.connection = connection;
-            this.maxBufferedBytes = maxBufferedBytes;
+            this.buffer = new ProtectedReplacementBatchPlan.TokenBuffer(maxBufferedBytes);
         }
 
         private void add(ProtectedWriteWork work,
                          Map<String, Object> owner,
-                         ProtectedWriteWork.FieldTokens field)
-                throws SQLException {
-            if (sql != null && !sql.equals(work.insertSql())) {
-                flush();
-            }
-            sql = work.insertSql();
+                         ProtectedWriteWork.FieldTokens field) throws SQLException {
+            ProtectedReplacementBatchPlan.Insertion insertion =
+                    new ProtectedReplacementBatchPlan.Insertion(work, owner, field);
             for (int index = 0; index < field.tokenCount(); index++) {
-                List<Object> parameters = work.sideIndexParameters(owner, field, index);
-                long bytes = com.flying.orm.rdb.batch.BatchMemoryBudget.estimateValueBytes(parameters);
-                if (!parameterSets.isEmpty() && (parameterSets.size()
-                        == JdbcProtectedSideIndexDml.MAX_TOKEN_BATCH_SIZE
-                        || (long) parameterCount + parameters.size()
-                        > ProtectedReplacementBatchPlan.MAX_PARAMETERS
-                        || saturatedAdd(bufferedBytes, bytes) > maxBufferedBytes)) {
+                if (!buffer.add(insertion, index)) {
                     flush();
-                    sql = work.insertSql();
+                    buffer.add(insertion, index);
                 }
-                if (bytes > maxBufferedBytes) {
-                    throw new IllegalArgumentException(
-                            "protected side-index token parameters exceed batch safety limits");
-                }
-                parameterSets.add(parameters);
-                parameterCount += parameters.size();
-                bufferedBytes = saturatedAdd(bufferedBytes, bytes);
             }
         }
 
         private void flush() throws SQLException {
-            if (parameterSets.isEmpty()) {
-                return;
-            }
-            JdbcProtectedSideIndexDml.insertParameterSets(connection, sql, parameterSets);
-            parameterSets.clear();
-            parameterCount = 0;
-            bufferedBytes = 0L;
-        }
-
-        private static long saturatedAdd(long left, long right) {
-            return Long.MAX_VALUE - left < right ? Long.MAX_VALUE : left + right;
+            JdbcProtectedSideIndexDml.insertParameterSets(connection, buffer.sql(), buffer.parameters());
+            buffer.clear();
         }
     }
 }

@@ -2,31 +2,21 @@ package com.flying.orm.rdb.internal.mapping;
 
 import com.flying.orm.core.annotation.EnumValue;
 import com.flying.orm.rdb.mapping.EntityEnumStorage;
-import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
 import com.flying.orm.rdb.mapping.MappingException;
-import tools.jackson.databind.JsonNode;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.time.Instant;
-import java.time.LocalDate;
-import java.time.LocalDateTime;
-import java.time.LocalTime;
-import java.time.OffsetDateTime;
-import java.time.OffsetTime;
-import java.util.Map;
-import java.util.UUID;
 
-/** 从 Java 字段类型和自有 @EnumValue 声明推断跨方言逻辑数据类型。 */
+/** 解析自有枚举持久值声明及未注册类型的逻辑删除字面量。 */
 final class EntityFieldTypeResolver {
 
     private EntityFieldTypeResolver() {
     }
 
-    static EntityEnumStorage enumStorage(Field field, EnumValueDefinition enumValue) {
-        if (!field.getType().isEnum()) {
+    static EntityEnumStorage enumStorage(Class<?> type, EnumValueDefinition enumValue) {
+        if (!type.isEnum()) {
             return EntityEnumStorage.NONE;
         }
         if (enumValue.memberName() != null) {
@@ -37,23 +27,12 @@ final class EntityFieldTypeResolver {
         return EntityEnumStorage.NAME;
     }
 
-    static String dataType(Field field, EntityEnumStorage enumStorage, EnumValueDefinition enumValue) {
-        Class<?> type = field.getType();
-        if (enumStorage == EntityEnumStorage.ORDINAL) {
-            return "INTEGER";
-        }
-        if (enumValue.valueType() != null) {
-            return dataType(enumValue.valueType());
-        }
-        return dataType(type);
-    }
-
-    static EnumValueDefinition enumValue(Field field) {
-        if (!field.getType().isEnum()) {
+    static EnumValueDefinition enumValue(Class<?> type) {
+        if (!type.isEnum()) {
             return EnumValueDefinition.NONE;
         }
         Field selected = null;
-        for (Field candidate : field.getType().getDeclaredFields()) {
+        for (Field candidate : type.getDeclaredFields()) {
             if (!candidate.isAnnotationPresent(EnumValue.class)) {
                 continue;
             }
@@ -61,63 +40,13 @@ final class EntityFieldTypeResolver {
                 throw new MappingException("@EnumValue must mark an instance value field: " + candidate);
             }
             if (selected != null) {
-                throw new MappingException("an enum may declare only one @EnumValue field: " + field.getType().getName());
+                throw new MappingException("an enum may declare only one @EnumValue field: " + type.getName());
             }
             selected = candidate;
         }
         return selected == null
                 ? EnumValueDefinition.NONE
                 : new EnumValueDefinition(selected.getName(), selected.getType());
-    }
-
-    private static String dataType(Class<?> type) {
-        Class<?> safeType = wrap(type);
-        if (Map.class.isAssignableFrom(safeType)
-                || java.util.Collection.class.isAssignableFrom(safeType)
-                || JsonNode.class.isAssignableFrom(safeType)) {
-            return "JSON";
-        }
-        if (String.class.equals(safeType) || safeType.isEnum()) {
-            return "VARCHAR";
-        }
-        if (UUID.class.equals(safeType)) {
-            return EntityTypeMappingRegistry.standard().resolve(safeType).databaseType().canonical();
-        }
-        if (Long.class.equals(safeType)) {
-            return "BIGINT";
-        }
-        if (Integer.class.equals(safeType) || Short.class.equals(safeType) || Byte.class.equals(safeType)) {
-            return "INTEGER";
-        }
-        if (Boolean.class.equals(safeType)) {
-            return "BOOLEAN";
-        }
-        if (BigDecimal.class.equals(safeType)
-                || BigInteger.class.equals(safeType)
-                || Double.class.equals(safeType)
-                || Float.class.equals(safeType)) {
-            return "DECIMAL";
-        }
-        if (LocalDateTime.class.equals(safeType)) {
-            return "TIMESTAMP";
-        }
-        if (Instant.class.equals(safeType) || OffsetDateTime.class.equals(safeType)) {
-            return "TIMESTAMPTZ";
-        }
-        if (LocalDate.class.equals(safeType)) {
-            return "DATE";
-        }
-        if (LocalTime.class.equals(safeType)) {
-            return "TIME";
-        }
-        if (OffsetTime.class.equals(safeType)) {
-            return "OFFSET_TIME";
-        }
-        if (byte[].class.equals(type) || Byte[].class.equals(type)) {
-            return "BINARY";
-        }
-        // 未知业务类型保守按文本交给 codec；RDB 层仍可使用动态表单显式覆盖。
-        return "VARCHAR";
     }
 
     static Object typedValue(String value, Class<?> type) {

@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.jdbc;
 
+import com.flying.orm.rdb.internal.protection.ProtectedReplacementBatchPlan;
 import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
@@ -32,6 +33,93 @@ class JdbcProtectedBatchSideIndexBatchingTest {
 
     private static final int ROW_COUNT = 8;
 
+    @TestFactory
+    List<DynamicTest> singleRowUpsertUsesCountsWithoutReturningInputIndexes() {
+        return List.of(List.<Integer>of(), List.of(0)).stream()
+                .map(indexes -> DynamicTest.dynamicTest(indexes.toString(),
+                        () -> verifyReturnedIndexes(indexes, "none", 1))).toList();
+    }
+
+    @TestFactory
+    List<DynamicTest> nativeUpsertCorrelatesUnknownCountsUsingReturnedInputIndexes() {
+        return List.of(List.<Integer>of(), List.of(0), List.of(1), List.of(1, 0),
+                List.of(-1), List.of(2), List.of(0, 0))
+                .stream().map(indexes -> DynamicTest.dynamicTest(indexes.toString(),
+                        () -> verifyReturnedIndexes(indexes, "none"))).toList();
+    }
+
+    @TestFactory
+    List<DynamicTest> returningFailuresCloseResourcesAndNeverWriteTokens() {
+        return List.of("result-close", "statement-close", "partial", "mismatch", "null-result")
+                .stream().map(failure -> DynamicTest.dynamicTest(failure,
+                        () -> verifyReturnedIndexes(List.of(0), failure))).toList();
+    }
+
+    private static void verifyReturnedIndexes(List<Integer> indexes, String failure) {
+        verifyReturnedIndexes(indexes, failure, 2);
+    }
+
+    private static void verifyReturnedIndexes(List<Integer> indexes, String failure, int rowCount) {
+        StatementRecorder recorder = new StatementRecorder();
+        recorder.businessIndexes = indexes;
+        recorder.businessFailure = failure;
+        if (rowCount == 1) recorder.businessCount = indexes.size();
+        com.flying.orm.rdb.dialect.RdbDialect pg = com.flying.orm.rdb.dialect.RdbDialect.postgresql();
+        com.flying.orm.core.form.DynamicForm form = com.flying.orm.core.form.DynamicForm.builder("business_row", "business_row")
+                .addField(com.flying.orm.core.form.DynamicField.primaryKey("id", "BIGINT"))
+                .addField(com.flying.orm.core.form.DynamicField.of("content", "VARCHAR")).build();
+        BatchWriteRequest rendered = com.flying.orm.rdb.form.FormDataSqlRenderer.create(
+                com.flying.orm.core.sql.render.SqlRenderer.builder().addDefaultTerms().build(), pg)
+                .upsertBatch(form, List.<Map<String, Object>>of(Map.of("id", 7L, "content", "first"),
+                        Map.of("id", 7L, "content", "last")).subList(0, rowCount));
+        List<Object[]> values = Flux.from(rendered.rows()).collectList().block();
+        List<Object[]> rows = new ArrayList<>();
+        for (int index = 0; index < values.size(); index++) {
+            rows.add(ProtectedBatchRows.extend(values.get(index), work(ProtectedWriteWork.Kind.UPSERT,
+                    7L, null, List.of(new ProtectedWriteWork.FieldTokens("phone",
+                            List.of(new byte[]{(byte) index}))))));
+        }
+        List<Long> completed = new ArrayList<>();
+        JdbcBatchWriter writer = JdbcBatchWriter.create(
+                com.flying.orm.rdb.execution.ConnectionAccessTestSupport.borrowed(recorder.connection()), pg);
+        BatchWriteRequest request = new BatchWriteRequest(rendered.statement(), rendered.parameterTypes(),
+                Flux.fromIterable(rows), BatchWriteOptions.of(2), rendered.rowCountPolicy(), rendered.generatedKeys());
+        if (!failure.equals("none") || indexes.stream().anyMatch(index -> index < 0 || index >= 2)
+                || indexes.stream().distinct().count() != indexes.size()) {
+            org.junit.jupiter.api.Assertions.assertThrows(com.flying.orm.rdb.batch.BatchExecutionEvidenceException.class,
+                    () -> writer.writeProtectedBatch(request, completed::add));
+            assertEquals(List.of(), recorder.executions);
+            assertEquals(List.of(), completed);
+            assertEquals(1, recorder.statementCloses);
+            assertEquals(failure.equals("partial") || failure.equals("null-result") ? 0 : 1, recorder.resultCloses);
+            return;
+        }
+        com.flying.orm.rdb.batch.BatchExecutionEvidence evidence = writer.writeProtectedBatch(request, completed::add);
+        List<List<Object>> expected = indexes.stream().sorted()
+                .map(index -> List.<Object>of(7L, "phone", ByteBuffer.wrap(new byte[]{index.byteValue()}))).toList();
+        List<List<Object>> inserted = new ArrayList<>();
+        for (int index = 0; index < recorder.executionShapes.size(); index++) {
+            if (recorder.executionShapes.get(index).startsWith("INSERT:")) inserted.addAll(recorder.executions.get(index));
+        }
+        assertEquals(expected, inserted);
+        assertTrue(evidence.affectedRows().isKnown());
+        assertEquals(indexes.size(), evidence.affectedRows().value());
+        assertEquals(java.util.stream.LongStream.range(0, rowCount).boxed().toList(), completed);
+        assertEquals(1, recorder.businessExecutions);
+        if (rowCount == 1) {
+            assertEquals(rendered.sql(), recorder.businessSql);
+            assertEquals(values.stream().map(row -> List.of(row)).toList(), recorder.businessParameters);
+            assertEquals(0, recorder.returnMode);
+            assertEquals(0, recorder.resultCloses);
+        } else {
+            assertTrue(recorder.businessSql.endsWith(" returning cast(? as integer)"));
+            assertEquals(List.of(0, 1), recorder.businessParameters.stream().map(List::getLast).toList());
+            assertEquals(java.sql.Statement.RETURN_GENERATED_KEYS, recorder.returnMode);
+            assertEquals(1, recorder.resultCloses);
+        }
+        assertEquals(1, recorder.statementCloses);
+    }
+
     @Test
     void compositeOwnerTokenBatchesRespectParameterAndOperationLimits() throws Exception {
         StatementRecorder recorder = new StatementRecorder();
@@ -47,8 +135,9 @@ class JdbcProtectedBatchSideIndexBatchingTest {
                                 .mapToObj(index -> ByteBuffer.allocate(4).putInt(0, index).array()).toList())));
 
         new JdbcProtectedBatchSideIndex().complete(recorder.connection(),
-                new JdbcProtectedBatchSideIndex.Prepared(List.of(
-                        new JdbcProtectedBatchSideIndex.RowState(work, List.of()))));
+                new ProtectedReplacementBatchPlan.Prepared(List.of(
+                        new ProtectedReplacementBatchPlan.Row(work, List.of())),
+                        com.flying.orm.rdb.batch.BatchWriteOptions.DEFAULT_MAX_BUFFERED_BYTES));
 
         assertTrue(recorder.executions.stream().allMatch(parameters -> parameters.size() <= 500
                 && parameters.stream().mapToInt(List::size).sum() <= 2_000));
@@ -65,7 +154,7 @@ class JdbcProtectedBatchSideIndexBatchingTest {
         for (int index = 0; index < 500; index++) {
             rows.add(ProtectedBatchRows.admit(new Object[]{"plain", (long) index}, 2, Long.MAX_VALUE, "test bytes"));
         }
-        JdbcProtectedBatchSideIndex.Prepared prepared = new JdbcProtectedBatchSideIndex().prepare(
+        ProtectedReplacementBatchPlan.Prepared prepared = new JdbcProtectedBatchSideIndex().prepare(
                 null, request(), rows);
 
         assertEquals(List.of(), prepared.rows());
@@ -89,14 +178,15 @@ class JdbcProtectedBatchSideIndexBatchingTest {
     @Test
     void sideIndexDeletesUseOneBoundedStatementForTheChunk() throws Exception {
         StatementRecorder recorder = new StatementRecorder();
-        List<JdbcProtectedBatchSideIndex.RowState> states = new ArrayList<>();
+        List<ProtectedReplacementBatchPlan.Row> states = new ArrayList<>();
         for (int index = 0; index < ROW_COUNT; index++) {
-            states.add(new JdbcProtectedBatchSideIndex.RowState(
+            states.add(new ProtectedReplacementBatchPlan.Row(
                     upsertWork(1_000L + index), List.of()));
         }
 
         new JdbcProtectedBatchSideIndex().complete(
-                recorder.connection(), new JdbcProtectedBatchSideIndex.Prepared(states));
+                recorder.connection(), new ProtectedReplacementBatchPlan.Prepared(states,
+                        com.flying.orm.rdb.batch.BatchWriteOptions.DEFAULT_MAX_BUFFERED_BYTES));
 
         assertEquals(1, recorder.preparedStatements.get(),
                      "side-index DELETE Statements must be bounded by the chunk, not multiplied by owner fields");
@@ -107,13 +197,14 @@ class JdbcProtectedBatchSideIndexBatchingTest {
         StatementRecorder recorder = new StatementRecorder();
         var fields = List.of(new ProtectedWriteWork.FieldTokens("phone", List.of(new byte[]{1})));
         var states = List.of(
-                new JdbcProtectedBatchSideIndex.RowState(work(
+                new ProtectedReplacementBatchPlan.Row(work(
                         ProtectedWriteWork.Kind.UPSERT, new BigDecimal("1.0"), null, fields), List.of()),
-                new JdbcProtectedBatchSideIndex.RowState(work(
+                new ProtectedReplacementBatchPlan.Row(work(
                         ProtectedWriteWork.Kind.UPSERT, new BigDecimal("1.00"), null, fields), List.of()));
 
         new JdbcProtectedBatchSideIndex().complete(recorder.connection(),
-                new JdbcProtectedBatchSideIndex.Prepared(states));
+                new ProtectedReplacementBatchPlan.Prepared(states,
+                        com.flying.orm.rdb.batch.BatchWriteOptions.DEFAULT_MAX_BUFFERED_BYTES));
 
         assertEquals(List.of("DELETE:1", "INSERT:1", "DELETE:1", "INSERT:1"),
                      recorder.executionShapes);
@@ -141,13 +232,14 @@ class JdbcProtectedBatchSideIndexBatchingTest {
                     var firstFields = List.of(new ProtectedWriteWork.FieldTokens("phone", List.of(new byte[]{1})));
                     var secondFields = List.of(new ProtectedWriteWork.FieldTokens("phone", List.of(new byte[]{2})));
                     var states = List.of(
-                            new JdbcProtectedBatchSideIndex.RowState(work(ProtectedWriteWork.Kind.UPSERT,
+                            new ProtectedReplacementBatchPlan.Row(work(ProtectedWriteWork.Kind.UPSERT,
                                     owners.first(), null, firstFields), List.of()),
-                            new JdbcProtectedBatchSideIndex.RowState(work(ProtectedWriteWork.Kind.UPSERT,
+                            new ProtectedReplacementBatchPlan.Row(work(ProtectedWriteWork.Kind.UPSERT,
                                     owners.second(), null, secondFields), List.of()));
 
                     new JdbcProtectedBatchSideIndex().complete(recorder.connection(),
-                            new JdbcProtectedBatchSideIndex.Prepared(states));
+                            new ProtectedReplacementBatchPlan.Prepared(states,
+                        com.flying.orm.rdb.batch.BatchWriteOptions.DEFAULT_MAX_BUFFERED_BYTES));
 
                     assertEquals(owners.same()
                                     ? List.of("DELETE:1", "INSERT:1", "DELETE:1", "INSERT:1")
@@ -221,12 +313,26 @@ class JdbcProtectedBatchSideIndexBatchingTest {
         private final AtomicInteger preparedStatements = new AtomicInteger();
         private final List<String> executionShapes = new ArrayList<>();
         private final List<List<List<Object>>> executions = new ArrayList<>();
+        private List<Integer> businessIndexes;
+        private int businessCount = java.sql.Statement.SUCCESS_NO_INFO;
+        private int businessExecutions;
+        private String businessSql;
+        private List<List<Object>> businessParameters;
+        private int returnMode;
+        private int resultCloses;
+        private int statementCloses;
+        private String businessFailure = "none";
 
         private Connection connection() {
             return (Connection) Proxy.newProxyInstance(
                     getClass().getClassLoader(), new Class<?>[]{Connection.class},
                     (proxy, method, arguments) -> switch (method.getName()) {
-                        case "prepareStatement" -> statement((String) arguments[0]);
+                        case "prepareStatement" -> {
+                            if (((String) arguments[0]).startsWith("insert into \"business_row\"")) {
+                                returnMode = arguments.length == 2 ? (int) arguments[1] : 0;
+                            }
+                            yield statement((String) arguments[0]);
+                        }
                         case "toString" -> "protected-batch-counting-connection";
                         default -> defaultValue(method.getReturnType());
                     });
@@ -249,6 +355,18 @@ class JdbcProtectedBatchSideIndexBatchingTest {
                             yield null;
                         }
                         case "executeBatch" -> {
+                            if (businessIndexes != null && sql.startsWith("insert into \"business_row\"")) {
+                                businessExecutions++;
+                                businessSql = sql;
+                                businessParameters = List.copyOf(parameters);
+                                int[] counts = new int[batchSize.get()];
+                                java.util.Arrays.fill(counts, businessCount);
+                                if (businessFailure.equals("partial")) {
+                                    throw new java.sql.BatchUpdateException("partially failed", new int[]{1});
+                                }
+                                if (businessFailure.equals("mismatch")) java.util.Arrays.fill(counts, 1);
+                                yield counts;
+                            }
                             executions.add(List.copyOf(parameters));
                             executionShapes.add((sql.startsWith("delete") ? "DELETE:" : "INSERT:")
                                     + batchSize.get());
@@ -256,7 +374,8 @@ class JdbcProtectedBatchSideIndexBatchingTest {
                             java.util.Arrays.fill(counts, 1);
                             yield counts;
                         }
-                        case "setObject" -> {
+                        case "getGeneratedKeys" -> businessFailure.equals("null-result") ? null : returnedIndexes();
+                        case "setObject", "setInt" -> {
                             bindings.put((Integer) arguments[0], arguments[1]);
                             yield null;
                         }
@@ -265,7 +384,14 @@ class JdbcProtectedBatchSideIndexBatchingTest {
                                     ((java.io.InputStream) arguments[1]).readAllBytes()));
                             yield null;
                         }
-                        case "setNull", "setQueryTimeout", "close" -> null;
+                        case "setNull", "setQueryTimeout" -> null;
+                        case "close" -> {
+                            if (sql.startsWith("insert into \"business_row\"")) {
+                                statementCloses++;
+                                if (businessFailure.equals("statement-close")) throw new java.sql.SQLException("close failed");
+                            }
+                            yield null;
+                        }
                         case "toString" -> "protected-batch-counting-statement";
                         default -> defaultValue(method.getReturnType());
                     });
@@ -289,6 +415,22 @@ class JdbcProtectedBatchSideIndexBatchingTest {
                         case "close" -> null;
                         case "toString" -> "empty-owner-result";
                         default -> defaultValue(method.getReturnType());
+                    });
+        }
+
+        private ResultSet returnedIndexes() {
+            AtomicInteger cursor = new AtomicInteger(-1);
+            return (ResultSet) Proxy.newProxyInstance(getClass().getClassLoader(), new Class<?>[]{ResultSet.class},
+                    (proxy, method, arguments) -> switch (method.getName()) {
+                        case "next" -> cursor.incrementAndGet() < businessIndexes.size();
+                        case "getInt" -> businessIndexes.get(cursor.get());
+                        case "wasNull" -> false;
+                        case "close" -> {
+                            resultCloses++;
+                            if (businessFailure.equals("result-close")) throw new java.sql.SQLException("result close failed");
+                            yield null;
+                        }
+                        default -> throw new UnsupportedOperationException(method.getName());
                     });
         }
     }

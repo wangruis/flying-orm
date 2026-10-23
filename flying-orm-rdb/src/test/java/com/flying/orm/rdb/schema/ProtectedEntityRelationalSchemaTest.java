@@ -10,11 +10,16 @@ import com.flying.orm.core.annotation.TableForeignKey;
 import com.flying.orm.core.annotation.TableName;
 import com.flying.orm.core.annotation.TablePrimaryKey;
 import com.flying.orm.core.annotation.TableUnique;
+import com.flying.orm.core.form.DynamicField;
+import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.metadata.ColumnDefault;
+import com.flying.orm.core.metadata.ColumnDefinition;
 import com.flying.orm.core.metadata.IndexKeyPart;
 import com.flying.orm.core.metadata.ReferentialAction;
 import com.flying.orm.core.metadata.RelationalMetadataFingerprint;
 import com.flying.orm.core.metadata.RelationalSchemaDefinition;
-import com.flying.orm.core.metadata.RelationalSchemaFingerprint;
+import com.flying.orm.core.metadata.ValueGeneration;
+import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.rdb.mapping.EntitySchemaDescriptor;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
@@ -24,7 +29,10 @@ import com.flying.orm.rdb.dialect.DatabaseDescriptor;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.protection.ProtectedContainsLayout;
 import com.flying.orm.rdb.protection.ProtectedFormLayout;
+import com.flying.orm.rdb.protection.ProtectedRelationalSchemaProjector;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -33,6 +41,36 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ProtectedEntityRelationalSchemaTest {
+
+    @Test
+    void containsOwnerKeysShareCompleteStorageFactsAcrossBothSchemaInputs() {
+        List<ColumnDefinition> keys = List.of(
+                ColumnDefinition.builder("tenant", "VARCHAR").length(32).codecId("tenant-codec")
+                        .charset("utf8mb4").collation("utf8mb4_bin")
+                        .defaultValue(ColumnDefault.literal("default-tenant"))
+                        .defaultConstraintName("df_tenant").comment("owner only").build(),
+                ColumnDefinition.builder("id", "BIGINT").generation(ValueGeneration.identity()).build(),
+                ColumnDefinition.builder("amount", "DECIMAL").precision(18).scale(4).build(),
+                ColumnDefinition.builder("created", "TIMESTAMP").temporalPrecision(6).build());
+        DynamicForm.Builder builder = DynamicForm.builder("accounts", "accounts");
+        keys.forEach(column -> builder.addField(new DynamicField(column, true, false)));
+        DynamicForm form = builder.addField(DynamicField.of("secret", "VARCHAR"))
+                .encrypted("secret", EncryptedFieldDefinition.builder()
+                        .searchModes(EncryptedSearchMode.CONTAINS).build()).build();
+        ProtectedContainsLayout layout = ProtectedContainsLayout.resolve(form).orElseThrow();
+        RelationalSchemaDefinition schema = ProtectedRelationalSchemaProjector.project(form, form.toTableDefinition());
+
+        for (ColumnDefinition key : keys) {
+            ColumnDefinition expected = key.toBuilder().nullable(false).comment(null)
+                    .defaultValue(ColumnDefault.none()).defaultConstraintName(null)
+                    .generation(ValueGeneration.none()).build();
+            assertEquals(expected, layout.table().field(key.name()).column(), key.name());
+            assertEquals(expected, schema.tables().get(1).column(key.name()), key.name());
+            assertFalse(layout.table().field(key.name()).primaryKey());
+        }
+        assertEquals(keys.stream().map(ColumnDefinition::name).toList(),
+                layout.foreignKeys().getFirst().referenceColumns());
+    }
 
     @Test
     void entitySchemaPublishesTheSamePhysicalOwnerRequiredByProtectedCrud() {
@@ -73,7 +111,7 @@ class ProtectedEntityRelationalSchemaTest {
         assertEquals(2, descriptor.schema().tables().size());
         assertSame(descriptor.table(), descriptor.schema().tables().getFirst());
         var side = descriptor.schema().tables().get(1);
-        assertEquals(legacy.table().relationIdentity().orElseThrow(), side.identity());
+        assertEquals(legacy.table().relationIdentity(), side.identity());
         assertEquals(legacy.table().fields().stream().map(field -> field.name()).toList(),
                 side.columns().stream().map(column -> column.name()).toList());
         assertEquals(legacy.indexes().stream().map(index -> index.name()).toList(),
@@ -103,16 +141,14 @@ class ProtectedEntityRelationalSchemaTest {
     }
 
     @Test
-    void ordinaryEntityKeepsItsTableAndFingerprintContract() {
+    void ordinaryEntityPublishesItsTableAndCompleteSchemaFingerprint() {
         EntitySchemaDescriptor<OrdinaryAccount> descriptor =
                 EntitySchemaDescriptor.builder(OrdinaryAccount.class).build();
 
         assertEquals(1, descriptor.schema().tables().size());
         assertSame(descriptor.table(), descriptor.schema().tables().getFirst());
-        assertEquals(RelationalMetadataFingerprint.of(descriptor.table()),
-                descriptor.relationalFingerprint());
         assertEquals(descriptor.relationalFingerprint(),
-                RelationalSchemaFingerprint.of(descriptor.schema()));
+                RelationalMetadataFingerprint.of(descriptor.schema()));
         assertFalse(descriptor.form().protections().protectedField("name"));
     }
 
@@ -124,7 +160,7 @@ class ProtectedEntityRelationalSchemaTest {
                 descriptor.schema().tables().get(1), descriptor.schema().tables().getFirst()));
 
         assertEquals(descriptor.relationalFingerprint(),
-                RelationalSchemaFingerprint.of(reversed));
+                RelationalMetadataFingerprint.of(reversed));
     }
 
     @Test

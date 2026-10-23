@@ -4,7 +4,9 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Modifier;
 import java.util.List;
+import java.util.Map;
 
+import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
@@ -77,6 +79,25 @@ class ProductionSurfaceConvergenceTest {
     void batchObservationHasNoDetachedFactoryOrClassifier() {
         assertProductionTypeAbsent("com.flying.orm.rdb.observation.BatchExecutionObservationFactory");
         assertProductionTypeAbsent("com.flying.orm.rdb.observation.BatchObservationClassification");
+    }
+
+    @Test
+    void internalOwnersDoNotRetainUncalledEntryPoints() {
+        Map<String, List<String>> removed = Map.of(
+                "form.FieldUseGuard", List.of("approveCollected"),
+                "operator.DmlOperator", List.of("formClient"),
+                "protection.ProtectedFormLayout", List.of("isPhysicalType"),
+                "protection.ProtectedSearchTokenService", List.of("currentSuffixToken"),
+                "reactive.R2dbcExecutionSession", List.of("withStatement"),
+                "reactive.ReactiveSqlExecutionProtection", List.of("translateBatchFailure"),
+                "schema.SchemaMigrationPlanner", List.of("safeIncrementalPlan"),
+                "schema.SchemaMigrationSupport", List.of("safeIncremental", "requireSafeIncremental"));
+        assertAll(removed.entrySet().stream().map(entry -> () -> {
+            Class<?> type = Class.forName("com.flying.orm.rdb." + entry.getKey(), false,
+                    ProductionSurfaceConvergenceTest.class.getClassLoader());
+            assertTrue(java.util.Arrays.stream(type.getDeclaredMethods())
+                    .noneMatch(method -> entry.getValue().contains(method.getName())), entry.getKey());
+        }));
     }
 
     private static void assertProductionTypeAbsent(String typeName) {

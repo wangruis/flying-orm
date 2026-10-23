@@ -4,8 +4,6 @@ import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.page.CursorPosition;
-import com.flying.orm.core.page.CursorPageQuery;
-import com.flying.orm.core.page.CursorSort;
 import com.flying.orm.core.page.KeysetPageQuery;
 import com.flying.orm.core.page.KeysetSort;
 import com.flying.orm.core.page.NullOrder;
@@ -36,17 +34,17 @@ class KeysetFiveDialectSqlTest {
                 RdbDialect.oracle(), RdbDialect.sqlServer())) {
             FormOperationPlanner planner = planner(dialect);
             for (int size : new int[]{5000, Integer.MAX_VALUE - 1}) {
-                assertTrue(planner.cursorPage(query, CursorPageQuery.first(size, CursorSort.asc("id")))
+                assertTrue(planner.reads.keysetPage(query, KeysetPageQuery.first(size, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST)))
                         .request().parameters().stream().anyMatch(value -> value instanceof Number number
                                 && number.longValue() == (long) size + 1), dialect.name());
-                assertTrue(planner.keysetPage(query,
+                assertTrue(planner.reads.keysetPage(query,
                         KeysetPageQuery.first(size, KeysetSort.asc("id", NullOrder.LAST)))
                         .request().parameters().stream().anyMatch(value -> value instanceof Number number
                                 && number.longValue() == (long) size + 1), dialect.name());
             }
-            assertThrows(ArithmeticException.class, () -> planner.cursorPage(query,
-                    CursorPageQuery.first(Integer.MAX_VALUE, CursorSort.asc("id"))));
-            assertThrows(ArithmeticException.class, () -> planner.keysetPage(query,
+            assertThrows(ArithmeticException.class, () -> planner.reads.keysetPage(query,
+                    KeysetPageQuery.first(Integer.MAX_VALUE, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST))));
+            assertThrows(ArithmeticException.class, () -> planner.reads.keysetPage(query,
                     KeysetPageQuery.first(Integer.MAX_VALUE, KeysetSort.asc("id", NullOrder.LAST))));
         }
     }
@@ -64,8 +62,8 @@ class KeysetFiveDialectSqlTest {
                 RdbDialect.h2(), RdbDialect.mysql(), RdbDialect.postgresql(),
                 RdbDialect.oracle(), RdbDialect.sqlServer())) {
             FormOperationPlanner planner = planner(dialect);
-            String sql = planner.keysetPage(query, page).request().sql();
-            SqlRenderer identifiers = planner.renderer.conditionRenderer();
+            String sql = planner.reads.keysetPage(query, page).request().sql();
+            SqlRenderer identifiers = planner.reads.renderer.conditionRenderer();
             String score = identifiers.identifier("Score");
             String id = identifiers.identifier("Id");
             assertTrue(sql.contains(score + " > ?"), dialect.name() + ": " + sql);
@@ -93,7 +91,7 @@ class KeysetFiveDialectSqlTest {
         for (RdbDialect dialect : List.of(
                 RdbDialect.h2(), RdbDialect.mysql(), RdbDialect.postgresql(),
                 RdbDialect.oracle(), RdbDialect.sqlServer())) {
-            FormOperationPlanner.PlannedKeysetPage plan = planner(dialect).keysetPage(query, page);
+            FormReadPlanner.PlannedKeysetPage plan = planner(dialect).reads.keysetPage(query, page);
             String sql = plan.request().sql().toLowerCase(Locale.ROOT);
 
             assertTrue(sql.contains("case when"), dialect.name());
@@ -114,14 +112,14 @@ class KeysetFiveDialectSqlTest {
         QuerySpec query = QuerySpec.of(form, ConditionGroup.and().build());
         FormOperationPlanner planner = planner(RdbDialect.h2());
 
-        String nonNullSql = planner.keysetPage(
+        String nonNullSql = planner.reads.keysetPage(
                 query,
                 KeysetPageQuery.after(
                         20,
                         CursorPosition.of(List.of(5, 7L)),
                         KeysetSort.asc("score", NullOrder.LAST)))
                 .request().sql();
-        String nullSql = planner.keysetPage(
+        String nullSql = planner.reads.keysetPage(
                 query,
                 KeysetPageQuery.after(
                         20,
@@ -139,6 +137,6 @@ class KeysetFiveDialectSqlTest {
         return new FormOperationPlanner(
                 renderer,
                 new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
-                SqlExecutionOptions.safeDefaults());
+                SqlExecutionOptions.unlimited());
     }
 }

@@ -47,7 +47,11 @@ public final class SqlLexicalScanner {
 
     /** 根据方言名或驱动产品名创建不可变扫描规则。 */
     public static Rules rulesFor(String dialectName) {
-        return switch (DatabaseProduct.detect(dialectName)) {
+        return rulesFor(DatabaseProduct.detect(dialectName));
+    }
+
+    static Rules rulesFor(DatabaseProduct product) {
+        return switch (product) {
             case MYSQL -> MYSQL;
             case POSTGRESQL -> POSTGRESQL;
             case SQL_SERVER -> SQL_SERVER;
@@ -92,68 +96,60 @@ public final class SqlLexicalScanner {
     public static long protectedSegmentAt(String sql, int offset, Rules rules, boolean templateSlots) {
         char current = sql.charAt(offset);
         char next = offset + 1 < sql.length() ? sql.charAt(offset + 1) : '\0';
-        if (rules.postgresqlEscapeStrings && isPostgresqlEscapeStringStart(sql, offset, current, next)) {
-            return segment(SegmentKind.SINGLE_QUOTED, backslashEscapedQuotedEnd(
-                    sql, offset + 1, '\'', "SQL contains an unclosed PostgreSQL escape string", false));
-        }
-        if (current == '\'') {
-            int end = rules.backslashEscapedStrings
+        return switch (current) {
+            case 'e', 'E' -> rules.postgresqlEscapeStrings
+                    && isPostgresqlEscapeStringStart(sql, offset, current, next)
+                    ? segment(SegmentKind.SINGLE_QUOTED, backslashEscapedQuotedEnd(
+                            sql, offset + 1, '\'', "SQL contains an unclosed PostgreSQL escape string", false))
+                    : -1L;
+            case '\'' -> segment(SegmentKind.SINGLE_QUOTED, rules.backslashEscapedStrings
                     ? backslashEscapedQuotedEnd(sql, offset, '\'', "SQL contains an unclosed quoted value",
-                                                rules.mysqlDashComments || rules == REDACTION)
-                    : quotedEnd(sql, offset, '\'', "SQL contains an unclosed quoted value");
-            return segment(SegmentKind.SINGLE_QUOTED, end);
-        }
-        if (current == '"') {
-            int end = rules.backslashEscapedStrings
-                    ? backslashEscapedQuotedEnd(
-                            sql, offset, '"', "SQL contains an unclosed quoted identifier or value",
                             rules.mysqlDashComments || rules == REDACTION)
-                    : quotedEnd(sql, offset, '"', "SQL contains an unclosed quoted identifier or value");
-            return segment(SegmentKind.DOUBLE_QUOTED, end);
-        }
-        if (rules.backticks && current == '`') {
-            return segment(SegmentKind.BACKTICK_IDENTIFIER, quotedEnd(sql, offset, '`',
-                    "SQL contains an unclosed backtick-quoted identifier"));
-        }
-        if (rules.brackets && current == '[') {
-            return segment(SegmentKind.BRACKET_IDENTIFIER, quotedEnd(sql, offset, ']',
-                    "SQL contains an unclosed bracket-quoted identifier"));
-        }
-        if (rules.oracleQuotes) {
-            int end = oracleQuoteEnd(sql, offset);
-            if (end >= 0) {
-                return segment(SegmentKind.ORACLE_QUOTED, end);
+                    : quotedEnd(sql, offset, '\'', "SQL contains an unclosed quoted value"));
+            case '"' -> segment(SegmentKind.DOUBLE_QUOTED, rules.backslashEscapedStrings
+                    ? backslashEscapedQuotedEnd(sql, offset, '"', "SQL contains an unclosed quoted identifier or value",
+                            rules.mysqlDashComments || rules == REDACTION)
+                    : quotedEnd(sql, offset, '"', "SQL contains an unclosed quoted identifier or value"));
+            case '`' -> rules.backticks ? segment(SegmentKind.BACKTICK_IDENTIFIER,
+                    quotedEnd(sql, offset, '`', "SQL contains an unclosed backtick-quoted identifier")) : -1L;
+            case '[' -> rules.brackets ? segment(SegmentKind.BRACKET_IDENTIFIER,
+                    quotedEnd(sql, offset, ']', "SQL contains an unclosed bracket-quoted identifier")) : -1L;
+            case 'q', 'Q', 'n', 'N' -> {
+                int end = rules.oracleQuotes ? oracleQuoteEnd(sql, offset) : -1;
+                yield end < 0 ? -1L : segment(SegmentKind.ORACLE_QUOTED, end);
             }
-        }
-        if (rules.dollarQuotes && current == '$'
-                && (rules != H2 || next == '$'
-                    && (offset == 0 || Character.isWhitespace(sql.charAt(offset - 1))))) {
-            int end = dollarQuoteEnd(sql, offset);
-            if (end >= 0) {
-                return segment(SegmentKind.DOLLAR_QUOTED, end);
+            case '$' -> {
+                if (rules.dollarQuotes && (rules != H2 || next == '$'
+                        && (offset == 0 || Character.isWhitespace(sql.charAt(offset - 1))))) {
+                    int end = dollarQuoteEnd(sql, offset);
+                    if (end >= 0) {
+                        yield segment(SegmentKind.DOLLAR_QUOTED, end);
+                    }
+                }
+                if (templateSlots && next == '{') {
+                    int end = sql.indexOf('}', offset + 2);
+                    if (end < 0) {
+                        throw new IllegalArgumentException("SQL contains an unclosed template slot");
+                    }
+                    yield segment(SegmentKind.TEMPLATE_SLOT, end + 1);
+                }
+                yield -1L;
             }
-        }
-        if (templateSlots && current == '$' && next == '{') {
-            int end = sql.indexOf('}', offset + 2);
-            if (end < 0) {
-                throw new IllegalArgumentException("SQL contains an unclosed template slot");
+            case '-' -> next == '-' && isDashCommentStart(sql, offset, rules.mysqlDashComments)
+                    ? segment(SegmentKind.LINE_COMMENT, lineCommentEnd(sql, offset + 2)) : -1L;
+            case '#' -> rules.hashComments
+                    ? segment(SegmentKind.LINE_COMMENT, lineCommentEnd(sql, offset + 1)) : -1L;
+            case '/' -> {
+                if (next != '*') {
+                    yield -1L;
+                }
+                if (rules.rejectExecutableComments && isExecutableComment(sql, offset)) {
+                    throw new IllegalArgumentException("MySQL executable comments are not allowed");
+                }
+                yield segment(SegmentKind.BLOCK_COMMENT, blockCommentEnd(sql, offset + 2, rules.nestedBlockComments));
             }
-            return segment(SegmentKind.TEMPLATE_SLOT, end + 1);
-        }
-        if (current == '-' && next == '-' && isDashCommentStart(sql, offset, rules.mysqlDashComments)) {
-            return segment(SegmentKind.LINE_COMMENT, lineCommentEnd(sql, offset + 2));
-        }
-        if (rules.hashComments && current == '#') {
-            return segment(SegmentKind.LINE_COMMENT, lineCommentEnd(sql, offset + 1));
-        }
-        if (current == '/' && next == '*') {
-            if (rules.rejectExecutableComments && isExecutableComment(sql, offset)) {
-                throw new IllegalArgumentException("MySQL executable comments are not allowed");
-            }
-            return segment(SegmentKind.BLOCK_COMMENT,
-                    blockCommentEnd(sql, offset + 2, rules.nestedBlockComments));
-        }
-        return -1L;
+            default -> -1L;
+        };
     }
 
     private static long segment(SegmentKind kind, int end) {

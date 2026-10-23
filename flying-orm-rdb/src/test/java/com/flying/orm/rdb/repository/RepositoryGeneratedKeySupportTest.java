@@ -7,17 +7,13 @@ import com.flying.orm.rdb.batch.BatchGeneratedKeys;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.execution.GeneratedKeyReadException;
 import com.flying.orm.rdb.execution.SqlWriteResult;
-import com.flying.orm.rdb.lifecycle.EntityLifecyclePhase;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
 import com.flying.orm.rdb.mapping.MappingException;
 import com.flying.orm.rdb.result.DynamicRow;
 import org.junit.jupiter.api.Test;
-import reactor.core.publisher.Flux;
-import reactor.core.publisher.Mono;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Arrays;
 import java.util.Map;
 import java.util.function.LongConsumer;
 
@@ -31,11 +27,15 @@ class RepositoryGeneratedKeySupportTest {
 
     @Test
     void bothWritersUseTheExistingSharedRuleOwners() throws Exception {
+        assertThrows(NoSuchMethodException.class, () -> RepositoryEntityIdSupport.class.getDeclaredMethod(
+                "currentGeneratedKey", Object.class));
+        assertThrows(NoSuchMethodException.class, () -> RepositoryEntityIdSupport.class.getDeclaredMethod(
+                "restoreGeneratedKey", Object.class, Object.class));
         assertDoesNotThrow(() -> RepositoryFailureSupport.class.getDeclaredMethod(
                 "generatedKeyReadFailure", GeneratedKeyReadException.class));
         assertDoesNotThrow(() -> RepositoryEntityIdSupport.class.getDeclaredMethod(
                 "assignGeneratedKey", Object.class, SqlWriteResult.class));
-        for (String writer : new String[]{"ReactiveRepositoryEntityWriter", "SyncRepositoryEntityWriter"}) {
+        for (String writer : new String[]{"ReactiveFormRepository", "SyncFormRepository"}) {
             String source = Files.readString(Path.of(
                     "src/main/java/com/flying/orm/rdb/repository/" + writer + ".java"));
             assertTrue(source.contains("RepositoryFailureSupport.generatedKeyReadFailure")
@@ -44,87 +44,72 @@ class RepositoryGeneratedKeySupportTest {
         }
     }
 
+
     @Test
-    void retainedRowsInheritAssignmentStateWithoutAnotherDelegate() {
-        assertEquals(2, RepositoryEntityIdSupport.BatchState.class.getDeclaredFields().length,
-                "batch state keeps only the entity and applied flag; failure recovery is invocation-local");
-        for (Class<?> owner : new Class<?>[]{BatchLifecycleTracker.class, SyncRepositoryBatchLifecycle.class}) {
-            Class<?> retained = Arrays.stream(owner.getDeclaredClasses())
-                    .filter(type -> type.getSimpleName().equals("RetainedEntity")).findFirst().orElseThrow();
-            assertEquals("BatchState", retained.getSuperclass().getSimpleName());
-            assertSame(RepositoryEntityIdSupport.class, retained.getSuperclass().getEnclosingClass());
-            assertTrue(Arrays.stream(retained.getDeclaredFields()).allMatch(field -> field.getType() == long.class),
-                    "retained row owns only its distinct memory counters");
+    void sharedBatchStateRejectsDuplicateDeliveryAndUnknownOffsets() {
+        try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.disabled())) {
+            Entity entity = new Entity();
+            Batch batch = batch(models, entity);
+            assertThrows(MappingException.class, () -> batch.keys().accept(1L, key(10L)));
+            batch.keys().accept(0L, key(10L));
+            assertThrows(MappingException.class, () -> batch.keys().accept(0L, key(20L)));
+            assertEquals(10L, entity.id);
+            assertEquals(1, entity.writes);
+            batch.complete().accept(0L);
+            batch.abort().run();
+            assertEquals(10L, entity.id);
         }
     }
 
     @Test
-    void bothBatchPathsRejectDuplicateDeliveryAndUnknownOffsets() {
-        for (boolean reactive : new boolean[]{false, true}) {
-            try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.disabled())) {
-                Entity entity = new Entity();
-                Batch batch = batch(models, entity, reactive);
-                assertThrows(MappingException.class, () -> batch.keys().accept(1L, key(10L)));
-                batch.keys().accept(0L, key(10L));
-                assertThrows(MappingException.class, () -> batch.keys().accept(0L, key(20L)));
-                assertEquals(10L, entity.id);
-                assertEquals(1, entity.writes);
-                batch.complete().accept(0L);
-                batch.abort().run();
-                assertEquals(10L, entity.id);
-            }
+    void failedSetterIsNotRetriedOrCompensated() {
+        try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.disabled())) {
+            Entity entity = new Entity();
+            entity.reject = 10L;
+            Batch batch = batch(models, entity);
+            entity.id = 3L;
+            assertThrows(MappingException.class, () -> batch.keys().accept(0L, key(10L)));
+            assertEquals(10L, entity.id);
+            assertEquals(1, entity.writes);
+            assertThrows(MappingException.class, () -> batch.keys().accept(0L, key(20L)));
+            batch.abort().run();
+            assertEquals(10L, entity.id);
+            assertEquals(1, entity.writes);
         }
     }
 
     @Test
-    void bothBatchPathsRestoreOnlyTheAssignmentThatFailed() {
-        for (boolean reactive : new boolean[]{false, true}) {
-            try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.disabled())) {
-                Entity entity = new Entity();
-                entity.id = 3L;
-                entity.reject = 10L;
-                Batch batch = batch(models, entity, reactive);
-                assertThrows(MappingException.class, () -> batch.keys().accept(0L, key(10L)));
-                assertEquals(3L, entity.id);
-                assertEquals(2, entity.writes);
-                assertThrows(MappingException.class, () -> batch.keys().accept(0L, key(20L)));
-                batch.abort().run();
-                assertEquals(3L, entity.id);
-            }
+    void sharedBatchStatePreservesKnownIdentityWithoutAcceptingGeneratedKeys() {
+        try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.disabled())) {
+            Entity entity = new Entity();
+            entity.id = 3L;
+            Batch batch = batch(models, entity);
+            assertThrows(MappingException.class, () -> batch.keys().accept(0L, key(10L)));
+            batch.complete().accept(0L);
+            assertEquals(3L, entity.id);
+            assertEquals(0, entity.writes);
         }
     }
 
     @Test
-    void bothBatchPathsPreserveSuccessfulAssignmentOnAbortBeforeCompletion() {
-        for (boolean reactive : new boolean[]{false, true}) {
-            try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.disabled())) {
-                Entity entity = new Entity();
-                Batch batch = batch(models, entity, reactive);
-                batch.keys().accept(0L, key(10L));
-                batch.abort().run();
-                assertEquals(10L, entity.id);
-                assertEquals(1, entity.writes);
-            }
+    void sharedBatchStatePreservesSuccessfulAssignmentOnAbortBeforeCompletion() {
+        try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.disabled())) {
+            Entity entity = new Entity();
+            Batch batch = batch(models, entity);
+            batch.keys().accept(0L, key(10L));
+            batch.abort().run();
+            assertEquals(10L, entity.id);
+            assertEquals(1, entity.writes);
         }
     }
 
-    private static Batch batch(EntityModelRegistry models, Entity entity, boolean reactive) {
+    private static Batch batch(EntityModelRegistry models, Entity entity) {
         var metadata = models.metadata(Entity.class);
         RepositoryEntityIdSupport<Entity> ids = RepositoryEntityIdSupport.create(metadata, models);
-        if (reactive) {
-            BatchLifecycleTracker<Entity> tracker = new BatchLifecycleTracker<>(
-                    new EntityLifecycleDispatcher<>(metadata, null), EntityLifecyclePhase.POST_PERSIST,
-                    ids, true, 1024L, (value, row) -> new BatchLifecycleTracker.RetainedMemory(1L, 1L));
-            Flux.from(tracker.rows(Mono.just(entity), value -> value, EntityLifecyclePhase.PRE_PERSIST))
-                    .blockLast();
-            return new Batch(tracker.generatedKeys(),
-                    offset -> tracker.rowCompleted(offset, EntityLifecyclePhase.POST_PERSIST).block(), tracker::abort);
-        }
-        SyncRepositoryBatchLifecycle<Entity> tracker = new SyncRepositoryBatchLifecycle<>(
-                new SyncRepositoryLifecycleSupport<>(metadata, null, new SyncRepositoryAwaiter()),
-                EntityLifecyclePhase.POST_PERSIST, models.entityValues(Entity.class), ids, true, 1024L);
-        tracker.remember(0L, entity);
-        return new Batch(tracker.generatedKeys(), tracker::rowCompleted, tracker::abort);
+        RepositoryBatchRetention<Entity> retained = new RepositoryBatchRetention<>(
+                ids, true, 1024L, "retainedBytes", (value, row) -> 1L);
+        retained.remember(0L, entity, entity);
+        return new Batch(retained.generatedKeys(), retained::complete, retained::clear);
     }
 
     private static DynamicRow key(long value) {

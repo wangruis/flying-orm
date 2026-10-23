@@ -15,11 +15,12 @@ final class JdbcBatchSupport {
         var options = request.options();
         List<ProtectedBatchRows.RowView> result = new ArrayList<>(Math.min(options.bufferSize(), 16));
         long bytes = 0;
+        boolean bounded = options.maxBufferedBytes() != Long.MAX_VALUE;
         long reservedLimit = options.maxBufferedBytes() - options.maxRowBytes();
-        while (result.size() < options.bufferSize() && bytes <= reservedLimit) {
+        while (result.size() < options.bufferSize() && (!bounded || bytes <= reservedLimit)) {
             ProtectedBatchRows.RowView row = rows.nextRowView();
             if (row == null) break;
-            bytes += row.estimatedBytes();
+            if (bounded) bytes += row.estimatedBytes();
             result.add(row);
         }
         return result;

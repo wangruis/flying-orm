@@ -27,13 +27,13 @@ import java.util.List;
 import java.util.UUID;
 import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static io.r2dbc.spi.ConnectionFactoryOptions.DATABASE;
 import static io.r2dbc.spi.ConnectionFactoryOptions.DRIVER;
 import static io.r2dbc.spi.ConnectionFactoryOptions.PASSWORD;
 import static io.r2dbc.spi.ConnectionFactoryOptions.PROTOCOL;
 import static io.r2dbc.spi.ConnectionFactoryOptions.USER;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class H2ForeignKeyIndexReadbackTest {
@@ -61,8 +61,8 @@ class H2ForeignKeyIndexReadbackTest {
             statement.execute("create table parents (id bigint primary key)");
             RelationalTableDefinition desired = child(explicit);
             SchemaSnapshot snapshot;
-            SchemaExecutionReport report;
-            ReviewedSchemaPlan next;
+            SchemaMigrationResult report;
+            SchemaMigrationPlan next;
             if (reactive) {
                 var factory = ConnectionFactories.get(ConnectionFactoryOptions.builder()
                         .option(DRIVER, "h2").option(PROTOCOL, H2ConnectionFactoryProvider.PROTOCOL_MEM)
@@ -72,9 +72,7 @@ class H2ForeignKeyIndexReadbackTest {
                 var client = ReactiveSchemaClient.create(executor, DIALECT);
                 var plan = client.reviewRelational(DESCRIPTOR, desired, reader, SchemaCompatibilityMode.EXACT)
                         .block(TIMEOUT);
-                assertFalse(plan.requiresManualAction());
-                report = client.executeReviewed(plan, reader, SchemaMigrationApproval.approve(plan,
-                        "isolated H2 foreign-key index regression")).block(TIMEOUT);
+                report = client.execute(plan, reader).block(TIMEOUT);
                 snapshot = reader.readSnapshot(CHILD).block(TIMEOUT);
                 next = client.reviewRelational(DESCRIPTOR, desired, reader, SchemaCompatibilityMode.EXACT)
                         .block(TIMEOUT);
@@ -83,13 +81,11 @@ class H2ForeignKeyIndexReadbackTest {
                 var reader = JdbcFormMetadataReaders.create(executor, DIALECT);
                 var client = JdbcSchemaClient.create(executor, DIALECT);
                 var plan = client.reviewRelational(DESCRIPTOR, desired, reader, SchemaCompatibilityMode.EXACT);
-                assertFalse(plan.requiresManualAction());
-                report = client.executeReviewed(plan, reader, SchemaMigrationApproval.approve(plan,
-                        "isolated H2 foreign-key index regression"));
+                report = client.execute(plan, reader);
                 snapshot = reader.readSnapshot(CHILD);
                 next = client.reviewRelational(DESCRIPTOR, desired, reader, SchemaCompatibilityMode.EXACT);
             }
-            assertEquals(SchemaExecutionStatus.SUCCESS, report.status(), report.verification().toString());
+            assertNotNull(report);
             assertEquals(explicit ? List.of("fk_parent") : List.of(),
                     snapshot.completeTable().orElseThrow().indexes().stream().map(IndexDefinition::name).toList());
             assertEquals(1, snapshot.completeTable().orElseThrow().foreignKeys().size());

@@ -33,9 +33,6 @@ import java.util.Set;
  */
 public final class ParameterConditionCompiler {
 
-    private static final int DEFAULT_MAX_COLLECTION_SIZE = 1_000;
-    private static final int DEFAULT_MAX_STRING_LENGTH = 4_096;
-
     private final List<ParameterConditionSpec> specs;
     private final List<SpecGroup> groups;
     private final TermRegistry terms;
@@ -409,8 +406,8 @@ public final class ParameterConditionCompiler {
 
         private final List<PendingSpecGroup> groups = new ArrayList<>();
         private final List<TermHandler> terms = new ArrayList<>();
-        private int maxCollectionSize = DEFAULT_MAX_COLLECTION_SIZE;
-        private int maxStringLength = DEFAULT_MAX_STRING_LENGTH;
+        private int maxCollectionSize = Integer.MAX_VALUE;
+        private int maxStringLength = Integer.MAX_VALUE;
         private Builder() {
         }
 
@@ -473,7 +470,7 @@ public final class ParameterConditionCompiler {
         }
 
         /**
-         * 限制参数条件中单个字符串去掉首尾空白后的最大长度。
+         * 限制参数条件中单个字符串的实际长度，不自动去掉首尾空白。
          *
          * @param maxStringLength 最大字符串长度
          * @return 当前构建器

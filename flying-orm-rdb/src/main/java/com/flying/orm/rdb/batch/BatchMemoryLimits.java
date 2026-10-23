@@ -9,8 +9,8 @@ import java.util.Objects;
  * @version v4.1.0
  */
 public record BatchMemoryLimits(int maxBufferSize, long maxBufferedBytes) {
-    public static final int DEFAULT_MAX_BUFFER_SIZE = 10_000;
-    public static final long DEFAULT_MAX_BUFFERED_BYTES = 256L * 1024 * 1024;
+    public static final int DEFAULT_MAX_BUFFER_SIZE = Integer.MAX_VALUE;
+    public static final long DEFAULT_MAX_BUFFERED_BYTES = Long.MAX_VALUE;
 
     public BatchMemoryLimits {
         if (maxBufferSize <= 0) throw new IllegalArgumentException("batch hard max buffer size must be greater than zero");

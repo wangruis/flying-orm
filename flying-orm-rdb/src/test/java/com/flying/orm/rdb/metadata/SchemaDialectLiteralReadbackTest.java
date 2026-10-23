@@ -14,7 +14,7 @@ import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.schema.JdbcSchemaClient;
-import com.flying.orm.rdb.schema.ReviewedSchemaPlan;
+import com.flying.orm.rdb.schema.SchemaMigrationPlan;
 import com.flying.orm.rdb.schema.SchemaCompatibilityMode;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
 import org.junit.jupiter.api.Test;
@@ -40,7 +40,7 @@ class SchemaDialectLiteralReadbackTest {
 
     @Test
     void oracleTypedTemporalDefaultsReadControlledAnsiLiterals() {
-        var dialect = InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE;
+        var dialect = MetadataQueryProfile.SnapshotDialect.ORACLE;
         assertAll(
                 () -> assertEquals(ColumnDefault.literal(LocalDate.parse("2026-09-05")),
                         RelationalMetadataValueParser.columnDefault(
@@ -58,7 +58,7 @@ class SchemaDialectLiteralReadbackTest {
 
     @Test
     void oracleTypedTemporalChecksReadComparisonRangeAndIn() {
-        var dialect = InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE;
+        var dialect = MetadataQueryProfile.SnapshotDialect.ORACLE;
         LocalDate date = LocalDate.parse("2026-09-05");
         LocalDateTime timestamp = LocalDateTime.parse("2026-09-05T12:30:00.123456");
         OffsetDateTime offsetTimestamp = OffsetDateTime.parse("2026-09-05T12:30:00.123456+08:00");
@@ -94,7 +94,7 @@ class SchemaDialectLiteralReadbackTest {
                 .build();
         RdbDialect dialect = RdbDialect.oracle();
         SyncSqlExecutor executor = new OracleLiteralMetadataExecutor();
-        ReviewedSchemaPlan plan = JdbcSchemaClient.create(executor, dialect).reviewRelational(
+        SchemaMigrationPlan plan = JdbcSchemaClient.create(executor, dialect).reviewRelational(
                 DatabaseDescriptor.of("Oracle", "19", dialect),
                 desired,
                 JdbcFormMetadataReaders.create(executor, dialect),
@@ -104,22 +104,22 @@ class SchemaDialectLiteralReadbackTest {
     }
 
     @Test
-    void oracleTypedTemporalReadbackRemainsClosedToExpressionsAndOtherDialects() {
-        var oracle = InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE;
+    void oracleDefaultsPreserveNativeExpressionsWhileCheckPredicatesRemainClosed() {
+        var oracle = MetadataQueryProfile.SnapshotDialect.ORACLE;
         for (String expression : List.of("DATE '2026-09-05' + 1", "DATE '2026-09-05' || 'x'",
                 "DATE '2026-09-05' 'extra'", "TO_DATE('2026-09-05', 'YYYY-MM-DD')")) {
-            assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.columnDefault(
+            assertEquals(ColumnDefault.nativeExpression(expression), RelationalMetadataValueParser.columnDefault(
                     expression, DatabaseType.of("ORACLE_DATE"), oracle), expression);
             assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.checkPredicate(
                     "\"value\" > " + expression, Map.of("value", DatabaseType.of("ORACLE_DATE")), oracle), expression);
         }
-        assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.columnDefault(
+        assertEquals(ColumnDefault.nativeExpression("DATE '2026-09-05'"), RelationalMetadataValueParser.columnDefault(
                 "DATE '2026-09-05'", DatabaseType.of("VARCHAR"), oracle));
         assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.checkPredicate(
                 "\"value\" > DATE '2026-09-05'", Map.of("value", DatabaseType.of("VARCHAR")), oracle));
-        for (var dialect : List.of(InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL,
-                InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER)) {
-            assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.columnDefault(
+        for (var dialect : List.of(MetadataQueryProfile.SnapshotDialect.POSTGRESQL,
+                MetadataQueryProfile.SnapshotDialect.SQL_SERVER)) {
+            assertEquals(ColumnDefault.nativeExpression("DATE '2026-09-05'"), RelationalMetadataValueParser.columnDefault(
                     "DATE '2026-09-05'", DatabaseType.of("DATE"), dialect));
             assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.checkPredicate(
                     "\"value\" > DATE '2026-09-05'", Map.of("value", DatabaseType.of("DATE")), dialect));
@@ -128,7 +128,7 @@ class SchemaDialectLiteralReadbackTest {
 
     @Test
     void oracleTimeOnlyLiteralsKeepTheirTextReadback() {
-        var dialect = InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE;
+        var dialect = MetadataQueryProfile.SnapshotDialect.ORACLE;
         assertEquals(ColumnDefault.literal(LocalTime.parse("12:30:00.123456")),
                 RelationalMetadataValueParser.columnDefault("'12:30:00.123456'", DatabaseType.of("TIME"), dialect));
         assertEquals(ColumnDefault.literal(OffsetTime.parse("12:30:00.123456+08:00")),
@@ -140,7 +140,7 @@ class SchemaDialectLiteralReadbackTest {
     void mysqlCurrentDateDefaultReadsItsDictionaryAlias() {
         ColumnDefault actual = assertDoesNotThrow(() -> RelationalMetadataValueParser.columnDefault(
                 "(curdate())", DatabaseType.of("DATE"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL));
+                MetadataQueryProfile.SnapshotDialect.MYSQL));
 
         assertEquals(ColumnDefault.currentDate(), actual);
     }
@@ -150,31 +150,31 @@ class SchemaDialectLiteralReadbackTest {
         for (String expression : new String[]{"curtime()", "(curtime(6))", "current_time(6)"}) {
             ColumnDefault actual = assertDoesNotThrow(() -> RelationalMetadataValueParser.columnDefault(
                     expression, DatabaseType.of("TIME"),
-                    InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL), expression);
+                    MetadataQueryProfile.SnapshotDialect.MYSQL), expression);
 
             assertEquals(ColumnDefault.currentTime(), actual, expression);
         }
     }
 
     @Test
-    void mysqlTemporalAliasesDoNotBecomeArbitraryOrCrossDialectDefaults() {
-        for (InformationSchemaFormMetadataReader.SnapshotDialect dialect : List.of(
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL,
-                InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE)) {
-            assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.columnDefault(
+    void mysqlTemporalAliasesAreNotGuessedAsPortableKeywords() {
+        for (MetadataQueryProfile.SnapshotDialect dialect : List.of(
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL,
+                MetadataQueryProfile.SnapshotDialect.ORACLE)) {
+            assertEquals(ColumnDefault.nativeExpression("curdate()"), RelationalMetadataValueParser.columnDefault(
                     "curdate()", DatabaseType.of("DATE"), dialect));
-            assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.columnDefault(
+            assertEquals(ColumnDefault.nativeExpression("curtime(6)"), RelationalMetadataValueParser.columnDefault(
                     "curtime(6)", DatabaseType.of("TIME"), dialect));
         }
         assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.columnDefault(
                 "curdate() + interval 1 day", DatabaseType.of("DATE"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL));
+                MetadataQueryProfile.SnapshotDialect.MYSQL));
         assertEquals(ColumnDefault.literal("curdate()"), RelationalMetadataValueParser.columnDefault(
                 "curdate()", DatabaseType.of("VARCHAR"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL));
+                MetadataQueryProfile.SnapshotDialect.MYSQL));
         assertEquals(ColumnDefault.currentTimestamp(), RelationalMetadataValueParser.columnDefault(
                 "current_timestamp(6)", DatabaseType.of("TIMESTAMP"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL));
+                MetadataQueryProfile.SnapshotDialect.MYSQL));
     }
 
     @Test
@@ -184,14 +184,14 @@ class SchemaDialectLiteralReadbackTest {
                 RelationalMetadataValueParser.checkPredicate(
                         "(\"value\" <> 'CAST(1 AS DECIMAL) and ''CAST(2 AS NUMERIC)''')",
                         Map.of("value", DatabaseType.of("VARCHAR")),
-                        InformationSchemaFormMetadataReader.SnapshotDialect.H2));
+                        MetadataQueryProfile.SnapshotDialect.H2));
     }
 
     @Test
     void sqlServerUnicodeDefaultReturnsTheOriginalLiteral() {
         assertEquals(ColumnDefault.literal("中文"), RelationalMetadataValueParser.columnDefault(
                 "(N'中文')", DatabaseType.of("VARCHAR"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER));
+                MetadataQueryProfile.SnapshotDialect.SQL_SERVER));
     }
 
     @Test
@@ -199,14 +199,14 @@ class SchemaDialectLiteralReadbackTest {
         assertEquals(CheckPredicate.compare("value", CheckPredicate.ComparisonOperator.NOT_EQUAL, "中文[值]"),
                 RelationalMetadataValueParser.checkPredicate("([value]<>N'中文[值]')",
                         Map.of("value", DatabaseType.of("VARCHAR")),
-                        InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER));
+                        MetadataQueryProfile.SnapshotDialect.SQL_SERVER));
     }
 
     @Test
     void sqlServerDateDefaultRoundTripsItsCanonicalCast() {
         assertEquals(ColumnDefault.currentDate(), RelationalMetadataValueParser.columnDefault(
                 "(CONVERT([date],getdate()))", DatabaseType.of("DATE"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER));
+                MetadataQueryProfile.SnapshotDialect.SQL_SERVER));
     }
 
     @Test
@@ -215,7 +215,7 @@ class SchemaDialectLiteralReadbackTest {
                 "(cast(current_timestamp as time))"}) {
             assertEquals(ColumnDefault.currentTime(), RelationalMetadataValueParser.columnDefault(
                     expression, DatabaseType.of("TIME"),
-                    InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER));
+                    MetadataQueryProfile.SnapshotDialect.SQL_SERVER));
         }
     }
 
@@ -228,14 +228,14 @@ class SchemaDialectLiteralReadbackTest {
             assertEquals(CheckPredicate.compare("value", CheckPredicate.ComparisonOperator.NOT_EQUAL, value),
                     RelationalMetadataValueParser.checkPredicate(expression,
                             Map.of("value", DatabaseType.of("VARCHAR")),
-                            InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL));
+                            MetadataQueryProfile.SnapshotDialect.MYSQL));
         }
         assertEquals(ColumnDefault.literal(value), RelationalMetadataValueParser.columnDefault(
                 value, DatabaseType.of("VARCHAR"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL));
+                MetadataQueryProfile.SnapshotDialect.MYSQL));
     }
 
-    private static final class OracleLiteralMetadataExecutor implements SyncSqlExecutor {
+    private static final class OracleLiteralMetadataExecutor implements com.flying.orm.rdb.support.ListQueryFixture {
 
         @Override
         public List<DynamicRow> query(SqlRequest request) {
@@ -267,7 +267,7 @@ class SchemaDialectLiteralReadbackTest {
         }
 
         @Override
-        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
             throw new UnsupportedOperationException();
         }
 

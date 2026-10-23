@@ -1,7 +1,7 @@
 package com.flying.orm.rdb.schema;
 
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.metadata.ReactiveFormMetadataReader;
 import com.flying.orm.rdb.metadata.JdbcFormMetadataReader;
@@ -15,8 +15,7 @@ import java.util.Objects;
 /**
  * 把受保护字段的辅助表作为独立迁移段接入主表计划。
  *
- * <p>辅助表必须单独读取元数据，才能区分首次启用与重复迁移；审核时也必须生成自己的回滚段，避免只回滚主表而遗留
- * CONTAINS 令牌表。本类型只在 Schema 包内协作，不扩展公开迁移 API。</p>
+ * <p>辅助表必须单独读取元数据，才能区分首次启用与重复迁移；主表与辅助表的真实变化一起进入执行和失效。本类型只在 Schema 包内协作，不扩展公开迁移 API。</p>
  *
  * @author wangr
  * @date 2026-08-10
@@ -25,18 +24,16 @@ import java.util.Objects;
 final class ProtectedSchemaMigrationPlanner {
 
     private final SchemaMigrationPlanner planner;
-    private final FormSchemaSqlRenderer renderer;
-    private final SchemaTableSqlRenderer tables;
-
-    ProtectedSchemaMigrationPlanner(SchemaMigrationPlanner planner, FormSchemaSqlRenderer renderer) {
+    ProtectedSchemaMigrationPlanner(SchemaMigrationPlanner planner) {
         this.planner = Objects.requireNonNull(planner, "schema migration planner must not be null");
-        this.renderer = Objects.requireNonNull(renderer, "form schema SQL renderer must not be null");
-        this.tables = renderer.tableRenderer();
     }
 
-    SchemaMigrationPlan appendCreatePlan(DynamicForm logical, SchemaMigrationPlan primary) {
+    SchemaMigrationPlan appendCreatePlan(DynamicForm logical, SchemaMigrationPlan primary,
+                                         SchemaMigrationOptions options) {
         return ProtectedContainsLayout.resolve(logical)
-                                      .map(layout -> combine(primary, createContainsPlan(layout)))
+                                      .map(layout -> combine(primary,
+                                              planner.createTablePlan(layout.table(), layout.indexes(),
+                                                      layout.foreignKeys(), options)))
                                       .orElse(primary);
     }
 
@@ -45,7 +42,8 @@ final class ProtectedSchemaMigrationPlanner {
                                                    ReactiveFormMetadataReader reader,
                                                    SchemaMigrationOptions options) {
         return ProtectedContainsLayout.resolve(logical)
-                                      .map(layout -> readReactivePlan(layout, reader, options)
+                                      .map(layout -> planner.plan(layout.table(), layout.indexes(),
+                                                      layout.foreignKeys(), reader, options)
                                               .map(side -> combine(primary, side)))
                                       .orElseGet(() -> Mono.just(primary));
     }
@@ -55,173 +53,30 @@ final class ProtectedSchemaMigrationPlanner {
                                          JdbcFormMetadataReader lookup,
                                          SchemaMigrationOptions options) {
         return ProtectedContainsLayout.resolve(logical)
-                                      .map(layout -> combine(primary, readJdbcPlan(layout, lookup, options)))
+                                      .map(layout -> combine(primary, planner.planJdbc(layout.table(),
+                                              layout.indexes(), layout.foreignKeys(), lookup, options)))
                                       .orElse(primary);
     }
 
-    Mono<ReviewedSchemaMigrationPlan> reviewExistingReactive(DynamicForm logical,
-                                                              TableMetadata primaryCurrent,
-                                                              SchemaMigrationPlan primary,
-                                                              ReactiveFormMetadataReader reader,
-                                                              SchemaMigrationOptions options,
-                                                              SchemaMigrationReviewPolicy policy,
-                                                              SchemaSnapshot snapshot) {
-        ReviewedSchemaMigrationPlan primaryReview = reviewer().review(primaryCurrent, primary, policy, snapshot);
-        return ProtectedContainsLayout.resolve(logical)
-                                      .map(layout -> readReactiveReviewed(layout, reader, options, policy)
-                                              .map(side -> combine(primaryReview, side)))
-                                      .orElseGet(() -> Mono.just(primaryReview));
-    }
-
-    ReviewedSchemaMigrationPlan reviewExistingJdbc(DynamicForm logical,
-                                                    TableMetadata primaryCurrent,
-                                                    SchemaMigrationPlan primary,
-                                                    JdbcFormMetadataReader lookup,
-                                                    SchemaMigrationOptions options,
-                                                    SchemaMigrationReviewPolicy policy,
-                                                    SchemaSnapshot snapshot) {
-        ReviewedSchemaMigrationPlan primaryReview = reviewer().review(primaryCurrent, primary, policy, snapshot);
-        return ProtectedContainsLayout.resolve(logical)
-                                      .map(layout -> combine(primaryReview,
-                                              readJdbcReviewed(layout, lookup, options, policy)))
-                                      .orElse(primaryReview);
-    }
-
-    ReviewedSchemaMigrationPlan reviewCreated(DynamicForm logical,
-                                               SchemaMigrationPlan primary,
-                                               SchemaMigrationReviewPolicy policy) {
-        ReviewedSchemaMigrationPlan primaryReview = reviewer().review(
-                primary.target().toTableMetadata(), primary, policy);
-        return ProtectedContainsLayout.resolve(logical)
-                                      .map(layout -> combine(primaryReview, reviewer().review(
-                                              layout.table().toTableMetadata(),
-                                              createContainsPlan(layout),
-                                              policy)))
-                                      .orElse(primaryReview);
-    }
-
-    private Mono<SchemaMigrationPlan> readReactivePlan(ProtectedContainsLayout layout,
-                                                       ReactiveFormMetadataReader reader,
-                                                       SchemaMigrationOptions options) {
-        return reader.readTableForSchema(layout.table().table())
-                     .flatMap(current -> planner.migrateSafelyPlanReactive(
-                             current, layout.table(), layout.indexes(), layout.foreignKeys(), options, reader))
-                     .onErrorResume(SchemaMigrationPlanner::isTableNotFound,
-                                    failure -> Mono.just(createContainsPlan(layout)));
-    }
-
-    private SchemaMigrationPlan readJdbcPlan(ProtectedContainsLayout layout,
-                                             JdbcFormMetadataReader lookup,
-                                             SchemaMigrationOptions options) {
-        try {
-            TableMetadata current = lookup.readTableForSchema(layout.table().table());
-            return migrateContainsPlan(layout, current, options,
-                    planner.physicalSnapshotJdbc(current, layout.table(), options, lookup));
-        } catch (IllegalArgumentException failure) {
-            if (!SchemaMigrationPlanner.isTableNotFound(failure)) {
-                throw failure;
-            }
-            return createContainsPlan(layout);
-        }
-    }
-
-    private Mono<ReviewedSchemaMigrationPlan> readReactiveReviewed(ProtectedContainsLayout layout,
-                                                                   ReactiveFormMetadataReader reader,
-                                                                   SchemaMigrationOptions options,
-                                                                   SchemaMigrationReviewPolicy policy) {
-        return reader.readTableForSchema(layout.table().table())
-                     .flatMap(current -> planner.reviewSnapshot(current, layout.table(), options, reader)
-                             .map(java.util.Optional::of)
-                             .defaultIfEmpty(java.util.Optional.empty())
-                             .map(snapshot -> reviewer().review(current,
-                                     migrateContainsPlan(layout, current, options, snapshot.orElse(null)),
-                                     policy, snapshot.orElse(null))))
-                     .onErrorResume(SchemaMigrationPlanner::isTableNotFound,
-                                    failure -> Mono.just(reviewer().review(
-                                            layout.table().toTableMetadata(), createContainsPlan(layout), policy)));
-    }
-
-    private ReviewedSchemaMigrationPlan readJdbcReviewed(ProtectedContainsLayout layout,
-                                                          JdbcFormMetadataReader lookup,
-                                                          SchemaMigrationOptions options,
-                                                          SchemaMigrationReviewPolicy policy) {
-        try {
-            TableMetadata current = lookup.readTableForSchema(layout.table().table());
-            SchemaSnapshot snapshot = planner.reviewSnapshotJdbc(current, layout.table(), options, lookup);
-            return reviewer().review(current, migrateContainsPlan(layout, current, options, snapshot), policy, snapshot);
-        } catch (IllegalArgumentException failure) {
-            if (!SchemaMigrationPlanner.isTableNotFound(failure)) {
-                throw failure;
-            }
-            return reviewer().review(layout.table().toTableMetadata(), createContainsPlan(layout), policy);
-        }
-    }
-
-    private SchemaMigrationPlan migrateContainsPlan(ProtectedContainsLayout layout,
-                                                     TableMetadata current,
-                                                     SchemaMigrationOptions options,
-                                                     SchemaSnapshot snapshot) {
-        return planner.migrateSafelyPlan(
-                current, layout.table(), layout.indexes(), layout.foreignKeys(), options, snapshot);
-    }
-
-    private SchemaMigrationPlan createContainsPlan(ProtectedContainsLayout layout) {
-        List<SqlRequest> requests = new ArrayList<>(tables.createTable(layout.table()));
-        requests.addAll(tables.createIndexes(layout.table().table(), layout.indexes()));
-        layout.foreignKeys().forEach(foreignKey -> requests.add(
-                tables.createCascadeForeignKey(layout.table().table(), foreignKey)));
-        return new SchemaMigrationPlan(layout.table(), layout.indexes(), layout.foreignKeys(),
-                                       false, requests, List.of());
-    }
-
-    private SchemaMigrationReviewer reviewer() {
-        return SchemaMigrationReviewer.create(renderer);
-    }
-
     private static SchemaMigrationPlan combine(SchemaMigrationPlan primary, SchemaMigrationPlan side) {
-        List<SqlRequest> requests = new ArrayList<>(primary.requests());
-        requests.addAll(side.requests());
         List<SkippedSchemaChange> skipped = new ArrayList<>(primary.skippedChanges());
         skipped.addAll(side.skippedChanges());
-        List<String> additionalTables = new ArrayList<>(primary.additionalCreatedTables());
+        List<RelationIdentity> additionalTables = new ArrayList<>(primary.additionalCreatedTables());
         additionalTables.addAll(side.additionalCreatedTables());
-        if (!side.tableExists()) {
-            additionalTables.add(side.target().table());
+        RelationIdentity sideTable = side.target().identity();
+        if ((!side.tableExists() || side.hasExecutableSql()) && !additionalTables.contains(sideTable)) {
+            additionalTables.add(sideTable);
         }
-        return new SchemaMigrationPlan(primary.target(), primary.targetIndexes(), primary.targetForeignKeys(),
-                                       primary.tableExists(), requests, skipped, additionalTables);
-    }
-
-    private static ReviewedSchemaMigrationPlan combine(ReviewedSchemaMigrationPlan primary,
-                                                       ReviewedSchemaMigrationPlan side) {
-        SchemaMigrationPlan migration = combine(primary.migration(), side.migration());
-        if (side.migration().hasExecutableSql()
-                && !migration.additionalCreatedTables().contains(side.migration().target().table())) {
-            List<String> affectedTables = new ArrayList<>(migration.additionalCreatedTables());
-            affectedTables.add(side.migration().target().table());
-            migration = new SchemaMigrationPlan(
-                    migration.target(),
-                    migration.targetIndexes(),
-                    migration.targetForeignKeys(),
-                    migration.tableExists(),
-                    migration.requests(),
-                    migration.skippedChanges(),
-                    affectedTables);
+        if (primary.steps().isEmpty() && primary.hasExecutableSql()
+                || side.steps().isEmpty() && side.hasExecutableSql()) {
+            // 整计划 SQL 扩展没有逐操作对应关系，不能为替换后的请求发布旧操作明细。
+            List<SqlRequest> requests = new ArrayList<>(primary.requests());
+            requests.addAll(side.requests());
+            return new SchemaMigrationPlan(primary.target(), primary.tableExists(), requests, skipped, additionalTables);
         }
-        List<SqlRequest> rollback = new ArrayList<>(side.rollback().requests());
-        rollback.addAll(primary.rollback().requests());
-        List<SchemaRollbackGap> gaps = new ArrayList<>(side.rollback().gaps());
-        gaps.addAll(primary.rollback().gaps());
-        List<SqlRequest> blocking = new ArrayList<>(primary.onlineDdl().potentiallyBlocking());
-        blocking.addAll(side.onlineDdl().potentiallyBlocking());
-        OnlineDdlReview online = new OnlineDdlReview(
-                primary.onlineDdl().mode(),
-                primary.onlineDdl().support(),
-                blocking,
-                primary.onlineDdl().requiresNonTransactionalExecution()
-                        || side.onlineDdl().requiresNonTransactionalExecution());
-        return new ReviewedSchemaMigrationPlan(
-                migration, new SchemaRollbackPlan(rollback, gaps), online);
+        List<SchemaPlanStep> steps = new ArrayList<>(primary.steps());
+        steps.addAll(side.steps());
+        return SchemaMigrationPlan.planned(primary.target(), primary.tableExists(), steps, skipped, additionalTables);
     }
 
 }

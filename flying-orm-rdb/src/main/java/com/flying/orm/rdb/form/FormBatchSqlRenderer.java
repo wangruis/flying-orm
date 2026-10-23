@@ -5,26 +5,26 @@ import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.ConditionGroups;
 import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
+import com.flying.orm.core.sql.render.SqlStatementPlan;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.dialect.UpsertDialect;
 import com.flying.orm.rdb.internal.dialect.StagedUpsertDialect;
 import com.flying.orm.rdb.internal.mapping.RepositoryUpsertValues;
+import com.flying.orm.rdb.internal.plan.SqlStatementCompiler;
 import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
-import java.util.StringJoiner;
-import java.util.stream.Collectors;
 
 /**
  * 动态表单批量写入 SQL 的内部实现。
  *
- * <p>首行确定列布局和 SQL，后续行只按该布局产生参数数组。这样即使输入 Map 的迭代顺序不同，
+ * <p>首行确定列布局和 SQL，后续行沿用绑定位置；表达式复用共享编译器。即使输入 Map 的迭代顺序不同，
  * 也不会把值绑定到错误的列；所有字段校验和 codec 转换仍委托给共享 support。</p>
  *
  * @author wangr
@@ -51,66 +51,78 @@ final class FormBatchSqlRenderer {
 
     BatchInsertPlan insertPlan(DynamicForm form, Map<String, Object> firstRow) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        List<FormSqlRenderSupport.FieldValue> firstValues = support.writeFields(
+        FormSqlRenderSupport.WriteFields firstValues = support.writeFields(
                 safeForm,
                 Objects.requireNonNull(firstRow, "batch insert first row must not be null"),
                 0L);
-        List<DynamicField> layout = firstValues.stream().map(FormSqlRenderSupport.FieldValue::field).toList();
-        StringJoiner placeholders = new StringJoiner(", ");
-        layout.forEach(field -> placeholders.add(support.valueExpression(field)));
-        String sql = "insert into " + support.identifier(safeForm) + " (" + support.columns(layout)
-                + ") values (" + placeholders + ")";
-        return plan(safeForm, layout, firstValues, sql);
+        List<DynamicField> layout = firstValues.fields();
+        SqlStatementPlan statement = FormWriteSqlRenderer.insertStatement(support, safeForm, firstValues);
+        return plan(safeForm, layout, firstValues, statement, List.of(), layout.size());
     }
 
     BatchInsertPlan upsertPlan(DynamicForm form, Map<String, Object> firstRow) {
-        return upsertPlan(form, firstRow, form, firstRow, firstRow);
+        return upsertPlan(form, firstRow, form, firstRow, firstRow, null, List.of(), null);
     }
 
-    BatchInsertPlan upsertPlan(DynamicForm logicalForm,
-                               Map<String, Object> preparedLogicalValues,
-                               DynamicForm physicalForm,
-                               Map<String, Object> firstRow,
-                               Map<String, Object> sourceRow) {
-        return upsertPlan(logicalForm, preparedLogicalValues, physicalForm, firstRow, sourceRow, null);
+    BatchInsertPlan insertIgnoringConflictsPlan(DynamicForm form, Map<String, Object> firstRow,
+                                                List<String> conflictNames) {
+        FormSqlRenderSupport.WriteFields firstValues = support.writeFields(form, firstRow, 0L);
+        List<DynamicField> layout = firstValues.fields();
+        List<DynamicField> keys = requireCompleteConflictKey(conflictNames.isEmpty()
+                ? form.fields().stream().filter(DynamicField::primaryKey).toList()
+                : conflictNames.stream().map(form::field).toList(), layout, conflictNames.isEmpty());
+        String sql = upsertDialect.renderIgnoreConflicts(support.identifier(form), identifiers(layout),
+                identifiers(keys), firstValues.expressions(support));
+        SqlStatementPlan statement = SqlStatementCompiler.ignoreConflicts(sql, firstValues.parameters().length, support.dialectName,
+                upsertDialect instanceof StagedUpsertDialect staged && staged.supportsBatchRowIndex());
+        return plan(form, layout, firstValues, statement, List.of(), layout.size());
     }
 
-    BatchInsertPlan upsertPlan(DynamicForm logicalForm,
-                               Map<String, Object> preparedLogicalValues,
-                               DynamicForm physicalForm,
-                               Map<String, Object> firstRow,
-                               Map<String, Object> sourceRow,
-                               ConditionGroup targetScope) {
+    BatchInsertPlan upsertPlan(DynamicForm logicalForm, Map<String, Object> preparedLogicalValues,
+                               DynamicForm physicalForm, Map<String, Object> firstRow,
+                               Map<String, Object> sourceRow, ConditionGroup targetScope, List<String> conflictNames,
+                               ConditionGroup updateCondition) {
         DynamicForm safeForm = Objects.requireNonNull(physicalForm, "dynamic form must not be null");
-        List<FormSqlRenderSupport.FieldValue> firstValues = support.writeFields(
+        FormSqlRenderSupport.WriteFields firstValues = support.writeFields(
                 safeForm,
                 Objects.requireNonNull(firstRow, "batch upsert first row must not be null"),
                 0L);
-        List<DynamicField> layout = firstValues.stream().map(FormSqlRenderSupport.FieldValue::field).toList();
+        List<DynamicField> layout = firstValues.fields();
         RepositoryUpsertValues stagedValues = sourceRow instanceof RepositoryUpsertValues values ? values : null;
         boolean scopedTarget = targetScope != null && !ConditionGroups.isEmpty(targetScope);
+        boolean conditionalUpdate = updateCondition != null && !ConditionGroups.isEmpty(updateCondition);
         UpsertFieldPlan fields = UpsertFieldPlan.create(
-                logicalForm, preparedLogicalValues, safeForm, layout, stagedValues, scopedTarget);
-        requireCompletePrimaryKey(safeForm, fields.insertFields());
+                logicalForm, preparedLogicalValues, safeForm, layout, stagedValues, scopedTarget, conflictNames);
+        requireCompleteConflictKey(fields.conflictFields(), fields.insertFields(), conflictNames.isEmpty());
         List<String> insertColumns = identifiers(fields.insertFields());
         List<String> conflictColumns = identifiers(fields.conflictFields());
         List<String> updateColumns = identifiers(fields.updateFields());
-        List<String> parameterColumns = identifiers(fields.parameterFields());
-        List<String> valueExpressions = fields.parameterFields().stream()
-                                               .map(support::valueExpression)
-                                               .toList();
-        if (scopedTarget && !updateColumns.isEmpty()) {
+        List<String> parameterColumns = fields.parameterFields() == fields.insertFields()
+                ? insertColumns : identifiers(fields.parameterFields());
+        firstValues = firstValues.select(fields.parameterFields());
+        List<String> valueExpressions = firstValues.expressions(support);
+        if ((scopedTarget || conditionalUpdate) && !updateColumns.isEmpty()) {
             if (!(upsertDialect instanceof StagedUpsertDialect staged)) {
-                throw new UnsupportedOperationException("custom upsert dialect does not support target row scope");
+                throw new UnsupportedOperationException("custom upsert dialect does not support target row predicates");
             }
             String table = support.identifier(safeForm);
             String qualifier = staged.scopeTargetQualifier(table);
             java.util.function.UnaryOperator<String> field = name -> qualifier + "." + support.identifier(name);
-            FormSqlRenderSupport.ConditionSql condition = support.condition(
-                    safeForm, targetScope, field, field, name -> qualifier, null);
-            String sql = staged.renderScoped(table, insertColumns, conflictColumns, updateColumns,
-                                             parameterColumns, valueExpressions, condition.sql());
-            return plan(safeForm, fields.parameterFields(), firstValues, sql, condition.parameters(),
+            FormSqlRenderSupport.ConditionSql scope = scopedTarget ? support.condition(
+                    safeForm, targetScope, field, field, name -> qualifier, null) : null;
+            FormSqlRenderSupport.ConditionSql condition = conditionalUpdate ? support.condition(
+                    safeForm, updateCondition, field, field, name -> qualifier, null) : null;
+            String sql = conditionalUpdate
+                    ? staged.renderConditional(table, insertColumns, conflictColumns, updateColumns,
+                            parameterColumns, valueExpressions, scope == null ? null : scope.sql(), condition.sql())
+                    : staged.renderScoped(table, insertColumns, conflictColumns, updateColumns,
+                            parameterColumns, valueExpressions, scope.sql());
+            List<Object> parameters = scope == null ? condition.parameters() : scope.parameters();
+            if (scope != null && condition != null) {
+                parameters = new ArrayList<>(parameters);
+                parameters.addAll(condition.parameters());
+            }
+            return plan(safeForm, fields.parameterFields(), firstValues, sql, parameters,
                         staged.scopeParameterIndex(insertColumns.size(), parameterColumns.size()));
         }
         String sql = renderUpsert(insertColumns,
@@ -148,24 +160,18 @@ final class FormBatchSqlRenderer {
         return fields.stream().map(DynamicField::name).map(support::identifier).toList();
     }
 
-    private static List<DynamicField> requireCompletePrimaryKey(DynamicForm form, List<DynamicField> layout) {
-        List<DynamicField> primaryKeys = form.fields().stream()
-                                             .filter(DynamicField::primaryKey)
-                                             .toList();
-        if (primaryKeys.isEmpty()) {
-            throw new IllegalArgumentException("batch upsert requires primary key fields in submitted values");
+    private static List<DynamicField> requireCompleteConflictKey(List<DynamicField> keys,
+                                                                List<DynamicField> layout, boolean primary) {
+        String kind = primary ? "primary key" : "conflict key";
+        if (keys.isEmpty()) {
+            throw new IllegalArgumentException("batch upsert requires " + kind + " fields in submitted values");
         }
-        Set<String> requiredPrimaryKeys = primaryKeys.stream()
-                                                     .map(DynamicField::normalizedName)
-                                                     .collect(Collectors.toUnmodifiableSet());
-        Set<String> submittedPrimaryKeys = layout.stream()
-                                                 .filter(DynamicField::primaryKey)
-                                                 .map(DynamicField::normalizedName)
-                                                 .collect(Collectors.toUnmodifiableSet());
-        if (!submittedPrimaryKeys.equals(requiredPrimaryKeys)) {
-            throw new IllegalArgumentException("batch upsert requires all primary key fields in submitted values");
+        boolean complete = primary ? layout.stream().filter(DynamicField::primaryKey).count() == keys.size()
+                : layout.containsAll(keys);
+        if (!complete) {
+            throw new IllegalArgumentException("batch upsert requires all " + kind + " fields in submitted values");
         }
-        return primaryKeys;
+        return keys;
     }
 
     private BatchWriteRequest batchRequest(DynamicForm form,
@@ -184,6 +190,9 @@ final class FormBatchSqlRenderer {
         Map<String, Object> firstRow = Objects.requireNonNull(rowIterator.next(),
                                                                 "batch " + operation + " row must not be null");
         BatchInsertPlan plan = upsert ? upsertPlan(safeForm, firstRow) : insertPlan(safeForm, firstRow);
+        if (!rowIterator.hasNext()) {
+            return plan.request(Mono.just(plan.firstParameters()), safeOptions);
+        }
         List<Object[]> parameterRows = new ArrayList<>(safeRows.size());
         parameterRows.add(plan.firstParameters());
         long rowIndex = 1L;
@@ -195,40 +204,55 @@ final class FormBatchSqlRenderer {
 
     private BatchInsertPlan plan(DynamicForm form,
                                  List<DynamicField> layout,
-                                 List<FormSqlRenderSupport.FieldValue> firstValues,
+                                 FormSqlRenderSupport.WriteFields firstValues,
                                  String sql) {
         return plan(form, layout, firstValues, sql, List.of(), layout.size());
     }
 
     private BatchInsertPlan plan(DynamicForm form,
                                  List<DynamicField> layout,
-                                 List<FormSqlRenderSupport.FieldValue> firstValues,
+                                 FormSqlRenderSupport.WriteFields firstValues,
                                  String sql,
-                                 List<Object> scopeParameters,
-                                 int scopeParameterIndex) {
-        Map<String, Object> valuesByField = new java.util.HashMap<>(Math.max(16, firstValues.size() * 2));
-        firstValues.forEach(value -> valuesByField.put(
-                value.field().normalizedName(), value.value()));
-        List<Object> parameters = new ArrayList<>(layout.size() + scopeParameters.size());
-        layout.forEach(field -> parameters.add(valuesByField.get(field.normalizedName())));
-        List<Class<?>> parameterTypes = new ArrayList<>(layout.stream().map(support::parameterType).toList());
-        if (!scopeParameters.isEmpty()) {
-            parameters.addAll(scopeParameterIndex, scopeParameters);
-            List<Class<?>> scopeTypes = new ArrayList<>(scopeParameters.size());
-            scopeParameters.forEach(value -> scopeTypes.add(value == null ? Object.class : value.getClass()));
-            parameterTypes.addAll(scopeParameterIndex, scopeTypes);
+                                 List<Object> predicateParameters,
+                                 int predicateParameterIndex) {
+        firstValues = firstValues.select(layout);
+        int parameterCount = firstValues.parameters().length + predicateParameters.size();
+        SqlStatementPlan statement = upsertDialect instanceof StagedUpsertDialect staged && staged.supportsBatchRowIndex()
+                ? SqlStatementCompiler.upsert(sql, parameterCount, support.dialectName)
+                : support.compiledStatement(sql, parameterCount, SqlBindMarkerStyle.CANONICAL);
+        return plan(form, layout, firstValues, statement, predicateParameters, predicateParameterIndex);
+    }
+
+    private BatchInsertPlan plan(DynamicForm form,
+                                 List<DynamicField> layout,
+                                 FormSqlRenderSupport.WriteFields firstValues,
+                                 SqlStatementPlan statement,
+                                 List<Object> predicateParameters,
+                                 int predicateParameterIndex) {
+        firstValues = firstValues.select(layout);
+        BatchColumnLayout columnLayout = BatchColumnLayout.of(form, firstValues, support);
+        predicateParameterIndex = firstValues.parameterIndex(predicateParameterIndex);
+        Object[] parameters = firstValues.parameters();
+        List<Class<?>> parameterTypes = firstValues.parameterTypes(support);
+        if (!predicateParameters.isEmpty()) {
+            Object[] expanded = new Object[parameters.length + predicateParameters.size()];
+            System.arraycopy(parameters, 0, expanded, 0, predicateParameterIndex);
+            System.arraycopy(parameters, predicateParameterIndex, expanded,
+                    predicateParameterIndex + predicateParameters.size(), parameters.length - predicateParameterIndex);
+            parameters = expanded;
+            List<Class<?>> predicateTypes = new ArrayList<>(predicateParameters.size());
+            for (int index = 0; index < predicateParameters.size(); index++) {
+                Object value = predicateParameters.get(index);
+                parameters[predicateParameterIndex + index] = value;
+                predicateTypes.add(FormSqlRenderSupport.boundParameterType(value));
+            }
+            parameterTypes.addAll(predicateParameterIndex, predicateTypes);
         }
-        return new BatchInsertPlan(support.compiledStatement(
-                                           sql,
-                                           parameters.size(),
-                                           SqlBindMarkerStyle.CANONICAL),
-                                   layout,
-                                   BatchColumnLayout.of(form,
-                                                        layout,
-                                                        support),
-                                   parameters.toArray(),
+        return new BatchInsertPlan(statement,
+                                   columnLayout,
+                                   parameters,
                                    parameterTypes,
-                                   scopeParameters,
-                                   scopeParameterIndex);
+                                   predicateParameters,
+                                   predicateParameterIndex);
     }
 }

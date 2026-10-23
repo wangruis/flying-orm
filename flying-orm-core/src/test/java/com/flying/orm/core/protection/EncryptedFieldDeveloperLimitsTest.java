@@ -10,6 +10,13 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class EncryptedFieldDeveloperLimitsTest {
 
     @Test
+    void annotationAndBuilderDefaultToApplicationOwnedLength() throws NoSuchMethodException {
+        assertEquals(Integer.MAX_VALUE, EncryptedFieldDefinition.builder().build().maxNormalizedLength());
+        assertEquals(Integer.MAX_VALUE, com.flying.orm.core.annotation.EncryptedField.class
+                .getDeclaredMethod("maxNormalizedLength").getDefaultValue());
+    }
+
+    @Test
     void acceptsDeveloperNormalizedLengthAboveFormerCeiling() {
         assertEquals(Integer.MAX_VALUE, EncryptedFieldDefinition.builder()
                 .maxNormalizedLength(Integer.MAX_VALUE).build().maxNormalizedLength());

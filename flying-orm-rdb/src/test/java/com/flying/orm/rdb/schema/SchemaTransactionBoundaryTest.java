@@ -31,16 +31,16 @@ class SchemaTransactionBoundaryTest {
     void jdbcExecutesAndInvalidatesWithoutTransactionInspection() {
         AtomicInteger executions = new AtomicInteger();
         AtomicInteger invalidations = new AtomicInteger();
-        SyncSqlExecutor sql = new SyncSqlExecutor() {
+        SyncSqlExecutor sql = new com.flying.orm.rdb.support.ListQueryFixture() {
             public List<DynamicRow> query(SqlRequest request) { return List.of(); }
             public long rowsUpdated(SqlRequest request) { executions.incrementAndGet(); return 0L; }
-            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                 throw new UnsupportedOperationException();
             }
         };
-        new JdbcSchemaMigrationExecutor(sql, SchemaMigrationObserver.noop(), ignored -> { })
+        new JdbcSchemaMigrationExecutor(sql, SchemaMigrationObserver.noop())
                 .executeWithInvalidation(REQUESTS, List.of("accounts"),
-                        ignored -> invalidations.incrementAndGet(), SqlExecutionOptions.safeDefaults());
+                        ignored -> invalidations.incrementAndGet(), SqlExecutionOptions.unlimited());
         assertEquals(1, invalidations.get());
         assertEquals(1, executions.get());
     }
@@ -55,7 +55,7 @@ class SchemaTransactionBoundaryTest {
         };
         Mono<Long> execution = new SchemaMigrationExecutor(sql, SchemaMigrationObserver.noop())
                 .executeWithInvalidation(REQUESTS, List.of("accounts"),
-                        ignored -> invalidations.incrementAndGet(), SqlExecutionOptions.safeDefaults());
+                        ignored -> invalidations.incrementAndGet(), SqlExecutionOptions.unlimited());
         assertEquals(0, executions.get());
         assertEquals(0, invalidations.get());
         assertEquals(0L, execution.block());

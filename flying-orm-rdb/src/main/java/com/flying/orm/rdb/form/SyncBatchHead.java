@@ -4,36 +4,43 @@ import static com.flying.orm.core.internal.error.ThrowableGraph.addSuppressedIfA
 import static com.flying.orm.core.internal.error.ThrowableGraph.findVirtualMachineError;
 
 import org.reactivestreams.Publisher;
-import org.reactivestreams.Subscriber;
-import org.reactivestreams.Subscription;
+import reactor.core.Disposable;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
 
 import java.util.Objects;
+import java.util.concurrent.CountDownLatch;
 
 /**
- * 同步批量规划只预读一行，并把同一次上游订阅继续交给 JDBC 批量执行器消费。
- *
- * <p>本类型只负责一次上游订阅及首行探测；下游订阅、需求和终止信号由
- * {@link SyncBatchHeadState} 协调，避免把两套状态机耦合在同一个大类中。</p>
+ * 同步批量规划的首行预读；同一次订阅的回放、需求与终态由 Reactor 管理。
+ * JDBC 仍由调用线程执行，close 负责取消本对象拥有的输入订阅。
  *
  * @author wangr
- * @date 2026-08-08
- * @version v1.0
+ * @version v4.1.2
  */
-final class SyncBatchHead<T> implements Publisher<T>, Subscriber<T>, AutoCloseable {
-
-    private final Publisher<T> source;
-
-    private final SyncBatchHeadState<T> state = new SyncBatchHeadState<>();
-
-    private SyncBatchHead(Publisher<T> source) {
-        this.source = Objects.requireNonNull(source, "batch source must not be null");
-    }
+final class SyncBatchHead<T> implements AutoCloseable {
+    private final CountDownLatch ready = new CountDownLatch(1);
+    private Disposable subscription;
+    private Publisher<T> rows;
+    private T first;
+    private volatile Throwable failure;
 
     static <T> SyncBatchHead<T> open(Publisher<T> source) throws InterruptedException {
-        SyncBatchHead<T> head = new SyncBatchHead<>(source);
+        Objects.requireNonNull(source, "batch source must not be null");
+        SyncBatchHead<T> head = new SyncBatchHead<>();
         try {
-            head.source.subscribe(head);
-            head.state.awaitFirst();
+            // 这里只启动一个可取消的输入订阅；不预取后续行，不在回调内运行 JDBC。
+            head.subscription = Flux.from(source).doOnError(head::failed)
+                    .<Void>switchOnFirst((signal, replay) -> {
+                        head.first = signal.get();
+                        head.rows = replay;
+                        head.ready.countDown();
+                        return Mono.never();
+                    }).subscribe(ignored -> { }, head::failed);
+            head.ready.await();
+            if (head.failure instanceof Error fatal) throw fatal;
+            if (head.failure instanceof RuntimeException runtime) throw runtime;
+            if (head.failure != null) throw new IllegalStateException("batch publisher failed", head.failure);
             return head;
         } catch (InterruptedException | RuntimeException | Error error) {
             closeAfterFailure(head, error);
@@ -41,47 +48,26 @@ final class SyncBatchHead<T> implements Publisher<T>, Subscriber<T>, AutoCloseab
         }
     }
 
-    boolean isEmpty() {
-        return state.isEmpty();
-    }
+    boolean isEmpty() { return first == null; }
 
     T first() {
-        return state.first();
+        if (isEmpty()) throw new IllegalStateException("empty batch source has no first row");
+        return first;
     }
 
-    @Override
-    public void subscribe(Subscriber<? super T> subscriber) {
-        state.subscribe(subscriber);
-    }
+    Publisher<T> rows() { return rows; }
 
-    @Override
-    public void onSubscribe(Subscription subscription) {
-        state.onSubscribe(subscription);
-    }
-
-    @Override
-    public void onNext(T value) {
-        state.onNext(value);
-    }
-
-    @Override
-    public void onError(Throwable error) {
-        state.onError(error);
-    }
-
-    @Override
-    public void onComplete() {
-        state.onComplete();
+    private void failed(Throwable error) {
+        failure = error;
+        ready.countDown();
     }
 
     @Override
     public void close() {
-        state.close();
+        if (subscription != null) subscription.dispose();
     }
 
-    /**
-     * 首行探测已失败时仍先取消上游；VME 保持最高优先级，且只在不会形成 cause/suppressed 环时保留清理上下文。
-     */
+    /** 首行失败仍取消输入，保留原始错误及取消失败。 */
     private static void closeAfterFailure(SyncBatchHead<?> head, Throwable primary) {
         VirtualMachineError primaryFatal = findVirtualMachineError(primary);
         try {
@@ -98,9 +84,6 @@ final class SyncBatchHead<T> implements Publisher<T>, Subscriber<T>, AutoCloseab
             }
             addSuppressedIfAcyclic(primary, cleanup);
         }
-        if (primaryFatal != null) {
-            throw primaryFatal;
-        }
+        if (primaryFatal != null) throw primaryFatal;
     }
-
 }

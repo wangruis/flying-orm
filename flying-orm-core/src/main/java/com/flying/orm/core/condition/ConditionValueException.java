@@ -34,8 +34,6 @@ public final class ConditionValueException extends IllegalArgumentException {
         /** 字符串值超过条件入口允许的资源上限。 */
         STRING_TOO_LONG,
         SHAPE_NOT_ALLOWED,
-        RANGE_SIZE_INVALID,
-        RANGE_TYPE_MISMATCH,
-        RANGE_ORDER_INVALID
+        RANGE_SIZE_INVALID
     }
 }

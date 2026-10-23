@@ -1,9 +1,8 @@
 package com.flying.orm.rdb.operator;
 
 import com.flying.orm.rdb.form.spec.WriteSpec;
+import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.lock.OptimisticLockOptions;
-
-import java.util.Objects;
 
 /**
  * 实体删除的执行方式无关计划。
@@ -12,27 +11,30 @@ import java.util.Objects;
  * 不会绕过 where、Scope 或乐观锁条件。</p>
  *
  * @param <T> 实体类型
+ * @param <S> 同步或响应式删除终端
+ * @author wangr
+ * @version v1.0
  */
-final class EntityDeleteCommand<T> {
+public abstract class EntityDeleteCommand<T, S extends EntityDeleteCommand<T, S>>
+        extends EntityCommand<T, S> {
 
-    private final EntityCommandState<T> state;
     private OptimisticLockOptions lock;
     private boolean physical;
 
-    EntityDeleteCommand(EntityCommandState<T> state) {
-        this.state = Objects.requireNonNull(state, "entity command state must not be null");
+    EntityDeleteCommand(EntityDmlModel<T> model, SqlRenderer renderer) {
+        super(model, renderer);
     }
 
-    EntityCommandState<T> state() {
-        return state;
+    /** 用实体版本字段校验期望版本。 */
+    public S optimisticLock(Object expectedVersion) {
+        lock = incrementVersion(expectedVersion);
+        return self();
     }
 
-    void optimisticLock(Object expectedVersion) {
-        lock = EntityOptimisticLocks.increment(state.metadata(), expectedVersion);
-    }
-
-    void physical() {
+    /** 显式使用物理删除，保留条件、Scope 和版本校验。 */
+    public S physical() {
         physical = true;
+        return self();
     }
 
     boolean physicalDelete() {
@@ -40,7 +42,7 @@ final class EntityDeleteCommand<T> {
     }
 
     WriteSpec spec() {
-        WriteSpec spec = WriteSpec.delete(state.form(), state.where().build()).withScope(state.scope());
+        WriteSpec spec = WriteSpec.delete(form(), where().build()).withScope(scope());
         return lock == null ? spec : spec.withLock(lock);
     }
 }

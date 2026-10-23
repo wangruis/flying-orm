@@ -6,6 +6,7 @@ import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.rdb.dialect.DatabaseDescriptor;
 import com.flying.orm.rdb.dialect.DialectCapabilities;
 import org.junit.jupiter.api.Test;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -21,45 +22,49 @@ class SchemaAbsentTargetContractTest {
             "PostgreSQL", "17", "postgresql", DialectCapabilities.empty());
 
     @Test
-    void freezesExplicitAbsentTargetIntoTheReviewedPlanIdentity() {
-        String desiredFingerprint = absentFingerprint(ACCOUNTS);
-
-        ReviewedSchemaPlan plan = ReviewedSchemaPlan.builder(DATABASE)
-                .compatibilityMode(SchemaCompatibilityMode.EXACT)
-                .desiredAbsent(ACCOUNTS)
-                .desiredFingerprint(desiredFingerprint)
-                .actualFingerprint("actual")
-                .build();
-        ReviewedSchemaPlan same = ReviewedSchemaPlan.builder(DATABASE)
-                .compatibilityMode(SchemaCompatibilityMode.EXACT)
-                .desiredAbsent(ACCOUNTS)
-                .desiredFingerprint(desiredFingerprint)
-                .actualFingerprint("actual")
-                .build();
-
-        assertEquals(ReviewedSchemaPlan.TargetState.ABSENT, plan.targetState().orElseThrow());
-        assertEquals(ACCOUNTS, plan.targetIdentity().orElseThrow());
-        assertTrue(plan.desiredTable().isEmpty());
-        assertEquals(plan.fingerprint(), same.fingerprint());
-
-        ReviewedSchemaPlan legacy = ReviewedSchemaPlan.builder(DATABASE)
-                .compatibilityMode(SchemaCompatibilityMode.EXACT)
-                .desiredFingerprint(desiredFingerprint)
-                .actualFingerprint("actual")
-                .build();
-        assertTrue(legacy.targetState().isEmpty());
-        assertTrue(legacy.targetIdentity().isEmpty());
-        assertNotEquals(legacy.fingerprint(), plan.fingerprint());
+    void targetStateIsDerivedFromTheDeclaredTargetRatherThanStoredTwice() {
+        for (Class<?> type : List.of(SchemaMigrationPlan.class, SchemaMigrationPlan.Builder.class)) {
+            assertEquals(0L, java.util.Arrays.stream(type.getDeclaredFields())
+                    .filter(field -> field.getType() == SchemaMigrationPlan.TargetState.class).count());
+        }
+        RelationalTableDefinition target = RelationalTableDefinition.builder(ACCOUNTS)
+                .addColumn(ColumnDefinition.builder("id", "BIGINT").build()).build();
+        SchemaMigrationPlan.Builder builder = SchemaMigrationPlan.builder(DATABASE)
+                .compatibilityMode(SchemaCompatibilityMode.EXACT);
+        SchemaMigrationPlan unspecified = builder.build();
+        SchemaMigrationPlan present = builder.desiredTable(target).build();
+        assertTrue(unspecified.targetState().isEmpty());
+        assertTrue(unspecified.targetIdentity().isEmpty());
+        assertEquals(SchemaMigrationPlan.TargetState.PRESENT, present.targetState().orElseThrow());
+        assertEquals(target.identity(), present.targetIdentity().orElseThrow());
+        assertThrows(IllegalStateException.class, () -> builder.desiredAbsent(ACCOUNTS));
+        assertThrows(IllegalStateException.class, () -> SchemaMigrationPlan.builder(DATABASE)
+                .desiredAbsent(ACCOUNTS).desiredTable(target));
     }
 
     @Test
-    void rejectsAbsentTargetWhoseDesiredFingerprintNamesAnotherState() {
-        assertThrows(IllegalArgumentException.class, () -> ReviewedSchemaPlan.builder(DATABASE)
+    void freezesExplicitAbsentTargetIntoTheReviewedPlanIdentity() {
+
+        SchemaMigrationPlan plan = SchemaMigrationPlan.builder(DATABASE)
                 .compatibilityMode(SchemaCompatibilityMode.EXACT)
                 .desiredAbsent(ACCOUNTS)
-                .desiredFingerprint("not-the-absent-snapshot")
-                .actualFingerprint("actual")
-                .build());
+                .build();
+        SchemaMigrationPlan same = SchemaMigrationPlan.builder(DATABASE)
+                .compatibilityMode(SchemaCompatibilityMode.EXACT)
+                .desiredAbsent(ACCOUNTS)
+                .build();
+
+        assertEquals(SchemaMigrationPlan.TargetState.ABSENT, plan.targetState().orElseThrow());
+        assertEquals(ACCOUNTS, plan.targetIdentity().orElseThrow());
+        assertTrue(plan.desiredTable().isEmpty());
+        assertEquals(plan.requests(), same.requests());
+
+        SchemaMigrationPlan legacy = SchemaMigrationPlan.builder(DATABASE)
+                .compatibilityMode(SchemaCompatibilityMode.EXACT)
+                .build();
+        assertTrue(legacy.targetState().isEmpty());
+        assertTrue(legacy.targetIdentity().isEmpty());
+        assertNotEquals(legacy.targetIdentity(), plan.targetIdentity());
     }
 
     @Test
@@ -106,13 +111,10 @@ class SchemaAbsentTargetContractTest {
         assertThrows(IllegalArgumentException.class, () -> absentPlan(dropAudit));
         assertThrows(IllegalArgumentException.class, () -> absentPlan(dropCaseDifferentAccounts));
         assertThrows(IllegalArgumentException.class, () -> absentPlan(addColumn));
-        assertThrows(IllegalArgumentException.class, () -> ReviewedSchemaPlan.builder(DATABASE)
+        assertThrows(IllegalArgumentException.class, () -> SchemaMigrationPlan.builder(DATABASE)
                 .compatibilityMode(SchemaCompatibilityMode.EXACT)
                 .desiredTable(accounts)
-                .desiredFingerprint(com.flying.orm.core.metadata.RelationalMetadataFingerprint.of(accounts))
-                .actualFingerprint("actual")
-                .addStep(SchemaPlanStep.manual(
-                        0, dropAccounts, SchemaMigrationRiskLevel.CRITICAL, java.util.List.of()))
+                .addStep(new SchemaPlanStep(dropAccounts, List.of()))
                 .build());
     }
 
@@ -157,18 +159,11 @@ class SchemaAbsentTargetContractTest {
                 SchemaCompatibilityMode.EXACT).operations().getFirst().kind());
     }
 
-    private static String absentFingerprint(RelationIdentity identity) {
-        return SchemaSnapshotFingerprint.of(SchemaSnapshot.absent(identity));
-    }
-
-    private static ReviewedSchemaPlan absentPlan(SchemaOperation operation) {
-        return ReviewedSchemaPlan.builder(DATABASE)
+    private static SchemaMigrationPlan absentPlan(SchemaOperation operation) {
+        return SchemaMigrationPlan.builder(DATABASE)
                 .compatibilityMode(SchemaCompatibilityMode.EXACT)
                 .desiredAbsent(ACCOUNTS)
-                .desiredFingerprint(absentFingerprint(ACCOUNTS))
-                .actualFingerprint("actual")
-                .addStep(SchemaPlanStep.manual(
-                        0, operation, SchemaMigrationRiskLevel.CRITICAL, java.util.List.of()))
+                .addStep(new SchemaPlanStep(operation, List.of()))
                 .build();
     }
 }

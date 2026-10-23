@@ -3,6 +3,7 @@ package com.flying.orm.rdb.metadata;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.type.DatabaseTypes;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -20,6 +21,8 @@ final class SqlServerMetadataQueries {
 
     private static final String BASE_COLUMNS_SQL = """
             select c.COLUMN_NAME,
+                   c.TABLE_NAME as METADATA_TABLE,
+                   cast(table_comment.value as nvarchar(max)) as TABLE_COMMENT,
                    c.TABLE_SCHEMA as RESOLUTION_SCHEMA,
                    case
                        when convert(varbinary(128), left(cast(ep.value as nvarchar(4000)),
@@ -218,12 +221,18 @@ final class SqlServerMetadataQueries {
                   and ep.major_id = t.object_id
                   and ep.minor_id = sc.column_id
                   and ep.name = 'MS_Description'
-            where c.TABLE_NAME = ?
+            left join sys.extended_properties table_comment
+                   on table_comment.class = 1
+                  and table_comment.major_id = object_id(quotename(c.TABLE_SCHEMA) + '.' + quotename(c.TABLE_NAME))
+                  and table_comment.minor_id = 0
+                  and table_comment.name = 'MS_Description'
+            where ${TABLE_FILTER}
             """.replace("${OFFSET_TIME_MARKER}", OFFSET_TIME_MARKER)
                .replace("${COMMENT_ESCAPE}", COMMENT_ESCAPE);
 
     private static final String BASE_INDEXES_SQL = """
             select i.name as INDEX_NAME,
+                   t.name as METADATA_TABLE,
                    c.name as COLUMN_NAME,
                    i.has_filter as INDEX_FILTERED,
                    i.filter_definition as INDEX_FILTER,
@@ -302,7 +311,7 @@ final class SqlServerMetadataQueries {
             join sys.columns c
               on c.object_id = t.object_id
              and c.column_id = ic.column_id
-            where t.name = ?
+            where ${TABLE_FILTER}
               and i.is_primary_key = 0
               and not exists (
                   select 1
@@ -316,6 +325,7 @@ final class SqlServerMetadataQueries {
 
     private static final String BASE_FOREIGN_KEYS_SQL = """
             select ps.name as TABLE_SCHEMA,
+                   pt.name as METADATA_TABLE,
                    fk.name as FOREIGN_KEY_NAME,
                    pc.name as COLUMN_NAME,
                    rs.name as REFERENCED_TABLE_SCHEMA,
@@ -344,7 +354,7 @@ final class SqlServerMetadataQueries {
             join sys.columns rc
               on rc.object_id = rt.object_id
              and rc.column_id = fkc.referenced_column_id
-            where pt.name = ?
+            where ${TABLE_FILTER}
             """;
 
     private static final String BASE_TABLE_SQL = """
@@ -388,7 +398,7 @@ final class SqlServerMetadataQueries {
              and ep.major_id = t.object_id
              and ep.minor_id = 0
              and ep.name = 'MS_Description'
-            where t.name = ?
+            where ${TABLE_FILTER}
             """;
 
     private static final String BASE_PRIMARY_KEY_SQL = keyConstraintSql("PK", "CLUSTERED");
@@ -404,14 +414,14 @@ final class SqlServerMetadataQueries {
             from sys.check_constraints cc
             join sys.tables t on t.object_id = cc.parent_object_id
             join sys.schemas s on s.schema_id = t.schema_id
-            where t.name = ?
+            where ${TABLE_FILTER}
             """;
 
     private SqlServerMetadataQueries() {
     }
 
-    static InformationSchemaFormMetadataReader.Queries queries() {
-        return InformationSchemaFormMetadataReader.Queries.complete(
+    static MetadataQueryProfile.Queries queries() {
+        return MetadataQueryProfile.Queries.complete(
                 SqlServerMetadataQueries::columnQuery,
                 SqlServerMetadataQueries::indexQuery,
                 SqlServerMetadataQueries::foreignKeyQuery,
@@ -420,39 +430,21 @@ final class SqlServerMetadataQueries {
                 SqlServerMetadataQueries::primaryKeyQuery,
                 SqlServerMetadataQueries::uniqueConstraintQuery,
                 SqlServerMetadataQueries::checkConstraintQuery,
-                InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER);
+                MetadataQueryProfile.SnapshotDialect.SQL_SERVER);
     }
 
     private static SqlRequest columnQuery(String schema, String table) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            // 表名已经是一段身份；先引用再查 OBJECT_ID，避免字面点号再次被当成 schema 分隔符。
-            String sql = BASE_COLUMNS_SQL + " and t.object_id = object_id(quotename(?)) order by c.ORDINAL_POSITION";
-            return new SqlRequest(sql, List.of(safeTable, safeTable));
-        }
-        String sql = BASE_COLUMNS_SQL + " and c.TABLE_SCHEMA = ? order by c.ORDINAL_POSITION";
-        return new SqlRequest(sql, List.of(safeTable, schema.trim()));
-    }
-
-    private static SqlRequest indexQuery(String schema, String table) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            String sql = BASE_INDEXES_SQL + " and t.object_id = object_id(quotename(?)) order by i.name, ic.key_ordinal";
-            return new SqlRequest(sql, List.of(safeTable, safeTable));
-        }
-        String sql = BASE_INDEXES_SQL + " and s.name = ? order by i.name, ic.key_ordinal";
-        return new SqlRequest(sql, List.of(safeTable, schema.trim()));
+        return scopedQuery(BASE_COLUMNS_SQL, schema, table, "c.TABLE_NAME", "c.TABLE_SCHEMA",
+                "t", " order by c.ORDINAL_POSITION");
     }
 
     private static SqlRequest foreignKeyQuery(String schema, String table) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            String sql = BASE_FOREIGN_KEYS_SQL
-                    + " and pt.object_id = object_id(quotename(?)) order by fk.name, fkc.constraint_column_id";
-            return new SqlRequest(sql, List.of(safeTable, safeTable));
-        }
-        String sql = BASE_FOREIGN_KEYS_SQL + " and ps.name = ? order by fk.name, fkc.constraint_column_id";
-        return new SqlRequest(sql, List.of(safeTable, schema.trim()));
+        return scopedQuery(BASE_FOREIGN_KEYS_SQL, schema, table, "pt.name", "ps.name",
+                "pt", " order by fk.name, fkc.constraint_column_id");
+    }
+
+    private static SqlRequest indexQuery(String schema, String table) {
+        return tableScopedQuery(BASE_INDEXES_SQL, schema, table, " order by i.name, ic.key_ordinal");
     }
 
     private static SqlRequest tableQuery(String schema, String table) {
@@ -460,28 +452,43 @@ final class SqlServerMetadataQueries {
     }
 
     private static SqlRequest primaryKeyQuery(String schema, String table) {
-        return tableScopedQuery(BASE_PRIMARY_KEY_SQL, schema, table,
-                                " order by kc.name, ic.key_ordinal");
+        return tableScopedQuery(BASE_PRIMARY_KEY_SQL, schema, table, " order by kc.name, ic.key_ordinal");
     }
 
     private static SqlRequest uniqueConstraintQuery(String schema, String table) {
-        return tableScopedQuery(BASE_UNIQUE_SQL, schema, table,
-                                " order by kc.name, ic.key_ordinal");
+        return tableScopedQuery(BASE_UNIQUE_SQL, schema, table, " order by kc.name, ic.key_ordinal");
     }
 
     private static SqlRequest checkConstraintQuery(String schema, String table) {
         return tableScopedQuery(BASE_CHECKS_SQL, schema, table, " order by cc.name");
     }
 
-    private static SqlRequest tableScopedQuery(
-            String baseSql, String schema, String table, String orderBy) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            return new SqlRequest(baseSql + " and t.object_id = object_id(quotename(?))" + orderBy,
-                                  List.of(safeTable, safeTable));
+    private static SqlRequest tableScopedQuery(String base, String schema, String table, String orderBy) {
+        return scopedQuery(base, schema, table, "t.name", "s.name", "t", orderBy);
+    }
+
+    private static SqlRequest scopedQuery(String base, String schema, String table,
+                                          String tableColumn, String schemaColumn,
+                                          String relationAlias, String orderBy) {
+        List<Object> parameters = new ArrayList<>(2);
+        String filter = "1 = 1";
+        if (table != null) {
+            filter = tableColumn + " = ?";
+            parameters.add(MetadataQueryProfile.requireText(table, "table"));
         }
-        return new SqlRequest(baseSql + " and s.name = ?" + orderBy,
-                              List.of(safeTable, schema.trim()));
+        String schemaFilter;
+        if (schema != null && !schema.isBlank()) {
+            schemaFilter = schemaColumn + " = ?";
+            parameters.add(schema.trim());
+        } else if (table == null) {
+            schemaFilter = schemaColumn + " = schema_name()";
+        } else {
+            // 单表保留默认 schema/dbo 解析，quotename 保留字面点号。
+            schemaFilter = relationAlias + ".object_id = object_id(quotename(?))";
+            parameters.add(parameters.getFirst());
+        }
+        return new SqlRequest(base.replace("${TABLE_FILTER}", filter)
+                + " and " + schemaFilter + orderBy, parameters);
     }
 
     private static String keyConstraintSql(String constraintType, String indexType) {
@@ -492,6 +499,7 @@ final class SqlServerMetadataQueries {
         };
         return """
                 select kc.name as CONSTRAINT_NAME,
+                   t.name as METADATA_TABLE,
                        c.name as COLUMN_NAME,
                        cast(case when i.type_desc = '${INDEX_TYPE}'
                                       and i.is_unique = 1
@@ -533,7 +541,7 @@ final class SqlServerMetadataQueries {
                 join sys.columns c
                   on c.object_id = ic.object_id
                  and c.column_id = ic.column_id
-                where kc.type = '${CONSTRAINT_TYPE}' and t.name = ?
+                where kc.type = '${CONSTRAINT_TYPE}' and ${TABLE_FILTER}
                 """.replace("${CONSTRAINT_TYPE}", constraintType)
                    .replace("${INDEX_TYPE}", indexType)
                    .replace("${CONSTRAINT_INDEX_FLAG}", constraintIndexFlag);

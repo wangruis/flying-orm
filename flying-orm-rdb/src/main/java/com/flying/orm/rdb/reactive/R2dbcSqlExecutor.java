@@ -62,14 +62,16 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
     private final SqlExecutionOptions executionOptions;
     private final BatchMemoryLimits batchMemoryLimits;
     private final Connection boundConnection;
+    private final RdbDialect dialect;
+    private final Function<Throwable, Throwable> errorTranslation;
     private R2dbcSqlExecutor(R2dbcConnectionAccess connectionAccess, RdbDialect dialect) {
         this(connectionAccess,
              R2dbcBindMarkers.from(dialect),
              SqlExecutionObserver.noop(),
              BatchExecutionObserver.noop(),
-             SqlExecutionOptions.safeDefaults(),
+             SqlExecutionOptions.unlimited(),
              BatchMemoryLimits.defaults(),
-             null);
+             null, dialect);
     }
     private R2dbcSqlExecutor(R2dbcConnectionAccess connectionAccess,
                              R2dbcBindMarkers bindMarkers,
@@ -77,7 +79,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
                              BatchExecutionObserver batchObserver,
                              SqlExecutionOptions executionOptions,
                              BatchMemoryLimits batchMemoryLimits,
-                             Connection boundConnection) {
+                             Connection boundConnection, RdbDialect dialect) {
         this.connectionAccess = Objects.requireNonNull(connectionAccess, "connection access must not be null");
         this.observer = SqlExecutionObservers.safe(Objects.requireNonNull(observer, "sql execution observer must not be null"));
         this.batchObserver = Objects.requireNonNull(batchObserver, "batch execution observer must not be null");
@@ -85,6 +87,10 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
         this.batchMemoryLimits = Objects.requireNonNull(
                 batchMemoryLimits, "batch memory limits must not be null");
         this.boundConnection = boundConnection;
+        this.dialect = dialect;
+        // 同连接子操作只做标准分类，应用转换统一在拥有连接的外层完成。
+        this.errorTranslation = dialect.hasExceptionTranslator() && boundConnection == null
+                ? this::translate : ReactiveSqlExecutionProtection::translate;
         // 显式方言只在首次装配时编译一次；不可变派生执行器复用同一 marker family。
         this.bindMarkers = Objects.requireNonNull(bindMarkers, "bind marker adapter must not be null");
         this.observationSupport = ReactiveSqlExecutionObservationSupport.create(
@@ -96,7 +102,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
         this.sequenceExecutor = new R2dbcSequenceExecutor(executionSession, observationSupport);
         this.generatedKeyWriter = new R2dbcGeneratedKeyWriter(executionSession);
         this.batchWriter = new R2dbcBatchWriter(
-                executionSession, bindMarkers, observer, batchObserver);
+                executionSession, bindMarkers, observer, batchObserver, dialect::mapException);
     }
     /**
      * 创建 R2DBC SQL 执行器。
@@ -114,10 +120,10 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
             Function<ReactiveSqlExecutor, Mono<T>> work) {
         Objects.requireNonNull(firstRequest, "first request must not be null");
         Objects.requireNonNull(work, "connection work must not be null");
-        return executionSession.withConnection(firstRequest,
+        return translateConfigured(executionSession.withConnection(firstRequest,
                 resource -> work.apply(new R2dbcSqlExecutor(connectionAccess, bindMarkers, observer,
-                        batchObserver, executionOptions, batchMemoryLimits, resource.connection())),
-                SqlExecutionOperation.UPDATE);
+                        batchObserver, executionOptions, batchMemoryLimits, resource.connection(), dialect)),
+                SqlExecutionOperation.UPDATE));
     }
 
     /**
@@ -147,7 +153,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
         BatchExecutionObserver safeObserver = Objects.requireNonNull(additionalObserver,
                                                                      "batch execution observer must not be null");
         return copy(observer,
-                    ReactiveSqlExecutionObservationSupport.combineBatchObservers(batchObserver, safeObserver),
+                    BatchExecutionObserver.composite(batchObserver, safeObserver),
                     executionOptions);
     }
     /**
@@ -161,7 +167,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
         BatchExecutionObserver safeBatchObserver = Objects.requireNonNull(
                 additionalBatchObserver, "batch execution observer must not be null");
         return copy(SqlExecutionObservers.composite(observer, safeObserver),
-                    ReactiveSqlExecutionObservationSupport.combineBatchObservers(batchObserver, safeBatchObserver),
+                    BatchExecutionObserver.composite(batchObserver, safeBatchObserver),
                     executionOptions);
     }
     /**
@@ -182,7 +188,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
                                     batchObserver,
                                     executionOptions,
                                     Objects.requireNonNull(limits, "batch memory limits must not be null"),
-                                    boundConnection);
+                                    boundConnection, dialect);
     }
     private R2dbcSqlExecutor copy(SqlExecutionObserver configuredObserver,
                                   BatchExecutionObserver configuredBatchObserver,
@@ -193,7 +199,17 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
                                     configuredBatchObserver,
                                     configuredExecutionOptions,
                                     batchMemoryLimits,
-                                    boundConnection);
+                                    boundConnection, dialect);
+    }
+
+    private Throwable translate(Throwable error) {
+        Throwable translated = ReactiveSqlExecutionProtection.translate(error);
+        return translated instanceof Error ? translated : dialect.translateException(translated);
+    }
+
+    private <T> Mono<T> translateConfigured(Mono<T> source) {
+        return dialect.hasExceptionTranslator() && boundConnection == null
+                ? source.onErrorMap(errorTranslation) : source;
     }
     @Override
     public Flux<DynamicRow> query(SqlRequest request) {
@@ -211,13 +227,12 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
                         .concatMap(result -> R2dbcExecutionSession.mapRows(
                                 result, safeOptions, largeObjects), 1),
                 rows -> executionSession.protectRows(rows, safeRequest.sql(), safeOptions))
-                .onErrorMap(ReactiveSqlExecutionProtection::translate);
+                .onErrorMap(errorTranslation);
         return observationSupport.observeFlux(SqlExecutionOperation.QUERY,
                                                safeRequest,
                                                executionParameters,
                                                0,
-                                               source,
-                                               safeOptions);
+                                               source);
     }
 
     @Override
@@ -227,42 +242,35 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
     @Override
     public Mono<Long> rowsUpdated(SqlRequest request, SqlExecutionOptions options) {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
-        SqlExecutionOptions safeOptions = Objects.requireNonNull(options, "sql execution options must not be null");
+        Objects.requireNonNull(options, "sql execution options must not be null");
         List<Object> executionParameters = R2dbcExecutionSession.snapshotExecutionParameters(safeRequest);
         if (!observationSupport.enabled()) {
             return executionSession.withPreparedStatementResource(
                     safeRequest, executionParameters, SqlExecutionOperation.UPDATE,
                     (statement, ignored) -> Flux.from(statement.execute())
-                            .flatMap(Result::getRowsUpdated)
+                            .concatMap(Result::getRowsUpdated)
                             .reduce(0L, R2dbcExecutionCounts::add))
-                    .onErrorMap(ReactiveSqlExecutionProtection::translate);
+                    .onErrorMap(errorTranslation);
         }
         return Mono.defer(() -> observedRowsUpdated(
-                safeRequest, safeOptions, executionParameters));
+                safeRequest, executionParameters));
     }
 
     private Mono<Long> observedRowsUpdated(SqlRequest request,
-                                           SqlExecutionOptions options,
                                            List<Object> executionParameters) {
         AtomicLong confirmedRows = new AtomicLong();
         Mono<Long> source = executionSession.withPreparedStatementResource(
                 request, executionParameters, SqlExecutionOperation.UPDATE,
                 (statement, ignored) -> R2dbcExecutionCounts.sum(
-                        Flux.from(statement.execute()).flatMap(Result::getRowsUpdated), confirmedRows::set))
-                .onErrorMap(ReactiveSqlExecutionProtection::translate);
+                        Flux.from(statement.execute()).concatMap(Result::getRowsUpdated), confirmedRows::set))
+                .onErrorMap(errorTranslation);
         return observationSupport.observeMono(SqlExecutionOperation.UPDATE,
                                                request,
                                                executionParameters,
                                                0,
                                                source,
                                                rows -> rows == null ? 0L : rows,
-                                               confirmedRows::get,
-                                               options);
-    }
-
-    @Override
-    public Mono<SqlWriteResult> rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
-        return writeReturningKeys(request, options, null);
+                                               confirmedRows::get);
     }
 
     private Mono<SqlWriteResult> writeReturningKeys(SqlRequest request,
@@ -273,8 +281,8 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
         List<Object> executionParameters = R2dbcExecutionSession.snapshotExecutionParameters(safeRequest);
         if (!observationSupport.enabled()) {
             return generatedKeyWriter.write(
-                    safeRequest, executionParameters, safeOptions, generatedKeyColumn)
-                    .onErrorMap(ReactiveSqlExecutionProtection::translate);
+                    safeRequest, executionParameters, safeOptions, generatedKeyColumn, null)
+                    .onErrorMap(errorTranslation);
         }
         return Mono.defer(() -> observedWriteReturningKeys(
                 safeRequest, safeOptions, executionParameters, generatedKeyColumn));
@@ -287,22 +295,18 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
         AtomicLong confirmedRows = new AtomicLong();
         Mono<SqlWriteResult> source = generatedKeyWriter.write(
                 request, executionParameters, options, generatedKeyColumn, confirmedRows::set)
-                .onErrorMap(ReactiveSqlExecutionProtection::translate);
+                .onErrorMap(errorTranslation);
         return observationSupport.observeMono(SqlExecutionOperation.UPDATE,
                                                request, executionParameters, 0, source,
                                                SqlWriteResult::affectedRows,
-                                               confirmedRows::get,
-                                               options);
+                                               confirmedRows::get);
     }
 
-    @InternalApi
     @Override
     public Mono<SqlWriteResult> rowsUpdatedReturningKeys(SqlRequest request,
                                                          SqlExecutionOptions options,
                                                          String generatedKeyColumn) {
-        return writeReturningKeys(
-                request, options, Objects.requireNonNull(
-                        generatedKeyColumn, "generated key column must not be null"));
+        return writeReturningKeys(request, options, generatedKeyColumn);
     }
     @InternalApi
     @Override
@@ -311,7 +315,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
         SqlExecutionOptions safeOptions = Objects.requireNonNull(options, "sql execution options must not be null");
         R2dbcProtectedWriteExecutor executor = new R2dbcProtectedWriteExecutor(executionSession, bindMarkers);
         if (!observationSupport.enabled()) {
-            return executor.execute(safeWork, safeOptions);
+            return translateConfigured(executor.execute(safeWork, safeOptions));
         }
         return Mono.defer(() -> observedProtectedWrite(executor, safeWork, safeOptions));
     }
@@ -320,7 +324,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
                                                         ProtectedWriteWork work,
                                                         SqlExecutionOptions options) {
         AtomicLong confirmedRows = new AtomicLong();
-        Mono<SqlWriteResult> source = executor.execute(work, options, confirmedRows::set);
+        Mono<SqlWriteResult> source = translateConfigured(executor.execute(work, options, confirmedRows::set));
         List<Object> executionParameters = R2dbcExecutionSession.snapshotExecutionParameters(
                 work.writeRequest());
         return observationSupport.observeMono(
@@ -330,8 +334,7 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
                 0,
                 source,
                 SqlWriteResult::affectedRows,
-                confirmedRows::get,
-                options);
+                confirmedRows::get);
     }
 
     /**
@@ -345,8 +348,12 @@ public final class R2dbcSqlExecutor implements ReactiveSqlExecutor, ConnectionSc
                                                                     "SQL execution sequence must not be null");
         SqlExecutionOptions safeOptions = Objects.requireNonNull(options, "sql execution options must not be null");
         return sequenceExecutor.execute(safeSequence, safeOptions)
-                               .onErrorMap(ReactiveSqlExecutionProtection::translate);
+                               .onErrorMap(errorTranslation);
     }
+
+    @InternalApi
+    @Override
+    public boolean supportsBatchRowLayouts() { return true; }
 
     @InternalApi
     @Override

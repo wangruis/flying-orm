@@ -40,25 +40,6 @@ final class R2dbcGeneratedKeyWriter {
         this.session = Objects.requireNonNull(session, "R2DBC execution session must not be null");
     }
 
-    Mono<SqlWriteResult> write(SqlRequest request, SqlExecutionOptions options) {
-        return write(request, options, null);
-    }
-
-    Mono<SqlWriteResult> write(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
-        SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
-        return write(safeRequest,
-                     R2dbcExecutionSession.snapshotExecutionParameters(safeRequest),
-                     options,
-                     generatedKeyColumn);
-    }
-
-    Mono<SqlWriteResult> write(SqlRequest request,
-                               List<Object> executionParameters,
-                               SqlExecutionOptions options,
-                               String generatedKeyColumn) {
-        return write(request, executionParameters, options, generatedKeyColumn, null);
-    }
-
     Mono<SqlWriteResult> write(SqlRequest request,
                                List<Object> executionParameters,
                                SqlExecutionOptions options,

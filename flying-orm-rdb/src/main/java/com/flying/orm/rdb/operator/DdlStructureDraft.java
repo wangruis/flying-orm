@@ -2,8 +2,8 @@ package com.flying.orm.rdb.operator;
 
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.ForeignKeyMetadata;
-import com.flying.orm.core.metadata.IndexMetadata;
+import com.flying.orm.core.metadata.ForeignKeyDefinition;
+import com.flying.orm.core.metadata.IndexDefinition;
 import com.flying.orm.rdb.schema.SchemaMigrationOptions;
 
 import java.util.ArrayList;
@@ -20,23 +20,23 @@ final class DdlStructureDraft {
 
     private final String table;
     private final List<DynamicField> fields = new ArrayList<>();
-    private final List<IndexMetadata> indexes = new ArrayList<>();
-    private final List<ForeignKeyMetadata> foreignKeys = new ArrayList<>();
+    private final List<IndexDefinition> indexes = new ArrayList<>();
+    private final List<ForeignKeyDefinition> foreignKeys = new ArrayList<>();
     private SchemaMigrationOptions options = SchemaMigrationOptions.safe();
 
     DdlStructureDraft(String table) {
         this.table = requireText(table, "table");
     }
 
-    ColumnDraft column() {
-        return new ColumnDraft(this);
+    void addColumn(DynamicField field) {
+        fields.add(Objects.requireNonNull(field, "dynamic field must not be null"));
     }
 
-    void addIndex(IndexMetadata index) {
+    void addIndex(IndexDefinition index) {
         indexes.add(Objects.requireNonNull(index, "index metadata must not be null"));
     }
 
-    void addForeignKey(ForeignKeyMetadata foreignKey) {
+    void addForeignKey(ForeignKeyDefinition foreignKey) {
         foreignKeys.add(Objects.requireNonNull(foreignKey, "foreign key metadata must not be null"));
     }
 
@@ -50,16 +50,12 @@ final class DdlStructureDraft {
         return builder.build();
     }
 
-    List<IndexMetadata> indexes() {
+    List<IndexDefinition> indexes() {
         return indexes;
     }
 
-    List<ForeignKeyMetadata> foreignKeys() {
+    List<ForeignKeyDefinition> foreignKeys() {
         return foreignKeys;
-    }
-
-    boolean hasForeignKeys() {
-        return !foreignKeys.isEmpty();
     }
 
     SchemaMigrationOptions options() {
@@ -74,60 +70,4 @@ final class DdlStructureDraft {
         return text;
     }
 
-    /** 当前一列的临时描述；只有 commit 后才加入所属表草稿。 */
-    static final class ColumnDraft {
-
-        private final DdlStructureDraft owner;
-        private String name;
-        private String dataType;
-        private boolean primaryKey;
-        private Integer length;
-        private Integer precision;
-        private Integer scale;
-        private String comment;
-
-        private ColumnDraft(DdlStructureDraft owner) {
-            this.owner = owner;
-        }
-
-        void name(String value) {
-            name = requireText(value, "column name");
-        }
-
-        void number(int value) {
-            if (value < 1) {
-                throw new IllegalArgumentException("number precision must be positive");
-            }
-            dataType = value <= 10 ? "INTEGER" : value <= 19 ? "BIGINT" : "DECIMAL";
-            if ("DECIMAL".equals(dataType)) {
-                precision = value;
-                scale = 0;
-            }
-        }
-
-        void varchar(int value) {
-            if (value < 1) {
-                throw new IllegalArgumentException("varchar length must be positive");
-            }
-            dataType = "VARCHAR";
-            length = value;
-        }
-
-        void primaryKey() {
-            primaryKey = true;
-        }
-
-        void comment(String value) {
-            comment = requireText(value, "column comment");
-        }
-
-        void commit() {
-            String safeName = requireText(name, "column name");
-            String safeType = requireText(dataType, "column data type");
-            DynamicField field = primaryKey
-                    ? DynamicField.primaryKey(safeName, safeType)
-                    : DynamicField.of(safeName, safeType);
-            owner.fields.add(field.withLength(length).withPrecision(precision, scale).withComment(comment));
-        }
-    }
 }

@@ -1,5 +1,9 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.execution.SqlExecutionPhase;
+import com.flying.orm.rdb.observation.SqlExecutionStatus;
+
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.sql.render.SqlRequest;
@@ -26,6 +30,44 @@ class SchemaMigrationExecutorTest {
     private static final SqlRequest REQUEST = new SqlRequest("alter table orders add note varchar(20)", List.of());
 
     @Test
+    void reactiveObservationReportsCleanupFailureAfterCompletedDdl() {
+        AtomicReference<SchemaMigrationObservation> observed = new AtomicReference<>();
+        IllegalStateException cleanup = new IllegalStateException("metadata invalidation failed");
+        SchemaMigrationExecutor executor = executor(Mono.just(1L), observed::set);
+
+        RuntimeException failure = assertThrows(RuntimeException.class, () -> executor.execute(
+                reviewedPlan(REQUEST), List.of("orders"), ignored -> { throw cleanup; },
+                SqlExecutionOptions.unlimited()).block());
+
+        SchemaMigrationObservation observation = observed.get();
+        assertEquals(SqlExecutionStatus.ERROR, observation.status());
+        assertEquals(SqlExecutionPhase.CLEANUP, observation.failedPhase());
+        assertEquals(1, observation.failedStepIndex());
+        assertEquals(1, observation.completedSteps());
+        assertEquals(1L, observation.rowsUpdated());
+        assertSame(failure, observation.error());
+    }
+
+    @Test
+    void eachSubscriptionPublishesSuccessOnlyAfterItsOwnInvalidation() {
+        AtomicInteger invalidations = new AtomicInteger();
+        AtomicInteger observations = new AtomicInteger();
+        SchemaMigrationExecutor executor = executor(Mono.just(1L), event -> {
+            assertEquals(observations.incrementAndGet(), invalidations.get());
+            assertEquals(SqlExecutionStatus.SUCCESS, event.status());
+            assertEquals(1, event.completedSteps());
+        });
+        Mono<SchemaMigrationResult> execution = executor.execute(reviewedPlan(REQUEST), List.of("orders"),
+                ignored -> invalidations.incrementAndGet(), SqlExecutionOptions.unlimited());
+
+        assertEquals(0, invalidations.get());
+        assertEquals(1, execution.block().steps().size());
+        assertEquals(1, execution.block().steps().size());
+        assertEquals(2, observations.get());
+        assertEquals(2, invalidations.get());
+    }
+
+    @Test
     void reactiveDdlTreatsAnUnavailableUpdateCountAsZero() {
         Long rows = executor(Mono.just(-1L)).execute(List.of(REQUEST)).block();
 
@@ -36,11 +78,11 @@ class SchemaMigrationExecutorTest {
     void reviewedReactiveMigrationKeepsExecutedSteps() {
         SchemaMigrationExecutor executor = executor(Mono.just(1L));
 
-        SchemaMigrationResult result = executor.executeReviewed(
+        SchemaMigrationResult result = executor.execute(
                 reviewedPlan(REQUEST),
                 List.of("orders"),
                 ignored -> { },
-                SchemaMigrationExecutionOptions.defaults()).block();
+                SqlExecutionOptions.unlimited()).block();
 
         assertEquals(1, result.steps().size());
         assertSame(REQUEST, result.steps().getFirst().request());
@@ -48,7 +90,7 @@ class SchemaMigrationExecutorTest {
 
     @Test
     void jdbcDdlTreatsAnUnavailableUpdateCountAsZero() {
-        SyncSqlExecutor sqlExecutor = new SyncSqlExecutor() {
+        SyncSqlExecutor sqlExecutor = new com.flying.orm.rdb.support.ListQueryFixture() {
             @Override
             public List<DynamicRow> query(SqlRequest request) {
                 throw new AssertionError("query must not execute");
@@ -62,17 +104,16 @@ class SchemaMigrationExecutorTest {
             @Override
             public com.flying.orm.rdb.execution.SqlWriteResult rowsUpdatedReturningKeys(
                     SqlRequest request,
-                    com.flying.orm.rdb.execution.SqlExecutionOptions options) {
+                    com.flying.orm.rdb.execution.SqlExecutionOptions options, String generatedKeyColumn) {
                 throw new AssertionError("generated keys must not be requested");
             }
         };
         JdbcSchemaMigrationExecutor executor = new JdbcSchemaMigrationExecutor(
                 sqlExecutor,
-                SchemaMigrationObserver.noop(),
-                ignored -> { });
+                SchemaMigrationObserver.noop());
 
         long rows = executor.execute(
-                List.of(REQUEST), com.flying.orm.rdb.execution.SqlExecutionOptions.safeDefaults());
+                List.of(REQUEST), com.flying.orm.rdb.execution.SqlExecutionOptions.unlimited());
 
         assertEquals(0L, rows);
     }
@@ -86,7 +127,7 @@ class SchemaMigrationExecutorTest {
                                     List.of(REQUEST),
                                     List.of("orders"),
                                     ignored -> invalidations.incrementAndGet(),
-                                    com.flying.orm.rdb.execution.SqlExecutionOptions.safeDefaults())
+                                    com.flying.orm.rdb.execution.SqlExecutionOptions.unlimited())
                             .doOnNext(ignored -> assertEquals(1, invalidations.get()))
                             .block();
 
@@ -110,7 +151,7 @@ class SchemaMigrationExecutorTest {
                                           int attempt = attempts.getAndIncrement();
                                           throw attempt == 0 ? first : second;
                                       },
-                                      com.flying.orm.rdb.execution.SqlExecutionOptions.safeDefaults())
+                                      com.flying.orm.rdb.execution.SqlExecutionOptions.unlimited())
                               .block());
 
         assertEquals(2, attempts.get());
@@ -124,7 +165,7 @@ class SchemaMigrationExecutorTest {
         AtomicInteger attempts = new AtomicInteger();
         IllegalStateException first = new IllegalStateException("orders invalidation failed");
         IllegalArgumentException second = new IllegalArgumentException("orders audit invalidation failed");
-        SyncSqlExecutor sqlExecutor = new SyncSqlExecutor() {
+        SyncSqlExecutor sqlExecutor = new com.flying.orm.rdb.support.ListQueryFixture() {
             @Override
             public List<DynamicRow> query(SqlRequest request) {
                 throw new AssertionError("query must not execute");
@@ -138,14 +179,13 @@ class SchemaMigrationExecutorTest {
             @Override
             public com.flying.orm.rdb.execution.SqlWriteResult rowsUpdatedReturningKeys(
                     SqlRequest request,
-                    com.flying.orm.rdb.execution.SqlExecutionOptions options) {
+                    com.flying.orm.rdb.execution.SqlExecutionOptions options, String generatedKeyColumn) {
                 throw new AssertionError("generated keys must not be requested");
             }
         };
         JdbcSchemaMigrationExecutor executor = new JdbcSchemaMigrationExecutor(
                 sqlExecutor,
-                SchemaMigrationObserver.noop(),
-                ignored -> { });
+                SchemaMigrationObserver.noop());
 
         RdbException thrown = assertThrows(
                 RdbException.class,
@@ -156,7 +196,7 @@ class SchemaMigrationExecutorTest {
                             int attempt = attempts.getAndIncrement();
                             throw attempt == 0 ? first : second;
                         },
-                        com.flying.orm.rdb.execution.SqlExecutionOptions.safeDefaults()));
+                        com.flying.orm.rdb.execution.SqlExecutionOptions.unlimited()));
 
         assertEquals(2, attempts.get());
         assertSame(first, thrown.getCause());
@@ -176,7 +216,7 @@ class SchemaMigrationExecutorTest {
                                       List.of(REQUEST),
                                       List.of("orders"),
                                       ignored -> { throw invalidationFailure; },
-                                      com.flying.orm.rdb.execution.SqlExecutionOptions.safeDefaults())
+                                      com.flying.orm.rdb.execution.SqlExecutionOptions.unlimited())
                               .block());
 
         assertSame(ddlFailure, thrown);
@@ -190,7 +230,7 @@ class SchemaMigrationExecutorTest {
     void jdbcDdlFailureRemainsPrimaryWhenInvalidationAlsoFails() {
         IllegalStateException ddlFailure = new IllegalStateException("ddl failed");
         IllegalArgumentException invalidationFailure = new IllegalArgumentException("invalidation failed");
-        SyncSqlExecutor sqlExecutor = new SyncSqlExecutor() {
+        SyncSqlExecutor sqlExecutor = new com.flying.orm.rdb.support.ListQueryFixture() {
             @Override
             public List<DynamicRow> query(SqlRequest request) {
                 throw new AssertionError("query must not execute");
@@ -204,14 +244,13 @@ class SchemaMigrationExecutorTest {
             @Override
             public com.flying.orm.rdb.execution.SqlWriteResult rowsUpdatedReturningKeys(
                     SqlRequest request,
-                    com.flying.orm.rdb.execution.SqlExecutionOptions options) {
+                    com.flying.orm.rdb.execution.SqlExecutionOptions options, String generatedKeyColumn) {
                 throw new AssertionError("generated keys must not be requested");
             }
         };
         JdbcSchemaMigrationExecutor executor = new JdbcSchemaMigrationExecutor(
                 sqlExecutor,
-                SchemaMigrationObserver.noop(),
-                ignored -> { });
+                SchemaMigrationObserver.noop());
 
         IllegalStateException thrown = assertThrows(
                 IllegalStateException.class,
@@ -219,7 +258,7 @@ class SchemaMigrationExecutorTest {
                         List.of(REQUEST),
                         List.of("orders"),
                         ignored -> { throw invalidationFailure; },
-                        com.flying.orm.rdb.execution.SqlExecutionOptions.safeDefaults()));
+                        com.flying.orm.rdb.execution.SqlExecutionOptions.unlimited()));
 
         assertSame(ddlFailure, thrown);
         assertEquals(1, thrown.getSuppressed().length);
@@ -239,7 +278,7 @@ class SchemaMigrationExecutorTest {
                                       List.of(REQUEST),
                                       List.of("orders"),
                                       ignored -> invalidations.incrementAndGet(),
-                                      com.flying.orm.rdb.execution.SqlExecutionOptions.safeDefaults())
+                                      com.flying.orm.rdb.execution.SqlExecutionOptions.unlimited())
                               .block());
 
         assertEquals(failure, thrown);
@@ -255,7 +294,7 @@ class SchemaMigrationExecutorTest {
                                           List.of(REQUEST),
                                           List.of("orders"),
                                           ignored -> invalidations.incrementAndGet(),
-                                          com.flying.orm.rdb.execution.SqlExecutionOptions.safeDefaults())
+                                          com.flying.orm.rdb.execution.SqlExecutionOptions.unlimited())
                                   .subscribe();
         subscription.dispose();
 
@@ -265,14 +304,14 @@ class SchemaMigrationExecutorTest {
     @Test
     void reviewedRelationalCancellationAfterSqlStartsInvalidatesExactlyOnce() {
         com.flying.orm.core.metadata.RelationalTableDefinition before =
-                VerifiedSchemaPlanFixtures.table(VerifiedSchemaPlanFixtures.ID);
+                SchemaExecutionFixtures.table(SchemaExecutionFixtures.ID);
         com.flying.orm.core.metadata.RelationalTableDefinition desired =
-                VerifiedSchemaPlanFixtures.table(
-                        VerifiedSchemaPlanFixtures.ID, VerifiedSchemaPlanFixtures.NOTE);
+                SchemaExecutionFixtures.table(
+                        SchemaExecutionFixtures.ID, SchemaExecutionFixtures.NOTE);
         AtomicReference<SchemaSnapshot> snapshot = new AtomicReference<>(SchemaSnapshot.present(before));
         AtomicInteger executions = new AtomicInteger();
         AtomicInteger invalidations = new AtomicInteger();
-        ReviewedSchemaPlan plan = VerifiedSchemaPlanFixtures.plan(snapshot.get(), desired, REQUEST);
+        SchemaMigrationPlan plan = SchemaExecutionFixtures.plan(snapshot.get(), desired, REQUEST);
         ReactiveSqlExecutor sqlExecutor = new ReactiveSqlExecutor() {
             @Override
             public Flux<DynamicRow> query(SqlRequest request) {
@@ -290,14 +329,10 @@ class SchemaMigrationExecutorTest {
                 sqlExecutor,
                 SchemaMigrationObserver.noop());
 
-        Disposable subscription = executor.executeReviewed(
+        Disposable subscription = executor.execute(
                 plan,
-                () -> Mono.just(snapshot.get()),
-                SchemaSnapshotCoverage::complete,
-                invalidations::incrementAndGet,
-                new SchemaMigrationExecutionOptions(
-                        com.flying.orm.rdb.execution.SqlExecutionOptions.safeDefaults(),
-                        null))
+                SchemaMigrationSupport.metadataRelations(plan), ignored -> invalidations.incrementAndGet(),
+                com.flying.orm.rdb.execution.SqlExecutionOptions.unlimited())
                 .subscribe();
 
         assertEquals(1, executions.get());
@@ -317,14 +352,14 @@ class SchemaMigrationExecutorTest {
 
         SchemaMigrationRejectedException failure = assertThrows(
                 SchemaMigrationRejectedException.class,
-                () -> executor.executeReviewed(
+                () -> executor.execute(
                                       reviewedPlan(new SqlRequest(
                                               "alter table orders comment "
                                                       + "/*flying-orm:mysql-comment-no-backslash-escapes*/ 'C:\\data'",
                                               List.of())),
                                       List.of("orders"),
                                       ignored -> invalidations.incrementAndGet(),
-                                      SchemaMigrationExecutionOptions.defaults())
+                                      SqlExecutionOptions.unlimited())
                               .block());
 
         assertEquals(SchemaMigrationFailureCode.EXECUTOR_CAPABILITY_REQUIRED, failure.failureCode());
@@ -333,6 +368,10 @@ class SchemaMigrationExecutorTest {
     }
 
     private static SchemaMigrationExecutor executor(Mono<Long> execution) {
+        return executor(execution, SchemaMigrationObserver.noop());
+    }
+
+    private static SchemaMigrationExecutor executor(Mono<Long> execution, SchemaMigrationObserver observer) {
         ReactiveSqlExecutor sqlExecutor = new ReactiveSqlExecutor() {
             @Override
             public <T> Mono<T> withConnection(SqlRequest firstRequest,
@@ -355,24 +394,18 @@ class SchemaMigrationExecutorTest {
         };
         return new SchemaMigrationExecutor(
                 sqlExecutor,
-                SchemaMigrationObserver.noop());
+                observer);
     }
 
-    private static ReviewedSchemaMigrationPlan reviewedPlan(SqlRequest request) {
+    private static SchemaMigrationPlan reviewedPlan(SqlRequest request) {
         DynamicForm target = DynamicForm.builder("orders", "orders")
                                         .addField(DynamicField.primaryKey("id", "BIGINT"))
                                         .build();
         SchemaMigrationPlan migration = new SchemaMigrationPlan(
-                target,
-                List.of(),
-                List.of(),
-                true,
+                target.toTableDefinition(), true,
                 List.of(request),
                 List.of());
-        return new ReviewedSchemaMigrationPlan(
-                migration,
-                new SchemaRollbackPlan(List.of(), List.of()),
-                new OnlineDdlReview(OnlineDdlMode.ALLOW_BLOCKING, List.of()));
+        return migration;
     }
 
 }

@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.internal.template;
 
+import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.internal.dialect.DatabaseProduct;
 
@@ -25,14 +26,7 @@ public final class SqlStatements {
      */
     public static String requireSingle(String sql) {
         // 模板构造时还不知道方言，不能用某个数据库的关键字规则猜测其他方言语法。
-        return requireSingle(sql, SqlLexicalScanner.genericRules(), false, false);
-    }
-
-    /**
-     * 在尚不知道数据库方言的低层执行边界采用可移植词法规则；井号按普通运算符处理，不能隐藏后续语句。
-     */
-    public static String requirePortableSingle(String sql) {
-        return requireSingle(sql, SqlLexicalScanner.portableRules(), false, false);
+        return requireSingle(sql, SqlLexicalScanner.genericRules(), DatabaseProduct.UNKNOWN);
     }
 
     /**
@@ -52,19 +46,31 @@ public final class SqlStatements {
 
     private static String requireSingle(String sql, String dialectName) {
         DatabaseProduct product = DatabaseProduct.detect(dialectName);
-        return requireSingle(sql, SqlLexicalScanner.rulesFor(dialectName),
-                product == DatabaseProduct.SQL_SERVER, product == DatabaseProduct.ORACLE);
+        return requireSingle(sql, SqlLexicalScanner.rulesFor(dialectName), product);
     }
 
     private static String requireSingle(String sql,
                                          SqlLexicalScanner.Rules lexicalRules,
-                                         boolean sqlServerDialect,
-                                         boolean oracleDialect) {
+                                         DatabaseProduct product) {
+        return SqlStatementBoundary.compile(statement(sql), lexicalRules, product, -1, true);
+    }
+
+    /** 同一次词法扫描完成语句边界检查和规范参数标记编译；原生标记只检查语句边界。 */
+    public static String compile(String sql, int parameterCount, SqlBindMarkerStyle markerStyle,
+                                 DatabaseProduct product) {
+        if (parameterCount < 0) {
+            throw new IllegalArgumentException("sql parameter count must not be negative");
+        }
+        SqlLexicalScanner.Rules rules = product == DatabaseProduct.UNKNOWN
+                ? SqlLexicalScanner.portableRules() : SqlLexicalScanner.rulesFor(product);
+        return SqlStatementBoundary.compile(statement(sql), rules, product,
+                markerStyle == SqlBindMarkerStyle.CANONICAL ? parameterCount : -1, false);
+    }
+
+    private static String statement(String sql) {
         if (sql == null || sql.isBlank()) {
             throw new IllegalArgumentException("SQL statement must not be blank");
         }
-        String statement = sql.trim();
-        SqlStatementBoundary.validate(statement, lexicalRules, sqlServerDialect, oracleDialect);
-        return statement;
+        return sql.trim();
     }
 }

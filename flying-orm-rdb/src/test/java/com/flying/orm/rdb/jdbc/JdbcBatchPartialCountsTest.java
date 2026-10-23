@@ -75,22 +75,20 @@ class JdbcBatchPartialCountsTest {
     @Test void keepsUnreportedBatchUpdateExceptionTailUnknown() {
         var state = new JdbcBatchEvidenceTestSupport.State().failure(
                 new BatchUpdateException("partial", "23000", 0, new int[]{1}));
-        var failure = assertThrows(BatchExecutionEvidenceException.class, () -> state.writer().writeBatchEvidence(
+        var failure = assertThrows(BatchExecutionEvidenceException.class, () -> state.writer().writeBatch(
                 JdbcBatchEvidenceTestSupport.request(Flux.range(0, 4).map(i -> new Object[]{i}), 4)));
         assertEquals(List.of(0L), failure.evidence().successfulOffsets().boxed().toList());
         assertEquals(0, failure.evidence().failedCount());
         assertFalse(failure.evidence().affectedRows().isKnown());
     }
 
-    @Test void ordinaryAndEvidenceBothAcceptSuccessfulUnknownCounts() {
-        for (boolean alias : new boolean[]{false, true}) {
-            var state = new JdbcBatchEvidenceTestSupport.State().outcome(Statement.SUCCESS_NO_INFO);
-            var request = JdbcBatchEvidenceTestSupport.request(Flux.<Object[]>just(new Object[]{1}), 1);
-            var fact = alias ? state.writer().writeBatchEvidence(request) : state.writer().writeBatch(request);
-            assertEquals(BatchExecutionState.SUCCESS, fact.state());
-            assertEquals(1, fact.successfulCount());
-            assertFalse(fact.affectedRows().isKnown());
-        }
+    @Test void batchAcceptsSuccessfulUnknownCounts() {
+        var state = new JdbcBatchEvidenceTestSupport.State().outcome(Statement.SUCCESS_NO_INFO);
+        var request = JdbcBatchEvidenceTestSupport.request(Flux.<Object[]>just(new Object[]{1}), 1);
+        var fact = state.writer().writeBatch(request);
+        assertEquals(BatchExecutionState.SUCCESS, fact.state());
+        assertEquals(1, fact.successfulCount());
+        assertFalse(fact.affectedRows().isKnown());
     }
 
     @Test void preservesAllReturnedPositionsAfterExecuteFailed() {

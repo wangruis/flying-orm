@@ -8,14 +8,15 @@ import com.flying.orm.core.scope.FieldUse;
 import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.scope.FieldVisibility;
 import com.flying.orm.core.sql.render.SqlRenderer;
+import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.form.FormDataSqlRenderer;
 import com.flying.orm.rdb.form.ReactiveFormClient;
 import com.flying.orm.rdb.form.SyncFormClient;
-import com.flying.orm.rdb.mapping.RowMapper;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.sync.SyncBatchExecutor;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
+import com.flying.orm.rdb.support.ListQueryFixture;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
@@ -29,6 +30,26 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class GovernedDmlResultVisibilityTest {
+    @Test
+    void syncRowConsumersSeeOnlyGovernedResultsForDynamicMapperAndDtoTerminals() {
+        SqlRenderer sql = SqlRenderer.builder().addDefaultTerms().build();
+        com.flying.orm.rdb.dialect.RdbDialect dialect = com.flying.orm.rdb.dialect.RdbDialect.postgresql();
+        SyncSqlExecutor executor = syncExecutor(rawRow());
+        SyncFormClient forms = SyncFormClient.create(executor, syncBatchExecutor(), FormDataSqlRenderer.create(sql, dialect));
+        SyncQueryOperator query = new SyncDmlOperator(forms, executor, sql, DataScope.none(), dialect)
+                .query().select("id", "secret", "internal_note").from(form(), policy());
+        assertEquals(1L, query.forEach(GovernedDmlResultVisibilityTest::assertPublished));
+        assertEquals(1L, query.forEach(row -> { assertPublished(row); return row.get("id"); },
+                id -> assertEquals(7L, id)));
+        assertEquals(1L, query.forEach(Visible.class,
+                row -> assertEquals(new Visible(7L, "**********"), row)));
+        SyncQueryOperator raw = new SyncDmlOperator(forms, executor, sql, DataScope.none(), dialect)
+                .query().select("id", "secret").from("people");
+        assertEquals(1L, raw.forEach(Visible.class,
+                row -> assertEquals(new Visible(7L, "classified"), row)));
+    }
+
+    record Visible(Long id, String secret) { }
 
     @Test
     void syncAndReactiveGovernedDmlPublishMaskedAndDropHiddenFields() {
@@ -41,11 +62,11 @@ class GovernedDmlResultVisibilityTest {
         SyncFormClient syncForms = SyncFormClient.create(syncExecutor, syncBatchExecutor(), forms);
         ReactiveFormClient reactiveForms = ReactiveFormClient.create(reactiveExecutor, forms);
 
-        DynamicRow sync = new SyncDmlOperator(syncForms, syncExecutor, sql, DataScope.none())
-                .query().select("id", "secret", "internal_note").from(form(), policy()).fetchMap().getFirst();
-        DynamicRow reactive = new DmlOperator(reactiveForms, reactiveExecutor, sql, DataScope.none())
+        DynamicRow sync = new SyncDmlOperator(syncForms, syncExecutor, sql, DataScope.none(), com.flying.orm.rdb.dialect.RdbDialect.postgresql())
+                .query().select("id", "secret", "internal_note").from(form(), policy()).fetch().getFirst();
+        DynamicRow reactive = new DmlOperator(reactiveForms, reactiveExecutor, sql, DataScope.none(), com.flying.orm.rdb.dialect.RdbDialect.postgresql())
                 .query().select("id", "secret", "internal_note").from(form(), policy())
-                .fetchMap().single().block();
+                .fetch().single().block();
 
         assertPublished(sync);
         assertPublished(reactive);
@@ -83,14 +104,14 @@ class GovernedDmlResultVisibilityTest {
     }
 
     private static SyncSqlExecutor syncExecutor(DynamicRow raw) {
-        return (SyncSqlExecutor) Proxy.newProxyInstance(
-                SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{SyncSqlExecutor.class},
-                (proxy, method, arguments) -> {
-                    if (method.getName().equals("queryMapped")) {
-                        return List.of(((RowMapper<?>) arguments[2]).map(raw));
-                    }
-                    throw new UnsupportedOperationException(method.toString());
-                });
+        return new ListQueryFixture() {
+            @Override public List<DynamicRow> query(SqlRequest request) {
+                return List.of(raw);
+            }
+            @Override public long rowsUpdated(SqlRequest request) {
+                throw new UnsupportedOperationException();
+            }
+        };
     }
 
     private static ReactiveSqlExecutor reactiveExecutor(DynamicRow raw) {

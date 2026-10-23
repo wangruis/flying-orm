@@ -126,6 +126,27 @@ class SqlObserverCompositionContractRegressionTest {
         assertFalse(SqlExecutionObservers.when(event -> true, broken).enabled());
     }
 
+    @Test
+    void disabledObserversDoNotRequireParameterProbes() {
+        SqlExecutionObserver disabled = new SqlExecutionObserver() {
+            @Override public boolean enabled() { return false; }
+            @Override public boolean requiresParameterValues() {
+                throw new IllegalStateException("disabled parameter provider must not be initialized");
+            }
+            @Override public void onExecution(SqlExecutionObservation event) { fail("disabled callback"); }
+        };
+        SqlExecutionObserver configured = SqlExecutionObservers.safe(disabled);
+        assertFalse(configured.enabled());
+        assertFalse(configured.requiresParameterValues());
+        assertSame(SqlExecutionObserver.noop(), configured);
+    }
+
+    @Test
+    void compositeAlreadyOwnsIsolationWithoutAnotherWrapper() {
+        SqlExecutionObserver composite = SqlExecutionObservers.composite(event -> { }, event -> { });
+        assertSame(composite, SqlExecutionObservers.safe(composite));
+    }
+
     private static SqlExecutionObserver recording(int required, List<String> calls) {
         return new SqlExecutionObserver() {
             @Override public boolean requiresParameterValues() { return (required & 1) != 0; }

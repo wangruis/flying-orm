@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.operator;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.LogicalOperator;
 import com.flying.orm.core.sql.render.SqlIdentifiers;
 import com.flying.orm.core.sql.render.SqlRenderer;
 
@@ -18,17 +19,11 @@ import java.util.function.Consumer;
  * @date 2026-07-27
  * @version v1.0
  */
-public final class WhereDsl {
+public final class WhereDsl implements ConditionDsl<String, WhereDsl> {
 
     private ConditionGroup.Builder builder;
     private final SqlRenderer renderer;
     private ConditionGroup snapshot;
-
-    /** 默认构造只在本包的基础契约测试中使用，正式 Operator 会传入自己的 SqlRenderer。 */
-    WhereDsl() {
-        this.builder = ConditionGroup.and();
-        this.renderer = null;
-    }
 
     /** 使用执行链已经装好的 renderer 创建条件，扩展 term 不需要再注册第二遍。 */
     WhereDsl(SqlRenderer renderer) {
@@ -49,7 +44,7 @@ public final class WhereDsl {
 
     /** 添加标准或已注册的业务条件，例如 {@code where("userId", "user-in-org", orgId)}。 */
     public WhereDsl where(String field, String operator, Object value) {
-        mutableBuilder().where(SqlIdentifiers.requireIdentifier(field, "where field"), operator, value);
+        mutableBuilder().add(SqlIdentifiers.requireIdentifier(field), operator, value);
         return this;
     }
 
@@ -79,30 +74,6 @@ public final class WhereDsl {
     }
 
     /**
-     * 添加严格的扩展条件，例如 {@code term("userId", "user-in-org", orgId)}。
-     *
-     * @param field 字段名
-     * @param operator 已注册的通用或业务 operator
-     * @param value 条件值
-     * @return 当前 DSL
-     */
-    public WhereDsl term(String field, String operator, Object value) {
-        return where(field, operator, value);
-    }
-
-    /**
-     * 添加可选等值条件。清理后没有有效值时不生成条件，适合搜索表单的非必填参数。
-     *
-     * @param field 字段名
-     * @param value 可选条件值
-     * @return 当前 DSL
-     */
-    public WhereDsl isIfPresent(String field, Object value) {
-        mutableBuilder().whereIfPresent(SqlIdentifiers.requireIdentifier(field, "where field"), "=", value);
-        return this;
-    }
-
-    /**
      * 添加可选扩展条件。是否跳过只由统一的值清理策略决定，不允许 operator 自己拼 SQL。
      *
      * @param field 字段名
@@ -110,30 +81,8 @@ public final class WhereDsl {
      * @param value 可选条件值
      * @return 当前 DSL
      */
-    public WhereDsl termIfPresent(String field, String operator, Object value) {
-        mutableBuilder().whereIfPresent(SqlIdentifiers.requireIdentifier(field, "where field"), operator, value);
-        return this;
-    }
-
-    /**
-     * 添加 IS NULL 条件，不需要传入占位参数。
-     *
-     * @param field 字段名
-     * @return 当前 DSL
-     */
-    public WhereDsl isNull(String field) {
-        mutableBuilder().whereNull(SqlIdentifiers.requireIdentifier(field, "where field"));
-        return this;
-    }
-
-    /**
-     * 添加 IS NOT NULL 条件，不需要传入占位参数。
-     *
-     * @param field 字段名
-     * @return 当前 DSL
-     */
-    public WhereDsl isNotNull(String field) {
-        mutableBuilder().whereNotNull(SqlIdentifiers.requireIdentifier(field, "where field"));
+    public WhereDsl whereIfPresent(String field, String operator, Object value) {
+        mutableBuilder().whereIfPresent(SqlIdentifiers.requireIdentifier(field), operator, value);
         return this;
     }
 
@@ -144,10 +93,26 @@ public final class WhereDsl {
         return snapshot;
     }
 
+    /** 只追加已冻结的新节点；不重建已有条件，OR 组仍作为整体保留。 */
+    void append(ConditionGroup conditions) {
+        if (conditions.children().isEmpty()) {
+            return;
+        }
+        appendTo(mutableBuilder(), conditions);
+    }
+
+    private static void appendTo(ConditionGroup.Builder target, ConditionGroup conditions) {
+        if (conditions.operator() == LogicalOperator.AND) {
+            conditions.children().forEach(target::add);
+        } else {
+            target.add(conditions);
+        }
+    }
+
     private ConditionGroup.Builder mutableBuilder() {
         if (builder == null) {
             builder = renderer.conditions();
-            snapshot.children().forEach(builder::add);
+            appendTo(builder, snapshot);
         }
         snapshot = null;
         return builder;

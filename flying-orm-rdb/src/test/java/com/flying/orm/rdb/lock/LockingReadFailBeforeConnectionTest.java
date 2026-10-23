@@ -24,10 +24,8 @@ class LockingReadFailBeforeConnectionTest {
         var client = LockingReadTestSupport.syncClient(custom, queries, new AtomicReference<>());
 
         assertThrows(UnsupportedOperationException.class,
-                     () -> client.lockingRead(LockingReadSpec.of(
-                             QuerySpec.of(LockingReadTestSupport.form(),
-                                          ConditionGroup.and().build()),
-                             ReadLock.update())));
+                     () -> client.lockingRead(QuerySpec.of(LockingReadTestSupport.form(),
+                                          ConditionGroup.and().build()).withLock(ReadLock.update())));
         assertEquals(0, queries.get());
     }
 }

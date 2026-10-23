@@ -4,17 +4,23 @@ import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.field.FieldIdentity;
 import com.flying.orm.rdb.internal.mapping.EntityMetadataResolver;
 import com.flying.orm.rdb.result.DynamicRow;
+import com.flying.orm.rdb.internal.InternalApi;
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.UnaryOperator;
+import java.util.function.Function;
+import java.util.function.IntFunction;
 
 /**
  * 把数据库行映射成业务对象的稳定扩展接口。
  *
  * <p>自定义映射可以直接实现这个函数式接口；常规 record/Bean 使用 {@link #of(Class)}。默认工厂会在内部
- * 编译并缓存反射计划，但具体计划类型不属于公共 API。实现对象可能被多个响应式订阅并发调用，自定义 mapper
+ * 编译可复用的反射计划，客户端的 {@link EntityModelRegistry} 按配置缓存计划；静态工厂不做全局缓存。
+ * 具体计划类型不属于公共 API。实现对象可能被多个响应式订阅并发调用，自定义 mapper
  * 不应把某一行的临时状态保存在共享字段里。</p>
  *
  * @param <T> 目标对象类型
@@ -33,6 +39,58 @@ public interface RowMapper<T> {
      * @throws MappingException 构造对象、写字段或值转换失败时抛出
      */
     T map(DynamicRow row);
+
+    /**
+     * 执行器按当前结果布局绑定一次；返回 null 表示继续使用普通行映射。
+     * 绑定器仅使用列布局，返回的函数同步消费当前行的索引值，不得保留值读取器。
+     * 函数属于本次结果消费，按行串行调用，不跨查询或线程共享。
+     */
+    @InternalApi
+    default Function<IntFunction<Object>, T> bindColumns(DynamicRow columns) {
+        return null;
+    }
+
+    /**
+     * 读取 COUNT 标量为精确 long；优先使用 total/TOTAL 别名，否则读取首列。
+     * 小数、非有限数或溢出值报错，不截断为错误的计数。
+     */
+    static RowMapper<Long> count() {
+        return RowMapper::countValue;
+    }
+
+    private static Long countValue(DynamicRow row) {
+        DynamicRow safeRow = Objects.requireNonNull(row, "count row must not be null");
+        Object value = safeRow.get("total");
+        if (value == null) {
+            value = safeRow.get("TOTAL");
+        }
+        if (value == null && !safeRow.isEmpty()) {
+            value = safeRow.value(0);
+        }
+        Long count = exactCount(value);
+        if (count == null) {
+            throw new IllegalArgumentException("count result must not be null");
+        }
+        return count;
+    }
+
+    /** 将驱动 COUNT 值无损转换为 long，保留 SQL NULL；拒绝小数、非有限数和溢出。 */
+    static Long exactCount(Object value) {
+        if (value == null) return null;
+        if (value instanceof Long count) return count;
+        if (value instanceof Byte || value instanceof Short || value instanceof Integer) {
+            return ((Number) value).longValue();
+        }
+        try {
+            if (value instanceof BigInteger integer) return integer.longValueExact();
+            if (value instanceof BigDecimal decimal) return decimal.longValueExact();
+            if (value instanceof Number number) return new BigDecimal(number.toString()).longValueExact();
+            if (value instanceof CharSequence text) return Long.parseLong(text.toString());
+        } catch (ArithmeticException | NumberFormatException error) {
+            throw new IllegalArgumentException("count result must be an exact long integer", error);
+        }
+        throw new IllegalArgumentException("count result must be an exact long integer");
+    }
 
     /**
      * 把调用方自己准备的普通 Map 显式压缩后再映射。
@@ -55,9 +113,17 @@ public interface RowMapper<T> {
         }
         RowMapper<T> delegate = this;
         UnaryOperator<String> renamer = name -> findAlias(safeAliases, name);
-        return row -> {
-            DynamicRow source = Objects.requireNonNull(row, "row must not be null");
-            return delegate.map(source.renameColumnsBound(renamer));
+        return new RowMapper<>() {
+            @Override
+            public T map(DynamicRow row) {
+                DynamicRow source = Objects.requireNonNull(row, "row must not be null");
+                return delegate.map(source.renameColumnsBound(renamer));
+            }
+
+            @Override
+            public Function<IntFunction<Object>, T> bindColumns(DynamicRow columns) {
+                return delegate.bindColumns(columns.renameColumns(renamer));
+            }
         };
     }
 
@@ -93,7 +159,7 @@ public interface RowMapper<T> {
      *
      * @param type 目标 record 或带无参构造器的 Bean 类型
      * @param <T> 目标对象类型
-     * @return 缓存后的行映射器
+     * @return 预编译、可复用的行映射器
      */
     static <T> RowMapper<T> of(Class<T> type) {
         return MappingPlan.of(type);
@@ -109,6 +175,28 @@ public interface RowMapper<T> {
      */
     static <T> RowMapper<T> of(Class<T> type, ValueCodecRegistry valueCodecs) {
         return MappingPlan.of(type, valueCodecs);
+    }
+
+    /**
+     * 按点分列名组装嵌套 Map，例如 {@code department.id}；保留列名大小写、顺序和 NULL。
+     * 路径各段不能为空，同一路径不能同时是值和子对象。默认查询仍返回平铺的紧凑行。
+     */
+    static RowMapper<Map<String, Object>> nested() {
+        return MappingPlan.nestedMap();
+    }
+
+    /**
+     * 按点分属性路径映射单行嵌套 Bean/record，例如 {@code department.id}。
+     * 子对象已映射的列全部为 SQL NULL 时返回 null；未投影属性仍沿用普通映射规则。
+     * 本入口只组装当前行，不发起关联查询，也不聚合多行集合。
+     */
+    static <T> RowMapper<T> nested(Class<T> type) {
+        return nested(type, ValueCodecRegistry.standard());
+    }
+
+    /** 使用应用 codec 创建可复用的嵌套行映射器；路径与字段绑定仅在结果布局变化时创建。 */
+    static <T> RowMapper<T> nested(Class<T> type, ValueCodecRegistry valueCodecs) {
+        return MappingPlan.nested(type, valueCodecs);
     }
 
     /**

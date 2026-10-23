@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.operator;
 
-import com.flying.orm.core.metadata.IndexMetadata;
+import com.flying.orm.core.metadata.IndexDefinition;
+import com.flying.orm.core.metadata.IndexKeyPart;
 
 /**
  * 索引 builder。这里只描述目标索引长什么样，真正是否需要创建由 createOrAlter 读库后决定。
@@ -9,14 +10,16 @@ import com.flying.orm.core.metadata.IndexMetadata;
  * @date 2026-07-28
  * @version v1.0
  */
-public final class IndexBuilder {
+public final class IndexBuilder<T> {
 
-    private final CreateOrAlterTableBuilder table;
-    private final IndexMetadata.Builder index;
+    private final T table;
+    private final DdlStructureDraft draft;
+    private final IndexDefinition.Builder index;
 
-    IndexBuilder(CreateOrAlterTableBuilder table, String name) {
+    IndexBuilder(T table, DdlStructureDraft draft, String name) {
         this.table = table;
-        this.index = IndexMetadata.builder(DdlStructureDraft.requireText(name, "index name"));
+        this.draft = draft;
+        this.index = IndexDefinition.builder(DdlStructureDraft.requireText(name, "index name"));
     }
 
     /**
@@ -24,7 +27,7 @@ public final class IndexBuilder {
      *
      * @return 当前索引构建器
      */
-    public IndexBuilder unique() {
+    public IndexBuilder<T> unique() {
         index.unique();
         return this;
     }
@@ -35,8 +38,14 @@ public final class IndexBuilder {
      * @param name 列名
      * @return 当前索引构建器
      */
-    public IndexBuilder column(String name) {
+    public IndexBuilder<T> column(String name) {
         index.addColumn(DdlStructureDraft.requireText(name, "index column"));
+        return this;
+    }
+
+    /** 按指定方向追加索引列，复用关系 Schema 的方向枚举。 */
+    public IndexBuilder<T> column(String name, IndexKeyPart.Direction direction) {
+        index.addKey(new IndexKeyPart(name, direction));
         return this;
     }
 
@@ -47,7 +56,7 @@ public final class IndexBuilder {
      * @param rest 其余列
      * @return 当前索引构建器
      */
-    public IndexBuilder columns(String first, String... rest) {
+    public IndexBuilder<T> columns(String first, String... rest) {
         column(first);
         for (String column : rest) {
             column(column);
@@ -60,8 +69,8 @@ public final class IndexBuilder {
      *
      * @return 所属表构建器
      */
-    public CreateOrAlterTableBuilder commit() {
-        table.draft().addIndex(index.build());
+    public T commit() {
+        draft.addIndex(index.build());
         return table;
     }
 }

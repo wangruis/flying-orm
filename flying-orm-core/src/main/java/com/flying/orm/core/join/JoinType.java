@@ -13,5 +13,7 @@ public enum JoinType {
     /** 左外连接。 */
     LEFT,
     /** 右外连接。 */
-    RIGHT
+    RIGHT,
+    /** 全外连接；需要目标方言声明支持。 */
+    FULL
 }

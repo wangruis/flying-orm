@@ -97,18 +97,14 @@ class PostgreSqlPartitionDdlTest {
         DatabaseDescriptor database = DatabaseDescriptor.of("PostgreSQL", "16", dialect);
 
         for (RelationalTableDefinition desired : invalid) {
-            ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
+            UnsupportedOperationException failure = assertThrows(UnsupportedOperationException.class,
+                    () -> RelationalSchemaPlanReviewer.create(dialect).review(
                     database,
                     desired,
                     SchemaSnapshot.present(actual),
                     SchemaSnapshotCoverage.complete(),
-                    SchemaCompatibilityMode.EXACT);
-
-            assertTrue(plan.requiresManualAction());
-            assertTrue(plan.requests().isEmpty());
-            assertEquals(List.of(SchemaOperation.Kind.VERIFY_MANUALLY),
-                    plan.operations().stream().map(SchemaOperation::kind).toList());
-            assertEquals("table-partition", plan.operations().getFirst().objectName());
+                    SchemaCompatibilityMode.EXACT));
+            assertTrue(failure.getMessage().contains("partition column"));
         }
     }
 

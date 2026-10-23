@@ -2,6 +2,7 @@ package com.flying.orm.core.page;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Function;
 
 /**
  * PageResult 保存分页查询结果和总数信息，行数据集合在创建时冻结。
@@ -64,6 +65,12 @@ public record PageResult<T>(List<T> rows, long total, int page, int size) {
         // 不能写成 (total + size - 1) / size：total 接近 Long.MAX_VALUE 时加法会溢出成负数。
         // total 已经保证大于 0，先减一再除可以得到同样的向上取整结果，而且整个过程不会越界。
         return 1 + (total - 1) / size;
+    }
+
+    /** 映射当前页的行，保留总数、页码和页大小；转换失败直接交给调用方。 */
+    public <R> PageResult<R> map(Function<? super T, ? extends R> mapper) {
+        Objects.requireNonNull(mapper, "page row mapper must not be null");
+        return new PageResult<>(rows.stream().<R>map(mapper).toList(), total, page, size);
     }
 
     /**

@@ -31,7 +31,7 @@ class DeepStructuredConditionAdaptersTest {
         StructuredConditionInput input = deep(StructuredConditionInput.term("value", "json-path-eq",
                 Map.of("path", "id", "value", 7)));
 
-        StructuredConditionInput adapted = JsonStructuredConditions.standard().adapt(form, input);
+        StructuredConditionInput adapted = JsonStructuredConditions.standard().adaptFields(form, form::field, input);
 
         assertInstanceOf(JsonConditionValue.class, leaf(adapted).value());
         assertEquals("json-path-eq", leaf(adapted).operator());
@@ -42,7 +42,7 @@ class DeepStructuredConditionAdaptersTest {
         DynamicForm form = form("INTEGER[]");
         StructuredConditionInput input = deep(StructuredConditionInput.term("value", "array-contains", List.of(7)));
 
-        StructuredConditionInput adapted = ArrayStructuredConditions.postgresql().adapt(form, input);
+        StructuredConditionInput adapted = ArrayStructuredConditions.postgresql().adaptFields(form, form::field, input);
 
         assertInstanceOf(ArrayConditionValue.class, leaf(adapted).value());
         assertEquals("array-contains", leaf(adapted).operator());
@@ -54,7 +54,7 @@ class DeepStructuredConditionAdaptersTest {
         StructuredConditionInput input = deep(StructuredConditionInput.term("value", "vector-l2-lt",
                 Map.of("vector", List.of(1F, 2F), "distance", 3D)));
 
-        StructuredConditionInput adapted = VectorStructuredConditions.postgresql().adapt(form, input);
+        StructuredConditionInput adapted = VectorStructuredConditions.postgresql().adaptFields(form, form::field, input);
 
         StructuredConditionInput leaf = leaf(adapted);
         assertEquals("vector-l2-lt", leaf.operator());
@@ -68,10 +68,11 @@ class DeepStructuredConditionAdaptersTest {
         StructuredConditionInput input = deep(StructuredConditionInput.term("value", "eq", 7));
         StructuredConditionInput mixed = new StructuredConditionInput("value", "eq", 7, "and",
                 java.util.Collections.singletonList(null));
+        DynamicForm form = form("INTEGER");
         for (StructuredConditionCustomizer customizer : List.of(JsonStructuredConditions.standard(),
                 ArrayStructuredConditions.postgresql(), VectorStructuredConditions.postgresql())) {
-            assertSame(input, customizer.adapt(form("INTEGER"), input));
-            assertSame(mixed, customizer.adapt(form("INTEGER"), mixed));
+            assertSame(input, customizer.adaptFields(form, form::field, input));
+            assertSame(mixed, customizer.adaptFields(form, form::field, mixed));
         }
     }
 

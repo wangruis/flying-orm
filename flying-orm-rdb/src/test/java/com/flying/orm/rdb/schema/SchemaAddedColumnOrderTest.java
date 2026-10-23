@@ -21,8 +21,8 @@ import java.sql.Statement;
 import java.util.List;
 import java.util.UUID;
 
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SchemaAddedColumnOrderTest {
@@ -61,33 +61,21 @@ class SchemaAddedColumnOrderTest {
     }
 
     @Test
-    void middleInsertionIsManualBeforeAnyReviewedDdlIsSent() throws Exception {
+    void middleInsertionFailsBeforeAnyDdlIsSent() throws Exception {
         try (Database database = new Database("id", "existing")) {
-            ReviewedSchemaPlan plan = database.review(table("id", "added", "existing"));
-
-            assertTrue(plan.requiresManualAction());
-            assertTrue(plan.steps().stream().anyMatch(step ->
-                    step.operation().kind() == SchemaOperation.Kind.VERIFY_MANUALLY
-                            && step.operation().objectName().equals("column-order")));
-            SchemaExecutionReport execution = database.client.executeReviewed(plan, database.reader,
-                    SchemaMigrationApproval.approve(plan, "isolated H2 column-order regression"));
-
-            assertEquals(SchemaExecutionStatus.FAILED, execution.status());
-            assertTrue(execution.steps().stream().noneMatch(SchemaExecutionReport.StepResult::sqlSent));
+            assertThrows(UnsupportedOperationException.class,
+                    () -> database.review(table("id", "added", "existing")));
             assertEquals(List.of("id", "existing"), database.columnNames());
         }
     }
 
     private static void assertH2RoundTrip(RelationalTableDefinition desired) throws Exception {
         try (Database database = new Database("id")) {
-            ReviewedSchemaPlan plan = database.review(desired);
-            assertFalse(plan.requiresManualAction());
+            SchemaMigrationPlan plan = database.review(desired);
 
-            SchemaExecutionReport execution = database.client.executeReviewed(plan, database.reader,
-                    SchemaMigrationApproval.approve(plan, "isolated H2 column-order regression"));
+            SchemaMigrationResult execution = database.client.execute(plan, database.reader);
 
-            assertEquals(SchemaExecutionStatus.SUCCESS, execution.status(),
-                    execution.verification().toString());
+            assertEquals(plan.requests().size(), execution.steps().size());
             List<String> targetNames = desired.columns().stream().map(ColumnDefinition::name).toList();
             assertEquals(targetNames, database.columnNames());
             assertEquals(targetNames.subList(1, targetNames.size()), plan.steps().stream()
@@ -126,7 +114,7 @@ class SchemaAddedColumnOrderTest {
             client = JdbcSchemaClient.create(executor, DIALECT);
         }
 
-        private ReviewedSchemaPlan review(RelationalTableDefinition desired) {
+        private SchemaMigrationPlan review(RelationalTableDefinition desired) {
             return client.reviewRelational(DATABASE, desired, reader, SchemaCompatibilityMode.EXACT);
         }
 

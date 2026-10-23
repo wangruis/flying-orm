@@ -7,10 +7,6 @@ import java.lang.reflect.Method;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.sql.SQLNonTransientConnectionException;
-import java.sql.SQLRecoverableException;
-import java.sql.SQLTimeoutException;
-import java.sql.SQLTransientConnectionException;
 import java.sql.Statement;
 import java.sql.Timestamp;
 import java.time.OffsetDateTime;
@@ -82,7 +78,7 @@ final class JdbcTemporalValueAdapter {
                 throw failure(null);
             }
             return connection;
-        } catch (SQLException | RuntimeException error) {
+        } catch (RuntimeException error) {
             throw failure(error);
         }
     }
@@ -91,12 +87,6 @@ final class JdbcTemporalValueAdapter {
         try {
             return type.getMethod(name, parameterTypes);
         } catch (NoSuchMethodException ignored) {
-            return null;
-        } catch (RuntimeException error) {
-            VirtualMachineError fatal = findVirtualMachineError(error);
-            if (fatal != null) {
-                throw fatal;
-            }
             return null;
         }
     }
@@ -126,26 +116,9 @@ final class JdbcTemporalValueAdapter {
         if (error instanceof Error fatalError) {
             throw fatalError;
         }
-        // 继续使用固定消息，避免把驱动细节带到错误报告；但必须保留 JDBC 标准连接异常类别，
-        // 否则 SQLState 缺失时异常翻译器会把连接故障误判为 UNKNOWN，并可能复用已损坏连接。
-        if (error instanceof SQLNonTransientConnectionException connectionError) {
-            return new SQLNonTransientConnectionException(
-                    FAILURE_MESSAGE, connectionError.getSQLState(), connectionError.getErrorCode(), connectionError);
-        }
-        if (error instanceof SQLTransientConnectionException connectionError) {
-            return new SQLTransientConnectionException(
-                    FAILURE_MESSAGE, connectionError.getSQLState(), connectionError.getErrorCode(), connectionError);
-        }
-        if (error instanceof SQLRecoverableException connectionError) {
-            return new SQLRecoverableException(
-                    FAILURE_MESSAGE, connectionError.getSQLState(), connectionError.getErrorCode(), connectionError);
-        }
-        if (error instanceof SQLTimeoutException timeoutError) {
-            return new SQLTimeoutException(
-                    FAILURE_MESSAGE, timeoutError.getSQLState(), timeoutError.getErrorCode(), timeoutError);
-        }
+        // 驱动异常保留类型、SQLState、vendor code 和异常身份；对外报告由统一翻译器生成。
         if (error instanceof SQLException sqlError) {
-            return new SQLException(FAILURE_MESSAGE, sqlError.getSQLState(), sqlError.getErrorCode(), sqlError);
+            return sqlError;
         }
         return error == null ? new SQLException(FAILURE_MESSAGE) : new SQLException(FAILURE_MESSAGE, error);
     }

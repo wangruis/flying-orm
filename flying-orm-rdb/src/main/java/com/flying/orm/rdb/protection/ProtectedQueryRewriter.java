@@ -99,7 +99,7 @@ final class ProtectedQueryRewriter {
                 groups,
                 query.distinctTokenCount(),
                 form.fields().stream().filter(DynamicField::primaryKey).map(DynamicField::name).toList(),
-                layout.table().table()));
+                layout.table().relationIdentity().table()));
     }
 
     boolean matchesContains(String value,

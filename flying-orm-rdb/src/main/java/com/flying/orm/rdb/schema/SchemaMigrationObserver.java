@@ -10,7 +10,6 @@ public interface SchemaMigrationObserver {
     void onMigration(SchemaMigrationObservation observation);
 
     static SchemaMigrationObserver noop() {
-        return ignored -> {
-        };
+        return SchemaMigrationObservers.noop();
     }
 }

@@ -7,7 +7,6 @@ import com.flying.orm.core.metadata.IndexDefinition;
 import com.flying.orm.core.metadata.IndexKeyPart;
 import com.flying.orm.core.metadata.PrimaryKeyDefinition;
 import com.flying.orm.core.metadata.RelationIdentity;
-import com.flying.orm.core.metadata.RelationalMetadataFingerprint;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 import com.flying.orm.core.sql.render.SqlRequest;
@@ -70,7 +69,7 @@ class EntitySchemaForeignKeyPreflightTest {
     @Test
     void rejectsCrossTableForeignKeysBeforeChangingTheirCandidateKeyOrColumn() {
         for (SchemaOperation operation : blockingOperations()) {
-            assertThrows(EntityRelationalSchemaSyncException.class, () ->
+            assertThrows(EntitySchemaSyncException.class, () ->
                     rejectReferencedCandidateKeyChanges(
                             EntitySchemaSyncMode.FULL_UPDATE,
                             List.of(SchemaSnapshot.present(ACTUAL_PARENT),
@@ -100,7 +99,7 @@ class EntitySchemaForeignKeyPreflightTest {
                 drop(SchemaOperation.Kind.DROP_INDEX, uniqueIndex));
 
         for (SchemaOperation operation : blocking) {
-            assertThrows(EntityRelationalSchemaSyncException.class, () ->
+            assertThrows(EntitySchemaSyncException.class, () ->
                     rejectReferencedCandidateKeyChanges(
                             EntitySchemaSyncMode.FULL_UPDATE,
                             List.of(SchemaSnapshot.present(ACTUAL_PARENT), child),
@@ -165,7 +164,7 @@ class EntitySchemaForeignKeyPreflightTest {
     private static void rejectReferencedCandidateKeyChanges(
             EntitySchemaSyncMode mode,
             List<SchemaSnapshot> snapshots,
-            List<ReviewedSchemaPlan> plans) {
+            List<SchemaMigrationPlan> plans) {
         EntitySchemaSyncSupport.rejectReferencedCandidateKeyChanges(
                 mode, snapshots, plans, RdbDialect.postgresql().schema());
     }
@@ -182,19 +181,12 @@ class EntitySchemaForeignKeyPreflightTest {
                 drop(SchemaOperation.Kind.DROP_COLUMN, ID));
     }
 
-    private static ReviewedSchemaPlan plan(SchemaOperation operation) {
-        return ReviewedSchemaPlan.builder(DatabaseDescriptor.of(
+    private static SchemaMigrationPlan plan(SchemaOperation operation) {
+        return SchemaMigrationPlan.builder(DatabaseDescriptor.of(
                         "PostgreSQL", "17", RdbDialect.postgresql()))
                 .compatibilityMode(SchemaCompatibilityMode.EXACT)
                 .desiredTable(DESIRED_PARENT)
-                .desiredFingerprint(RelationalMetadataFingerprint.of(DESIRED_PARENT))
-                .actualFingerprint("actual")
-                .addStep(SchemaPlanStep.executable(
-                        0,
-                        operation,
-                        new SqlRequest("reviewed ddl", List.of()),
-                        SchemaMigrationRiskLevel.CRITICAL,
-                        List.of()))
+                .addStep(new SchemaPlanStep(operation, List.of(new SqlRequest("reviewed ddl", List.of()))))
                 .build();
     }
 

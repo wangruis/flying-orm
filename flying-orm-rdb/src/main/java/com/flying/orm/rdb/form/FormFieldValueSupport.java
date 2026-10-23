@@ -2,18 +2,20 @@ package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.expression.ValueExpression;
+import com.flying.orm.core.sql.render.SqlFragment;
+import com.flying.orm.rdb.internal.value.ExpressionFieldValue;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.rdb.codec.ArrayValueCodec;
 import com.flying.orm.rdb.codec.DialectScalarValueCodec;
 import com.flying.orm.rdb.codec.LargeObjectValueCodec;
-import com.flying.orm.rdb.codec.OffsetTimeValueCodec;
 import com.flying.orm.rdb.json.JsonValueCodec;
 import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
 import com.flying.orm.rdb.vector.VectorValueCodec;
 
 import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -30,30 +32,71 @@ final class FormFieldValueSupport {
     private FormFieldValueSupport() {
     }
 
-    static List<FormSqlRenderSupport.FieldValue> writeFields(FormSqlRenderSupport support,
+    static FormSqlRenderSupport.WriteFields writeFields(FormSqlRenderSupport support,
                                                               DynamicForm form,
                                                               Map<String, Object> values,
                                                               Long batchRowIndex) {
         Map<String, Object> safeValues = Objects.requireNonNull(values, "dynamic form values must not be null");
-        if (safeValues.isEmpty()) {
-            throw new IllegalArgumentException("dynamic form values must not be empty");
-        }
-        List<FormSqlRenderSupport.FieldValue> fieldValues = new ArrayList<>(safeValues.size());
-        Map<String, String> sourceNames = new HashMap<>(Math.max(16, safeValues.size() * 2));
+        List<DynamicField> declared = form.fields();
+        List<DynamicField> fields = null;
+        Object[] parameters = new Object[safeValues.size()];
+        SqlFragment[] fragments = null;
+        Map<DynamicField, Boolean> seen = null;
+        int index = 0;
         for (Map.Entry<String, Object> entry : safeValues.entrySet()) {
-            DynamicField field = support.field(form, entry.getKey());
+            DynamicField field = form.field(entry.getKey());
             requireWritableValue(support, field, entry.getValue(), batchRowIndex);
-            String previousName = sourceNames.putIfAbsent(field.normalizedName(), entry.getKey());
-            if (previousName != null) {
-                throw new IllegalArgumentException("duplicate normalized dynamic write field");
+            // 声明顺序已经唯一；只有提交顺序偏离时才创建本次请求的布局和去重索引。
+            if (fields == null && (index >= declared.size() || declared.get(index) != field)) {
+                fields = new ArrayList<>(safeValues.size());
+                seen = safeValues.size() > 1 ? new IdentityHashMap<>(safeValues.size()) : null;
+                for (int previous = 0; previous < index; previous++) {
+                    DynamicField prefix = declared.get(previous);
+                    fields.add(prefix);
+                    seen.put(prefix, Boolean.TRUE);
+                }
             }
-            fieldValues.add(new FormSqlRenderSupport.FieldValue(
-                    field, writeValue(support, field, entry.getValue())));
+            if (fields != null) {
+                if (seen != null && seen.put(field, Boolean.TRUE) != null) {
+                    throw new IllegalArgumentException("duplicate normalized dynamic write field");
+                }
+                fields.add(field);
+            }
+            Object value = entry.getValue();
+            if (value instanceof ValueExpression expression) {
+                FormUpdateExpressions.requirePlain(form, field);
+                if (expression instanceof ValueExpression.Value bound && !(bound.value() instanceof ExpressionFieldValue)) {
+                    value = bound.value();
+                } else {
+                    if (fragments == null) fragments = new SqlFragment[safeValues.size()];
+                    fragments[index++] = support.expression(expression, reference -> {
+                        throw new IllegalArgumentException("INSERT values cannot reference a table row");
+                    }).fragment();
+                    continue;
+                }
+            }
+            parameters[index++] = writeValue(support, field, value);
         }
-        return fieldValues;
+        if (fields == null) fields = index == declared.size() ? declared : declared.subList(0, index);
+        if (fragments == null) return new FormSqlRenderSupport.WriteFields(fields, parameters, List.of(), null);
+        List<String> expressions = new ArrayList<>(fields.size());
+        List<Object> bindings = new ArrayList<>();
+        int[] offsets = new int[fields.size() + 1];
+        for (int column = 0; column < fields.size(); column++) {
+            offsets[column] = bindings.size();
+            SqlFragment fragment = fragments[column];
+            expressions.add(fragment == null ? support.valueExpression(fields.get(column)) : fragment.sql());
+            if (fragment == null) bindings.add(parameters[column]);
+            else bindings.addAll(fragment.parameters());
+        }
+        offsets[fields.size()] = bindings.size();
+        return new FormSqlRenderSupport.WriteFields(fields, bindings.toArray(), expressions, offsets);
     }
 
     static Object writeValue(FormSqlRenderSupport support, DynamicField field, Object value) {
+        if (value instanceof ValueExpression) {
+            throw new IllegalArgumentException("SQL expression must be compiled before value binding: " + field.name());
+        }
         if (value == null) {
             return null;
         }
@@ -72,21 +115,15 @@ final class FormFieldValueSupport {
         if (field.databaseType().logicalType() == LogicalType.VECTOR) {
             return VectorValueCodec.write(value, field.length());
         }
-        if (OffsetTimeValueCodec.isOffsetTimeDataType(field.databaseType())) {
-            return OffsetTimeValueCodec.write(value, field.databaseType(), support.dialectName);
-        }
         if (isJson(field)) {
             return JsonValueCodec.write(value);
         }
         if (LargeObjectValueCodec.isLargeObjectDataType(field.databaseType())) {
             return LargeObjectValueCodec.write(value, field.databaseType(), support.dialectName);
         }
-        if (scalarParameterType(support, field) != Object.class) {
-            return DialectScalarValueCodec.write(
-                    value, field.databaseType(), support.dialectName,
-                    support.nativeBoolean, support.valueCodecs);
-        }
-        Object encoded = support.valueCodecs.write(value);
+        Object encoded = DialectScalarValueCodec.write(
+                value, field.databaseType(), support.dialectName,
+                support.nativeBoolean, support.valueCodecs);
         if (encoded instanceof UUID uuid && support.parameterType(field) == String.class) {
             // 应用 codec 优先；只有 codec 仍保留 UUID 时才执行跨方言 VARCHAR 默认回退。
             return uuid.toString();
@@ -105,7 +142,7 @@ final class FormFieldValueSupport {
     }
 
     static boolean isTextBackedOffsetTime(FormSqlRenderSupport support, DynamicField field) {
-        return OffsetTimeValueCodec.isOffsetTimeDataType(field.databaseType())
+        return !field.databaseType().isArray() && field.databaseType().logicalType() == LogicalType.OFFSET_TIME
                 && ("mysql".equalsIgnoreCase(support.dialectName)
                     || "oracle".equalsIgnoreCase(support.dialectName)
                     || "sqlserver".equalsIgnoreCase(support.dialectName));

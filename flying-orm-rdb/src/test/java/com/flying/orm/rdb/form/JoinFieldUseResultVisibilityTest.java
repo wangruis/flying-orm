@@ -4,6 +4,7 @@ import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.join.JoinQuerySpec;
+import com.flying.orm.core.join.JoinFieldRef;
 import com.flying.orm.core.join.JoinSource;
 import com.flying.orm.core.protection.MaskedFieldDefinition;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
@@ -33,6 +34,27 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 class JoinFieldUseResultVisibilityTest {
 
     @Test
+    void computedColumnCoexistsWithDeclaredAndGovernedMaskedProjections() {
+        DynamicForm form = DynamicForm.builder("people", "people")
+                .addField(DynamicField.of("secret", "VARCHAR"))
+                .masked("secret", MaskedFieldDefinition.builder("full").build()).build();
+        JoinQuerySpec.Builder builder = JoinQuerySpec.builder(form);
+        JoinQuerySpec spec = builder.selectAs(builder.root(), "secret", "visible_secret")
+                .select(com.flying.orm.core.expression.ValueExpression.value(3), "calculated").build();
+        DynamicRow raw = DynamicRow.copyOf(Map.of("visible_secret", "classified", "calculated", 3));
+        FieldUsePolicy policy = FieldUsePolicy.builder()
+                .joinVisibility(new JoinFieldRef(builder.root(), "secret"), FieldVisibility.MASKED).build();
+        SyncFormClient sync = SyncFormClient.create(syncExecutor(raw), syncBatchExecutor(), renderer());
+        ReactiveFormClient reactive = ReactiveFormClient.create(reactiveExecutor(raw), renderer());
+        for (DynamicRow row : List.of(sync.selectJoin(spec).getFirst(), reactive.selectJoin(spec).single().block(),
+                sync.withFieldUsePolicy(policy).selectJoin(spec).getFirst(),
+                reactive.withFieldUsePolicy(policy).selectJoin(spec).single().block())) {
+            assertEquals("**********", row.get("visible_secret"));
+            assertEquals(3, row.get("calculated"));
+        }
+    }
+
+    @Test
     void explicitFullVisibilityOverridesJoinDeclaredMasking() {
         DynamicForm form = DynamicForm.builder("people", "people")
                 .addField(DynamicField.of("secret", "VARCHAR"))
@@ -41,7 +63,7 @@ class JoinFieldUseResultVisibilityTest {
         JoinQuerySpec spec = builder.selectAs(builder.root(), "secret", "visible_secret").build();
         DynamicRow raw = DynamicRow.copyOf(Map.of("visible_secret", "classified"));
         FieldUsePolicy policy = FieldUsePolicy.builder()
-                .visibility("secret", FieldVisibility.FULL).build();
+                .joinVisibility(new JoinFieldRef(builder.root(), "secret"), FieldVisibility.FULL).build();
 
         assertAll(
                 () -> assertEquals("classified", SyncFormClient.create(
@@ -54,13 +76,16 @@ class JoinFieldUseResultVisibilityTest {
     @Test
     void governedJoinAppliesTheMaskingPolicyExactlyOnce() {
         DynamicForm form = DynamicForm.builder("people", "people")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
                 .addField(DynamicField.of("secret", "VARCHAR"))
                 .masked("secret", MaskedFieldDefinition.builder("length-label").build()).build();
         JoinQuerySpec.Builder builder = JoinQuerySpec.builder(form);
-        JoinQuerySpec spec = builder.selectAs(builder.root(), "secret", "visible_secret").build();
+        JoinQuerySpec spec = builder.selectAs(builder.root(), "secret", "visible_secret")
+                .orderBy(builder.root(), "id", com.flying.orm.core.page.PageSort.Direction.ASC).build();
         DynamicRow raw = DynamicRow.copyOf(Map.of("visible_secret", "classified"));
         FieldUsePolicy policy = FieldUsePolicy.builder()
-                .visibility("secret", FieldVisibility.MASKED).build();
+                .allowJoin(new JoinFieldRef(builder.root(), "id"), FieldUse.SORT)
+                .joinVisibility(new JoinFieldRef(builder.root(), "secret"), FieldVisibility.MASKED).build();
         FormDataSqlRenderer renderer = renderer().withProtectedFields(
                 com.flying.orm.rdb.protection.ProtectedFieldRuntime.withoutKeys(
                         com.flying.orm.rdb.protection.ProtectedValueNormalizerRegistry.standard(),
@@ -71,7 +96,13 @@ class JoinFieldUseResultVisibilityTest {
                 () -> assertEquals("[10]", SyncFormClient.create(syncExecutor(raw), syncBatchExecutor(), renderer)
                         .withFieldUsePolicy(policy).selectJoin(spec).getFirst().get("visible_secret")),
                 () -> assertEquals("[10]", ReactiveFormClient.create(reactiveExecutor(raw), renderer)
-                        .withFieldUsePolicy(policy).selectJoin(spec).single().block().get("visible_secret")));
+                        .withFieldUsePolicy(policy).selectJoin(spec).single().block().get("visible_secret")),
+                () -> assertEquals("[10]", SyncFormClient.create(syncExecutor(raw), syncBatchExecutor(), renderer)
+                        .withFieldUsePolicy(policy).pageJoin(spec, com.flying.orm.core.page.PageQuery.of(1, 10))
+                        .rows().getFirst().get("visible_secret")),
+                () -> assertEquals(List.of("[10]", "[10]"), ReactiveFormClient.create(reactiveExecutor(raw), renderer)
+                        .withFieldUsePolicy(policy).pageJoin(spec, com.flying.orm.core.page.PageQuery.of(1, 10))
+                        .repeat(1).map(page -> page.rows().getFirst().get("visible_secret")).collectList().block()));
     }
 
     @Test
@@ -106,9 +137,9 @@ class JoinFieldUseResultVisibilityTest {
         DynamicRow raw = rawRow();
         FormDataSqlRenderer renderer = renderer();
         DynamicRow sync = SyncFormClient.create(syncExecutor(raw), syncBatchExecutor(), renderer)
-                .withFieldUsePolicy(policy()).selectJoin(spec).getFirst();
+                .withFieldUsePolicy(policy(root)).selectJoin(spec).getFirst();
         DynamicRow reactive = ReactiveFormClient.create(reactiveExecutor(raw), renderer)
-                .withFieldUsePolicy(policy()).selectJoin(spec).single().block();
+                .withFieldUsePolicy(policy(root)).selectJoin(spec).single().block();
 
         assertPublished(sync);
         assertPublished(reactive);
@@ -131,11 +162,11 @@ class JoinFieldUseResultVisibilityTest {
                           .build();
     }
 
-    private static FieldUsePolicy policy() {
+    private static FieldUsePolicy policy(JoinSource root) {
         return FieldUsePolicy.builder()
-                             .visibility("id", FieldVisibility.FULL)
-                             .visibility("secret", FieldVisibility.MASKED)
-                             .allow("internal_note", FieldUse.PROJECT)
+                             .joinVisibility(new JoinFieldRef(root, "id"), FieldVisibility.FULL)
+                             .joinVisibility(new JoinFieldRef(root, "secret"), FieldVisibility.MASKED)
+                             .allowJoin(new JoinFieldRef(root, "internal_note"), FieldUse.PROJECT)
                              .build();
     }
 
@@ -149,10 +180,13 @@ class JoinFieldUseResultVisibilityTest {
 
     private static SyncSqlExecutor syncExecutor(DynamicRow raw) {
         return (SyncSqlExecutor) Proxy.newProxyInstance(
-                SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{SyncSqlExecutor.class},
+                SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{com.flying.orm.rdb.support.ListQueryFixture.class},
                 (proxy, method, arguments) -> {
                     if (method.getName().equals("query")) {
-                        return List.of(raw);
+                        com.flying.orm.core.sql.render.SqlRequest request =
+                                (com.flying.orm.core.sql.render.SqlRequest) arguments[0];
+                        return List.of(request.sql().startsWith("select count(*)")
+                                ? DynamicRow.copyOf(Map.of("total", 1L)) : raw);
                     }
                     if (method.getName().equals("queryMapped")) {
                         @SuppressWarnings("unchecked")
@@ -166,7 +200,8 @@ class JoinFieldUseResultVisibilityTest {
     private static ReactiveSqlExecutor reactiveExecutor(DynamicRow raw) {
         return new ReactiveSqlExecutor() {
             @Override public Flux<DynamicRow> query(com.flying.orm.core.sql.render.SqlRequest request) {
-                return Flux.just(raw);
+                return Flux.just(request.sql().startsWith("select count(*)")
+                        ? DynamicRow.copyOf(Map.of("total", 1L)) : raw);
             }
             @Override public Mono<Long> rowsUpdated(com.flying.orm.core.sql.render.SqlRequest request) {
                 return Mono.error(new UnsupportedOperationException());

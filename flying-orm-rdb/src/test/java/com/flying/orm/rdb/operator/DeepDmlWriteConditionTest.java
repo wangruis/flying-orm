@@ -18,7 +18,7 @@ class DeepDmlWriteConditionTest {
         ConditionGroup where = ConditionGroup.and().where("id", "=", 7).build();
         for (int level = 1; level < 10_000; level++) where = ConditionGroup.and().add(where).build();
         ConditionGroup conditions = where;
-        DmlWriteCommand command = DmlWriteCommand.update(renderer, "deep_rows");
+        PlanningDynamicWrite.Update command = new PlanningDynamicWrite.Update(renderer, "deep_rows");
         command.set("label", "updated");
         command.where(ignored -> new WhereDsl(renderer, conditions));
 

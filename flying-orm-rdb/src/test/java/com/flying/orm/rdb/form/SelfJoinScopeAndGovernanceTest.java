@@ -244,7 +244,11 @@ class SelfJoinScopeAndGovernanceTest {
 
     private static SyncFormClient sync(List<SqlRequest> requests, FieldUsePolicy policy, RdbDialect dialect) {
         SyncSqlExecutor executor = (SyncSqlExecutor) Proxy.newProxyInstance(SyncSqlExecutor.class.getClassLoader(),
-                new Class<?>[]{SyncSqlExecutor.class}, (proxy, method, args) -> {
+                new Class<?>[]{com.flying.orm.rdb.support.ListQueryFixture.class}, (proxy, method, args) -> {
+                    if (method.getName().equals("query")) {
+                        requests.add((SqlRequest) args[0]);
+                        return List.of(raw());
+                    }
                     if (method.getName().equals("queryMapped")) {
                         requests.add((SqlRequest) args[0]);
                         @SuppressWarnings("unchecked") RowMapper<Object> mapper = (RowMapper<Object>) args[2];

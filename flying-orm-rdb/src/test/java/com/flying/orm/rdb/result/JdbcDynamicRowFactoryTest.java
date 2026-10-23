@@ -34,7 +34,7 @@ class JdbcDynamicRowFactoryTest {
 
     @Test
     void knownScalarColumnsDoNotConsumeLargeObjectLimits() throws SQLException {
-        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
+        SqlExecutionOptions options = SqlExecutionOptions.unlimited()
                 .withMaxLargeObjectChars(3).withMaxLargeObjectBytes(3);
         String text = "ordinary text";
         byte[] binary = {1, 2, 3, 4};
@@ -48,7 +48,7 @@ class JdbcDynamicRowFactoryTest {
 
     @Test
     void materializedLargeObjectsAndUnknownColumnsKeepTheirLimits() throws SQLException {
-        SqlExecutionOptions options = SqlExecutionOptions.safeDefaults()
+        SqlExecutionOptions options = SqlExecutionOptions.unlimited()
                 .withMaxLargeObjectChars(3).withMaxLargeObjectBytes(3);
         for (int type : new int[]{Types.CLOB, Types.NCLOB, Types.LONGVARCHAR, Types.LONGNVARCHAR,
                 Types.BLOB, Types.LONGVARBINARY, Types.OTHER, Types.JAVA_OBJECT, Types.NULL}) {
@@ -108,7 +108,18 @@ class JdbcDynamicRowFactoryTest {
     }
 
     @Test
-    void keepsSanitizedConnectionFailuresClassifiableWithoutExposingDriverDetails() {
+    void preservesDriverSQLExceptionWithoutDuplicatingItsTypeAndState() {
+        SQLException original = new SQLTransientConnectionException("secret driver detail", "08006", 701);
+        oracle.sql.TIMESTAMPTZ value = new oracle.sql.TIMESTAMPTZ(OffsetDateTime.now());
+        SQLException actual = assertThrows(SQLException.class, () -> JdbcDynamicRowFactory.from(
+                resultSetWithStatementFailure(value, original),
+                SqlExecutionOptions.unlimited()).readCurrentRow());
+        assertSame(original, actual);
+        assertSafeReport(actual);
+    }
+
+    @Test
+    void preservesConnectionFailuresAndSanitizesOnlyThePublicReport() {
         oracle.sql.TIMESTAMPTZ value = new oracle.sql.TIMESTAMPTZ(
                 OffsetDateTime.parse("2026-08-21T11:04:05.123456+08:00"));
         SQLTransientConnectionException transientCause = new SQLTransientConnectionException("secret transient detail", null, 701);
@@ -118,20 +129,20 @@ class JdbcDynamicRowFactoryTest {
                 () -> JdbcDynamicRowFactory.from(
                         resultSetWithStatementFailure(
                                 value, transientCause),
-                        SqlExecutionOptions.safeDefaults()).readCurrentRow());
+                        SqlExecutionOptions.unlimited()).readCurrentRow());
         SQLNonTransientConnectionException permanentFailure = assertThrows(
                 SQLNonTransientConnectionException.class,
                 () -> JdbcDynamicRowFactory.from(
                         resultSetWithStatementFailure(
                                 value, permanentCause),
-                        SqlExecutionOptions.safeDefaults()).readCurrentRow());
+                        SqlExecutionOptions.unlimited()).readCurrentRow());
 
-        assertSanitizedConnectionFailure(transientFailure, transientCause, null, 701);
-        assertSanitizedConnectionFailure(permanentFailure, permanentCause, " ", 702);
+        assertOriginalConnectionFailure(transientFailure, transientCause, null, 701);
+        assertOriginalConnectionFailure(permanentFailure, permanentCause, " ", 702);
     }
 
     @Test
-    void keepsSanitizedTimeoutFailureClassifiableWithoutSqlState() {
+    void keepsOriginalTimeoutFailureClassifiableWithoutSqlState() {
         oracle.sql.TIMESTAMPTZ value = new oracle.sql.TIMESTAMPTZ(
                 OffsetDateTime.parse("2026-08-21T11:04:05.123456+08:00"));
 
@@ -141,10 +152,9 @@ class JdbcDynamicRowFactoryTest {
                 () -> JdbcDynamicRowFactory.from(
                         resultSetWithStatementFailure(
                                 value, original),
-                        SqlExecutionOptions.safeDefaults()).readCurrentRow());
+                        SqlExecutionOptions.unlimited()).readCurrentRow());
 
-        assertEquals("failed to materialize JDBC temporal value", failure.getMessage());
-        assertSame(original, failure.getCause());
+        assertSame(original, failure);
         assertSafeReport(failure);
         assertNull(failure.getSQLState());
         assertEquals(703, failure.getErrorCode());
@@ -153,7 +163,7 @@ class JdbcDynamicRowFactoryTest {
     }
 
     @Test
-    void keepsSanitizedRecoverableFailureClassifiableWithoutSqlState() {
+    void keepsOriginalRecoverableFailureClassifiableWithoutSqlState() {
         oracle.sql.TIMESTAMPTZ value = new oracle.sql.TIMESTAMPTZ(
                 OffsetDateTime.parse("2026-08-21T11:04:05.123456+08:00"));
 
@@ -163,10 +173,9 @@ class JdbcDynamicRowFactoryTest {
                 () -> JdbcDynamicRowFactory.from(
                         resultSetWithStatementFailure(
                                 value, original),
-                        SqlExecutionOptions.safeDefaults()).readCurrentRow());
+                        SqlExecutionOptions.unlimited()).readCurrentRow());
 
-        assertEquals("failed to materialize JDBC temporal value", failure.getMessage());
-        assertSame(original, failure.getCause());
+        assertSame(original, failure);
         assertSafeReport(failure);
         assertNull(failure.getSQLState());
         assertEquals(704, failure.getErrorCode());
@@ -175,7 +184,7 @@ class JdbcDynamicRowFactoryTest {
     }
 
     private static DynamicRow read(Object value, Connection connection) throws SQLException {
-        return JdbcDynamicRowFactory.from(resultSet(value, connection), SqlExecutionOptions.safeDefaults())
+        return JdbcDynamicRowFactory.from(resultSet(value, connection), SqlExecutionOptions.unlimited())
                                     .readCurrentRow();
     }
 
@@ -216,10 +225,9 @@ class JdbcDynamicRowFactoryTest {
         });
     }
 
-    private static void assertSanitizedConnectionFailure(SQLException failure, SQLException original,
+    private static void assertOriginalConnectionFailure(SQLException failure, SQLException original,
                                                          String sqlState, int errorCode) {
-        assertEquals("failed to materialize JDBC temporal value", failure.getMessage());
-        assertSame(original, failure.getCause());
+        assertSame(original, failure);
         assertSafeReport(failure);
         assertEquals(sqlState, failure.getSQLState());
         assertEquals(errorCode, failure.getErrorCode());

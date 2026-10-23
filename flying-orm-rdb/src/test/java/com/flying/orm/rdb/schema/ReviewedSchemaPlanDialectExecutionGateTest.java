@@ -9,7 +9,6 @@ import com.flying.orm.core.metadata.IndexKeyPart;
 import com.flying.orm.core.metadata.PrimaryKeyDefinition;
 import com.flying.orm.core.metadata.ReferentialAction;
 import com.flying.orm.core.metadata.RelationIdentity;
-import com.flying.orm.core.metadata.RelationalMetadataFingerprint;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 import com.flying.orm.core.sql.render.SqlRequest;
@@ -38,7 +37,7 @@ class ReviewedSchemaPlanDialectExecutionGateTest {
             .build();
 
     @Test
-    void builtInPlansAdmitSafeEvolutionKindsButKeepConstraintReplacementClosed() {
+    void plansKeepExplicitBackendSqlWithoutHardcodedDialectPolicy() {
         for (RdbDialect dialect : List.of(
                 RdbDialect.h2(),
                 RdbDialect.mysql(),
@@ -46,12 +45,7 @@ class ReviewedSchemaPlanDialectExecutionGateTest {
                 RdbDialect.sqlServer())) {
             DatabaseDescriptor database = DatabaseDescriptor.of(dialect.name(), "test", dialect);
             for (SchemaOperation operation : evolutionOperations()) {
-                boolean unsupported = switch (operation.kind()) {
-                    case VERIFY_MANUALLY -> true;
-                    case CHANGE_FOREIGN_KEY -> false;
-                    case CHANGE_CHECK -> !dialect.name().equals("mysql");
-                    default -> false;
-                };
+                boolean unsupported = operation.kind() == SchemaOperation.Kind.VERIFY_MANUALLY;
                 if (unsupported) {
                     assertThrows(IllegalArgumentException.class, () -> executablePresentPlan(database, operation),
                             () -> dialect.name() + " accepted " + operation.kind());
@@ -66,10 +60,14 @@ class ReviewedSchemaPlanDialectExecutionGateTest {
     }
 
     @Test
-    void unknownDialectsDoNotInheritBuiltInEvolutionSupport() {
+    void customBackendCanSupplyExplicitSqlForItsOwnOperations() {
         DatabaseDescriptor database = DatabaseDescriptor.of("custom", "test", "custom", DialectCapabilities.empty());
         for (SchemaOperation operation : evolutionOperations()) {
-            assertThrows(IllegalArgumentException.class, () -> executablePresentPlan(database, operation));
+            if (operation.kind() == SchemaOperation.Kind.VERIFY_MANUALLY) {
+                assertThrows(IllegalArgumentException.class, () -> executablePresentPlan(database, operation));
+            } else {
+                assertDoesNotThrow(() -> executablePresentPlan(database, operation));
+            }
         }
     }
 
@@ -130,19 +128,12 @@ class ReviewedSchemaPlanDialectExecutionGateTest {
         return List.copyOf(operations);
     }
 
-    private static ReviewedSchemaPlan executablePresentPlan(DatabaseDescriptor database,
+    private static SchemaMigrationPlan executablePresentPlan(DatabaseDescriptor database,
                                                             SchemaOperation operation) {
-        return ReviewedSchemaPlan.builder(database)
+        return SchemaMigrationPlan.builder(database)
                 .compatibilityMode(SchemaCompatibilityMode.EXACT)
                 .desiredTable(TABLE)
-                .desiredFingerprint(RelationalMetadataFingerprint.of(TABLE))
-                .actualFingerprint("actual")
-                .addStep(SchemaPlanStep.executable(
-                        0,
-                        operation,
-                        new SqlRequest("reviewed ddl", List.of()),
-                        SchemaMigrationRiskLevel.CRITICAL,
-                        List.of()))
+                .addStep(new SchemaPlanStep(operation, List.of(new SqlRequest("reviewed ddl", List.of()))))
                 .build();
     }
 

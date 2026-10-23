@@ -26,132 +26,72 @@ final class R2dbcBatchChunker {
     private R2dbcBatchChunker() {
     }
 
-    static Flux<R2dbcBatchWriterChunks.BatchChunk> chunks(BatchWriteRequest request) {
-        return chunks(request, ignored -> {
-        });
-    }
-
     static Flux<R2dbcBatchWriterChunks.BatchChunk> chunks(BatchWriteRequest request,
-                                                           LongConsumer acceptedRows) {
-        return chunks(request, rows(request), acceptedRows);
-    }
-
-    private static Flux<Object[]> rows(BatchWriteRequest request) {
-        long maxRows = request.options().maxRows();
-        return Flux.from(request.rows())
-                .onErrorMap(BatchExecutionEvidenceException.class, R2dbcBatchRowSourceFailure::new)
-                .index()
-                .handle((tuple, sink) -> {
-                    if (maxRows > 0 && tuple.getT1() >= maxRows) {
-                        sink.error(new R2dbcBatchRowLimitExceededException(tuple.getT1(), maxRows));
-                    } else {
-                        Object[] stableRow = R2dbcParameterValues.stabilizeBatchParameters(
-                                tuple.getT2(), request.parameterCount());
-                        sink.next(stableRow);
-                    }
-                });
-    }
-
-    static Flux<R2dbcBatchWriterChunks.BatchChunk> chunks(BatchWriteRequest request,
-                                                           Flux<Object[]> preparedRows) {
-        return chunks(request, preparedRows, ignored -> { });
-    }
-
-    private static Flux<R2dbcBatchWriterChunks.BatchChunk> chunks(BatchWriteRequest request,
-                                                                   Flux<Object[]> preparedRows,
-                                                                   LongConsumer acceptedRows) {
-        Flux<Object[]> safeRows = requireNonNull(preparedRows, "prepared rows must not be null");
+                                                         LongConsumer acceptedRows) {
         LongConsumer safeAcceptedRows = requireNonNull(acceptedRows, "accepted row tracker must not be null");
         return Flux.defer(() -> {
-            long perChunkLimit = request.options().maxBufferedBytes();
-            long maxRowBytes = request.options().maxRowBytes();
-            ChunkAccumulator accumulator = new ChunkAccumulator(
-                    request.options().bufferSize(), perChunkLimit, maxRowBytes);
-            Flux<R2dbcBatchWriterChunks.BatchChunk> completed = safeRows.index()
-                    .map(tuple -> {
-                        IndexedRow row = IndexedRow.from(
-                                tuple.getT1(), tuple.getT2(), request.parameterCount(),
-                                maxRowBytes);
-                        safeAcceptedRows.accept(1L);
-                        return row;
-                    })
+            ChunkAccumulator accumulator = new ChunkAccumulator(request);
+            Flux<R2dbcBatchWriterChunks.BatchChunk> completed = Flux.from(request.rows())
+                    .onErrorMap(BatchExecutionEvidenceException.class, R2dbcBatchRowSourceFailure::new)
                     .handle((row, sink) -> {
-                        List<IndexedRow> chunk = accumulator.accept(row);
+                        R2dbcBatchWriterChunks.BatchChunk chunk = accumulator.accept(row);
+                        safeAcceptedRows.accept(1L);
                         if (chunk != null) {
-                            sink.next(toChunk(request, accumulator.nextChunkIndex(), chunk));
+                            sink.next(chunk);
                         }
                     });
             return completed.concatWith(Flux.defer(() -> {
-                List<IndexedRow> last = accumulator.drain();
-                return last == null
-                        ? Flux.empty()
-                        : Flux.just(toChunk(request, accumulator.nextChunkIndex(), last));
+                R2dbcBatchWriterChunks.BatchChunk last = accumulator.drain();
+                return last == null ? Flux.empty() : Flux.just(last);
             }));
         });
     }
 
-    private static R2dbcBatchWriterChunks.BatchChunk toChunk(BatchWriteRequest request,
-                                                               int chunkIndex,
-                                                               List<IndexedRow> rows) {
-        List<ProtectedBatchRows.RowView> rowViews = new ArrayList<>(rows.size());
-        long estimatedBytes = 0L;
-        for (IndexedRow row : rows) {
-            ProtectedBatchRows.RowView rowView = row.rowView();
-            rowViews.add(rowView);
-            estimatedBytes += rowView.estimatedBytes();
-        }
-        return new R2dbcBatchWriterChunks.BatchChunk(
-                chunkIndex, rows.getFirst().offset(), rowViews, estimatedBytes);
-    }
-
-    private record IndexedRow(long offset, ProtectedBatchRows.RowView rowView) {
-
-        private static IndexedRow from(long offset,
-                                       Object[] row,
-                                       int parameterCount,
-                                       long maxRowBytes) {
-            ProtectedBatchRows.RowView owned = ProtectedBatchRows.admit(
-                    row, parameterCount, maxRowBytes, "row bytes");
-            return new IndexedRow(offset, owned);
-        }
-
-        private IndexedRow {
-            rowView = requireNonNull(rowView, "batch row view must not be null");
-        }
-    }
-
     /** 行数满或无法再为最大合法行预留空间时立即发布，不接纳下一缓冲的跨界行。 */
     private static final class ChunkAccumulator {
+        private final int parameterCount;
         private final int chunkSize;
+        private final long maxRows;
+        private final long maxRowBytes;
+        private final boolean bounded;
         private final long drainThreshold;
-        private List<IndexedRow> rows;
+        private List<ProtectedBatchRows.RowView> rows;
         private long bytes;
-        private int chunkIndex;
+        private long accepted;
 
-        private ChunkAccumulator(int chunkSize, long byteLimit, long maxRowBytes) {
-            this.chunkSize = chunkSize;
+        private ChunkAccumulator(BatchWriteRequest request) {
+            this.parameterCount = request.parameterCount();
+            this.chunkSize = request.options().bufferSize();
+            this.maxRows = request.options().maxRows();
+            this.maxRowBytes = request.options().maxRowBytes();
+            long byteLimit = request.options().maxBufferedBytes();
+            this.bounded = byteLimit != Long.MAX_VALUE;
             this.drainThreshold = byteLimit - maxRowBytes;
             this.rows = new ArrayList<>(Math.min(chunkSize, 16));
         }
 
-        private List<IndexedRow> accept(IndexedRow row) {
+        private R2dbcBatchWriterChunks.BatchChunk accept(Object[] values) {
+            if (maxRows > 0 && accepted >= maxRows) {
+                throw new R2dbcBatchRowLimitExceededException(accepted, maxRows);
+            }
+            Object[] stable = R2dbcParameterValues.stabilizeBatchParameters(values, parameterCount);
+            ProtectedBatchRows.RowView row = ProtectedBatchRows.admit(
+                    stable, parameterCount, maxRowBytes, "row bytes");
             rows.add(row);
-            bytes += row.rowView().estimatedBytes();
-            return rows.size() == chunkSize || bytes > drainThreshold ? drain() : null;
+            accepted++;
+            if (bounded) bytes += row.estimatedBytes();
+            return rows.size() == chunkSize || bounded && bytes > drainThreshold ? drain() : null;
         }
 
-        private List<IndexedRow> drain() {
+        private R2dbcBatchWriterChunks.BatchChunk drain() {
             if (rows.isEmpty()) {
                 return null;
             }
-            List<IndexedRow> completed = rows;
+            R2dbcBatchWriterChunks.BatchChunk completed =
+                    new R2dbcBatchWriterChunks.BatchChunk(accepted - rows.size(), rows);
             rows = new ArrayList<>(Math.min(chunkSize, 16));
             bytes = 0L;
             return completed;
-        }
-
-        private int nextChunkIndex() {
-            return chunkIndex++;
         }
     }
 }

@@ -18,7 +18,7 @@ class BatchEvidenceNoTransactionOwnershipTest {
         JdbcBatchWriter writer = state.writer()
                 ;
 
-        BatchExecutionEvidence evidence = writer.writeBatchEvidence(JdbcBatchEvidenceTestSupport.request(
+        BatchExecutionEvidence evidence = writer.writeBatch(JdbcBatchEvidenceTestSupport.request(
                 Flux.range(0, 2).map(value -> new Object[]{value}), 2));
 
         assertEquals(1, state.acquired.get());

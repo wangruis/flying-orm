@@ -28,7 +28,7 @@ public record EncryptedFieldDefinition(Set<EncryptedSearchMode> searchModes,
                                        int maxNormalizedLength,
                                        int containsMinLength) {
 
-    private static final Pattern EXTENSION_ID = Pattern.compile("[A-Za-z0-9._-]{1,32}");
+    private static final Pattern EXTENSION_ID = Pattern.compile("[A-Za-z0-9._-]+");
 
     /** 完成不可变快照和跨属性校验。 */
     public EncryptedFieldDefinition {
@@ -67,7 +67,7 @@ public record EncryptedFieldDefinition(Set<EncryptedSearchMode> searchModes,
         }
     }
 
-    /** @return 使用安全默认值的构建器；默认启用精确搜索 */
+    /** @return 默认启用精确搜索的构建器；文本容量由调用方按需限制 */
     public static Builder builder() {
         return new Builder();
     }
@@ -84,7 +84,7 @@ public record EncryptedFieldDefinition(Set<EncryptedSearchMode> searchModes,
         private Set<EncryptedSearchMode> searchModes = EnumSet.of(EncryptedSearchMode.EXACT);
         private String normalizer = "identity";
         private List<Integer> suffixLengths = List.of();
-        private int maxNormalizedLength = 4096;
+        private int maxNormalizedLength = Integer.MAX_VALUE;
         private int containsMinLength = 3;
 
         private Builder() {

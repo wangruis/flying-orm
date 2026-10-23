@@ -17,6 +17,20 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class QualifiedJoinFieldUsePolicyTest {
 
     @Test
+    void singleSourceJoinUsesTheSameQualifiedGrantsAsMultiSourceJoin() {
+        Sources sources = sources();
+        JoinFieldRef name = new JoinFieldRef(sources.accounts(), "name");
+        FieldUseRequirements requirements = FieldUseRequirements.builder()
+                .requireJoin(name, FieldUse.PROJECT).build();
+        Map<JoinSource, FieldScope> scopes = Map.of(sources.accounts(), FieldScope.unrestricted());
+        FieldUsePolicy bare = FieldUsePolicy.builder().visibility("name", FieldVisibility.FULL).build();
+        assertFalse(bare.approveJoin(requirements, scopes).allowed());
+        FieldUsePolicy qualified = FieldUsePolicy.builder().joinVisibility(name, FieldVisibility.FULL).build();
+        assertTrue(qualified.approveJoin(requirements, scopes).allowed());
+        assertEquals(FieldVisibility.FULL, qualified.approveJoin(requirements, scopes).joinVisibility(name));
+    }
+
+    @Test
     void keepsQualifiedRequirementsAndDecisionsImmutableAndSourceSpecific() {
         Sources sources = sources();
         JoinFieldRef accountName = new JoinFieldRef(sources.accounts(), " NAME ");

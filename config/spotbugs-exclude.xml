@@ -1,5 +1,38 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <FindBugsFilter>
+    <!-- Internal ownership transfer: JDBC consumes before clear; each R2DBC batch owns a fresh
+         buffer that is never modified after publication. No public user callback receives this list. -->
+    <Match>
+        <Class name="com.flying.orm.rdb.internal.protection.ProtectedReplacementBatchPlan$TokenBuffer"/>
+        <Method name="parameters"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!-- Every private BatchSpec constructor call receives List.of/copyOf and Set.of/copyOf,
+         or reuses those immutable fields. Accessors cannot expose mutable caller collections. -->
+    <Match>
+        <Class name="com.flying.orm.rdb.form.spec.BatchSpec"/>
+        <Method name="~(conflictFields|ignoredUpdates)"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!-- Null denotes default primary-key conflict handling; coordinators use it to select
+         generated-key preparation. An empty non-null array would change that branch. -->
+    <Match>
+        <Class name="com.flying.orm.rdb.repository.RepositoryBatchKind"/>
+        <Method name="conflictColumns"/>
+        <Bug pattern="PZLA_PREFER_ZERO_LENGTH_ARRAYS"/>
+    </Match>
+    <!-- prepareMapping fills the array once, never exposes or mutates it after its volatile
+         publication. Every mapping accessor reads mappingKeys before reading associated fields. -->
+    <Match>
+        <Class name="com.flying.orm.rdb.result.RowLayout"/>
+        <Field name="mappingKeys"/>
+        <Bug pattern="VO_VOLATILE_REFERENCE_TO_ARRAY"/>
+    </Match>
+    <Match>
+        <Class name="com.flying.orm.rdb.result.RowLayout"/>
+        <Field name="ambiguousMappingColumns"/>
+        <Bug pattern="IS2_INCONSISTENT_SYNC"/>
+    </Match>
     <!-- Public guard methods deliberately fail fast with unchecked contract errors. -->
     <Match>
         <Bug pattern="THROWS_METHOD_THROWS_RUNTIMEEXCEPTION"/>
@@ -31,10 +64,7 @@
         <Or>
             <Class name="com.flying.orm.rdb.batch.BatchOptimisticLockException"/>
             <Class name="com.flying.orm.rdb.batch.BatchExecutionEvidenceException"/>
-            <Class name="com.flying.orm.rdb.batch.BatchWriteException"/>
             <Class name="com.flying.orm.rdb.execution.SqlExecutionSequenceException"/>
-            <Class name="com.flying.orm.rdb.reactive.R2dbcBatchChunkConflictFailure"/>
-            <Class name="com.flying.orm.rdb.reactive.R2dbcBatchChunkWriteFailure"/>
             <Class name="com.flying.orm.rdb.schema.EntitySchemaSyncException"/>
         </Or>
         <Bug pattern="SE_BAD_FIELD"/>
@@ -90,6 +120,34 @@
         <Method name="requireColumnName"/>
         <Bug pattern="UPM_UNCALLED_PRIVATE_METHOD"/>
     </Match>
+    <!-- Nested Call.equals and Arithmetic.equals invoke this private interface helper (invokestatic). -->
+    <Match>
+        <Class name="com.flying.orm.core.expression.ValueExpression"/>
+        <Method name="structurallyEqual"/>
+        <Bug pattern="UPM_UNCALLED_PRIVATE_METHOD"/>
+    </Match>
+    <!-- Null means unrestricted visibility or SQL NULL; neither means an empty result array. -->
+    <Match>
+        <Class name="com.flying.orm.rdb.form.AggregateResultDecoder"/>
+        <Method name="resolveVisibility"/>
+        <Bug pattern="PZLA_PREFER_ZERO_LENGTH_ARRAYS"/>
+    </Match>
+    <Match>
+        <Class name="com.flying.orm.rdb.codec.EnumMaskValueCodec"/>
+        <Method name="read"/>
+        <Bug pattern="PZLA_PREFER_ZERO_LENGTH_ARRAYS"/>
+    </Match>
+    <!-- QuerySpec is immutable; its sort list and AggregateSpec's own list are frozen at construction. -->
+    <Match>
+        <Class name="com.flying.orm.rdb.aggregate.AggregateSpec"/>
+        <Method name="~(query|sorts)"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!-- SQL value equality is inherited intentionally; compiler trust and batching hints are not value identity. -->
+    <Match>
+        <Class name="com.flying.orm.rdb.internal.plan.VerifiedSqlStatementPlan"/>
+        <Bug pattern="EQ_DOESNT_OVERRIDE_EQUALS"/>
+    </Match>
     <!-- These accessors expose immutable values already frozen during construction. -->
     <Match>
         <Class name="com.flying.orm.core.codec.ValueCodecRegistry"/>
@@ -99,7 +157,6 @@
         <Or>
             <Class name="com.flying.orm.core.condition.StructuredConditionInput"/>
             <Class name="com.flying.orm.core.form.DynamicFormChangeSet"/>
-            <Class name="com.flying.orm.core.metadata.ForeignKeyMetadata"/>
             <Class name="com.flying.orm.core.param.ParameterConditionCompiler"/>
             <Class name="com.flying.orm.core.protection.EncryptedFieldDefinition"/>
             <Class name="com.flying.orm.core.scope.FieldScope"/>
@@ -188,7 +245,6 @@
         <Or>
             <Class name="com.flying.orm.rdb.bootstrap.FlyingOrmEnvironment"/>
             <Class name="com.flying.orm.rdb.dialect.RdbDialect"/>
-            <Class name="com.flying.orm.rdb.execution.BatchRowSnapshotter$Snapshot"/>
             <Class name="com.flying.orm.rdb.execution.ProtectedBatchRows$RowView"/>
             <Class name="com.flying.orm.rdb.form.spec.WriteSpec"/>
             <Class name="com.flying.orm.rdb.internal.plan.ConditionStructurePlan"/>
@@ -203,10 +259,7 @@
             <Class name="com.flying.orm.rdb.operator.ColumnBuilder"/>
             <Class name="com.flying.orm.rdb.operator.ForeignKeyBuilder"/>
             <Class name="com.flying.orm.rdb.operator.IndexBuilder"/>
-            <Class name="com.flying.orm.rdb.operator.SyncColumnBuilder"/>
             <Class name="com.flying.orm.rdb.operator.SyncDatabaseOperator$NativeComponents"/>
-            <Class name="com.flying.orm.rdb.operator.SyncForeignKeyBuilder"/>
-            <Class name="com.flying.orm.rdb.operator.SyncIndexBuilder"/>
             <Class name="com.flying.orm.rdb.protection.ProtectedFieldRuntime$PreparedWrite"/>
             <Class name="com.flying.orm.rdb.schema.EntitySchemaSynchronizer"/>
             <Class name="com.flying.orm.rdb.schema.SchemaMigrationObservation"/>
@@ -222,5 +275,38 @@
     <Match>
         <Class name="com.flying.orm.rdb.jdbc.JdbcBatchRows"/>
         <Bug pattern="WA_AWAIT_NOT_IN_LOOP"/>
+    </Match>
+    <!-- Stream.toList publishes an immutable String list; OwnedMetadataConstructionTest checks mutation rejection. -->
+    <Match>
+        <Class name="com.flying.orm.core.metadata.IndexDefinition"/>
+        <Method name="columns"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!-- Compilation shares the actual reflection Field with its metadata; it does not own or copy reflection handles. -->
+    <Match>
+        <Class name="com.flying.orm.rdb.internal.mapping.EntityMetadataResolver$Property"/>
+        <Method name="~(field|&lt;init&gt;)"/>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+    <!-- These accessors deliberately return the configured client/execution port, not a copied service. -->
+    <Match>
+        <Or>
+            <Class name="com.flying.orm.rdb.operator.DatabaseOperator"/>
+            <Class name="com.flying.orm.rdb.operator.SyncDatabaseOperator"/>
+        </Or>
+        <Method name="~(forms|executor)"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!-- Both construction branches publish immutable requests (Stream.toList or List.copyOf). -->
+    <Match>
+        <Class name="com.flying.orm.rdb.schema.SchemaMigrationPlan"/>
+        <Method name="~(requests|requestsForExecution)"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!-- SchemaMigrationPlan is an immutable value; results share the executed plan. -->
+    <Match>
+        <Class name="com.flying.orm.rdb.schema.SchemaMigrationResult"/>
+        <Method name="plan"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
 </FindBugsFilter>

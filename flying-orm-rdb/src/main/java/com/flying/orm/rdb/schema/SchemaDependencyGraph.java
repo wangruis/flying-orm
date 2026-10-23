@@ -49,7 +49,7 @@ final class SchemaDependencyGraph {
         for (RelationalTableDefinition table : orderedTables) {
             TreeSet<RelationIdentity> dependencies = new TreeSet<>(IDENTITY_ORDER);
             for (ForeignKeyDefinition foreignKey : table.foreignKeys()) {
-                RelationIdentity referencedTable = foreignKey.referencedTable();
+                RelationIdentity referencedTable = foreignKey.reference();
                 if (tableIndex.containsKey(referencedTable)) {
                     dependencies.add(referencedTable);
                 }

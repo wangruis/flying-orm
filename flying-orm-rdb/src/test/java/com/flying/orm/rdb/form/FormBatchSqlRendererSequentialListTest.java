@@ -6,6 +6,8 @@ import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import org.junit.jupiter.api.Test;
+import org.reactivestreams.Subscription;
+import reactor.core.publisher.BaseSubscriber;
 import reactor.core.publisher.Flux;
 
 import java.nio.ByteBuffer;
@@ -18,8 +20,67 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FormBatchSqlRendererSequentialListTest {
+
+    @Test
+    void defaultOnlyInsertHasNoBindingsAndDoesNotRepeatDefaultValuesClause() {
+        for (RdbDialect dialect : List.of(RdbDialect.postgresql(), RdbDialect.mysql(),
+                RdbDialect.sqlServer(), RdbDialect.oracle(), RdbDialect.h2())) {
+            FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                    SqlRenderer.builder().addDefaultTerms().build(), dialect);
+            String expected = switch (dialect.name()) {
+                case "mysql" -> "insert into `batch_rows` () values ()";
+                case "oracle" -> "insert into \"batch_rows\" (\"id\") values (default)";
+                case "sqlserver" -> "insert into [batch_rows] default values";
+                case "h2" -> "insert into batch_rows default values";
+                default -> "insert into \"batch_rows\" default values";
+            };
+            assertEquals(expected, renderer.insert(form(), Map.of()).sql(), dialect.name());
+            BatchWriteRequest request = renderer.insertBatch(form(), List.of(Map.of(), Map.of(), Map.of()));
+            assertEquals(expected, request.sql(), dialect.name());
+            assertEquals(List.of(), request.parameterTypes());
+            assertEquals(List.of(List.of(), List.of(), List.of()), parameterRows(request));
+            assertEquals(null, com.flying.orm.rdb.internal.plan.SqlExecutionStatements.r2dbcInsertBatch(
+                    request.statement(), dialect.name(), 3));
+        }
+    }
+
+    @Test
+    void defaultOnlyInsertDoesNotAllowAnEmptyUpdateOrAnIncompleteUpsertKey() {
+        assertThrows(IllegalArgumentException.class, () -> renderer().update(form(), Map.of(),
+                com.flying.orm.core.condition.ConditionGroup.and().where("id", "=", 1L).build()));
+        assertThrows(IllegalArgumentException.class, () -> renderer().upsertBatch(form(), List.of(Map.of())));
+    }
+
+    @Test
+    void singleRowRemainsReplayableIndependentAndDemandDriven() {
+        for (BatchOperation operation : BatchOperation.values()) {
+            Map<String, Object> first = row(1L, "first", (byte) 1);
+            CountingLinkedList<Map<String, Object>> rows = new CountingLinkedList<>(List.of(first));
+            BatchWriteRequest request = operation.render(renderer(), form(), rows);
+            List<List<Object>> expected = parameterRows(request);
+            first.put("payload", ByteBuffer.wrap(new byte[]{99, 100}));
+            first.clear();
+            rows.clear();
+            assertEquals(expected, parameterRows(request), operation.name());
+            assertEquals(0, rows.indexedGetCalls());
+
+            List<Object[]> received = new ArrayList<>();
+            BaseSubscriber<Object[]> subscriber = new BaseSubscriber<>() {
+                @Override protected void hookOnSubscribe(Subscription subscription) { }
+                @Override protected void hookOnNext(Object[] value) { received.add(value); }
+            };
+            Flux.from(request.rows()).subscribe(subscriber);
+            assertTrue(received.isEmpty(), "no row before demand");
+            subscriber.request(1);
+            assertEquals(1, received.size());
+            subscriber.request(1);
+            assertEquals(1, received.size(), "single row must not be emitted twice");
+            assertEquals(expected, parameterRows(request), "a new subscription can replay the batch");
+        }
+    }
 
     @Test
     void defaultBatchOperationsPrepareSequentialListRowsWithoutIndexedReads() {
@@ -50,7 +111,6 @@ class FormBatchSqlRendererSequentialListTest {
 
             IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
                     () -> operation.render(renderer(), form(), rows), operation.name());
-
             assertEquals("batch insert row [1] fields must match the first row", error.getMessage(), operation.name());
         }
     }

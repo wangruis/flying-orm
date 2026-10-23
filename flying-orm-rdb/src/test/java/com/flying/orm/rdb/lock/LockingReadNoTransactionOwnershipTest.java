@@ -20,9 +20,7 @@ class LockingReadNoTransactionOwnershipTest {
         var client = LockingReadTestSupport.syncClient(
                 RdbDialect.postgresql(), queries, request);
 
-        client.lockingRead(LockingReadSpec.of(
-                QuerySpec.of(LockingReadTestSupport.form(), ConditionGroup.and().build()),
-                ReadLock.updateNowait()));
+        client.lockingRead(QuerySpec.of(LockingReadTestSupport.form(), ConditionGroup.and().build()).withLock(ReadLock.updateNowait()));
 
         assertEquals(1, queries.get());
         assertTrue(request.get().sql().endsWith(" FOR UPDATE NOWAIT"), request.get().sql());
@@ -37,11 +35,11 @@ class LockingReadNoTransactionOwnershipTest {
         QuerySpec query = QuerySpec.of(
                 LockingReadTestSupport.form(), ConditionGroup.and().build());
 
-        client.lockingRead(LockingReadSpec.of(query, ReadLock.update()));
+        client.lockingRead(query.withLock(ReadLock.update()));
         String waitSql = request.get().sql();
-        client.lockingRead(LockingReadSpec.of(query, ReadLock.updateNowait()));
+        client.lockingRead(query.withLock(ReadLock.updateNowait()));
         String noWaitSql = request.get().sql();
-        client.lockingRead(LockingReadSpec.of(query, ReadLock.updateSkipLocked()));
+        client.lockingRead(query.withLock(ReadLock.updateSkipLocked()));
         String skipLockedSql = request.get().sql();
 
         assertEquals(3, queries.get());

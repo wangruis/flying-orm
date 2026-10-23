@@ -28,25 +28,42 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class BatchFieldUseFailBeforeExecutionTest {
 
     @Test
-    void syncBatchResultEvidenceAndChunksRejectDeniedInsertBeforeTheExecutor() {
+    void unrestrictedUpdateStillChecksExtensionUseBeforeExecution() {
+        AtomicInteger executions = new AtomicInteger();
+        SqlRenderer conditions = SqlRenderer.builder().addDefaultTerms().addTerm(
+                com.flying.orm.core.sql.render.SqlTermHandler.of(
+                        com.flying.orm.core.condition.TermExtensionDescriptor.join("join-only", java.util.Set.of(), 1, 1),
+                        com.flying.orm.core.condition.ConditionValueShape.SCALAR,
+                        (term, context) -> new com.flying.orm.core.sql.render.SqlFragment(
+                                context.identifier(term.field()) + " = ?", java.util.List.of(term.value())))).build();
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(conditions, RdbDialect.postgresql());
+        BatchSpec spec = BatchSpec.update(form(), Flux.just(new BatchUpdate(Map.of("secret", "changed"),
+                conditions.conditions().where("id", "join-only", 1L).build())));
+        SyncFormClient sync = SyncFormClient.create(syncSqlExecutor(), syncBatchExecutor(executions), renderer);
+        ReactiveFormClient reactive = ReactiveFormClient.create(reactiveExecutor(executions), renderer);
+        assertThrows(IllegalArgumentException.class, () -> sync.writeBatch(spec));
+        assertThrows(IllegalArgumentException.class, () -> reactive.writeBatch(spec).block());
+        assertEquals(0, executions.get());
+    }
+
+    @Test
+    void syncBatchRejectsDeniedInsertBeforeTheExecutor() {
         AtomicInteger executions = new AtomicInteger();
         SyncFormClient client = SyncFormClient.create(
                 syncSqlExecutor(), syncBatchExecutor(executions), renderer())
                 .withFieldUsePolicy(deniesSecret());
 
         assertThrows(ScopeAccessException.class, () -> client.writeBatch(insertSpec()));
-        assertThrows(ScopeAccessException.class, () -> client.writeBatchEvidence(insertSpec()));
         assertEquals(0, executions.get());
     }
 
     @Test
-    void reactiveBatchResultEvidenceAndChunksRejectDeniedInsertBeforeTheExecutor() {
+    void reactiveBatchRejectsDeniedInsertBeforeTheExecutor() {
         AtomicInteger executions = new AtomicInteger();
         ReactiveFormClient client = ReactiveFormClient.create(reactiveExecutor(executions), renderer())
                 .withFieldUsePolicy(deniesSecret());
 
         assertThrows(ScopeAccessException.class, () -> client.writeBatch(insertSpec()).block());
-        assertThrows(ScopeAccessException.class, () -> client.writeBatchEvidence(insertSpec()).block());
         assertEquals(0, executions.get());
     }
 
@@ -69,7 +86,7 @@ class BatchFieldUseFailBeforeExecutionTest {
 
     private static SyncSqlExecutor syncSqlExecutor() {
         return (SyncSqlExecutor) Proxy.newProxyInstance(
-                SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{SyncSqlExecutor.class},
+                SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{com.flying.orm.rdb.support.ListQueryFixture.class},
                 (proxy, method, arguments) -> {
                     throw new UnsupportedOperationException(method.toString());
                 });
@@ -103,12 +120,6 @@ class BatchFieldUseFailBeforeExecutionTest {
                 return Mono.error(new AssertionError("batch executor must not be reached: writeBatch"));
             }
 
-            @Override
-            public Mono<com.flying.orm.rdb.batch.BatchExecutionEvidence> writeBatchEvidence(
-                    BatchWriteRequest request) {
-                executions.incrementAndGet();
-                return Mono.error(new AssertionError("batch executor must not be reached: writeBatchEvidence"));
-            }
 
         };
     }

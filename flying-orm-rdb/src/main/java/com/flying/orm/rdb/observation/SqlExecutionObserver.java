@@ -28,9 +28,7 @@ public interface SqlExecutionObserver {
     }
 
 
-    /**
-     * 带参数详情的同一条观测回调。默认回退到原来的结构化事件，旧 observer 不需要改代码。
-     */
+    /** 带参数详情的同一条观测回调；未声明参数需求的实现只处理结构化事件。 */
     default void onExecution(SqlExecutionObservation observation, List<Object> parameters) {
         onExecution(observation);
     }
@@ -48,16 +46,6 @@ public interface SqlExecutionObserver {
     }
 
     static SqlExecutionObserver noop() {
-        return new SqlExecutionObserver() {
-            @Override
-            public boolean enabled() {
-                return false;
-            }
-
-            @Override
-            public void onExecution(SqlExecutionObservation observation) {
-                // 明确关闭观测。
-            }
-        };
+        return SqlExecutionObservers.noop();
     }
 }

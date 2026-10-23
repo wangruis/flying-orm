@@ -62,7 +62,7 @@ public class RdbException extends RuntimeException implements OrmErrorReportProv
                                   reportSqlState(sqlState),
                                   null,
                                   null,
-                                  "database operation failed");
+                                  RdbErrorKind.UNKNOWN.message());
     }
 
     private static String reportSqlState(String value) {

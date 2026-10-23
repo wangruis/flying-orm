@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Iterator;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.lang.management.ManagementFactory;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
@@ -18,6 +19,107 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ConditionNodesTest {
+    private static volatile Object rewriteSink;
+
+    @Test
+    void flatTermVisitsDoNotAllocatePreorderTraversalContainers() {
+        ConditionGroup root = ConditionGroup.and().where("id", ">=", 1L).where("id", "<=", 100L).build();
+        assertFlatRewriteAllocation(() -> ConditionNodes.forEachTerm(root, term -> rewriteSink = term));
+        assertSame(root.children().getLast(), rewriteSink);
+    }
+
+    @Test
+    void flatTermSearchDoesNotAllocatePreorderTraversalContainers() {
+        ConditionGroup root = ConditionGroup.and().where("id", ">=", 1L).where("id", "<=", 100L).build();
+        assertFlatRewriteAllocation(() -> ConditionNodes.anyTerm(root, term -> {
+            rewriteSink = term;
+            return false;
+        }));
+        assertSame(root.children().getLast(), rewriteSink);
+    }
+
+    @Test
+    void leafTraversalPreservesDeepBranchesSharedOccurrencesAndEmptyGroups() {
+        TermCondition first = TermCondition.of("a", "=", 1);
+        TermCondition second = TermCondition.of("b", "=", 2);
+        ConditionGroup branch = ConditionGroup.or().add(first).add(ConditionGroup.and().build()).add(second).build();
+        ConditionGroup deep = branch;
+        for (int index = 0; index < 4_000; index++) deep = ConditionGroup.and().add(deep).build();
+        ConditionGroup root = ConditionGroup.and().add(deep).add(branch).add(first).build();
+        List<TermCondition> visited = new ArrayList<>();
+        ConditionNodes.forEachTerm(root, visited::add);
+        assertEquals(List.of(first, second, first, second, first), visited);
+        visited.clear();
+        assertTrue(ConditionNodes.anyTerm(root, term -> {
+            visited.add(term);
+            return visited.size() == 3;
+        }));
+        assertEquals(List.of(first, second, first), visited);
+        visited.clear();
+        ConditionNodes.forEachTerm(second, visited::add);
+        assertEquals(List.of(second), visited);
+        ConditionNodes.forEachTerm(ConditionGroup.or().build(), term -> {
+            throw new AssertionError("empty group has no leaves");
+        });
+    }
+
+    @Test
+    void flatConditionRewriteDoesNotAllocateASeparateTraversalContainer() {
+        ConditionGroup root = ConditionGroup.and().where("id", ">=", 1L).where("id", "<=", 100L).build();
+        assertFlatRewriteAllocation(() -> rewriteSink = ConditionNodes.rewrite(root, term -> term));
+        assertSame(root, rewriteSink);
+    }
+
+    @Test
+    void flatStructuredRewriteDoesNotAllocateASeparateTraversalContainer() {
+        StructuredConditionInput root = StructuredConditionInput.and(
+                StructuredConditionInput.term("id", "gte", 1L),
+                StructuredConditionInput.term("id", "lte", 100L));
+        assertFlatRewriteAllocation(() -> rewriteSink = ConditionNodes.rewrite(root, term -> term));
+        assertSame(root, rewriteSink);
+    }
+
+    private static void assertFlatRewriteAllocation(Runnable rewrite) {
+        com.sun.management.ThreadMXBean allocation =
+                (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
+        allocation.setThreadAllocatedMemoryEnabled(true);
+        int iterations = 50_000;
+        for (int index = 0; index < iterations; index++) rewrite.run();
+        long thread = Thread.currentThread().threadId();
+        long before = allocation.getThreadAllocatedBytes(thread);
+        for (int index = 0; index < iterations; index++) rewrite.run();
+        long bytes = allocation.getThreadAllocatedBytes(thread) - before;
+        assertTrue(bytes < iterations * 64L, "bytes per rewrite: " + bytes / (double) iterations);
+    }
+
+    @Test
+    void deepChangedConditionsRemainIterativeInBothRepresentations() {
+        int depth = 4_000;
+        ConditionGroup condition = ConditionGroup.and().where("id", "=", 1L).build();
+        StructuredConditionInput input = StructuredConditionInput.term("id", "eq", 1L);
+        for (int index = 0; index < depth; index++) {
+            condition = ConditionGroup.or().add(condition).build();
+            input = StructuredConditionInput.or(input);
+        }
+        AtomicInteger visits = new AtomicInteger();
+        ConditionGroup changed = ConditionNodes.rewrite(condition, term -> {
+            visits.incrementAndGet();
+            return TermCondition.of(term.field(), term.operator(), 2L);
+        });
+        StructuredConditionInput changedInput = ConditionNodes.rewrite(input, term -> {
+            visits.incrementAndGet();
+            return StructuredConditionInput.term(term.field(), term.operator(), 2L);
+        });
+        assertEquals(2, visits.get());
+        for (int index = 0; index < depth; index++) {
+            assertEquals(com.flying.orm.core.condition.LogicalOperator.OR, changed.operator());
+            assertEquals("or", changedInput.logic());
+            changed = (ConditionGroup) changed.children().getFirst();
+            changedInput = changedInput.terms().getFirst();
+        }
+        assertEquals(2L, ((TermCondition) changed.children().getFirst()).value());
+        assertEquals(2L, changedInput.value());
+    }
 
     @Test
     void visitsSharedSubtreesAtEveryOccurrenceInPreorder() {

@@ -10,6 +10,10 @@ final class BatchExecutionObservers {
     private BatchExecutionObservers() {
     }
 
+    static BatchExecutionObserver noop() {
+        return Noop.INSTANCE;
+    }
+
     static BatchExecutionObserver safe(BatchExecutionObserver observer) {
         BatchExecutionObserver safeObserver = Objects.requireNonNull(
                 observer, "batch execution observer must not be null");
@@ -17,7 +21,7 @@ final class BatchExecutionObservers {
             return safeObserver;
         }
         try {
-            return safeObserver.enabled() ? new Safe(safeObserver) : safeObserver;
+            return safeObserver.enabled() ? new Safe(safeObserver) : noop();
         } catch (RuntimeException failure) {
             return BatchExecutionObserver.noop();
         }
@@ -39,6 +43,16 @@ final class BatchExecutionObservers {
     }
 
     interface Isolated {
+    }
+
+    private enum Noop implements BatchExecutionObserver, Isolated {
+        INSTANCE;
+
+        @Override
+        public boolean enabled() { return false; }
+
+        @Override
+        public void onExecution(BatchExecutionObservation observation) { }
     }
 
     private record Safe(BatchExecutionObserver delegate)

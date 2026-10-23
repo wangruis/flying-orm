@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.function.IntFunction;
 import java.util.function.Supplier;
+import java.util.function.UnaryOperator;
 
 /**
  * 一批查询结果共享的列布局。
@@ -26,25 +27,19 @@ final class RowLayout {
 
     private final Map<String, Integer> indexes;
 
-    private final String[] mappingKeys;
+    /** 实体映射首次使用时才准备；最后发布 keys，让其他线程同时看到完整索引。 */
+    private volatile String[] mappingKeys;
 
-    private final Map<String, Integer> mappingIndexes;
+    private Map<String, Integer> mappingIndexes;
 
-    private final boolean ambiguousMappingColumns;
+    private boolean ambiguousMappingColumns;
 
     /** 按计划身份保存当前结果布局的字段绑定；生命周期不会超过当前 RowLayout。 */
     private Map<Object, Object> mappingBindings;
 
-    private RowLayout(String[] columnNames,
-                      Map<String, Integer> indexes,
-                      String[] mappingKeys,
-                      Map<String, Integer> mappingIndexes,
-                      boolean ambiguousMappingColumns) {
+    private RowLayout(String[] columnNames, Map<String, Integer> indexes) {
         this.columnNames = columnNames;
         this.indexes = indexes;
-        this.mappingKeys = mappingKeys;
-        this.mappingIndexes = mappingIndexes;
-        this.ambiguousMappingColumns = ambiguousMappingColumns;
     }
 
     static RowLayout of(List<String> columnNames) {
@@ -67,8 +62,6 @@ final class RowLayout {
 
     private static RowLayout materializeSmall(int size, IntFunction<String> columnName) {
         String[] names = new String[size];
-        String[] normalized = new String[size];
-        boolean ambiguous = false;
         for (int index = 0; index < size; index++) {
             String name = requireColumnName(columnName.apply(index));
             for (int previous = 0; previous < index; previous++) {
@@ -76,27 +69,14 @@ final class RowLayout {
                     throw new DuplicateColumnLabelException(name, previous, index);
                 }
             }
-            String mappingKey = EntityFieldNames.resultKey(name);
-            if (!ambiguous) {
-                for (int previous = 0; previous < index; previous++) {
-                    if (normalized[previous].equals(mappingKey)) {
-                        ambiguous = true;
-                        break;
-                    }
-                }
-            }
             names[index] = name;
-            normalized[index] = mappingKey;
         }
-        return new RowLayout(names, Map.of(), normalized, Map.of(), ambiguous);
+        return new RowLayout(names, Map.of());
     }
 
     private static RowLayout materializeIndexed(int size, IntFunction<String> columnName) {
         String[] names = new String[size];
         Map<String, Integer> indexes = new HashMap<>(size * 2);
-        String[] normalized = new String[size];
-        Map<String, Integer> mappingIndexes = new HashMap<>(size * 2);
-        boolean ambiguous = false;
         for (int index = 0; index < size; index++) {
             String name = requireColumnName(columnName.apply(index));
             Integer previous = indexes.putIfAbsent(name, index);
@@ -104,12 +84,8 @@ final class RowLayout {
                 throw new DuplicateColumnLabelException(name, previous, index);
             }
             names[index] = name;
-            String mappingKey = EntityFieldNames.resultKey(name);
-            ambiguous |= mappingIndexes.putIfAbsent(mappingKey, index) != null;
-            normalized[index] = mappingKey;
         }
-        return new RowLayout(
-                names, Map.copyOf(indexes), normalized, Map.copyOf(mappingIndexes), ambiguous);
+        return new RowLayout(names, indexes);
     }
 
     int size() {
@@ -119,6 +95,18 @@ final class RowLayout {
     String columnName(int index) {
         Objects.checkIndex(index, columnNames.length);
         return columnNames[index];
+    }
+
+    RowLayout rename(UnaryOperator<String> renamer) {
+        String[] renamed = null;
+        for (int index = 0; index < columnNames.length; index++) {
+            String name = renamer.apply(columnNames[index]);
+            if (!columnNames[index].equals(name)) {
+                if (renamed == null) renamed = columnNames.clone();
+                renamed[index] = name;
+            }
+        }
+        return renamed == null ? this : RowLayout.of(java.util.Arrays.asList(renamed));
     }
 
     int indexOf(Object column) {
@@ -137,11 +125,13 @@ final class RowLayout {
     }
 
     String mappingKey(int index) {
+        if (mappingKeys == null) prepareMapping();
         Objects.checkIndex(index, mappingKeys.length);
         return mappingKeys[index];
     }
 
     int mappingIndexOf(String key) {
+        if (mappingKeys == null) prepareMapping();
         if (!mappingIndexes.isEmpty()) {
             return mappingIndexes.getOrDefault(key, -1);
         }
@@ -154,7 +144,33 @@ final class RowLayout {
     }
 
     boolean hasAmbiguousMappingColumns() {
+        if (mappingKeys == null) prepareMapping();
         return ambiguousMappingColumns;
+    }
+
+    private synchronized void prepareMapping() {
+        if (mappingKeys != null) return;
+        String[] normalized = new String[columnNames.length];
+        Map<String, Integer> resolved = columnNames.length > LINEAR_LOOKUP_LIMIT
+                ? new HashMap<>(columnNames.length * 2) : null;
+        boolean ambiguous = false;
+        for (int index = 0; index < columnNames.length; index++) {
+            String key = EntityFieldNames.resultKey(columnNames[index]);
+            if (resolved != null) {
+                ambiguous |= resolved.putIfAbsent(key, index) != null;
+            } else if (!ambiguous) {
+                for (int previous = 0; previous < index; previous++) {
+                    if (normalized[previous].equals(key)) {
+                        ambiguous = true;
+                        break;
+                    }
+                }
+            }
+            normalized[index] = key;
+        }
+        mappingIndexes = resolved == null ? Map.of() : resolved;
+        ambiguousMappingColumns = ambiguous;
+        mappingKeys = normalized;
     }
 
     @SuppressWarnings("unchecked")

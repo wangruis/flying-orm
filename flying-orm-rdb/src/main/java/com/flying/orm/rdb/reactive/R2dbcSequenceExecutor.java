@@ -155,8 +155,7 @@ final class R2dbcSequenceExecutor {
                                                             0,
                                                              execution,
                                                              rows -> rows,
-                                                             confirmedRows == null ? () -> 0L : confirmedRows::get,
-                                                             options)
+                                                             confirmedRows == null ? () -> 0L : confirmedRows::get)
                                              .map(rows -> new SqlExecutionStepResult(
                                                      stepIndex, request, rows, System.nanoTime() - startedAt))
                                              .doOnNext(result -> resource.completeStep(phase, result));

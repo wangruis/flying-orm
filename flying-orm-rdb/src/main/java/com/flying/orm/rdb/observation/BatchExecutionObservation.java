@@ -90,10 +90,6 @@ public record BatchExecutionObservation(BatchExecutionEventType eventType,
 
     /** 只保存无参数值的请求描述。 */
     public record BatchWriteRequestView(String sql, int parameterCount, SqlExecutionBackend backend) {
-        public BatchWriteRequestView(String sql, int parameterCount) {
-            this(sql, parameterCount, SqlExecutionBackend.UNKNOWN);
-        }
-
         public BatchWriteRequestView {
             sql = Objects.requireNonNull(sql, "batch sql must not be null");
             backend = Objects.requireNonNull(backend, "batch execution backend must not be null");

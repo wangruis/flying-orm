@@ -14,12 +14,12 @@ import com.flying.orm.core.metadata.IndexKeyPart;
 import com.flying.orm.core.metadata.PrimaryKeyDefinition;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
-import com.flying.orm.rdb.internal.mapping.EntityRelationalMetadataCompiler.Property;
-import com.flying.orm.rdb.mapping.EntityFieldMetadata;
+import com.flying.orm.rdb.internal.mapping.EntityMetadataResolver.Property;
 import com.flying.orm.rdb.mapping.MappingException;
 import com.flying.orm.rdb.schema.RelationalObjectNameGenerator;
 
 import java.lang.annotation.Annotation;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -29,7 +29,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.function.BiPredicate;
 
-/** 合并实体层次上的主键、索引、外键和检查约束；只在 descriptor 冷路径执行。 */
+/** 合并实体层次上的结构声明；只在模型编译或显式 Schema 投影的冷路径执行。 */
 final class EntityRelationalConstraintCompiler {
 
     // Oracle 12c 是内建方言中最短的标识符上限。框架生成的名字固定满足这个下限，
@@ -185,33 +185,32 @@ final class EntityRelationalConstraintCompiler {
     private static TargetProperties targetProperties(
             Class<?> targetType,
             String[] propertyNames) {
-        EntityCompilation<?> target = EntityMetadataResolver.compileModel(Objects.requireNonNull(
-                targetType, "foreign key target entity must not be null"));
-        LinkedHashMap<String, EntityFieldMetadata> properties = new LinkedHashMap<>();
-        for (int index = 0; index < target.persistentFields().size(); index++) {
-            properties.put(target.persistentFields().get(index).getName(),
-                           target.fieldMetadata().get(index));
+        Objects.requireNonNull(targetType, "foreign key target entity must not be null");
+        LinkedHashMap<String, Field> properties = new LinkedHashMap<>();
+        for (Field field : EntityMetadataHierarchy.persistentFields(targetType)) {
+            properties.put(field.getName(), field);
         }
         List<String> columns = new ArrayList<>(propertyNames.length);
         Set<String> seen = new HashSet<>();
         for (String propertyName : propertyNames) {
             String safeName = requiredId(propertyName, "foreign key target property");
-            EntityFieldMetadata metadata = properties.get(safeName);
-            if (metadata == null) {
+            Field field = properties.get(safeName);
+            if (field == null) {
                 throw new MappingException(
                         "foreign key references an unknown target entity property");
             }
-            if (target.protections().encrypted(metadata.columnName()).isPresent()) {
+            if (FlyingAnnotationReader.encryptedField(field).isPresent()) {
                 throw new MappingException(
                         "foreign key must not reference an encrypted target entity property");
             }
-            if (!seen.add(metadata.columnName())) {
+            String column = EntityFieldMetadataCompiler.columnName(field);
+            if (!seen.add(column)) {
                 throw new MappingException(
                         "foreign key must not repeat a target entity property");
             }
-            columns.add(metadata.columnName());
+            columns.add(column);
         }
-        return new TargetProperties(target.relationIdentity(), columns);
+        return new TargetProperties(EntityTableNameResolver.resolveIdentity(targetType), columns);
     }
 
     private static CheckPredicate predicate(TableCheck annotation, Property property) {

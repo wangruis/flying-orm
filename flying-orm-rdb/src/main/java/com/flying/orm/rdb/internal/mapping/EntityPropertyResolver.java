@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.internal.mapping;
 
 import com.flying.orm.core.lambda.EntityProperty;
+import com.flying.orm.core.lambda.BoundEntityProperty;
 import com.flying.orm.core.internal.error.ThrowableGraph;
 import com.flying.orm.rdb.mapping.EntityMetadata;
 import com.flying.orm.rdb.mapping.EntityFieldMetadata;
@@ -47,9 +48,18 @@ public final class EntityPropertyResolver {
      * @return 经过所属类型和持久化字段校验的物理列名
      */
     public static <T> String column(EntityMetadata<T> metadata, EntityProperty<T, ?> property) {
-        EntityMetadata<T> safeMetadata = Objects.requireNonNull(metadata, "entity metadata must not be null");
-        Class<T> safeType = safeMetadata.type();
-        EntityProperty<T, ?> safeProperty = Objects.requireNonNull(property, "entity property must not be null");
+        return resolve(metadata, property);
+    }
+
+    /** 仅解析绑定 Getter 的字段；缓存不保存其接收实例或属性值。 */
+    public static String column(EntityMetadata<?> metadata, BoundEntityProperty<?> property) {
+        return resolve(metadata, property);
+    }
+
+    private static String resolve(EntityMetadata<?> metadata, Object property) {
+        EntityMetadata<?> safeMetadata = Objects.requireNonNull(metadata, "entity metadata must not be null");
+        Class<?> safeType = safeMetadata.type();
+        Object safeProperty = Objects.requireNonNull(property, "entity property must not be null");
         AtomicReference<LambdaMethod> slot = CACHE.get(safeProperty.getClass());
         LambdaMethod method = slot.get();
         if (method == null) {
@@ -107,7 +117,7 @@ public final class EntityPropertyResolver {
                                        error);
         }
         int modifiers = accessor.getModifiers();
-        if (Modifier.isStatic(modifiers) || accessor.isDefault() || accessor.getParameterCount() != 0
+        if (Modifier.isStatic(modifiers) || accessor.getParameterCount() != 0
                 || void.class.equals(accessor.getReturnType())) {
             throw new MappingException("method is not a direct entity property accessor: " + accessor);
         }

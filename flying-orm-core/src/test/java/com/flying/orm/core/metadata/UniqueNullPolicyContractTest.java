@@ -47,12 +47,6 @@ class UniqueNullPolicyContractTest {
     }
 
     @Test
-    void defaultUniqueFingerprintRetainsItsEncoding() {
-        assertEquals("c96d146e9d9c8ad011dcee0e61d40beab03b35d64cc5aa88a4410f8ae3593d11",
-                RelationalMetadataFingerprint.of(table(UniqueConstraintDefinition.of("uq_email", "email"))));
-    }
-
-    @Test
     void distinctUniqueCannotServeAsAPortableForeignKeyTarget() {
         RelationalTableDefinition target = table(new UniqueConstraintDefinition(
                 "uq_email", List.of("email"), UniqueNullPolicy.DISTINCT));

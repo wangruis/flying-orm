@@ -15,6 +15,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * 把前端数组条件变成强类型内部值。字段类型只从 DynamicForm 读取，前端不能自报元素类型。
@@ -29,9 +30,13 @@ public final class ArrayStructuredConditions implements StructuredConditionResol
     public static final String CONTAINS = "array-contains";
     public static final String CONTAINED_BY = "array-contained-by";
     public static final String OVERLAPS = "array-overlaps";
+    public static final String NOT_CONTAINS = "array-not-contains";
+    public static final String NOT_CONTAINED_BY = "array-not-contained-by";
+    public static final String NOT_OVERLAPS = "array-not-overlaps";
     public static final String ANY_EQUALS = "array-any-eq";
 
-    private static final Set<String> OPERATORS = Set.of(CONTAINS, CONTAINED_BY, OVERLAPS, ANY_EQUALS);
+    private static final Set<String> OPERATORS = Set.of(
+            CONTAINS, CONTAINED_BY, OVERLAPS, NOT_CONTAINS, NOT_CONTAINED_BY, NOT_OVERLAPS, ANY_EQUALS);
     private static final TermRegistry GOVERNED_TERMS = ArrayTermHandlers.postgresql().terms();
 
     private ArrayStructuredConditions() {
@@ -46,16 +51,15 @@ public final class ArrayStructuredConditions implements StructuredConditionResol
     }
 
     @Override
-    public ConditionGroup compile(DynamicForm form,
-                                  StructuredConditionInput input,
-                                  StructuredConditionPolicy policy) {
-        return StructuredConditionResolver.composite(this).compile(form, input, policy);
+    public ConditionGroup compileFields(DynamicForm form, Function<String, DynamicField> fields,
+                                        StructuredConditionInput input, StructuredConditionPolicy policy) {
+        return StructuredConditionResolver.composite(this).compileFields(form, fields, input, policy);
     }
 
     @Override
-    public StructuredConditionInput adapt(DynamicForm form, StructuredConditionInput input) {
-        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        return ConditionNodes.rewrite(input, term -> adaptTerm(safeForm, term));
+    public StructuredConditionInput adaptFields(DynamicForm form, Function<String, DynamicField> fields,
+                                                StructuredConditionInput input) {
+        return ConditionNodes.rewrite(input, term -> adaptTerm(fields, term));
     }
 
     @Override
@@ -67,15 +71,16 @@ public final class ArrayStructuredConditions implements StructuredConditionResol
         return safePolicy.withAdditionalTerms(GOVERNED_TERMS);
     }
 
-    private StructuredConditionInput adaptTerm(DynamicForm form, StructuredConditionInput input) {
+    private StructuredConditionInput adaptTerm(Function<String, DynamicField> fields,
+                                               StructuredConditionInput input) {
         String operator = normalize(input.operator());
         if (!OPERATORS.contains(operator)) {
             return input;
         }
-        DynamicField field = form.field(Objects.requireNonNull(input.field(),
-                                                                "array condition field must not be null"));
-        if (!field.databaseType().isArray()) {
-            throw new IllegalArgumentException("array operator requires an SQL array field: " + field.name());
+        String name = Objects.requireNonNull(input.field(), "array condition field must not be null");
+        DynamicField field = fields.apply(name);
+        if (field == null || !field.databaseType().isArray()) {
+            throw new IllegalArgumentException("array operator requires an SQL array field: " + name);
         }
         Object value = ANY_EQUALS.equals(operator)
                 ? ArrayValueCodec.writeElement(input.value(), field.databaseType())

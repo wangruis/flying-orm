@@ -1,15 +1,13 @@
 package com.flying.orm.rdb.schema;
 
-import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.form.DynamicFormChangeSet;
-import com.flying.orm.core.metadata.ForeignKeyMetadata;
-import com.flying.orm.core.metadata.IndexMetadata;
-import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.metadata.ForeignKeyDefinition;
+import com.flying.orm.core.metadata.IndexDefinition;
+import com.flying.orm.core.metadata.RelationIdentity;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.RdbDialect;
-import com.flying.orm.rdb.protection.ProtectedFormLayout;
-import com.flying.orm.rdb.protection.ProtectedContainsLayout;
 
 import java.util.List;
 import java.util.Objects;
@@ -17,14 +15,10 @@ import java.util.Objects;
 /**
  * 动态表单的 DDL 门面。
  *
- * <p>公开方法和原来的使用方式保持不变，具体工作交给包内协作者：表与字段 SQL、迁移计划、外键风险
- * 报告和回滚 SQL 各自独立。这样这个类只负责入口编排，不再把所有数据库结构规则堆在一个文件里。</p>
+ * <p>表与字段 SQL、迁移计划和外键差异由包内协作者负责；该门面只组织公开入口。</p>
  *
  * <p>渲染器只生成 SQL 请求和迁移计划，不访问数据库，也不启动事务。标识符、类型和自定义 DDL 片段
- * 仍由 {@link SchemaDialect} 做白名单校验。</p>
- *
- * <p>旧 String 表名保持原有语义。带 catalog、schema 或字面点号的分段关系，请使用
- * {@link RelationalSchemaSqlRenderer}，避免在兼容入口丢失物理关系身份。</p>
+ * 仍由 {@link SchemaDialect} 做白名单校验；显式 {@link FormSchemaDdlRenderer} 回调输出属于可信后端 SQL。</p>
  *
  * @author wangr
  * @date 2026-08-07
@@ -33,15 +27,13 @@ import java.util.Objects;
 public final class FormSchemaSqlRenderer {
 
     private final SchemaDialect dialect;
-    private final SchemaTableSqlRenderer tables;
+    private final RelationalSchemaSqlRenderer tables;
     private final SchemaMigrationPlanner migrations;
-    private final SchemaRollbackSqlRenderer rollback;
 
     private FormSchemaSqlRenderer(SchemaDialect dialect) {
         this.dialect = Objects.requireNonNull(dialect, "schema dialect must not be null");
-        this.tables = new SchemaTableSqlRenderer(dialect);
+        this.tables = RelationalSchemaSqlRenderer.create(dialect);
         this.migrations = new SchemaMigrationPlanner(this);
-        this.rollback = new SchemaRollbackSqlRenderer(dialect, tables);
     }
 
     /** 用指定的结构 SQL 写法创建渲染器。 */
@@ -54,16 +46,11 @@ public final class FormSchemaSqlRenderer {
         return create(Objects.requireNonNull(dialect, "rdb dialect must not be null").schema());
     }
 
-    /** 包内审核器读取在线 DDL 能力，业务层不需要直接依赖结构方言对象。 */
-    SchemaOnlineDdlSupport onlineDdlSupport() {
-        return dialect.onlineDdlSupport();
-    }
-
     SchemaDialect dialect() {
         return dialect;
     }
 
-    SchemaTableSqlRenderer tableRenderer() {
+    RelationalSchemaSqlRenderer tableRenderer() {
         return tables;
     }
 
@@ -72,43 +59,37 @@ public final class FormSchemaSqlRenderer {
         return migrations;
     }
 
-    /** 包内审核器复用方言的在线索引改写规则。 */
-    SqlRequest preferOnline(SqlRequest request) {
-        return dialect.preferOnline(request);
+    /** 复用方言的并发索引语法。 */
+    SqlRequest preferConcurrentIndex(SqlRequest request) {
+        return dialect.preferConcurrentIndex(request);
     }
 
     /** 生成建表 SQL，必要的序列和字段注释会按原来的顺序附在请求列表中。 */
     public List<SqlRequest> createTable(DynamicForm form) {
-        DynamicForm safeForm = SchemaMigrationSupport.requireLegacyRelation(form);
-        DynamicForm physical = ProtectedFormLayout.physical(safeForm);
-        List<SqlRequest> requests = new java.util.ArrayList<>(tables.createTable(physical));
-        requests.addAll(tables.createIndexes(physical.table(), physical.toTableMetadata().indexes()));
-        ProtectedContainsLayout.resolve(safeForm).ifPresent(layout -> {
-            requests.addAll(tables.createTable(layout.table()));
-            requests.addAll(tables.createIndexes(layout.table().table(), layout.indexes()));
-            layout.foreignKeys().forEach(foreignKey -> requests.add(
-                    tables.createCascadeForeignKey(layout.table().table(), foreignKey)));
-        });
-        return List.copyOf(requests);
+        return createTablePlan(form, List.of()).requests();
     }
 
     /** 给已有表创建目标索引。 */
-    public List<SqlRequest> createIndexes(String table, List<IndexMetadata> indexes) {
-        return tables.createIndexes(table, indexes);
+    public List<SqlRequest> createIndexes(String table, List<IndexDefinition> indexes) {
+        RelationIdentity relation = SchemaMigrationSupport.relation(table);
+        return Objects.requireNonNull(indexes, "indexes must not be null").stream()
+                .flatMap(index -> tables.render(SchemaOperation.of(SchemaOperation.Kind.ADD_INDEX,
+                        relation, index.name(), null, index, SchemaOperation.Compatibility.REQUIRES_REVIEW)).stream())
+                .toList();
     }
 
-    /** 表不存在时先建表，再建索引；外键继续进入人工审核列表。 */
-    public SchemaMigrationPlan createTablePlan(DynamicForm target, List<IndexMetadata> targetIndexes) {
+    /** 表不存在时统一生成表、索引及显式外键的有序 DDL。 */
+    public SchemaMigrationPlan createTablePlan(DynamicForm target, List<IndexDefinition> targetIndexes) {
         return createTablePlan(target, targetIndexes, List.of());
     }
 
     public SchemaMigrationPlan createTablePlan(DynamicForm target,
-                                               List<IndexMetadata> targetIndexes,
-                                               List<ForeignKeyMetadata> targetForeignKeys) {
+                                               List<IndexDefinition> targetIndexes,
+                                               List<ForeignKeyDefinition> targetForeignKeys) {
         return migrations.createTablePlan(target, targetIndexes, targetForeignKeys);
     }
 
-    /** 根据变更集生成直接迁移 SQL。高风险结构变更仍应使用安全迁移计划入口。 */
+    /** 根据显式变更集生成迁移 SQL。 */
     public List<SqlRequest> migrate(DynamicFormChangeSet changeSet) {
         return migrations.migrate(changeSet);
     }
@@ -119,77 +100,76 @@ public final class FormSchemaSqlRenderer {
     }
 
     /** 安全迁移的快捷入口，只返回可以执行的 SQL。 */
-    public List<SqlRequest> migrateSafely(TableMetadata current,
+    public List<SqlRequest> migrateSafely(RelationalTableDefinition current,
                                           DynamicForm target,
-                                          List<IndexMetadata> targetIndexes) {
+                                          List<IndexDefinition> targetIndexes) {
         return migrateSafelyPlan(current, target, targetIndexes).requests();
     }
 
-    public List<SqlRequest> migrateSafely(TableMetadata current,
+    public List<SqlRequest> migrateSafely(RelationalTableDefinition current,
                                           DynamicForm target,
-                                          List<IndexMetadata> targetIndexes,
+                                          List<IndexDefinition> targetIndexes,
                                           SchemaMigrationOptions options) {
         return migrateSafelyPlan(current, target, targetIndexes, options).requests();
     }
 
     /** 返回完整安全迁移计划，包含可执行 SQL 和需要上层审核的 skipped 项。 */
-    public SchemaMigrationPlan migrateSafelyPlan(TableMetadata current,
+    public SchemaMigrationPlan migrateSafelyPlan(RelationalTableDefinition current,
                                                  DynamicForm target,
-                                                 List<IndexMetadata> targetIndexes) {
+                                                 List<IndexDefinition> targetIndexes) {
         return migrateSafelyPlan(current, target, targetIndexes, List.of(), SchemaMigrationOptions.safe());
     }
 
-    public SchemaMigrationPlan migrateSafelyPlan(TableMetadata current,
+    public SchemaMigrationPlan migrateSafelyPlan(RelationalTableDefinition current,
                                                  DynamicForm target,
-                                                 List<IndexMetadata> targetIndexes,
+                                                 List<IndexDefinition> targetIndexes,
                                                  SchemaMigrationOptions options) {
         return migrateSafelyPlan(current, target, targetIndexes, List.of(), options);
     }
 
-    public SchemaMigrationPlan migrateSafelyPlan(TableMetadata current,
+    public SchemaMigrationPlan migrateSafelyPlan(RelationalTableDefinition current,
                                                  DynamicForm target,
-                                                 List<IndexMetadata> targetIndexes,
-                                                 List<ForeignKeyMetadata> targetForeignKeys,
+                                                 List<IndexDefinition> targetIndexes,
+                                                 List<ForeignKeyDefinition> targetForeignKeys,
                                                  SchemaMigrationOptions options) {
-        return migrations.migrateSafelyPlan(current,
+        return renderPlan(current, null, migrations.migrateSafelyPlan(current,
                                              target,
                                              targetIndexes,
                                              targetForeignKeys,
-                                             options);
+                                             options), options);
     }
 
-    /* 下面的方法只服务于 schema 包内审核器，避免把回滚拼装规则复制到审核器里。 */
-    SqlRequest rollbackDropTable(String table) {
-        return rollback.rollbackDropTable(table);
+    SchemaMigrationPlan renderPlan(RelationalTableDefinition current, SchemaSnapshot snapshot,
+                                   SchemaMigrationPlan builtin, SchemaMigrationOptions options) {
+        if (options.concurrentIndexesPreferred()) {
+            builtin = builtin.steps().isEmpty() ? new SchemaMigrationPlan(
+                    builtin.target(), builtin.tableExists(),
+                    builtin.requests().stream().map(this::preferConcurrentIndex).toList(),
+                    builtin.skippedChanges(), builtin.additionalCreatedTables())
+                    : SchemaMigrationPlan.planned(builtin.target(), builtin.tableExists(),
+                            builtin.steps().stream().map(step -> new SchemaPlanStep(step.operation(),
+                                    step.requests().stream().map(this::preferConcurrentIndex).toList())).toList(),
+                            builtin.skippedChanges(), builtin.additionalCreatedTables());
+        }
+        return renderPlan(current, snapshot, builtin);
     }
 
-    List<SqlRequest> rollbackDropSequences(DynamicForm form) {
-        return tables.dropSequences(form.fields(), List.of());
+    SchemaMigrationPlan renderPlan(RelationalTableDefinition current, SchemaSnapshot snapshot, SchemaMigrationPlan builtin) {
+        FormSchemaDdlRenderer extension = dialect.formRenderer();
+        if (extension == null || !builtin.hasExecutableSql()) {
+            return builtin;
+        }
+        List<SqlRequest> requests = requireRendered(extension.render(current, snapshot, builtin));
+        return new SchemaMigrationPlan(builtin.target(),
+                builtin.tableExists(), requests, builtin.skippedChanges(), builtin.additionalCreatedTables());
     }
 
-    List<SqlRequest> rollbackDropSequences(List<DynamicField> fields) {
-        return tables.dropSequences(fields, List.of());
+    private static List<SqlRequest> requireRendered(List<SqlRequest> requests) {
+        List<SqlRequest> result = List.copyOf(requests);
+        if (result.isEmpty()) {
+            throw new IllegalArgumentException("form schema renderer must not erase planned DDL");
+        }
+        return result;
     }
 
-    List<SqlRequest> rollbackDropSequences(List<DynamicField> fields, List<DynamicField> retainedFields) {
-        return tables.dropSequences(fields, retainedFields);
-    }
-
-    SqlRequest rollbackColumnType(String table,
-                                  String currentColumn,
-                                  com.flying.orm.core.metadata.ColumnMetadata column) {
-        return rollback.rollbackColumnType(table, currentColumn, column);
-    }
-
-    SqlRequest rollbackRenameColumn(String table, String currentName, String previousName) {
-        return rollback.rollbackRenameColumn(table, currentName, previousName);
-    }
-
-    SqlRequest rollbackDropIndex(String table, IndexMetadata index) {
-        return rollback.rollbackDropIndex(table, index);
-    }
-
-    SqlRequest rollbackCreateIndex(String table, IndexMetadata index) {
-        return rollback.rollbackCreateIndex(table, index);
-    }
 }

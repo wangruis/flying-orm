@@ -2,10 +2,13 @@ package com.flying.orm.rdb.mapping;
 
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.form.TenantStrategy;
+import com.flying.orm.core.join.QueryRelation;
 import com.flying.orm.core.internal.hash.StableDigest;
 import com.flying.orm.core.internal.hash.StableEncoder;
-import com.flying.orm.core.metadata.IndexMetadata;
+import com.flying.orm.core.metadata.IndexDefinition;
 import com.flying.orm.core.metadata.RelationIdentity;
+import com.flying.orm.core.metadata.RelationalMetadataFingerprint;
+import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.protection.FieldProtectionRegistry;
 import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.internal.mapping.EntityFieldNames;
@@ -16,6 +19,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 /**
  * 保存一个实体对应的表、字段、主键、版本字段和逻辑删除字段信息。
@@ -29,83 +33,77 @@ import java.util.Optional;
 public final class EntityMetadata<T> {
 
     private static final StableDigest.Domain STRUCTURE_DOMAIN =
-            StableDigest.domain("entity-physical-structure/v1");
+            StableDigest.domain("entity-physical-structure/v2");
 
     private final Class<T> type;
 
     private final String formId;
 
-    private final String table;
     private final RelationIdentity relationIdentity;
 
     private final List<EntityFieldMetadata> fields;
+    private final List<EntityFieldMetadata> primaryKeyFields;
+    private final Optional<EntityFieldMetadata> versionField;
+    private final Optional<EntityFieldMetadata> logicDeleteField;
     private final boolean enumConditionValues;
+    private final boolean customMappings;
     private final List<String> defaultProjection;
+    private final List<PageSort> defaultSorts;
 
     private final Map<String, EntityFieldMetadata> fieldsByName;
     private final EntityFieldMetadata tenantField;
     private final TenantStrategy tenantStrategy;
     private final DynamicForm dynamicForm;
-    private final List<IndexMetadata> targetIndexes;
+    private final List<IndexDefinition> targetIndexes;
     private final String structureFingerprint;
 
     EntityMetadata(Class<T> type,
                    String formId,
-                   String table,
                    RelationIdentity relationIdentity,
+                   String namingSource,
                    List<EntityFieldMetadata> fields,
                    String tenantField,
                    TenantStrategy tenantStrategy,
-                   FieldProtectionRegistry protections) {
+                   FieldProtectionRegistry protections,
+                   Map<String, QueryRelation> relations) {
         this.type = Objects.requireNonNull(type, "entity type must not be null");
         this.formId = requireText(formId, "entity form id");
-        this.table = requireText(table, "entity table");
-        this.relationIdentity = relationIdentity;
+        this.relationIdentity = Objects.requireNonNull(relationIdentity, "relation identity must not be null");
         this.fields = List.copyOf(fields);
+        this.primaryKeyFields = this.fields.stream().filter(EntityFieldMetadata::primaryKey).toList();
+        this.versionField = this.fields.stream().filter(EntityFieldMetadata::version).findFirst();
+        this.logicDeleteField = this.fields.stream().filter(EntityFieldMetadata::logicDelete).findFirst();
         this.enumConditionValues = this.fields.stream().anyMatch(field -> field.enumValueMember() != null
                 || field.enumStorage() != EntityEnumStorage.NONE);
+        this.customMappings = this.fields.stream().anyMatch(field -> field.customMapping() != null);
         this.defaultProjection = this.fields.stream().allMatch(EntityFieldMetadata::selectable)
                 ? null : this.fields.stream().filter(EntityFieldMetadata::selectable)
                         .map(EntityFieldMetadata::columnName).toList();
+        this.defaultSorts = this.fields.stream().filter(EntityFieldMetadata::ordered)
+                .sorted(Comparator.comparingInt(EntityFieldMetadata::orderPriority))
+                .map(field -> field.orderAscending()
+                        ? PageSort.asc(field.columnName()) : PageSort.desc(field.columnName()))
+                .collect(Collectors.toUnmodifiableList());
         this.fieldsByName = index(this.fields);
         this.tenantField = tenantField == null ? null : field(tenantField);
         this.tenantStrategy = this.tenantField == null
                 ? TenantStrategy.NONE
                 : Objects.requireNonNull(tenantStrategy, "tenant strategy must not be null");
         this.dynamicForm = buildDynamicForm(Objects.requireNonNull(
-                protections, "field protection registry must not be null"));
-        this.targetIndexes = dynamicForm.toTableMetadata().indexes();
+                protections, "field protection registry must not be null"), relations, namingSource);
+        this.targetIndexes = dynamicForm.toTableDefinition().indexes();
         this.structureFingerprint = fingerprint(dynamicForm, targetIndexes);
     }
 
-    /** 实体解析器跨包创建元数据时使用；业务代码应从 EntityModelRegistry 读取。 */
+    /** 实体描述编译时将查询关系与字段放入同一个表单，物理结构不受关系声明影响。 */
     @InternalApi
-    public static <T> EntityMetadata<T> create(Class<T> type,
-                                                String formId,
-                                                String table,
-                                                List<EntityFieldMetadata> fields,
-                                                String tenantField,
-                                                TenantStrategy tenantStrategy,
-                                                FieldProtectionRegistry protections) {
+    public static <T> EntityMetadata<T> create(
+            Class<T> type, String formId, RelationIdentity relationIdentity, String namingSource,
+            List<EntityFieldMetadata> fields, String tenantField, TenantStrategy tenantStrategy,
+            FieldProtectionRegistry protections, Map<String, QueryRelation> relations) {
         return new EntityMetadata<>(
-                type, formId, table, null, fields, tenantField, tenantStrategy, protections);
-    }
-
-    /** 严格关系模型跨包创建元数据时使用；旧 String 工厂和 table() 语义保持不变。 */
-    @InternalApi
-    public static <T> EntityMetadata<T> createRelational(
-            Class<T> type,
-            String formId,
-            String legacyTable,
-            RelationIdentity relationIdentity,
-            List<EntityFieldMetadata> fields,
-            String tenantField,
-            TenantStrategy tenantStrategy,
-            FieldProtectionRegistry protections) {
-        return new EntityMetadata<>(
-                type, formId, legacyTable,
-                Objects.requireNonNull(relationIdentity, "relation identity must not be null"),
-                fields, tenantField, tenantStrategy, protections);
+                type, formId, relationIdentity, namingSource,
+                fields, tenantField, tenantStrategy, protections, relations);
     }
 
     /** @return 对应的 Java 实体类型 */
@@ -120,7 +118,7 @@ public final class EntityMetadata<T> {
 
     /** @return 实体对应的物理表名 */
     public String table() {
-        return table;
+        return relationIdentity.table();
     }
 
     /** @return 按实体声明顺序保存的不可修改字段列表 */
@@ -134,9 +132,17 @@ public final class EntityMetadata<T> {
         return enumConditionValues;
     }
 
+    boolean hasCustomMappings() {
+        return customMappings;
+    }
+
     /** null 表示所有字段均可默认查询；空列表表示没有可默认查询的字段，只在读取时拒绝。 */
     List<String> defaultProjection() {
         return defaultProjection;
+    }
+
+    List<PageSort> defaultSorts() {
+        return defaultSorts;
     }
 
     /**
@@ -164,17 +170,22 @@ public final class EntityMetadata<T> {
 
     /** @return 第一个主键字段；实体没有主键注解时为空 */
     public Optional<EntityFieldMetadata> idField() {
-        return fields.stream().filter(EntityFieldMetadata::primaryKey).findFirst();
+        return primaryKeyFields.isEmpty() ? Optional.empty() : Optional.of(primaryKeyFields.getFirst());
+    }
+
+    /** @return 按实体字段顺序保存的全部主键；无主键时为空，复合键不能只取 idField() */
+    public List<EntityFieldMetadata> primaryKeyFields() {
+        return primaryKeyFields;
     }
 
     /** @return 乐观锁版本字段；没有声明时为空 */
     public Optional<EntityFieldMetadata> versionField() {
-        return fields.stream().filter(EntityFieldMetadata::version).findFirst();
+        return versionField;
     }
 
     /** @return 逻辑删除字段；没有声明时为空 */
     public Optional<EntityFieldMetadata> logicDeleteField() {
-        return fields.stream().filter(EntityFieldMetadata::logicDelete).findFirst();
+        return logicDeleteField;
     }
 
     /** @return 租户隔离字段；公共表或未声明租户约束时为空 */
@@ -192,7 +203,7 @@ public final class EntityMetadata<T> {
      *
      * @return 可并发复用的不可变目标索引集合
      */
-    public List<IndexMetadata> targetIndexes() {
+    public List<IndexDefinition> targetIndexes() {
         return targetIndexes;
     }
 
@@ -225,12 +236,11 @@ public final class EntityMetadata<T> {
         return dynamicForm;
     }
 
-    private DynamicForm buildDynamicForm(FieldProtectionRegistry protections) {
-        DynamicForm.Builder builder = relationIdentity == null
-                ? DynamicForm.builder(formId, table)
-                : DynamicForm.relationalBuilder(formId, relationIdentity);
+    private DynamicForm buildDynamicForm(FieldProtectionRegistry protections, Map<String, QueryRelation> relations,
+                                         String namingSource) {
+        DynamicForm.Builder builder = DynamicForm.relationalBuilder(formId, relationIdentity).namingSource(namingSource);
         for (EntityFieldMetadata field : fields) {
-            builder.addField(field.toDynamicField());
+            builder.addField(field.field());
         }
         logicDeleteField().ifPresent(field -> builder.logicDelete(field.columnName(),
                                                                    field.logicNotDeletedValue(),
@@ -238,39 +248,24 @@ public final class EntityMetadata<T> {
         tenantField().ifPresent(field -> builder.tenant(field.columnName(), tenantStrategy));
         protections.encryptedFields().forEach(builder::encrypted);
         protections.maskedFields().forEach(builder::masked);
+        relations.forEach(builder::relation);
         return builder.build();
     }
 
-    private static String fingerprint(DynamicForm form, List<IndexMetadata> indexes) {
+    private static String fingerprint(DynamicForm form, List<IndexDefinition> indexes) {
         StableEncoder descriptor = StableDigest.sha256(STRUCTURE_DOMAIN);
-        RelationIdentity identity = form.relationIdentity().orElse(null);
-        if (identity == null) {
-            // 旧 String 表名继续使用原编码，保证已有实体的结构指纹和缓存语义不变。
-            descriptor.text("TABLE", form.table().trim());
-        } else {
-            descriptor.marker("SEGMENTED_RELATION")
+        RelationIdentity identity = form.relationIdentity();
+        descriptor.marker("SEGMENTED_RELATION")
                       .nullableText("CATALOG", identity.catalog().orElse(null))
                       .nullableText("SCHEMA", identity.schema().orElse(null))
                       .text("TABLE", identity.table());
-        }
         form.fields().stream()
             .sorted(Comparator.comparing(field -> field.name().trim()))
             .forEach(field -> {
                 descriptor.marker("FIELD")
-                          .text("FIELD_NAME", field.name().trim())
-                          .text("FIELD_TYPE", field.databaseType().canonical())
                           .bool("FIELD_PRIMARY_KEY", field.primaryKey())
-                          .bool("FIELD_NULLABLE", field.nullable())
-                          .bool("FIELD_UNIQUE", field.unique())
-                          .nullableInteger("FIELD_LENGTH", field.length())
-                          .nullableInteger("FIELD_PRECISION", field.precision())
-                          .nullableInteger("FIELD_SCALE", field.scale())
-                          .nullableText("FIELD_COMMENT", field.comment())
-                          .text("GENERATION_STRATEGY", field.generation().strategy().name())
-                          .nullableText("GENERATION_SEQUENCE", field.generation().sequenceName())
-                          .integer("GENERATION_START", field.generation().startWith())
-                          .integer("GENERATION_INCREMENT", field.generation().incrementBy())
-                          .integer("GENERATION_CACHE", field.generation().cacheSize());
+                          .bool("FIELD_UNIQUE", field.unique());
+                RelationalMetadataFingerprint.encodeColumn(descriptor, field.column());
             });
         indexes.stream()
                .sorted(Comparator.comparing(index -> index.name().trim()))
@@ -279,7 +274,8 @@ public final class EntityMetadata<T> {
                              .text("INDEX_NAME", index.name().trim())
                              .bool("INDEX_UNIQUE", index.unique())
                              .integer("INDEX_COLUMN_COUNT", index.columns().size());
-                   index.columns().forEach(column -> descriptor.text("INDEX_COLUMN", column.trim()));
+                   index.keys().forEach(key -> descriptor.text("INDEX_COLUMN", key.column().trim())
+                           .text("INDEX_DIRECTION", key.direction().name()));
                });
         return descriptor.finishHex();
     }

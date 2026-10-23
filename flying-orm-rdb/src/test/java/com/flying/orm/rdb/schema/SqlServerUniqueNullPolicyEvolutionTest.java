@@ -12,8 +12,6 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SqlServerUniqueNullPolicyEvolutionTest {
@@ -22,50 +20,38 @@ class SqlServerUniqueNullPolicyEvolutionTest {
 
     @Test
     void dropsDistinctUniquenessAsItsPhysicalFilteredIndex() {
-        ReviewedSchemaPlan plan = review(table(key(UniqueNullPolicy.DISTINCT, "code")), table(null));
-        assertFalse(plan.requiresManualAction());
+        SchemaMigrationPlan plan = review(table(key(UniqueNullPolicy.DISTINCT, "code")), table(null));
         assertEquals(List.of("drop index [uq_accounts] on [app].[accounts]"), sql(plan));
     }
 
     @Test
     void replacesADistinctUniqueIndexWithOneDropExistingStatement() {
-        ReviewedSchemaPlan plan = review(table(key(UniqueNullPolicy.DISTINCT, "code")),
+        SchemaMigrationPlan plan = review(table(key(UniqueNullPolicy.DISTINCT, "code")),
                 table(key(UniqueNullPolicy.DISTINCT, "code", "tenant")));
-        assertFalse(plan.requiresManualAction());
         assertEquals(List.of("create unique index [uq_accounts] on [app].[accounts] ([code], [tenant])"
                 + " where [code] is not null and [tenant] is not null with (drop_existing = on)"), sql(plan));
     }
 
     @Test
-    void changesNullPolicyOnlyAfterEstablishingTargetSemanticsUnderADeterministicGuard() {
+    void changesNullPolicyByReplacingTheDeclaredConstraintOrIndex() {
         for (UniqueNullPolicy target : UniqueNullPolicy.values()) {
             UniqueNullPolicy source = target == UniqueNullPolicy.DEFAULT
                     ? UniqueNullPolicy.DISTINCT : UniqueNullPolicy.DEFAULT;
             RelationalTableDefinition actual = table(key(source, "code"));
             RelationalTableDefinition desired = table(key(target, "code"));
-            ReviewedSchemaPlan plan = review(actual, desired);
-            assertFalse(plan.requiresManualAction());
-            assertEquals(4, plan.requests().size());
+            SchemaMigrationPlan plan = review(actual, desired);
+            assertEquals(2, plan.requests().size());
             assertEquals(sql(plan), sql(review(actual, desired)));
-            assertEquals(plan.fingerprint(), review(actual, desired).fingerprint());
+            assertEquals(plan.requests(), review(actual, desired).requests());
             assertTrue(plan.operations().stream().allMatch(operation -> operation.kind() == SchemaOperation.Kind.CHANGE_UNIQUE));
 
             List<String> sql = sql(plan);
-            String opening = target == UniqueNullPolicy.DISTINCT
-                    ? "create unique index [" : "alter table [app].[accounts] add constraint [";
-            assertTrue(sql.getFirst().startsWith(opening));
-            String guard = sql.getFirst().substring(opening.length(), sql.getFirst().indexOf(']', opening.length()));
-            assertNotEquals("uq_accounts", guard);
-            assertTrue(guard.length() <= 30);
             assertEquals(source == UniqueNullPolicy.DISTINCT
                     ? "drop index [uq_accounts] on [app].[accounts]"
-                    : "alter table [app].[accounts] drop constraint [uq_accounts]", sql.get(1));
+                    : "alter table [app].[accounts] drop constraint [uq_accounts]", sql.getFirst());
             assertEquals(target == UniqueNullPolicy.DISTINCT
                     ? "create unique index [uq_accounts] on [app].[accounts] ([code]) where [code] is not null"
-                    : "alter table [app].[accounts] add constraint [uq_accounts] unique ([code])", sql.get(2));
-            assertEquals(target == UniqueNullPolicy.DISTINCT
-                    ? "drop index [" + guard + "] on [app].[accounts]"
-                    : "alter table [app].[accounts] drop constraint [" + guard + "]", sql.get(3));
+                    : "alter table [app].[accounts] add constraint [uq_accounts] unique ([code])", sql.getLast());
         }
     }
 
@@ -81,13 +67,13 @@ class SqlServerUniqueNullPolicyEvolutionTest {
         return (unique == null ? table : table.addUnique(unique)).build();
     }
 
-    private static ReviewedSchemaPlan review(RelationalTableDefinition actual, RelationalTableDefinition desired) {
+    private static SchemaMigrationPlan review(RelationalTableDefinition actual, RelationalTableDefinition desired) {
         RdbDialect dialect = RdbDialect.sqlServer();
         return RelationalSchemaPlanReviewer.create(dialect).review(DatabaseDescriptor.of("SQL Server", "2022", dialect),
                 desired, SchemaSnapshot.present(actual), SchemaSnapshotCoverage.complete(), SchemaCompatibilityMode.EXACT);
     }
 
-    private static List<String> sql(ReviewedSchemaPlan plan) {
+    private static List<String> sql(SchemaMigrationPlan plan) {
         return plan.requests().stream().map(request -> request.sql()).toList();
     }
 }

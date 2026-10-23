@@ -45,10 +45,9 @@ final class StructuredConditionValueNormalizer {
         ConditionValueShape shape = policy.valueShape(operator);
         try {
             requireTextFieldForLike(operator, field, path);
-            ConditionValueNormalizer.ScalarConverter converter = !policy.usesFieldValue(operator)
-                    || shape == ConditionValueShape.NONE
-                    ? (scalar, index) -> scalar
-                    : (scalar, index) -> normalizeScalar(scalar, field, path, index);
+            boolean fieldValue = policy.usesFieldValue(operator);
+            ConditionValueNormalizer.ScalarConverter converter = (scalar, index) ->
+                    normalizeScalar(scalar, field, policy, operator, fieldValue, path, index);
             return ConditionValueNormalizer.normalize(shape,
                                                       value,
                                                       ConditionValuePolicy.REJECT_EMPTY,
@@ -76,8 +75,6 @@ final class StructuredConditionValueNormalizer {
             case STRING_TOO_LONG -> StructuredConditionErrorCode.VALUE_TOO_LONG;
             case SHAPE_NOT_ALLOWED -> StructuredConditionErrorCode.VALUE_SHAPE_NOT_ALLOWED;
             case RANGE_SIZE_INVALID -> StructuredConditionErrorCode.VALUE_RANGE_SIZE_INVALID;
-            case RANGE_TYPE_MISMATCH -> StructuredConditionErrorCode.VALUE_RANGE_TYPE_MISMATCH;
-            case RANGE_ORDER_INVALID -> StructuredConditionErrorCode.VALUE_RANGE_ORDER_INVALID;
         };
         String location = path.text();
         return StructuredConditionException.field(code,
@@ -86,11 +83,16 @@ final class StructuredConditionValueNormalizer {
                                                   "structured condition value is invalid at " + location);
     }
 
-    private Object normalizeScalar(Object value, DynamicField field,
+    private Object normalizeScalar(Object value, DynamicField field, StructuredConditionPolicy policy,
+                                   String operator, boolean fieldValue,
                                    ConditionCompilationBudget.Path path, int index) {
-        Class<?> targetType = targetType(field);
         try {
-            Object codecInput = StructuredConditionValueSnapshots.snapshot(value);
+            Object mapped = policy.mapValue(field.name(), operator, value);
+            if (!fieldValue) {
+                return mapped;
+            }
+            Class<?> targetType = targetType(field);
+            Object codecInput = StructuredConditionValueSnapshots.snapshot(mapped);
             return targetType == null
                     ? valueCodecs.write(codecInput) : valueCodecs.read(codecInput, targetType);
         } catch (RuntimeException failure) {

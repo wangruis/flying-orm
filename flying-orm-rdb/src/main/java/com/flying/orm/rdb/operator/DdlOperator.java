@@ -1,12 +1,20 @@
 package com.flying.orm.rdb.operator;
 
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.metadata.RelationIdentity;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
+import com.flying.orm.rdb.dialect.DatabaseDescriptor;
 import com.flying.orm.rdb.metadata.ReactiveFormMetadataReader;
 import com.flying.orm.rdb.schema.ReactiveSchemaClient;
+import com.flying.orm.rdb.schema.SchemaMigrationPlan;
+import com.flying.orm.rdb.schema.SchemaCompatibilityMode;
+import com.flying.orm.rdb.schema.SchemaMigrationResult;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Consumer;
 
 /**
  * 动态表结构的响应式入口。
@@ -39,8 +47,58 @@ public final class DdlOperator {
         return new CreateOrAlterTableBuilder(schemaClient, metadataReader, table);
     }
 
-    /** 从同一份动态表单安全建表或增量调整；危险变更仍需现有审核入口。 */
+    /** 从同一份动态表单建表或增量调整；其他变更通过构建器选项显式选择，不提供审核流程。 */
     public Mono<Long> createOrAlter(DynamicForm form) {
         return schemaClient.createOrAlter(form, List.of(), metadataReader);
+    }
+
+    /**
+     * 按关系声明增量调整，未声明的现有列和约束保留；订阅后读取、规划并执行。
+     */
+    public Mono<SchemaMigrationResult> createOrAlter(DatabaseDescriptor database, RelationalTableDefinition table) {
+        return plan(database, table).flatMap(this::execute);
+    }
+
+    /**
+     * 在一次回调中描述完整表结构，支持列默认值、CHECK 和命名约束。
+     * 配置在调用时执行一次并冻结；订阅时才读取、规划和执行，重复订阅复用同一份声明。
+     */
+    public Mono<SchemaMigrationResult> createOrAlter(DatabaseDescriptor database, String table,
+                                                      Consumer<RelationalTableDefinition.Builder> definition) {
+        return createOrAlter(database, RelationIdentity.table(table), definition);
+    }
+
+    /** 按显式 catalog/schema/table 身份配置完整表结构，不拆分表名中的点号。 */
+    public Mono<SchemaMigrationResult> createOrAlter(DatabaseDescriptor database, RelationIdentity table,
+                                                      Consumer<RelationalTableDefinition.Builder> definition) {
+        RelationalTableDefinition.Builder builder = RelationalTableDefinition.builder(table);
+        Objects.requireNonNull(definition, "table configuration must not be null").accept(builder);
+        return createOrAlter(database, builder.build());
+    }
+
+    /** 规划增量声明，不执行 SQL；未声明的现有对象保留。 */
+    public Mono<SchemaMigrationPlan> plan(DatabaseDescriptor database, RelationalTableDefinition table) {
+        return schemaClient.planCreateOrAlter(database, table, metadataReader);
+    }
+
+    /** 显式规划完整目标替换；目标未包含的现有对象会进入删除计划。 */
+    public Mono<SchemaMigrationPlan> planReplacement(DatabaseDescriptor database, RelationalTableDefinition table) {
+        return planReplacement(database, table, SchemaCompatibilityMode.EXACT);
+    }
+
+    /** 对完整目标求差异；兼容模式只分类差异，不改变替换意图或执行 SQL。 */
+    public Mono<SchemaMigrationPlan> planReplacement(DatabaseDescriptor database, RelationalTableDefinition table,
+                                           SchemaCompatibilityMode mode) {
+        return schemaClient.reviewRelational(database, table, metadataReader, mode);
+    }
+
+    /** 执行已冻结的关系计划，使用客户端默认执行选项。 */
+    public Mono<SchemaMigrationResult> execute(SchemaMigrationPlan plan) {
+        return schemaClient.execute(plan, metadataReader);
+    }
+
+    /** 使用本次明确指定的执行选项执行已冻结计划。 */
+    public Mono<SchemaMigrationResult> execute(SchemaMigrationPlan plan, SqlExecutionOptions options) {
+        return schemaClient.execute(plan, metadataReader, options);
     }
 }

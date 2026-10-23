@@ -7,8 +7,8 @@ import com.flying.orm.core.scope.FieldScope;
 import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.internal.InternalApi;
 
-import java.util.Comparator;
 import java.util.List;
+import java.util.Set;
 
 /**
  * 实体读取的内部默认规则；投影供所有实体入口共享，默认排序仍只用于 Repository。
@@ -33,12 +33,7 @@ public final class EntityQueryDefaults {
                                   ConditionGroup where,
                                   FieldScope defaultFields) {
         QuerySpec projected = applyProjection(QuerySpec.of(form, where), metadata, defaultFields);
-        List<PageSort> sorts = metadata.fields().stream()
-                .filter(EntityFieldMetadata::ordered)
-                .sorted(Comparator.comparingInt(EntityFieldMetadata::orderPriority))
-                .map(field -> field.orderAscending()
-                        ? PageSort.asc(field.columnName()) : PageSort.desc(field.columnName()))
-                .toList();
+        List<PageSort> sorts = metadata.defaultSorts();
         return sorts.isEmpty() ? projected : projected.withSorts(sorts);
     }
 
@@ -47,14 +42,24 @@ public final class EntityQueryDefaults {
      * 显式 select 仍走原有字段治理并保持严格拒绝。
      */
     public static QuerySpec applyProjection(QuerySpec spec, EntityMetadata<?> metadata, FieldScope defaultFields) {
+        return applyProjection(spec, metadata, defaultFields, Set.of());
+    }
+
+    /** 从隐式默认投影中排除指定列；不会把空结果解释为全字段。 */
+    public static QuerySpec applyProjection(QuerySpec spec, EntityMetadata<?> metadata,
+                                             FieldScope defaultFields, Set<String> excluded) {
         List<String> readable = metadata.defaultProjection();
         if (readable == null) {
-            return spec;
+            if (excluded.isEmpty()) {
+                return spec;
+            }
+            readable = metadata.fields().stream().map(EntityFieldMetadata::columnName).toList();
         }
         FieldScope fields = spec.scope().fields();
-        List<String> projection = fields.unrestrictedRead() && defaultFields.unrestrictedRead()
+        List<String> projection = excluded.isEmpty() && fields.unrestrictedRead() && defaultFields.unrestrictedRead()
                 ? readable
-                : readable.stream().filter(field -> fields.canRead(field) && defaultFields.canRead(field)).toList();
+                : readable.stream().filter(field -> !excluded.contains(field)
+                        && fields.canRead(field) && defaultFields.canRead(field)).toList();
         if (projection.isEmpty()) {
             throw new MappingException("entity has no selectable fields: " + metadata.type().getName());
         }

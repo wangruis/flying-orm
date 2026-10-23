@@ -32,7 +32,7 @@ class KeysetRejectsNullableUniqueTieBreakerTest {
 
         assertEquals(List.of("created_at", "tenant_id", "id"),
                      normalized.sorts().stream().map(KeysetSort::field).toList());
-        assertEquals(List.of("tenant_id", "id"), normalized.hiddenTieBreakers());
+        assertEquals(1, normalized.callerSortCount());
         assertEquals(CursorDirection.DESC, normalized.sorts().get(2).direction());
         assertEquals(NullOrder.LAST, normalized.sorts().get(2).nullOrder());
     }
@@ -55,8 +55,10 @@ class KeysetRejectsNullableUniqueTieBreakerTest {
                                       .withUnique(true))
                 .addField(DynamicField.of("name", "VARCHAR"))
                 .build();
-        assertEquals(List.of("email"),
-                     KeysetPageNormalizer.normalize(nonNullUnique, page).hiddenTieBreakers());
+        KeysetPageNormalizer.NormalizedKeysetPage normalized =
+                KeysetPageNormalizer.normalize(nonNullUnique, page);
+        assertEquals(1, normalized.callerSortCount());
+        assertEquals(List.of("name", "email"), normalized.sorts().stream().map(KeysetSort::field).toList());
     }
 
     @Test

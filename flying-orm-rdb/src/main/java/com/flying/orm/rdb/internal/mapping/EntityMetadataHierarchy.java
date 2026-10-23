@@ -2,8 +2,12 @@ package com.flying.orm.rdb.internal.mapping;
 
 
 import java.lang.reflect.Field;
+import java.lang.reflect.GenericArrayType;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
+import java.lang.reflect.TypeVariable;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -18,6 +22,41 @@ import java.util.Optional;
 public final class EntityMetadataHierarchy {
 
     private EntityMetadataHierarchy() {
+    }
+
+    /** 在模型或访问计划编译时解析成员实际类型；继承变量只沿其声明层次查找。 */
+    public static Class<?> memberClass(Class<?> entityType, Type memberType) {
+        if (memberType instanceof Class<?> type) return type;
+        if (memberType instanceof ParameterizedType type) return (Class<?>) type.getRawType();
+        if (memberType instanceof GenericArrayType array) {
+            return memberClass(entityType, array.getGenericComponentType()).arrayType();
+        }
+        TypeVariable<?> variable = (TypeVariable<?>) memberType;
+        if (variable.getGenericDeclaration() instanceof Class<?> owner) {
+            for (Class<?> current = entityType; current != owner;) {
+                Type parent = genericParent(current, owner);
+                if (parent == null) break;
+                current = memberClass(entityType, parent);
+                if (current == owner && parent instanceof ParameterizedType parameterized) {
+                    TypeVariable<?>[] variables = owner.getTypeParameters();
+                    for (int index = 0; index < variables.length; index++) {
+                        if (variables[index].equals(variable)) {
+                            return memberClass(entityType, parameterized.getActualTypeArguments()[index]);
+                        }
+                    }
+                }
+            }
+        }
+        return memberClass(entityType, variable.getBounds()[0]);
+    }
+
+    private static Type genericParent(Class<?> type, Class<?> owner) {
+        Type parent = type.getGenericSuperclass();
+        if (parent != null && owner.isAssignableFrom(memberClass(type, parent))) return parent;
+        for (Type candidate : type.getGenericInterfaces()) {
+            if (owner.isAssignableFrom(memberClass(type, candidate))) return candidate;
+        }
+        return null;
     }
 
     static List<Class<?>> persistentTypes(Class<?> entityType) {

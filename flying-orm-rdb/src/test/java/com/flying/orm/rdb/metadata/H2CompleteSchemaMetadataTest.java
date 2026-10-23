@@ -36,10 +36,10 @@ class H2CompleteSchemaMetadataTest {
 
     @Test
     void declaresAndProjectsEveryCompleteSnapshotFact() {
-        InformationSchemaFormMetadataReader.Queries queries = H2MetadataQueries.queries();
+        MetadataQueryProfile.Queries queries = H2MetadataQueries.queries();
 
-        assertTrue(InformationSchemaFormMetadataReader.coverage(queries).isComplete());
-        assertEquals(InformationSchemaFormMetadataReader.SnapshotDialect.H2,
+        assertTrue(new MetadataQueryProfile(queries).coverage().isComplete());
+        assertEquals(MetadataQueryProfile.SnapshotDialect.H2,
                      queries.snapshotDialect());
         assertTrue(queries.tableQuery().create("app", "orders").sql().contains("TABLE_COMMENT"));
         assertTrue(queries.primaryKeyQuery().create("app", "orders").sql().contains("CONSTRAINT_NAME"));
@@ -78,8 +78,7 @@ class H2CompleteSchemaMetadataTest {
     @Test
     void assemblesCapturedH2RowsIntoAnExactCompleteSnapshot() {
         CapturedH2Executor executor = new CapturedH2Executor();
-        SchemaSnapshot snapshot = new InformationSchemaFormMetadataReader(
-                executor, H2MetadataQueries.queries())
+        SchemaSnapshot snapshot = new InformationSchemaFormMetadataReader(executor, new MetadataQueryProfile(H2MetadataQueries.queries()))
                 .readSnapshot("app", "orders")
                 .block();
 

@@ -3,7 +3,6 @@ package com.flying.orm.rdb.internal.plan;
 import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
 import com.flying.orm.core.sql.render.SqlStatementPlan;
 import com.flying.orm.rdb.internal.dialect.DatabaseProduct;
-import com.flying.orm.rdb.internal.template.SqlLexicalScanner;
 import com.flying.orm.rdb.internal.template.SqlStatements;
 
 import java.util.Objects;
@@ -27,6 +26,31 @@ public final class SqlStatementCompiler {
         return compileVerified(sql, parameterCount, markerStyle, databaseProductName);
     }
 
+    /** 保留渲染器给出的 INSERT 结构边界，不从任意 SQL 文本猜测可重复的 VALUES 部分。 */
+    public static SqlStatementPlan insert(String prefix, String tuple, int parameterCount,
+                                           String databaseProductName) {
+        String safePrefix = Objects.requireNonNull(prefix, "insert prefix must not be null").stripLeading();
+        String safeTuple = Objects.requireNonNull(tuple, "insert tuple must not be null").stripTrailing();
+        VerifiedSqlStatementPlan statement = compileVerified(safePrefix + safeTuple, parameterCount,
+                SqlBindMarkerStyle.CANONICAL, databaseProductName);
+        return new VerifiedSqlStatementPlan(statement, safePrefix.length(), DatabaseProduct.detect(databaseProductName));
+    }
+
+    /** 由支持返回输入序号的 UPSERT 渲染器保留结构来源，普通编译不会取得该能力。 */
+    public static SqlStatementPlan upsert(String sql, int parameterCount, String databaseProductName) {
+        VerifiedSqlStatementPlan statement = compileVerified(sql, parameterCount,
+                SqlBindMarkerStyle.CANONICAL, databaseProductName);
+        return new VerifiedSqlStatementPlan(statement, DatabaseProduct.detect(databaseProductName), true, false);
+    }
+
+    /** 保留冲突忽略语义；侧索引只能跟随实际插入的输入行。 */
+    public static SqlStatementPlan ignoreConflicts(String sql, int parameterCount,
+                                                   String databaseProductName, boolean batchRowIndex) {
+        VerifiedSqlStatementPlan statement = compileVerified(sql, parameterCount,
+                SqlBindMarkerStyle.CANONICAL, databaseProductName);
+        return new VerifiedSqlStatementPlan(statement, DatabaseProduct.detect(databaseProductName), batchRowIndex, true);
+    }
+
     static VerifiedSqlStatementPlan compileVerified(String sql,
                                                      int parameterCount,
                                                      SqlBindMarkerStyle markerStyle,
@@ -34,11 +58,6 @@ public final class SqlStatementCompiler {
         String source = Objects.requireNonNull(sql, "sql must not be null");
         String productName = Objects.requireNonNullElse(databaseProductName, "");
         DatabaseProduct product = DatabaseProduct.detect(productName);
-        if (product == DatabaseProduct.UNKNOWN) {
-            SqlStatements.requirePortableSingle(source);
-        } else {
-            SqlStatements.requireSingleForDatabaseProduct(source, productName);
-        }
         SqlBindMarkerStyle safeStyle = Objects.requireNonNull(
                 markerStyle, "sql bind marker style must not be null");
         return new VerifiedSqlStatementPlan(
@@ -46,65 +65,6 @@ public final class SqlStatementCompiler {
                 safeStyle,
                 parameterCount,
                 product,
-                compileBindMarkers(source, parameterCount, safeStyle, productName, product));
-    }
-
-    /** 在单语句边界内完成唯一一次参数标记编译，不再公开第二个编译入口。 */
-    private static String compileBindMarkers(String source,
-                                             int parameterCount,
-                                             SqlBindMarkerStyle markerStyle,
-                                             String databaseProductName,
-                                             DatabaseProduct product) {
-        if (parameterCount < 0) {
-            throw new IllegalArgumentException("sql parameter count must not be negative");
-        }
-        if (markerStyle == SqlBindMarkerStyle.NATIVE) {
-            return source;
-        }
-        if (source.indexOf('?') < 0) {
-            if (parameterCount != 0) {
-                throw markerCountMismatch();
-            }
-            return source;
-        }
-
-        SqlLexicalScanner.Rules rules = SqlLexicalScanner.rulesFor(databaseProductName);
-        StringBuilder adapted = new StringBuilder(source.length() + parameterCount * 2);
-        int markerIndex = 0;
-        for (int index = 0; index < source.length();) {
-            long protectedSegment = SqlLexicalScanner.protectedSegmentAt(
-                    source, index, rules, false);
-            if (protectedSegment >= 0L) {
-                int end = SqlLexicalScanner.segmentEnd(protectedSegment);
-                adapted.append(source, index, end);
-                index = end;
-                continue;
-            }
-            if (source.charAt(index) == '?') {
-                appendMarker(adapted, markerIndex++, product);
-            } else {
-                adapted.append(source.charAt(index));
-            }
-            index++;
-        }
-        if (markerIndex != parameterCount) {
-            throw markerCountMismatch();
-        }
-        return adapted.toString();
-    }
-
-    private static void appendMarker(StringBuilder sql,
-                                     int markerIndex,
-                                     DatabaseProduct product) {
-        switch (product) {
-            case POSTGRESQL -> sql.append('$').append(markerIndex + 1);
-            case SQL_SERVER -> sql.append("@P").append(markerIndex);
-            default -> sql.append('?');
-        }
-    }
-
-    private static IllegalArgumentException markerCountMismatch() {
-        return new IllegalArgumentException(
-                "sql parameter marker count does not match parameter count");
+                SqlStatements.compile(source, parameterCount, safeStyle, product));
     }
 }

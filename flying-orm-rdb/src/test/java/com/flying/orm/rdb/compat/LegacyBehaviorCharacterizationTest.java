@@ -3,8 +3,8 @@ package com.flying.orm.rdb.compat;
 import com.flying.orm.core.condition.StructuredConditionInput;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.page.CursorPageQuery;
-import com.flying.orm.core.page.CursorSort;
+import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetSort;
 import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.scope.DataScope;
@@ -50,7 +50,7 @@ class LegacyBehaviorCharacterizationTest {
     void querySpecRemainsImmutableAndShowSensitiveOnlyChangesDisplayMode() {
         DynamicForm form = form();
         DataScope scope = DataScope.all();
-        SqlExecutionOptions executionOptions = SqlExecutionOptions.safeDefaults();
+        SqlExecutionOptions executionOptions = SqlExecutionOptions.unlimited();
         List<String> projections = new ArrayList<>(List.of("id", "name"));
         List<String> groups = new ArrayList<>(List.of("name"));
         List<PageSort> sorts = new ArrayList<>(List.of(PageSort.asc("name")));
@@ -85,18 +85,18 @@ class LegacyBehaviorCharacterizationTest {
     }
 
     @Test
-    void cursorPageKeepsADeepSnapshotAndFirstPageMeaning() {
+    void keysetPageKeepsADeepSnapshotAndFirstPageMeaning() {
         byte[] mutableValue = new byte[]{1, 2, 3};
-        CursorPageQuery first = CursorPageQuery.first(20, CursorSort.asc("id"));
-        CursorPageQuery after = CursorPageQuery.after(20, List.of(mutableValue), CursorSort.asc("id"));
+        KeysetPageQuery first = KeysetPageQuery.first(20, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST));
+        KeysetPageQuery after = KeysetPageQuery.after(20, com.flying.orm.core.page.CursorPosition.of(List.of(mutableValue)), KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST));
         mutableValue[0] = 9;
 
         assertTrue(first.firstPage());
         assertFalse(after.firstPage());
-        assertArrayEquals(new byte[]{1, 2, 3}, (byte[]) after.cursor().getFirst());
-        byte[] returned = (byte[]) after.cursor().getFirst();
+        assertArrayEquals(new byte[]{1, 2, 3}, (byte[]) after.position().values().getFirst());
+        byte[] returned = (byte[]) after.position().values().getFirst();
         returned[1] = 9;
-        assertArrayEquals(new byte[]{1, 2, 3}, (byte[]) after.cursor().getFirst());
+        assertArrayEquals(new byte[]{1, 2, 3}, (byte[]) after.position().values().getFirst());
     }
 
     @Test

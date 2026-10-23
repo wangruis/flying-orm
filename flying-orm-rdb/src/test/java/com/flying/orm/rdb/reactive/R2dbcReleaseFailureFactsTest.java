@@ -41,7 +41,7 @@ class R2dbcReleaseFailureFactsTest {
         RuntimeException failure = assertThrows(RuntimeException.class, () -> session.withPreparedStatement(
                 fixture.request,
                 List.of(),
-                SqlExecutionOptions.safeDefaults(),
+                SqlExecutionOptions.unlimited(),
                 SqlExecutionOperation.QUERY,
                 (statement, largeObjects) -> Flux.just(1),
                 Function.identity()).blockLast(Duration.ofSeconds(2)));
@@ -60,7 +60,7 @@ class R2dbcReleaseFailureFactsTest {
                 () -> executor.rowsUpdated(fixture.request).block(Duration.ofSeconds(2))));
         assertInstanceOf(RdbException.class, assertThrows(RuntimeException.class,
                 () -> executor.rowsUpdatedReturningKeys(
-                        fixture.request, SqlExecutionOptions.safeDefaults()).block(Duration.ofSeconds(2))));
+                        fixture.request, SqlExecutionOptions.unlimited()).block(Duration.ofSeconds(2))));
 
         assertEquals(List.of(SqlExecutionStatus.ERROR, SqlExecutionStatus.ERROR),
                 events.stream().map(SqlExecutionObservation::status).toList());
@@ -83,7 +83,7 @@ class R2dbcReleaseFailureFactsTest {
                 List.of(new ProtectedWriteWork.FieldTokens("payload", List.of(new byte[]{1}))));
 
         assertInstanceOf(RdbException.class, assertThrows(RuntimeException.class,
-                () -> executor.protectedWrite(work, SqlExecutionOptions.safeDefaults())
+                () -> executor.protectedWrite(work, SqlExecutionOptions.unlimited())
                         .block(Duration.ofSeconds(2))));
 
         assertEquals(1, events.size());
@@ -113,7 +113,7 @@ class R2dbcReleaseFailureFactsTest {
                 .withObserver(events::add);
 
         Disposable subscription = executor.rowsUpdatedReturningKeys(
-                fixture.request, SqlExecutionOptions.safeDefaults()).subscribe();
+                fixture.request, SqlExecutionOptions.unlimited()).subscribe();
         assertEquals(1, fixture.releaseCalls.get(), "release must be pending after the driver confirms the write");
         subscription.dispose();
 
@@ -128,7 +128,7 @@ class R2dbcReleaseFailureFactsTest {
                 .withObserver(events::add);
 
         Disposable subscription = executor.protectedWrite(
-                protectedWork(), SqlExecutionOptions.safeDefaults()).subscribe();
+                protectedWork(), SqlExecutionOptions.unlimited()).subscribe();
         assertEquals(1, fixture.releaseCalls.get(), "release must be pending after the driver confirms the write");
         subscription.dispose();
 

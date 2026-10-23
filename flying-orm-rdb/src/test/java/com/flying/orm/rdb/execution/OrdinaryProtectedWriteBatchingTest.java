@@ -140,7 +140,7 @@ class OrdinaryProtectedWriteBatchingTest {
         });
         try {
             Counts counts = new Counts(2, false);
-            SqlExecutionOptions options = SqlExecutionOptions.safeDefaults();
+            SqlExecutionOptions options = SqlExecutionOptions.unlimited();
 
             SqlWriteResult result = execute(true, counts, work(1), options);
 
@@ -156,7 +156,7 @@ class OrdinaryProtectedWriteBatchingTest {
     Stream<DynamicTest> protectedUpdateKeepsDeveloperOwnerRowBudget() {
         return bothExecutors("owner row budget", reactive -> {
             Counts counts = new Counts(2, false);
-            SqlExecutionOptions options = SqlExecutionOptions.safeDefaults().withMaxRows(1);
+            SqlExecutionOptions options = SqlExecutionOptions.unlimited().withMaxRows(1);
 
             SqlRowLimitExceededException failure = assertThrows(SqlRowLimitExceededException.class,
                     () -> execute(reactive, counts, work(1), options));
@@ -175,7 +175,7 @@ class OrdinaryProtectedWriteBatchingTest {
     Stream<DynamicTest> ownerReadsKeepUnlimitedAndLargeDeveloperBudgets() {
         return bothExecutors("unlimited and large owner budgets", reactive -> {
             for (SqlExecutionOptions options : List.of(SqlExecutionOptions.unlimited(),
-                    SqlExecutionOptions.safeDefaults().withMaxRows(10_000L)
+                    SqlExecutionOptions.unlimited().withMaxRows(10_000L)
                             .withMaxResultBytes(128L * 1024 * 1024)
                             .withMaxLargeObjectBytes(32L * 1024 * 1024)
                             .withMaxLargeObjectChars(32_000_000L))) {
@@ -246,7 +246,7 @@ class OrdinaryProtectedWriteBatchingTest {
                 "insert into token_index(id, field_tag, token_hash) values (?, ?, ?)",
                 List.of(new ProtectedWriteWork.FieldTokens("secret", List.of(new byte[32]))));
         Throwable failure = assertThrows(IllegalStateException.class, () -> R2dbcSqlExecutor.create(ConnectionAccessTestSupport.borrowed(connection), RdbDialect.postgresql())
-                .protectedWrite(work, SqlExecutionOptions.safeDefaults()).block(Duration.ofSeconds(5)));
+                .protectedWrite(work, SqlExecutionOptions.unlimited()).block(Duration.ofSeconds(5)));
         assertSame(tokenFailure, failure);
         assertEquals(1, counts.businessWrites);
         assertEquals(1, completedKeys.get());
@@ -270,7 +270,7 @@ class OrdinaryProtectedWriteBatchingTest {
     private static SqlWriteResult execute(boolean reactive,
                                           Counts counts,
                                           ProtectedWriteWork work) {
-        return execute(reactive, counts, work, SqlExecutionOptions.safeDefaults());
+        return execute(reactive, counts, work, SqlExecutionOptions.unlimited());
     }
 
     private static SqlWriteResult execute(boolean reactive,

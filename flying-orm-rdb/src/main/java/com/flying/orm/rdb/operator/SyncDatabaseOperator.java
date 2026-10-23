@@ -8,9 +8,8 @@ import com.flying.orm.rdb.form.SyncFormClient;
 import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.metadata.JdbcFormMetadataReader;
 import com.flying.orm.rdb.metadata.MetadataCacheInvalidator;
-import com.flying.orm.rdb.metadata.SyncFormMetadataReader;
 import com.flying.orm.rdb.schema.JdbcSchemaClient;
-import com.flying.orm.rdb.schema.SchemaMigrationExecutionOptions;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.schema.SchemaMigrationObserver;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
 import com.flying.orm.rdb.template.SqlTemplateEngine;
@@ -44,9 +43,7 @@ public final class SyncDatabaseOperator {
     private final RdbDialect dialect;
     private final JdbcSchemaClient schema;
     private final JdbcFormMetadataReader jdbcMetadata;
-    private final SyncFormMetadataReader metadata;
     private final MetadataCacheInvalidator metadataInvalidator;
-    private final SqlTemplateRegistry templates;
     private final SyncSqlTemplateParameterProvider templateParameters;
     private final SqlTemplateEngine templateEngine;
 
@@ -65,11 +62,9 @@ public final class SyncDatabaseOperator {
         this.defaultDataScope = safe.defaultDataScope();
         this.schema = safe.schema();
         this.jdbcMetadata = safe.jdbcMetadata();
-        this.metadata = safe.metadata();
         this.metadataInvalidator = safe.metadataInvalidator();
-        this.templates = safe.templates();
         this.templateParameters = safe.templateParameters();
-        this.templateEngine = SqlTemplateEngine.create(this.templates,
+        this.templateEngine = SqlTemplateEngine.create(safe.templates(),
                                                        this.dialect,
                                                        this.renderer.valueCodecs())
                                                .forJdbc();
@@ -87,9 +82,7 @@ public final class SyncDatabaseOperator {
         this.dialect = source.dialect;
         this.schema = schema;
         this.jdbcMetadata = source.jdbcMetadata;
-        this.metadata = source.metadata;
         this.metadataInvalidator = source.metadataInvalidator;
-        this.templates = source.templates;
         this.templateParameters = source.templateParameters;
         this.templateEngine = source.templateEngine;
     }
@@ -100,6 +93,18 @@ public final class SyncDatabaseOperator {
         return new SyncDatabaseOperator(components);
     }
 
+    /** 返回 DML 使用的同一表单客户端，包含当前门面的默认配置。 */
+    public SyncFormClient forms() { return forms; }
+
+    /** 返回 DDL 使用的同一结构客户端，包含当前门面的默认配置。 */
+    public JdbcSchemaClient schema() { return schema; }
+
+    /** 返回已装配的同步执行端口，不获取连接。 */
+    public SyncSqlExecutor executor() { return executor; }
+
+    /** 返回已装配的结构读取器，不创建新的读取器或缓存。 */
+    public JdbcFormMetadataReader metadataReader() { return jdbcMetadata; }
+
     /** 创建同步 DDL 入口。 */
     public SyncDdlOperator ddl() {
         return SyncDdlOperator.create(schema, jdbcMetadata);
@@ -107,7 +112,7 @@ public final class SyncDatabaseOperator {
 
     /** 创建动态查询、更新和删除入口。 */
     public SyncDmlOperator dml() {
-        return new SyncDmlOperator(forms, executor, renderer, defaultDataScope);
+        return new SyncDmlOperator(forms, executor, renderer, defaultDataScope, dialect);
     }
 
     /** 创建不需要手写表名和字段名的实体 Lambda DML 入口。 */
@@ -117,7 +122,7 @@ public final class SyncDatabaseOperator {
 
     /** 创建同步元数据读取与缓存失效入口。 */
     public SyncMetadataOperator metadata() {
-        return new SyncMetadataOperator(metadata, metadataInvalidator);
+        return new SyncMetadataOperator(jdbcMetadata, metadataInvalidator);
     }
 
     /**
@@ -134,8 +139,15 @@ public final class SyncDatabaseOperator {
                                            forms.entityModels(),
                                            templateEngine,
                                            templateId,
-                                           templates.serverParameters(templateId),
                                            templateParameters);
+    }
+
+    /** 返回使用指定模板和同步可信参数提供者的新门面；原门面及其他配置保持不变。 */
+    public SyncDatabaseOperator withSqlTemplates(SqlTemplateRegistry registry,
+                                                 SyncSqlTemplateParameterProvider parameterProvider) {
+        return new SyncDatabaseOperator(new NativeComponents(
+                forms, executor, renderer, defaultDataScope, dialect, schema, jdbcMetadata,
+                metadataInvalidator, registry, parameterProvider));
     }
 
     /** 返回与已有默认数据范围取交集的新门面，作用于动态及实体 DML，不改写原生 SQL 或模板。 */
@@ -151,7 +163,7 @@ public final class SyncDatabaseOperator {
     }
 
     /** 返回为 Schema 迁移设置默认执行选项的门面；单次迁移可显式覆盖。 */
-    public SyncDatabaseOperator withSchemaExecutionOptions(SchemaMigrationExecutionOptions options) {
+    public SyncDatabaseOperator withSchemaExecutionOptions(SqlExecutionOptions options) {
         return copy(forms, schema.withDefaultMigrationExecutionOptions(options), defaultDataScope);
     }
 
@@ -177,7 +189,6 @@ public final class SyncDatabaseOperator {
                                    RdbDialect dialect,
                                    JdbcSchemaClient schema,
                                    JdbcFormMetadataReader jdbcMetadata,
-                                   SyncFormMetadataReader metadata,
                                    MetadataCacheInvalidator metadataInvalidator,
                                    SqlTemplateRegistry templates,
                                    SyncSqlTemplateParameterProvider templateParameters) {
@@ -190,7 +201,6 @@ public final class SyncDatabaseOperator {
             dialect = Objects.requireNonNull(dialect, "rdb dialect must not be null");
             schema = Objects.requireNonNull(schema, "jdbc schema client must not be null");
             jdbcMetadata = Objects.requireNonNull(jdbcMetadata, "jdbc metadata reader must not be null");
-            metadata = Objects.requireNonNull(metadata, "sync metadata reader must not be null");
             metadataInvalidator = Objects.requireNonNull(
                     metadataInvalidator, "metadata cache invalidator must not be null");
             templates = Objects.requireNonNull(templates, "SQL template registry must not be null");

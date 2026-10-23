@@ -1,8 +1,9 @@
 package com.flying.orm.rdb.metadata;
 
+import com.flying.orm.core.metadata.RelationalTableDefinition;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.dialect.RdbDialect;
@@ -13,7 +14,6 @@ import org.junit.jupiter.api.DynamicTest;
 import org.junit.jupiter.api.TestFactory;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
@@ -21,7 +21,6 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -36,6 +35,34 @@ class NestedMetadataCacheInvalidationTest {
             MetadataCacheInvalidator::invalidateAll,
             cache -> cache.invalidate("public.accounts"),
             cache -> cache.invalidate(RelationIdentity.of("catalog", "public", "accounts")));
+
+    @TestFactory
+    List<DynamicTest> plainReaderInvalidationIsNotLostBehindTheCache() {
+        return List.of(
+                DynamicTest.dynamicTest("relation", () -> assertPlainReaderInvalidation(
+                        cache -> cache.invalidate("accounts"))),
+                DynamicTest.dynamicTest("all", () -> assertPlainReaderInvalidation(
+                        MetadataCacheInvalidator::invalidateAll)));
+    }
+
+    private static void assertPlainReaderInvalidation(Consumer<MetadataCacheInvalidator> invalidate) {
+        MutableReader source = new MutableReader() {
+            @Override
+            public void invalidate(RelationIdentity relation) {
+                current = form(true);
+            }
+
+            @Override
+            public void invalidateAll() {
+                current = form(true);
+            }
+        };
+        ReactiveFormMetadataCache cache = ReactiveFormMetadataReaders.cached(source);
+        assertColumns(cache, 1);
+        invalidate.accept(cache);
+        assertColumns(cache, 2);
+        assertEquals(4, source.reads);
+    }
 
     @TestFactory
     List<DynamicTest> nestedInvalidationRefreshesBothMetadataKinds() {
@@ -157,18 +184,23 @@ class NestedMetadataCacheInvalidationTest {
                 tests.add(DynamicTest.dynamicTest("mode=" + mode + "/table=" + table, () -> {
                     AtomicReference<ReactiveFormMetadataCache> cacheRef = new AtomicReference<>();
                     MutableReader source = new MutableReader() {
-                        @Override
-                        public Mono<DynamicForm> readForm(String id, String name) {
-                            reads++;
-                            DynamicForm captured = current;
-                            if (reads == 1) {
-                                current = form(true);
-                                // Reproduce invalidation after the reader captures the old structure,
-                                // but before it returns the loading Publisher to the cache.
-                                invalidate.accept(cacheRef.get());
-                            }
-                            return Mono.just(captured);
-                        }
+            @Override
+            public Mono<DynamicForm> readForm(String id, RelationIdentity relation) {
+                reads++;
+                DynamicForm captured = current;
+                if (reads == 1) {
+                    current = form(true);
+                    // Reproduce invalidation after the reader captures the old structure,
+                    // but before it returns the loading Publisher to the cache.
+                    invalidate.accept(cacheRef.get());
+                }
+                return Mono.just(captured);
+            }
+
+            @Override
+            public Mono<RelationalTableDefinition> readTable(RelationIdentity relation) {
+                return readForm(relation.table(), relation).map(form -> form.toTableDefinition(relation));
+            }
                     };
                     ReactiveFormMetadataCache cache = ReactiveFormMetadataReaders.cached(source);
                     cacheRef.set(cache);
@@ -198,10 +230,16 @@ class NestedMetadataCacheInvalidationTest {
                 CountDownLatch proceed = new CountDownLatch(1);
                 // Model an integration cache whose invalidation is concurrently in progress.
                 InvalidatingReader delegate = new InvalidatingReader(false) {
-                    @Override
-                    public Mono<DynamicForm> readForm(String id, String table) {
-                        return inner.readForm(id, "public", table);
-                    }
+            @Override
+            public Mono<DynamicForm> readForm(String id, RelationIdentity relation) {
+                String table = relation.qualifiedName();
+                return inner.readForm(id, "public", table);
+            }
+
+            @Override
+            public Mono<RelationalTableDefinition> readTable(RelationIdentity relation) {
+                return readForm(relation.table(), relation).map(form -> form.toTableDefinition(relation));
+            }
 
                     @Override
                     public void invalidateAll() {
@@ -248,7 +286,7 @@ class NestedMetadataCacheInvalidationTest {
         int reads;
 
         @Override
-        public Mono<DynamicForm> readForm(String id, String table) {
+        public Mono<DynamicForm> readForm(String id, RelationIdentity relation) {
             return Mono.fromSupplier(() -> {
                 reads++;
                 return current;
@@ -256,9 +294,10 @@ class NestedMetadataCacheInvalidationTest {
         }
 
         @Override
-        public Mono<DynamicForm> readForm(String id, String schema, String table) {
-            return readForm(id, table);
+        public Mono<RelationalTableDefinition> readTable(RelationIdentity relation) {
+            return readForm(relation.table(), relation).map(form -> form.toTableDefinition(relation));
         }
+
     }
 
     private static class InvalidatingReader extends MutableReader implements MetadataCacheInvalidator {
@@ -271,7 +310,8 @@ class NestedMetadataCacheInvalidationTest {
         }
 
         @Override
-        public void invalidate(String table) {
+        public void invalidate(com.flying.orm.core.metadata.RelationIdentity relation) {
+            String table = relation.qualifiedName();
             invalidateAll();
         }
 

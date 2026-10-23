@@ -19,6 +19,26 @@ class RowLayoutSmallProjectionAllocationTest {
     private static volatile RowLayout sink;
 
     @Test
+    void wideProjectionDoesNotCopyItsPrivateIndex() {
+        assumeTrue(ManagementFactory.getRuntimeMXBean().getInputArguments().stream()
+                .noneMatch(argument -> argument.startsWith("-javaagent:")),
+                "allocation limits require an uninstrumented VM");
+        com.sun.management.ThreadMXBean allocation = (com.sun.management.ThreadMXBean)
+                ManagementFactory.getThreadMXBean();
+        allocation.setThreadAllocatedMemoryEnabled(true);
+        List<String> columns = List.of("id", "name", "age", "email", "phone", "city", "state", "zip",
+                "country", "score", "status", "created", "updated", "owner", "role", "group");
+        for (int index = 0; index < MEASURED_ITERATIONS; index++) sink = RowLayout.of(columns);
+        long thread = Thread.currentThread().threadId();
+        long before = allocation.getThreadAllocatedBytes(thread);
+        for (int index = 0; index < MEASURED_ITERATIONS; index++) sink = RowLayout.of(columns);
+        long bytes = allocation.getThreadAllocatedBytes(thread) - before;
+        assertTrue(bytes < MEASURED_ITERATIONS * 1024L,
+                "bytes per wide layout: " + bytes / (double) MEASURED_ITERATIONS);
+        for (int index = 0; index < columns.size(); index++) assertEquals(index, sink.indexOf(columns.get(index)));
+    }
+
+    @Test
     void smallProjectionDoesNotBuildDiscardedHashIndexes() {
         java.lang.management.ThreadMXBean managementBean = ManagementFactory.getThreadMXBean();
         assumeTrue(managementBean instanceof com.sun.management.ThreadMXBean,

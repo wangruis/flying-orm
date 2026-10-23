@@ -2,11 +2,13 @@ package com.flying.orm.rdb.internal.protection;
 
 import com.flying.orm.rdb.batch.BatchMemoryBudget;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
+import com.flying.orm.rdb.execution.ProtectedBatchRows;
 import com.flying.orm.rdb.execution.SqlWriteResult;
 
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.util.ArrayList;
+import java.util.AbstractList;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -41,15 +43,123 @@ public final class ProtectedReplacementBatchPlan {
         return () -> new SegmentIterator(safeRows, maxBufferedBytes);
     }
 
-    public interface Row {
-        ProtectedWriteWork work();
+    /** 共享 JDBC/R2DBC 的已准备行状态，不携带连接或执行行为。 */
+    public record Row(ProtectedWriteWork work, List<Map<String, Object>> owners) {
+        public Row {
+            owners = List.copyOf(owners);
+        }
 
-        List<Map<String, Object>> owners();
+        /** 固定真实写入返回的 owner，随后与普通行共用替换规划。 */
+        public Row completed(SqlWriteResult result) {
+            List<Map<String, Object>> resolved = replacementOwners(result);
+            if (resolved.isEmpty()) {
+                throw new IllegalStateException("protected batch update owner was not found");
+            }
+            return new Row(work, resolved);
+        }
+
+        /** result 为空时使用已知或已解析的 INSERT 主键；生成键路径传入真实结果。 */
+        public List<Map<String, Object>> replacementOwners(SqlWriteResult result) {
+            return switch (work.kind()) {
+                case INSERT -> owners.isEmpty() ? List.of(work.resolveInsertOwner(
+                        result == null ? new SqlWriteResult(1L, List.of()) : result)) : owners;
+                case UPSERT -> List.of(work.knownOwner());
+                case UPDATE -> owners;
+            };
+        }
+    }
+
+    public record Prepared(List<Row> rows, long maxBufferedBytes) {
+        public Prepared {
+            rows = List.copyOf(rows);
+            if (maxBufferedBytes <= 0L) {
+                throw new IllegalArgumentException("protected batch byte limit must be greater than zero");
+            }
+        }
+
+        public boolean hasOwnerRestrictedUpdates() {
+            return rows.stream().map(Row::work).filter(Objects::nonNull)
+                    .anyMatch(work -> work.kind() == ProtectedWriteWork.Kind.UPDATE);
+        }
+    }
+
+    /** 全部普通行无需侧索引状态；混合窗口保持与输入一一对应的行号。 */
+    public static List<Row> prepareRows(List<ProtectedBatchRows.RowView> rows) {
+        if (rows.stream().noneMatch(row -> row.work() != null)) return List.of();
+        List<Row> states = new ArrayList<>(rows.size());
+        for (ProtectedBatchRows.RowView row : rows) states.add(new Row(row.work(), List.of()));
+        return states;
     }
 
     public record Insertion(ProtectedWriteWork work,
                             Map<String, Object> owner,
                             ProtectedWriteWork.FieldTokens field) {
+    }
+
+    /** 两个执行端共用的纯令牌缓冲；false 表示先执行当前缓冲，再加入同一令牌。 */
+    public static final class TokenBuffer {
+        private final long maxBufferedBytes;
+        private final List<List<Object>> parameters = new ArrayList<>();
+        private String sql;
+        private long parameterCount;
+        private long bufferedBytes;
+
+        public TokenBuffer(long maxBufferedBytes) {
+            this.maxBufferedBytes = maxBufferedBytes;
+        }
+
+        public boolean add(Insertion insertion, int tokenIndex) {
+            ProtectedWriteWork work = insertion.work();
+            int width = work.ownerFields().size() + 2;
+            if (!parameters.isEmpty() && (!work.insertSql().equals(sql)
+                    || parameters.size() >= MAX_OPERATIONS || parameterCount + width > MAX_PARAMETERS)) {
+                return false;
+            }
+            List<Object> view = new AbstractList<>() {
+                @Override
+                public Object get(int index) {
+                    Objects.checkIndex(index, size());
+                    return index < width - 2 ? Objects.requireNonNull(
+                            insertion.owner().get(work.ownerFields().get(index)),
+                            "protected write owner value must not be null")
+                            : index == width - 2 ? insertion.field().fieldTag()
+                            : insertion.field().ownedToken(tokenIndex);
+                }
+
+                @Override
+                public int size() {
+                    return width;
+                }
+            };
+            long bytes = BatchMemoryBudget.estimateValueBytes(view);
+            if (bytes == Long.MAX_VALUE || bytes > maxBufferedBytes) {
+                throw new IllegalArgumentException("protected side-index token parameters exceed batch safety limits");
+            }
+            if (!parameters.isEmpty() && bytes > maxBufferedBytes - bufferedBytes) {
+                return false;
+            }
+            parameters.add(work.sideIndexParameters(insertion.owner(), insertion.field(), tokenIndex));
+            sql = work.insertSql();
+            parameterCount += width;
+            bufferedBytes += bytes;
+            return true;
+        }
+
+        public String sql() {
+            return sql;
+        }
+
+        /** 内部消费端复用自有缓冲；JDBC执行返回后清空，R2DBC移交后不再修改。 */
+        public List<List<Object>> parameters() {
+            return parameters;
+        }
+
+        public void clear() {
+            parameters.clear();
+            parameterCount = 0;
+            bufferedBytes = 0;
+            sql = null;
+        }
     }
 
     public record Segment(String deleteSql,
@@ -210,20 +320,10 @@ public final class ProtectedReplacementBatchPlan {
                 if (currentWork == null) {
                     continue;
                 }
-                currentOwners = owners(row, currentWork);
-                if (currentOwners.isEmpty()) {
-                    throw new IllegalStateException("protected batch update owner was not found");
-                }
+                currentOwners = row.replacementOwners(null);
             }
         }
 
-        private static List<Map<String, Object>> owners(Row row, ProtectedWriteWork work) {
-            return switch (work.kind()) {
-                case INSERT -> List.of(work.resolveInsertOwner(new SqlWriteResult(1L, List.of())));
-                case UPSERT -> List.of(work.knownOwner());
-                case UPDATE -> row.owners();
-            };
-        }
     }
 
     private record Operation(Insertion insertion,

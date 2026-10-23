@@ -71,7 +71,7 @@ class R2dbcSequenceCleanupOwnershipTest {
         Fixture fixture = new Fixture();
         Mono<SqlExecutionSequenceResult> execution = assertDoesNotThrow(() ->
                 fixture.executor.executeInConnection(new SqlExecutionSequence(
-                        List.of(), List.of(), List.of()), SqlExecutionOptions.safeDefaults()));
+                        List.of(), List.of(), List.of()), SqlExecutionOptions.unlimited()));
 
         for (int subscription = 0; subscription < 2; subscription++) {
             SqlExecutionSequenceResult result = execution.block(Duration.ofSeconds(2));
@@ -89,7 +89,7 @@ class R2dbcSequenceCleanupOwnershipTest {
         Mono<SqlExecutionSequenceResult> execution = assertDoesNotThrow(() ->
                 fixture.executor.executeInConnection(new SqlExecutionSequence(
                         List.of(), List.of(), List.of(request(CLEANUP, 1))),
-                        SqlExecutionOptions.safeDefaults()));
+                        SqlExecutionOptions.unlimited()));
         assertEquals(0, fixture.connectionAcquisitions.get());
 
         for (int subscription = 1; subscription <= 2; subscription++) {
@@ -109,7 +109,7 @@ class R2dbcSequenceCleanupOwnershipTest {
         Mono<SqlExecutionSequenceResult> execution = assertDoesNotThrow(() ->
                 fixture.executor.executeInConnection(new SqlExecutionSequence(
                         List.of(), List.of(), List.of(request(CLEANUP_FAILURE))),
-                        SqlExecutionOptions.safeDefaults()));
+                        SqlExecutionOptions.unlimited()));
 
         SqlExecutionSequenceException failure = assertThrows(SqlExecutionSequenceException.class,
                 () -> execution.block(Duration.ofSeconds(2)));
@@ -128,7 +128,7 @@ class R2dbcSequenceCleanupOwnershipTest {
         Mono<?> execution = fixture.executor.executeInConnection(new SqlExecutionSequence(
                 List.of(), List.of(request(WORK_FAILURE)),
                 List.of(request(CLEANUP, new SqlTypedValue(SqlTypedValue.Kind.BLOB, cleanupPayload)))),
-                SqlExecutionOptions.safeDefaults());
+                SqlExecutionOptions.unlimited());
         cleanupPayload[0] = 9;
 
         SqlExecutionSequenceException failure = assertThrows(
@@ -148,7 +148,7 @@ class R2dbcSequenceCleanupOwnershipTest {
         Mono<?> execution = fixture.executor.executeInConnection(new SqlExecutionSequence(
                 List.of(), List.of(request(WORK_PENDING)),
                 List.of(request(CLEANUP, new SqlTypedValue(SqlTypedValue.Kind.BLOB, cleanupPayload)))),
-                SqlExecutionOptions.safeDefaults());
+                SqlExecutionOptions.unlimited());
         cleanupPayload[0] = 9;
 
         Disposable subscription = execution.subscribe();
@@ -173,7 +173,7 @@ class R2dbcSequenceCleanupOwnershipTest {
         Disposable subscription = fixture.executor.executeInConnection(new SqlExecutionSequence(
                 List.of(), List.of(request(ORDINARY_BEFORE, 1)),
                 List.of(request(CLEANUP, 1), request(CLEANUP_PENDING), request(CLEANUP_TAIL))),
-                SqlExecutionOptions.safeDefaults()).subscribe();
+                SqlExecutionOptions.unlimited()).subscribe();
         try {
             assertTrue(fixture.cleanupStarted.await(2, TimeUnit.SECONDS));
             assertEquals(1, fixture.cleanupExecutions.get());
@@ -195,7 +195,7 @@ class R2dbcSequenceCleanupOwnershipTest {
                 () -> fixture.executor.executeInConnection(new SqlExecutionSequence(
                         List.of(), List.of(request(ORDINARY_BEFORE, 1)),
                         List.of(request(CLEANUP, 1), request(CLEANUP_FAILURE))),
-                        SqlExecutionOptions.safeDefaults()).block(Duration.ofSeconds(2)));
+                        SqlExecutionOptions.unlimited()).block(Duration.ofSeconds(2)));
 
         assertEquals(SqlExecutionPhase.CLEANUP, failure.phase());
         assertEquals(1, failure.stepIndex());
@@ -225,7 +225,7 @@ class R2dbcSequenceCleanupOwnershipTest {
                             RuntimeException error = assertThrows(RuntimeException.class,
                                     () -> fixture.executor.executeInConnection(
                                             new SqlExecutionSequence(List.of(), work, cleanup),
-                                            SqlExecutionOptions.safeDefaults()).block(Duration.ofSeconds(2)));
+                                            SqlExecutionOptions.unlimited()).block(Duration.ofSeconds(2)));
 
                             assertAll(fixture::assertCleanupOnceAndOwnedConnectionClosed, () -> {
                                 SqlExecutionSequenceException failure = assertInstanceOf(
@@ -254,7 +254,7 @@ class R2dbcSequenceCleanupOwnershipTest {
         SqlRequest afterRequest = request(ORDINARY_AFTER, after);
         Mono<?> execution = fixture.executor.executeInConnection(new SqlExecutionSequence(
                 List.of(), List.of(beforeRequest, wrappedRequest, afterRequest), List.of()),
-                SqlExecutionOptions.safeDefaults());
+                SqlExecutionOptions.unlimited());
         wrapped[0] = 9;
         before[0] = 8;
         after[0] = 9;
@@ -278,7 +278,7 @@ class R2dbcSequenceCleanupOwnershipTest {
         Mono<?> execution = fixture.executor.executeInConnection(new SqlExecutionSequence(
                 List.of(), List.of(request(ORDINARY_BEFORE, "before"),
                         request(MUTABLE_WRAPPER, new SqlTypedValue(SqlTypedValue.Kind.BLOB, wrapped)),
-                        request(ORDINARY_AFTER, 7)), List.of()), SqlExecutionOptions.safeDefaults());
+                        request(ORDINARY_AFTER, 7)), List.of()), SqlExecutionOptions.unlimited());
         wrapped[0] = 9;
         execution.block(Duration.ofSeconds(2));
         assertEquals("before", fixture.bound(ORDINARY_BEFORE).getFirst());

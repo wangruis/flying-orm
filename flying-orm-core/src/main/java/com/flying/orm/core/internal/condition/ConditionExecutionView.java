@@ -6,6 +6,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.function.Consumer;
 
 /**
  * 条件 AST 按需生成的结构摘要和共享参数源。
@@ -56,7 +57,7 @@ public final class ConditionExecutionView {
         return cacheable;
     }
 
-    /** Retains immutable child segments instead of copying every descendant at every level. */
+    /** Takes ownership of the private directory; neither it nor its child segments may change after publication. */
     static List<Object> concatenate(List<List<Object>> segments) {
         return segments.size() == 1 ? segments.getFirst() : new ParameterSources(segments);
     }
@@ -66,7 +67,7 @@ public final class ConditionExecutionView {
         private final int size;
 
         private ParameterSources(List<List<Object>> segments) {
-            this.segments = List.copyOf(segments);
+            this.segments = segments;
             int count = 0;
             for (List<Object> segment : segments) {
                 count = Math.addExact(count, segment.size());
@@ -93,6 +94,29 @@ public final class ConditionExecutionView {
                 }
             }
             return current.get(index);
+        }
+
+        @Override
+        public void forEach(Consumer<? super Object> action) {
+            Objects.requireNonNull(action, "parameter action must not be null");
+            Iterator<List<Object>> current = segments.iterator();
+            ArrayDeque<Iterator<List<Object>>> pending = null;
+            while (true) {
+                if (current.hasNext()) {
+                    List<Object> segment = current.next();
+                    if (segment instanceof ParameterSources sources) {
+                        if (pending == null) pending = new ArrayDeque<>();
+                        pending.push(current);
+                        current = sources.segments.iterator();
+                    } else {
+                        segment.forEach(action);
+                    }
+                } else if (pending != null && !pending.isEmpty()) {
+                    current = pending.pop();
+                } else {
+                    return;
+                }
+            }
         }
 
         @Override

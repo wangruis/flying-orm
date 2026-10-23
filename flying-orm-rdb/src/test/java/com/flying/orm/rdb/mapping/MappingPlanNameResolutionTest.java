@@ -6,11 +6,40 @@ import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.function.Function;
+import java.util.function.IntFunction;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 class MappingPlanNameResolutionTest {
+
+    @Test
+    void boundColumnsMapDifferentRowsWithoutRetainingTheFirstValues() {
+        RowMapper<AliasedRecord> mapper = RowMapper.of(AliasedRecord.class);
+        Function<IntFunction<Object>, AliasedRecord> bound = mapper.bindColumns(
+                DynamicRow.copyOf(Map.of("stored_name", "first")));
+        assertNotNull(bound);
+        assertEquals(new AliasedRecord("second"), bound.apply(index -> "second"));
+        assertEquals(new AliasedRecord(null), bound.apply(index -> null));
+        Function<IntFunction<Object>, AliasedBean> bean = RowMapper.of(AliasedBean.class).bindColumns(
+                DynamicRow.copyOf(Map.of("name", "first")));
+        assertNotNull(bean);
+        assertEquals("third", bean.apply(index -> "third").name);
+        Function<IntFunction<Object>, AliasedRecord> aliased = mapper.withAliases(Map.of("label", "name"))
+                .bindColumns(DynamicRow.copyOf(Map.of("label", "ignored")));
+        assertEquals(new AliasedRecord("renamed"), aliased.apply(index -> "renamed"));
+        Function<IntFunction<Object>, PrimitiveProjection> missing = RowMapper.of(PrimitiveProjection.class)
+                .bindColumns(DynamicRow.copyOf(Map.of("name", "ignored")));
+        assertEquals(new PrimitiveProjection("current", 0), missing.apply(index -> "current"));
+        Map<String, Object> columns = new LinkedHashMap<>();
+        columns.put("name", "ignored");
+        columns.put("rank", 1);
+        Function<IntFunction<Object>, PrimitiveProjection> present = RowMapper.of(PrimitiveProjection.class)
+                .bindColumns(DynamicRow.copyOf(columns));
+        assertThrows(IllegalArgumentException.class, () -> present.apply(index -> index == 0 ? "current" : null));
+    }
 
     @Test
     void resolvesQualifiedQuotedSnakeCaseLabelsToJavaMembers() {

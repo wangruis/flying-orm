@@ -33,7 +33,7 @@ class MySqlUpsertConflictTargetTest {
                 BatchWriteOptions.defaults());
 
         String sql = request.sql().toLowerCase();
-        assertTrue(sql.contains("`id` = if(`id` <=> values(`id`)"));
+        assertTrue(sql.contains("`id` = if(`id` = values(`id`)"));
         assertTrue(sql.contains("select null union all select null"));
     }
 
@@ -52,8 +52,8 @@ class MySqlUpsertConflictTargetTest {
                 List.of(Map.of("tenant_id", 1L, "user_id", 2L, "name_col", "Ada")),
                 BatchWriteOptions.defaults()).sql().toLowerCase();
 
-        assertTrue(sql.contains("`tenant_id` <=> values(`tenant_id`)"));
-        assertTrue(sql.contains("`user_id` <=> values(`user_id`)"));
+        assertTrue(sql.contains("`tenant_id` = values(`tenant_id`)"));
+        assertTrue(sql.contains("`user_id` = values(`user_id`)"));
     }
 
     @Test

@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.rdb.cache.BoundedCacheRegion;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.metadata.MetadataCacheInvalidator;
@@ -44,8 +45,8 @@ final class FormFieldDecodingPlanCache implements MetadataCacheInvalidator {
     }
 
     @Override
-    public void invalidate(String table) {
-        Objects.requireNonNull(table, "table must not be null");
+    public void invalidate(RelationIdentity relation) {
+        Objects.requireNonNull(relation, "relation must not be null");
         plans.invalidateAll();
     }
 

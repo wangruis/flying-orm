@@ -4,11 +4,12 @@ import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.batch.BatchExecutionEvidence;
-import com.flying.orm.rdb.form.BatchOptimisticUpdate;
+import com.flying.orm.rdb.form.BatchUpdate;
 import com.flying.orm.rdb.form.ReactiveFormClient;
 import com.flying.orm.rdb.form.spec.BatchSpec;
 import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
+import com.flying.orm.rdb.dialect.RdbDialect;
 import org.reactivestreams.Publisher;
 import reactor.core.publisher.Mono;
 
@@ -34,15 +35,17 @@ public final class DmlOperator {
     private final SqlRenderer renderer;
 
     private final DataScope defaultDataScope;
+    private final RdbDialect dialect;
 
     DmlOperator(ReactiveFormClient formClient,
                 ReactiveSqlExecutor executor,
                 SqlRenderer renderer,
-                DataScope defaultDataScope) {
+                DataScope defaultDataScope, RdbDialect dialect) {
         this.formClient = Objects.requireNonNull(formClient, "form client must not be null");
         this.executor = Objects.requireNonNull(executor, "reactive sql executor must not be null");
         this.renderer = Objects.requireNonNull(renderer, "sql renderer must not be null");
         this.defaultDataScope = Objects.requireNonNull(defaultDataScope, "default data scope must not be null");
+        this.dialect = Objects.requireNonNull(dialect, "RDB dialect must not be null");
     }
 
     /**
@@ -51,7 +54,7 @@ public final class DmlOperator {
      * @return 只供本次查询使用的构建器
      */
     public QueryOperator query() {
-        return new QueryOperator(formClient, executor, renderer, defaultDataScope);
+        return new QueryOperator(formClient, executor, renderer, defaultDataScope, dialect);
     }
 
     /** 创建绑定动态表单的新查询；元数据、字段保护与 Scope 由原有表单内核处理。 */
@@ -62,14 +65,14 @@ public final class DmlOperator {
         return formClient.insert(WriteSpec.insert(form, values));
     }
 
-    /** 更新动态表单；保留元数据和非空条件保护。 */
+    /** 更新动态表单；复用元数据和有效 Scope。 */
     public DmlUpdateOperator update(DynamicForm form) {
-        return new DmlUpdateOperator(formClient, DmlWriteCommand.update(renderer, form));
+        return new DmlUpdateOperator(formClient, renderer, form.table(), form);
     }
 
     /** 删除动态表单；声明逻辑删除时默认软删除。 */
     public DmlDeleteOperator delete(DynamicForm form) {
-        return new DmlDeleteOperator(formClient, DmlWriteCommand.delete(renderer, form));
+        return new DmlDeleteOperator(formClient, renderer, form.table(), form);
     }
 
     /** 使用有界批量内核插入；返回实际执行证据。 */
@@ -84,9 +87,9 @@ public final class DmlOperator {
         return formClient.writeBatch(BatchSpec.upsert(form, rows));
     }
 
-    /** 每行携带条件及预期版本的批量更新，保留并发冲突证据。 */
+    /** 每行携带条件的批量更新；提供 lock 时严格检查版本冲突。 */
     public Mono<BatchExecutionEvidence> updateBatch(
-            DynamicForm form, Publisher<BatchOptimisticUpdate> rows) {
+            DynamicForm form, Publisher<BatchUpdate> rows) {
         return formClient.writeBatch(BatchSpec.update(form, rows));
     }
 
@@ -107,7 +110,7 @@ public final class DmlOperator {
      * @return 更新构建器
      */
     public DmlUpdateOperator update(String table) {
-        return new DmlUpdateOperator(formClient, renderer, table);
+        return new DmlUpdateOperator(formClient, renderer, table, null);
     }
 
     /**
@@ -117,7 +120,7 @@ public final class DmlOperator {
      * @return 删除构建器
      */
     public DmlDeleteOperator delete(String table) {
-        return new DmlDeleteOperator(formClient, renderer, table);
+        return new DmlDeleteOperator(formClient, renderer, table, null);
     }
 
     /**
@@ -134,7 +137,4 @@ public final class DmlOperator {
         return formClient.entity(type);
     }
 
-    ReactiveFormClient formClient() {
-        return formClient;
-    }
 }

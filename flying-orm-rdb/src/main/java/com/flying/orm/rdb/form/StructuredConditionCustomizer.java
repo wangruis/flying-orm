@@ -3,8 +3,10 @@ package com.flying.orm.rdb.form;
 import com.flying.orm.core.condition.StructuredConditionInput;
 import com.flying.orm.core.condition.StructuredConditionPolicy;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.form.DynamicField;
 
 import java.util.Objects;
+import java.util.function.Function;
 
 /**
  * 给前端结构化条件编译加一点扩展：可以改输入，也可以改安全策略。
@@ -34,13 +36,10 @@ public interface StructuredConditionCustomizer {
         Objects.requireNonNull(policy, "structured condition policy must not be null");
     }
 
-    /**
-     * 在可信表单元数据下适配前端条件。只修改 operator 白名单的定制器可以沿用这个默认实现；
-     * 需要转换值的定制器必须覆盖本方法，并根据表单字段验证输入。
-     */
-    default StructuredConditionInput adapt(DynamicForm form, StructuredConditionInput input) {
-        Objects.requireNonNull(form, "dynamic form must not be null");
-        return Objects.requireNonNull(input, "structured condition input must not be null");
+    /** 使用查询已解析的字段元数据适配输入；只修改 operator 的定制器直接保留原输入。 */
+    default StructuredConditionInput adaptFields(DynamicForm form, Function<String, DynamicField> fields,
+                                                 StructuredConditionInput input) {
+        return input;
     }
 
     default StructuredConditionPolicy customize(StructuredConditionPolicy policy) {

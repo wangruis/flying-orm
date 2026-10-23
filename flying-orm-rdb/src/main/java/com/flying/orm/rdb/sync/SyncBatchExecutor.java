@@ -15,6 +15,10 @@ import java.util.function.LongConsumer;
  * @version v4.1.0
  */
 public interface SyncBatchExecutor {
+    /** 是否理解内部逐行 SQL 布局；普通自定义适配器保持固定 SQL 契约。 */
+    @InternalApi
+    default boolean supportsBatchRowLayouts() { return false; }
+
     static SyncBatchExecutor jdbc(JdbcConnectionAccess access, RdbDialect dialect) {
         return JdbcBatchWriter.create(access, dialect);
     }
@@ -26,9 +30,6 @@ public interface SyncBatchExecutor {
     @InternalApi
     BatchExecutionEvidence writeBatch(BatchWriteRequest request, LongConsumer rowCompleted);
 
-    default BatchExecutionEvidence writeBatchEvidence(BatchWriteRequest request) {
-        return writeBatch(request);
-    }
 
     default BatchExecutionEvidence writeProtectedBatch(BatchWriteRequest request) {
         return writeProtectedBatch(request, null);
@@ -40,7 +41,4 @@ public interface SyncBatchExecutor {
         throw new UnsupportedOperationException("sync batch executor does not support protected batch writes");
     }
 
-    default BatchExecutionEvidence writeProtectedBatchEvidence(BatchWriteRequest request) {
-        return writeProtectedBatch(request);
-    }
 }

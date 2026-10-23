@@ -4,7 +4,7 @@ import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.form.LogicDeleteDefinition;
 import com.flying.orm.core.form.TenantDefinition;
-import com.flying.orm.core.metadata.ValueGeneration;
+import com.flying.orm.core.metadata.ColumnDefinition;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.core.type.DatabaseType;
@@ -39,9 +39,8 @@ public final class ProtectedFormLayout {
         if (safeForm.protections().encryptedFields().isEmpty()) {
             return safeForm;
         }
-        DynamicForm.Builder builder = safeForm.relationIdentity()
-                .map(identity -> DynamicForm.relationalBuilder(safeForm.id(), identity))
-                .orElseGet(() -> DynamicForm.builder(safeForm.id(), safeForm.table()));
+        DynamicForm.Builder builder = DynamicForm.relationalBuilder(safeForm.id(), safeForm.relationIdentity())
+                .namingSource(safeForm.namingSource()).features(safeForm.features());
         Set<String> names = new HashSet<>();
         for (DynamicField field : safeForm.fields()) {
             EncryptedFieldDefinition definition = safeForm.protections().encrypted(field.name()).orElse(null);
@@ -78,10 +77,6 @@ public final class ProtectedFormLayout {
         return ProtectedColumnNames.suffix(form.id(), form.field(fieldName).name(), length);
     }
 
-    static boolean isPhysicalType(DatabaseType databaseType) {
-        return CIPHERTEXT_DATABASE_TYPE.equals(databaseType) || HASH_DATABASE_TYPE.equals(databaseType);
-    }
-
     /** @return whether the parsed type is the internal protected-field ciphertext storage type */
     public static boolean isCiphertextType(DatabaseType databaseType) {
         return CIPHERTEXT_DATABASE_TYPE.equals(databaseType);
@@ -93,13 +88,13 @@ public final class ProtectedFormLayout {
     }
 
     private static DynamicField encryptedColumn(DynamicField field) {
-        return new DynamicField(field.name(), CIPHERTEXT_DATABASE_TYPE, false, field.nullable(), false,
-                                null, null, null, field.comment(), ValueGeneration.none());
+        return new DynamicField(ColumnDefinition.builder(field.name(), CIPHERTEXT_DATABASE_TYPE)
+                .nullable(field.nullable()).comment(field.comment()).build(), false, false).withFeatures(field.features());
     }
 
     private static DynamicField hidden(String name, boolean nullable, boolean unique) {
-        return new DynamicField(name, HASH_DATABASE_TYPE, false, nullable, unique,
-                                null, null, null, null, ValueGeneration.none());
+        return new DynamicField(ColumnDefinition.builder(name, HASH_DATABASE_TYPE)
+                .nullable(nullable).build(), false, unique);
     }
 
     private static void add(DynamicForm.Builder builder, Set<String> names, DynamicField field) {

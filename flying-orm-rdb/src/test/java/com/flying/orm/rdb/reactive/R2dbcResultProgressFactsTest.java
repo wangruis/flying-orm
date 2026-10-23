@@ -165,14 +165,14 @@ class R2dbcResultProgressFactsTest {
             SqlRequest request = new SqlRequest("insert into sample(payload) values (?)", List.of("value"));
             return switch (mode) {
                 case ORDINARY -> executor.rowsUpdated(request);
-                case KEYS -> executor.rowsUpdatedReturningKeys(request, SqlExecutionOptions.safeDefaults());
+                case KEYS -> executor.rowsUpdatedReturningKeys(request, SqlExecutionOptions.unlimited());
                 case PROTECTED, PROTECTED_KEYS -> executor.protectedWrite(new ProtectedWriteWork(
                         ProtectedWriteWork.Kind.INSERT, request, null, List.of("id"),
                         mode.keys ? Map.of() : Map.of("id", 1L), "id = ?",
                         "delete from sample_tokens where id = ? and field = ?",
                         "insert into sample_tokens(id, field, token) values (?, ?, ?)",
                         List.of(new ProtectedWriteWork.FieldTokens("payload", List.of(new byte[]{1})))),
-                        SqlExecutionOptions.safeDefaults());
+                        SqlExecutionOptions.unlimited());
             };
         }
 

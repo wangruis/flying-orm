@@ -80,13 +80,12 @@ public final class SyncNativeSqlOperator {
 
     /** 执行查询并等待完整类型化列表。 */
     public <T> List<T> query(Class<T> type) {
-        return SyncSqlResultOperations.queryMapped(
-                executor, state.request(), state.options(), entityModels.rawRowMapper(type, valueCodecs), 0);
+        return executor.queryMapped(state.request(), state.options(), entityModels.rawRowMapper(type, valueCodecs), 0);
     }
 
     /** 执行查询并使用自定义映射器等待完整列表。 */
     public <T> List<T> query(RowMapper<T> mapper) {
-        return SyncSqlResultOperations.queryMapped(executor, state.request(), state.options(), mapper, 0);
+        return executor.queryMapped(state.request(), state.options(), mapper, 0);
     }
 
     /** 查询最多一行，空结果返回 null，多行结果明确报错。 */

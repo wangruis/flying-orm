@@ -54,7 +54,7 @@ class FormTermCompositionTest {
                     FormDataSqlRenderer renderer = FormDataSqlRenderer.create(extended, dialect);
                     FormOperationPlanner planner = new FormOperationPlanner(renderer,
                             new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
-                            SqlExecutionOptions.safeDefaults());
+                            SqlExecutionOptions.unlimited());
                     SqlRequest request = planner.update(WriteSpec.update(form, Map.of("label", "changed"),
                             extended.conditions().where("x", "eq-or-null", 10).build())
                             .withLock(OptimisticLockOptions.increment("version", 7L))).request();
@@ -110,10 +110,10 @@ class FormTermCompositionTest {
                 default -> client.delete(WriteSpec.delete(form, where)).block();
             }
         } else {
-            SyncSqlExecutor executor = new SyncSqlExecutor() {
+            SyncSqlExecutor executor = new com.flying.orm.rdb.support.ListQueryFixture() {
                 public List<DynamicRow> query(SqlRequest request) { requests.add(request); return List.of(); }
                 public long rowsUpdated(SqlRequest request) { requests.add(request); return 0L; }
-                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                     throw new AssertionError("unexpected generated keys");
                 }
             };

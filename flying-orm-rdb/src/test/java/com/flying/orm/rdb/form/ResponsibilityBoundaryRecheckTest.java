@@ -33,7 +33,7 @@ class ResponsibilityBoundaryRecheckTest {
                 "r2dbc:h2:mem:///boundary_recheck_" + UUID.randomUUID().toString().replace("-", ""))), RdbDialect.h2());
 
         var rows = executor.query(new SqlRequest("SELECT ? AS id", List.of(7)),
-                SqlExecutionOptions.safeDefaults()).collectList().block();
+                SqlExecutionOptions.unlimited()).collectList().block();
 
         assertNotNull(rows);
         assertEquals(1, rows.size());

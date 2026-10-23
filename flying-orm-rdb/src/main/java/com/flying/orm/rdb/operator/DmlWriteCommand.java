@@ -1,6 +1,8 @@
 package com.flying.orm.rdb.operator;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.expression.ValueExpression;
+import com.flying.orm.core.field.FieldIdentity;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.form.LogicDeleteDefinition;
@@ -28,95 +30,104 @@ import java.util.function.Function;
  * @date 2026-08-07
  * @version v1.0
  */
-final class DmlWriteCommand {
+public abstract class DmlWriteCommand<S extends DmlWriteCommand<S>> implements ConditionDsl<String, S> {
 
-    private final Kind kind;
     private final SqlRenderer renderer;
     private final String table;
     private final DynamicForm boundForm;
-    private final Map<String, Object> values = new LinkedHashMap<>();
 
     private WhereDsl where;
     private OptimisticLockOptions lock;
     private LogicDeleteDefinition logicDelete;
     private DataScope scope = DataScope.none();
 
-    private DmlWriteCommand(Kind kind, SqlRenderer renderer, String table) {
-        this(kind, renderer, table, null);
-    }
-
-    private DmlWriteCommand(Kind kind, SqlRenderer renderer, String table, DynamicForm form) {
-        this.kind = Objects.requireNonNull(kind, "DML write kind must not be null");
+    DmlWriteCommand(SqlRenderer renderer, String table, DynamicForm form) {
         this.renderer = Objects.requireNonNull(renderer, "sql renderer must not be null");
-        this.table = SqlIdentifiers.requireIdentifier(table, "operator " + kind.label + " table");
+        this.table = SqlIdentifiers.requireIdentifier(table);
         this.boundForm = form;
         this.where = new WhereDsl(renderer);
     }
 
-    static DmlWriteCommand update(SqlRenderer renderer, DynamicForm form) {
-        DynamicForm safeForm = Objects.requireNonNull(form, "write form must not be null");
-        return new DmlWriteCommand(Kind.UPDATE, renderer, safeForm.table(), safeForm);
+    protected abstract S self();
+
+    abstract WriteSpec writeSpec(DynamicForm form, ConditionGroup conditions);
+
+    Map<String, Object> values() {
+        return Map.of();
     }
 
-    static DmlWriteCommand delete(SqlRenderer renderer, DynamicForm form) {
-        DynamicForm safeForm = Objects.requireNonNull(form, "write form must not be null");
-        return new DmlWriteCommand(Kind.DELETE, renderer, safeForm.table(), safeForm);
+    /** 构建并以 AND 追加一组条件，采用函数返回的 DSL。 */
+    public S where(Function<WhereDsl, WhereDsl> customizer) {
+        where(conditions(customizer));
+        return self();
     }
 
-    static DmlWriteCommand update(SqlRenderer renderer, String table) {
-        return new DmlWriteCommand(Kind.UPDATE, renderer, table);
+    /** 以 AND 追加已构建的条件；OR 组作为整体保留，Scope 与字段治理仍由原执行链处理。 */
+    public S where(ConditionGroup conditions) {
+        where.append(Objects.requireNonNull(conditions, "where conditions must not be null"));
+        return self();
     }
 
-    static DmlWriteCommand delete(SqlRenderer renderer, String table) {
-        return new DmlWriteCommand(Kind.DELETE, renderer, table);
+    /** 显式替换业务 where；Scope、逻辑删除和乐观锁约束独立保留。 */
+    public S replaceWhere(Function<WhereDsl, WhereDsl> customizer) {
+        this.where = new WhereDsl(renderer, conditions(customizer));
+        return self();
     }
 
-    void set(String field, Object value) {
-        requireKind(Kind.UPDATE);
-        values.put(SqlIdentifiers.requireIdentifier(field, "operator update field"), value);
-    }
-
-    void where(Function<WhereDsl, WhereDsl> customizer) {
+    private ConditionGroup conditions(Function<WhereDsl, WhereDsl> customizer) {
         WhereDsl dsl = new WhereDsl(renderer);
-        ConditionGroup snapshot = Objects.requireNonNull(customizer, "where customizer must not be null")
+        return Objects.requireNonNull(customizer, "where customizer must not be null")
                             .apply(dsl)
                             .build();
-        this.where = new WhereDsl(renderer, snapshot);
     }
 
-    void where(String field, String operator, Object value) {
+    /** 追加一个参数化条件。 */
+    @Override
+    public S where(String field, String operator, Object value) {
         where.where(field, operator, value);
+        return self();
     }
 
-    void optimisticLock(OptimisticLockOptions lock) {
+    @Override
+    public S whereIfPresent(String field, String operator, Object value) {
+        where.whereIfPresent(field, operator, value);
+        return self();
+    }
+
+    /** 显式开启乐观锁。 */
+    public S optimisticLock(OptimisticLockOptions lock) {
         this.lock = Objects.requireNonNull(lock, "optimistic lock options must not be null");
+        return self();
     }
 
-    void logicDelete(String fieldName, Object notDeletedValue, Object deletedValue) {
+    /** 声明逻辑删除字段及业务值。 */
+    public S logicDelete(String fieldName, Object notDeletedValue, Object deletedValue) {
         if (boundForm != null) {
             throw new IllegalStateException("configure logic delete on the bound DynamicForm");
         }
         this.logicDelete = LogicDeleteDefinition.of(
-                SqlIdentifiers.requireIdentifier(fieldName, "operator logic delete field"),
+                SqlIdentifiers.requireIdentifier(fieldName),
                 notDeletedValue,
                 deletedValue);
+        return self();
     }
 
-    void scope(DataScope scope) {
+    /** 追加本次数据范围，只会继续收紧默认保护。 */
+    public S scope(DataScope scope) {
         this.scope = this.scope.and(Objects.requireNonNull(scope, "data scope must not be null"));
+        return self();
+    }
+
+    /** 使用常见的 0/1 逻辑删除约定。 */
+    public S logicDelete(String fieldName) {
+        return logicDelete(fieldName, 0, 1);
     }
 
     /** 生成交给 FormClient 的不可变写入描述，真正安全校验仍只在统一 Form 计划器中执行一次。 */
     WriteSpec spec() {
         ConditionGroup conditions = where.build();
-        WriteSpec spec;
-        if (kind == Kind.UPDATE) {
-            DynamicForm form = form(values.keySet());
-            spec = WriteSpec.update(form, values, conditions).withScope(scope);
-        } else {
-            DynamicForm form = form(Set.of());
-            spec = WriteSpec.delete(form, conditions).withScope(scope);
-        }
+        DynamicForm form = form(conditions);
+        WriteSpec spec = writeSpec(form, conditions).withScope(scope);
         return lock == null ? spec : spec.withLock(lock);
     }
 
@@ -126,22 +137,30 @@ final class DmlWriteCommand {
      * <p>表名、赋值字段、条件字段和逻辑删除字段已经分别在进入命令时完成 SQL 标识符校验；这里只对
      * 来自独立 {@link OptimisticLockOptions} 的版本字段补齐同一边界校验，随后保留声明顺序生成表单。</p>
      */
-    private DynamicForm form(Set<String> fields) {
+    private DynamicForm form(ConditionGroup conditions) {
         if (boundForm != null) {
             return boundForm;
         }
-        Set<String> names = new LinkedHashSet<>(fields);
-        collectConditionFields(where.build(), names);
+        Map<String, Object> values = values();
+        Set<FieldIdentity> names = new LinkedHashSet<>();
+        values.keySet().forEach(name -> names.add(FieldIdentity.of(name)));
+        for (Object value : values.values()) {
+            if (value instanceof ValueExpression expression) {
+                expression.forEachField(field -> names.add(FieldIdentity.of(
+                        SqlIdentifiers.requireIdentifier(field.identity().name()))));
+            }
+        }
+        ConditionNodes.forEachTerm(conditions, term -> names.add(FieldIdentity.of(term.field())));
         if (lock != null) {
-            names.add(SqlIdentifiers.requireIdentifier(lock.field(), "operator field"));
+            names.add(FieldIdentity.of(SqlIdentifiers.requireIdentifier(lock.field())));
         }
         if (logicDelete != null) {
-            names.add(logicDelete.fieldName());
+            names.add(FieldIdentity.of(logicDelete.fieldName()));
         }
 
         DynamicForm.Builder builder = DynamicForm.builder(table, table);
-        for (String name : names) {
-            builder.addField(DynamicField.of(name, "OTHER"));
+        for (FieldIdentity name : names) {
+            builder.addField(DynamicField.of(name.name(), "OTHER"));
         }
         if (logicDelete != null) {
             builder.logicDelete(
@@ -150,24 +169,63 @@ final class DmlWriteCommand {
         return builder.build();
     }
 
-    private static void collectConditionFields(ConditionGroup group, Set<String> names) {
-        ConditionNodes.forEachTerm(group, term -> names.add(term.field()));
-    }
+    /** 更新配置；只有更新命令持有赋值集合。 */
+    public abstract static class Update<S extends Update<S>> extends DmlWriteCommand<S> {
+        private final Map<String, Object> assignments = new LinkedHashMap<>();
 
-    private void requireKind(Kind expected) {
-        if (kind != expected) {
-            throw new IllegalStateException("cannot set values on operator " + kind.label + " command");
+        Update(SqlRenderer renderer, String table, DynamicForm form) {
+            super(renderer, table, form);
+        }
+
+        /** 设置一个字段，保留 null；同名字段后设置的值覆盖前值。 */
+        public S set(String field, Object value) {
+            assignments.put(SqlIdentifiers.requireIdentifier(field), value);
+            return self();
+        }
+
+        /** 按 Map 顺序追加赋值，不保留调用方 Map。 */
+        public S set(Map<String, ?> values) {
+            Objects.requireNonNull(values, "update values must not be null").forEach(this::set);
+            return self();
+        }
+
+        /** 使用参数化数据库表达式赋值。 */
+        public S setExpression(String field, ValueExpression expression) {
+            return set(field, Objects.requireNonNull(expression, "SET expression must not be null"));
+        }
+
+        @Override
+        Map<String, Object> values() {
+            return assignments;
+        }
+
+        @Override
+        WriteSpec writeSpec(DynamicForm form, ConditionGroup conditions) {
+            return WriteSpec.update(form, assignments, conditions);
         }
     }
 
-    private enum Kind {
-        UPDATE("update"),
-        DELETE("delete");
+    /** 删除配置；物理删除不改变原数据范围和乐观锁语义。 */
+    public abstract static class Delete<S extends Delete<S>> extends DmlWriteCommand<S> {
+        private boolean physical;
 
-        private final String label;
+        Delete(SqlRenderer renderer, String table, DynamicForm form) {
+            super(renderer, table, form);
+        }
 
-        Kind(String label) {
-            this.label = label;
+        /** 显式使用物理 DELETE。 */
+        public S physical() {
+            physical = true;
+            return self();
+        }
+
+        boolean physicalDelete() {
+            return physical;
+        }
+
+        @Override
+        WriteSpec writeSpec(DynamicForm form, ConditionGroup conditions) {
+            return WriteSpec.delete(form, conditions);
         }
     }
 }

@@ -27,7 +27,7 @@ final class SqlAlterStatementState {
         columnComplete = false;
     }
 
-    void accept(String statement, String word, String before, boolean sqlServerDialect) {
+    void accept(String statement, String word, String before) {
         validateColumnTail(word);
         if (!"ALTER".equals(statement)) {
             return;
@@ -46,7 +46,7 @@ final class SqlAlterStatementState {
             column = true;
             columnComplete = false;
         }
-        if (!SqlStatementBoundary.isStatementStart(word, sqlServerDialect)
+        if (!SqlStatementBoundary.isStatementStart(word)
                 && SqlStatementBoundary.isAlterAction(word)) {
             action = true;
         }

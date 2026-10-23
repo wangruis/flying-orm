@@ -7,6 +7,7 @@ import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.condition.StructuredConditionInput;
 import com.flying.orm.core.condition.StructuredConditionPolicy;
 import com.flying.orm.core.condition.TermRegistry;
+import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.join.JoinQuerySpec;
@@ -17,9 +18,7 @@ import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.aggregate.AggregateExpression;
-import com.flying.orm.rdb.aggregate.AggregateHaving;
 import com.flying.orm.rdb.aggregate.AggregateSpec;
-import com.flying.orm.rdb.aggregate.FormAggregatePlanner;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.form.spec.QuerySpec;
@@ -49,7 +48,7 @@ class DeepFormConditionPlanningTest {
 
     @Test
     void ordinaryFormQueryPlansTenThousandNestedGroups() {
-        FormOperationPlanner.PlannedQuery plan = planner(renderer()).select(
+        FormReadPlanner.PlannedQuery plan = planner(renderer()).reads.select(
                 QuerySpec.of(form, deep(ConditionGroup.and().where("id", "=", 7).build())));
 
         assertEquals(List.of(7), plan.request().parameters());
@@ -59,7 +58,7 @@ class DeepFormConditionPlanningTest {
     @Test
     void governedQueryStillCollectsDeepCallerFields() {
         QuerySpec query = QuerySpec.of(form, deep(ConditionGroup.and().where("id", "=", 7).build()));
-        GovernedPlanEnvelope<FormOperationPlanner.PlannedQuery> plan = planner(renderer()).selectGoverned(
+        GovernedPlanEnvelope<FormReadPlanner.PlannedQuery> plan = planner(renderer()).reads.selectGoverned(
                 query, FieldUsePolicy.unrestricted(), QueryShapeLimits.defaults().withMaxBindCount(4));
 
         assertEquals(List.of(7), plan.plan().request().parameters());
@@ -71,7 +70,7 @@ class DeepFormConditionPlanningTest {
         QuerySpec query = QuerySpec.of(form, ConditionGroup.and().where("label", "=", "visible").build())
                 .withScope(DataScope.where(scope));
 
-        assertEquals(List.of("visible", 7), planner(renderer()).select(query).request().parameters());
+        assertEquals(List.of("visible", 7), planner(renderer()).reads.select(query).request().parameters());
     }
 
     @Test
@@ -84,13 +83,13 @@ class DeepFormConditionPlanningTest {
     }
 
     @Test
-    void writeGuardRejectsDeepEmptyGroupsEvenWithANonemptyServerScope() {
+    void emptyBusinessGroupsRetainTheServerWriteScope() {
         WriteSpec write = WriteSpec.delete(form, deep(ConditionGroup.and().build()))
                 .withScope(DataScope.where(ConditionGroup.and().where("id", "=", 7).build()));
 
-        IllegalArgumentException failure = assertThrows(IllegalArgumentException.class,
-                () -> planner(renderer()).delete(write));
-        assertEquals("write business where condition must not be empty", failure.getMessage());
+        FormOperationPlanner.PlannedWrite plan = planner(renderer()).delete(write);
+        assertEquals(List.of(7), plan.request().parameters());
+        assertTrue(plan.request().sql().contains("where \"id\" = ?"));
     }
 
     @Test
@@ -100,7 +99,7 @@ class DeepFormConditionPlanningTest {
                 ProtectedFieldKeyRing.single("v1", new byte[32]))) {
             FormDataSqlRenderer renderer = renderer().withProtectedFields(runtime);
             ConditionGroup where = deep(ConditionGroup.and().add(ProtectedConditions.exact("secret", "value")).build());
-            FormOperationPlanner.PlannedQuery plan = planner(renderer).select(QuerySpec.of(protectedForm, where));
+            FormReadPlanner.PlannedQuery plan = planner(renderer).reads.select(QuerySpec.of(protectedForm, where));
 
             assertEquals(1, plan.request().parameters().size());
             assertInstanceOf(byte[].class, plan.request().parameters().getFirst());
@@ -130,14 +129,53 @@ class DeepFormConditionPlanningTest {
     }
 
     @Test
+    void enumNormalizationKeepsUnchangedMutableValuesInTheirOwnedTree() {
+        EntityValues<EnumRow> values = EntityValues.createUncached(EnumRow.class);
+        for (TermCondition leaf : List.of(
+                TermCondition.of("payload", "=", new byte[]{1, 2}),
+                TermCondition.of("modified", "=", new java.util.Date(123L)),
+                TermCondition.of("payload", "in", List.of(new byte[]{3, 4})),
+                TermCondition.of("status", "=", Map.of("code", "A")))) {
+            ConditionGroup where = deep(ConditionGroup.and().add(leaf).build());
+            assertSame(where, values.normalizeCondition(where, TermRegistry.standard()), leaf.field());
+        }
+    }
+
+    @Test
+    void enumRewriteRetainsUnrelatedLeavesAndTheirSnapshotIsolation() {
+        EntityValues<EnumRow> values = EntityValues.createUncached(EnumRow.class);
+        java.util.concurrent.atomic.AtomicInteger copies = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.Date source = new java.util.Date(123L) {
+            @Override
+            public Object clone() {
+                copies.incrementAndGet();
+                return super.clone();
+            }
+        };
+        TermCondition date = TermCondition.of("modified", "=", source);
+        ConditionGroup where = ConditionGroup.and().add(date).where("status", "=", Status.ACTIVE).build();
+        copies.set(0);
+        ConditionGroup normalized = values.normalizeCondition(where, TermRegistry.standard());
+        assertEquals(0, copies.get(), "an enum rewrite must not snapshot unrelated date values");
+        assertSame(date, normalized.children().getFirst());
+        assertEquals("A", ((TermCondition) normalized.children().get(1)).value());
+        source.setTime(456L);
+        ((java.util.Date) date.value()).setTime(789L);
+        assertEquals(new java.util.Date(123L), date.value());
+        assertSame(normalized, values.normalizeCondition(normalized, TermRegistry.standard()));
+    }
+
+    @Test
     void aggregateHavingCountsAndRendersDeepGroups() {
         AggregateSpec spec = AggregateSpec.builder(QuerySpec.of(form, ConditionGroup.and().build()))
                 .aggregate(AggregateExpression.count("id", "total"))
-                .having(AggregateHaving.of(deep(ConditionGroup.and().where("total", ">", 1L).build())))
+                .having(deep(ConditionGroup.and().where("total", ">", 1L).build()))
                 .build();
         FormDataSqlRenderer renderer = renderer();
-        FormAggregatePlanner planner = new FormAggregatePlanner(renderer, StructuredConditionResolver.defaults(),
-                DataScope.none(), SqlExecutionOptions.safeDefaults(), FieldUsePolicy.unrestricted(),
+        FormAggregatePlanner planner = new FormAggregatePlanner(renderer,
+                new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
+                SqlExecutionOptions.unlimited(),
+                FieldUsePolicy.unrestricted(),
                 QueryShapeLimits.defaults());
         FormAggregatePlanner.Plan plan = planner.plan(spec);
 
@@ -155,8 +193,10 @@ class DeepFormConditionPlanningTest {
                 StructuredConditionPolicy.defaults().withMaxDepth(DEPTH).withMaxNodes(DEPTH));
         AggregateSpec spec = AggregateSpec.builder(query)
                 .aggregate(AggregateExpression.count("id", "total")).build();
-        FormAggregatePlanner planner = new FormAggregatePlanner(renderer(), StructuredConditionResolver.defaults(),
-                DataScope.none(), SqlExecutionOptions.safeDefaults(), FieldUsePolicy.unrestricted(),
+        FormAggregatePlanner planner = new FormAggregatePlanner(renderer(),
+                new FormScopeSupport(renderer(), StructuredConditionResolver.defaults(), DataScope.none()),
+                SqlExecutionOptions.unlimited(),
+                FieldUsePolicy.unrestricted(),
                 QueryShapeLimits.defaults());
 
         FormAggregatePlanner.Plan plan = planner.plan(spec);
@@ -174,7 +214,7 @@ class DeepFormConditionPlanningTest {
         FormDataSqlRenderer renderer = renderer();
         JoinQueryPlanner planner = new JoinQueryPlanner(renderer,
                 new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
-                SqlExecutionOptions.safeDefaults());
+                SqlExecutionOptions.unlimited());
 
         assertEquals(List.of(7), planner.plan(spec, null).request().parameters());
     }
@@ -201,7 +241,7 @@ class DeepFormConditionPlanningTest {
     private static FormOperationPlanner planner(FormDataSqlRenderer renderer) {
         return new FormOperationPlanner(renderer,
                 new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
-                SqlExecutionOptions.safeDefaults());
+                SqlExecutionOptions.unlimited());
     }
 
     @TableName("deep_enum_rows")

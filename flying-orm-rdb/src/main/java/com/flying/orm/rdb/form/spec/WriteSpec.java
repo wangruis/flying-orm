@@ -16,8 +16,8 @@ import java.util.Optional;
  * 单条写入的不可变规格，统一承载表单、字段值、条件、数据范围、乐观锁和可选执行保护。
  *
  * <p>字段值按调用方声明顺序复制并允许 {@code null}，数组、ByteBuffer、可变文本和旧式可变时间值
- * 会在发布时冻结。update/delete 的非空条件、租户、DataScope、逻辑删除和乐观锁仍由 FormClient
- * 的安全管线统一校验。</p>
+ * 会在发布时冻结。update/delete 的租户、DataScope、逻辑删除和乐观锁仍由 FormClient
+ * 的安全管线统一校验。设置未改变时复用当前规格，不重新发布字段快照。</p>
  *
  * @author wangr
  * @date 2026-08-04
@@ -86,7 +86,7 @@ public final class WriteSpec {
     }
 
     /**
-     * 创建更新规格；执行时仍会强制非空 where。
+     * 创建更新规格；空业务条件作用于有效 Scope 内全部行，未配置 Scope 时作用于全表。
      *
      * @param form 动态表单
      * @param values 待更新字段值
@@ -161,17 +161,18 @@ public final class WriteSpec {
 
     /**
      * @param scope 数据范围
-     * @return 仅替换数据范围的新规格
+     * @return 仅替换数据范围的规格
      */
     public WriteSpec withScope(DataScope scope) {
-        return new WriteSpec(form, operation, values, where, scope, lock, executionOptions, true);
+        return this.scope == scope ? this : new WriteSpec(form, operation, values, where, scope, lock, executionOptions, true);
     }
 
     /**
      * @param lock 乐观锁参数
-     * @return 仅替换乐观锁的新规格
+     * @return 仅替换乐观锁的规格
      */
     public WriteSpec withLock(OptimisticLockOptions lock) {
+        if (lock != null && this.lock == lock) return this;
         return new WriteSpec(form, operation, values, where, scope,
                              Objects.requireNonNull(lock, "write optimistic lock must not be null"), executionOptions,
                              true);
@@ -179,9 +180,10 @@ public final class WriteSpec {
 
     /**
      * @param options 执行保护
-     * @return 仅替换执行保护的新规格
+     * @return 仅替换执行保护的规格
      */
     public WriteSpec withExecutionOptions(SqlExecutionOptions options) {
+        if (options != null && executionOptions == options) return this;
         return new WriteSpec(form, operation, values, where, scope, lock,
                              Objects.requireNonNull(options, "write execution options must not be null"), true);
     }

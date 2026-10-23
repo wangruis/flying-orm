@@ -1,7 +1,9 @@
 package com.flying.orm.rdb.internal.protection;
 
 import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.rdb.execution.ProtectedBatchRows;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
+import com.flying.orm.rdb.execution.SqlWriteResult;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -13,6 +15,57 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ProtectedReplacementBatchPlanTest {
+
+    @Test
+    void sharedStateKeepsInputSlotsAndSnapshotsThePreparedList() {
+        ProtectedWriteWork work = work(7L, (byte) 1);
+        ProtectedBatchRows.RowView ordinary = ProtectedBatchRows.admit(
+                new Object[]{"ordinary", 1L}, 2, Long.MAX_VALUE, "test");
+        ProtectedBatchRows.RowView protectedRow = ProtectedBatchRows.admit(
+                ProtectedBatchRows.extend(new Object[]{"value", 7L}, work), 2, Long.MAX_VALUE, "test");
+        assertEquals(List.of(), ProtectedReplacementBatchPlan.prepareRows(List.of(ordinary)));
+        List<ProtectedReplacementBatchPlan.Row> rows = ProtectedReplacementBatchPlan.prepareRows(
+                List.of(ordinary, protectedRow, ordinary));
+        ProtectedReplacementBatchPlan.Prepared prepared = new ProtectedReplacementBatchPlan.Prepared(rows, 500L);
+        rows.clear();
+        assertEquals(3, prepared.rows().size());
+        org.junit.jupiter.api.Assertions.assertNull(prepared.rows().getFirst().work());
+        org.junit.jupiter.api.Assertions.assertSame(work, prepared.rows().get(1).work());
+        org.junit.jupiter.api.Assertions.assertFalse(prepared.hasOwnerRestrictedUpdates());
+        assertEquals(List.of(Map.of("id", 7L)), prepared.rows().get(1)
+                .replacementOwners(new SqlWriteResult(1L, List.of())));
+        assertThrows(UnsupportedOperationException.class, () -> prepared.rows().clear());
+    }
+
+    @Test
+    void updateStateUsesOnlyThePrereadOwners() {
+        ProtectedWriteWork base = work(7L, (byte) 1);
+        ProtectedWriteWork update = new ProtectedWriteWork(ProtectedWriteWork.Kind.UPDATE,
+                base.writeRequest(), new SqlRequest("select id from business_row where id = ?", List.of(7L)),
+                base.ownerFields(), Map.of(), "id = ?", base.deleteSql(), base.insertSql(), base.fields());
+        List<Map<String, Object>> owners = new java.util.ArrayList<>(List.of(Map.of("id", 9L)));
+        ProtectedReplacementBatchPlan.Row row = new ProtectedReplacementBatchPlan.Row(update, owners);
+        owners.clear();
+        ProtectedReplacementBatchPlan.Prepared prepared = new ProtectedReplacementBatchPlan.Prepared(
+                List.of(row), 500L);
+        org.junit.jupiter.api.Assertions.assertTrue(prepared.hasOwnerRestrictedUpdates());
+        assertEquals(List.of(Map.of("id", 9L)), row.replacementOwners(new SqlWriteResult(1L, List.of())));
+        assertThrows(UnsupportedOperationException.class, () -> row.owners().clear());
+    }
+
+    @Test
+    void jdbcAndReactivePreparationShareTheReplacementState() throws Exception {
+        Class<?> jdbc = Class.forName("com.flying.orm.rdb.jdbc.JdbcProtectedBatchSideIndex");
+        Class<?> reactive = Class.forName("com.flying.orm.rdb.reactive.R2dbcProtectedBatchSideIndex");
+        org.junit.jupiter.api.Assertions.assertAll(
+                () -> org.junit.jupiter.api.Assertions.assertTrue(ProtectedReplacementBatchPlan.Row.class.isRecord()),
+                () -> assertEquals(List.of(), java.util.Arrays.stream(jdbc.getDeclaredClasses())
+                        .map(Class::getSimpleName).filter(name -> name.equals("RowState") || name.equals("Prepared"))
+                        .toList()),
+                () -> assertEquals(List.of(), java.util.Arrays.stream(reactive.getDeclaredClasses())
+                        .map(Class::getSimpleName).filter(name -> name.equals("RowState") || name.equals("Prepared"))
+                        .toList()));
+    }
 
     @Test
     void wideOwnerReplacementUsesIndividualSegmentsAndStillHonorsTheByteBudget() {
@@ -64,17 +117,7 @@ class ProtectedReplacementBatchPlanTest {
     }
 
     private static ProtectedReplacementBatchPlan.Row row(ProtectedWriteWork work) {
-        return new ProtectedReplacementBatchPlan.Row() {
-            @Override
-            public ProtectedWriteWork work() {
-                return work;
-            }
-
-            @Override
-            public List<Map<String, Object>> owners() {
-                return List.of();
-            }
-        };
+        return new ProtectedReplacementBatchPlan.Row(work, List.of());
     }
 
     @Test

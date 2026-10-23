@@ -13,16 +13,16 @@ class OwnedMetadataConstructionTest {
 
     @Test
     void metadataBuildersPublishImmutableSnapshots() {
-        IndexMetadata.Builder indexBuilder = IndexMetadata.builder("ix_customer")
+        IndexDefinition.Builder indexBuilder = IndexDefinition.builder("ix_customer")
                                                            .addColumn("tenant_id");
-        IndexMetadata index = indexBuilder.build();
+        IndexDefinition index = indexBuilder.build();
         indexBuilder.addColumn("customer_id");
 
-        ForeignKeyMetadata.Builder foreignKeyBuilder = ForeignKeyMetadata.builder("fk_customer")
+        ForeignKeyDefinition.Builder foreignKeyBuilder = ForeignKeyDefinition.builder("fk_customer")
                                                                           .addColumn("tenant_id")
-                                                                          .referenceTable("tenant")
+                                                                          .reference(RelationIdentity.table("tenant"))
                                                                           .addReferenceColumn("id");
-        ForeignKeyMetadata foreignKey = foreignKeyBuilder.build();
+        ForeignKeyDefinition foreignKey = foreignKeyBuilder.build();
         foreignKeyBuilder.addColumn("customer_id").addReferenceColumn("id");
 
         assertEquals(java.util.List.of("tenant_id"), index.columns());

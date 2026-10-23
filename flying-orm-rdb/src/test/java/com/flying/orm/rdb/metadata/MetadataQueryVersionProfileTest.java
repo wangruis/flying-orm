@@ -119,7 +119,7 @@ class MetadataQueryVersionProfileTest {
         assertTrue(sql.contains("C.COLLATION"));
     }
 
-    private static final class CapturingSyncExecutor implements SyncSqlExecutor {
+    private static final class CapturingSyncExecutor implements com.flying.orm.rdb.support.ListQueryFixture {
 
         private final List<String> sql = new ArrayList<>();
 
@@ -135,7 +135,7 @@ class MetadataQueryVersionProfileTest {
         }
 
         @Override
-        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
             throw new UnsupportedOperationException();
         }
     }

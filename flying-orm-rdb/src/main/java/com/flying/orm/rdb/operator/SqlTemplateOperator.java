@@ -15,7 +15,6 @@ import reactor.core.publisher.Mono;
 
 import java.util.Map;
 import java.util.Objects;
-import java.util.Set;
 
 /**
  * 执行启动阶段注册的服务端 SQL 模板。
@@ -48,12 +47,11 @@ public final class SqlTemplateOperator {
                         EntityModelRegistry entityModels,
                         SqlTemplateEngine engine,
                         String templateId,
-                        Set<String> serverParameters,
                         SqlTemplateParameterProvider parameterProvider) {
         this.executor = Objects.requireNonNull(executor, "reactive sql executor must not be null");
         this.valueCodecs = Objects.requireNonNull(valueCodecs, "value codec registry must not be null");
         this.entityModels = Objects.requireNonNull(entityModels, "entity model registry must not be null");
-        this.state = new SqlTemplateExecutionState(engine, templateId, serverParameters);
+        this.state = new SqlTemplateExecutionState(engine, templateId);
         this.parameterProvider = Objects.requireNonNull(
                 parameterProvider, "SQL template parameter provider must not be null");
     }

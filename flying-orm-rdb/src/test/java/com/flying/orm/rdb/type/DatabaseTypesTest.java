@@ -1,18 +1,87 @@
 package com.flying.orm.rdb.type;
 
 import com.flying.orm.core.type.DatabaseType;
+import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.rdb.codec.LargeObjectValueCodec;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Locale;
 import java.time.Duration;
 import java.time.Period;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 class DatabaseTypesTest {
+
+    private static volatile Class<?> parameterTypeResult;
+    private static volatile LogicalType logicalTypeResult;
+
+    @Test
+    void dialectIndependentTypesDoNotAllocateNormalizedDialectStrings() {
+        java.lang.management.ThreadMXBean management = java.lang.management.ManagementFactory.getThreadMXBean();
+        assumeTrue(management instanceof com.sun.management.ThreadMXBean);
+        com.sun.management.ThreadMXBean allocations = (com.sun.management.ThreadMXBean) management;
+        assumeTrue(allocations.isThreadAllocatedMemorySupported());
+        allocations.setThreadAllocatedMemoryEnabled(true);
+        DatabaseType[] types = {DatabaseType.of("BIGINT"), DatabaseType.of("DECIMAL"),
+                DatabaseType.of("TIMESTAMP"), DatabaseType.of("VARCHAR"), DatabaseType.of("TEXT[]"),
+                DatabaseType.of("DATE"), DatabaseType.of("CUSTOM_TYPE")};
+        String[] dialects = {" PostgreSQL ", " MySQL ", " OrAcLe ", " SqlServer "};
+        resolveTypes(types, dialects, 30_000);
+        long thread = Thread.currentThread().threadId();
+        long before = allocations.getThreadAllocatedBytes(thread);
+        resolveTypes(types, dialects, 30_000);
+        double bytesPerCall = (allocations.getThreadAllocatedBytes(thread) - before) / 30_000.0;
+        assertTrue(bytesPerCall < 16, "dialect-independent type resolution allocated " + bytesPerCall + " B/call");
+    }
+
+    private static void resolveTypes(DatabaseType[] types, String[] dialects, int iterations) {
+        for (int index = 0; index < iterations; index++) {
+            DatabaseType type = types[index % types.length];
+            String dialect = dialects[index % dialects.length];
+            parameterTypeResult = DatabaseTypes.parameterType(type, dialect, true);
+            logicalTypeResult = DatabaseTypes.effectiveLogicalType(type, dialect);
+        }
+    }
+
+    @Test
+    void deferredDialectNormalizationPreservesNullInputContracts() {
+        assertThrows(NullPointerException.class, () -> DatabaseTypes.parameterType(DatabaseType.of("BIGINT"), null, true));
+        assertThrows(NullPointerException.class, () -> DatabaseTypes.parameterType(DatabaseType.of("TEXT[]"), null, true));
+        assertThrows(NullPointerException.class, () -> DatabaseTypes.effectiveLogicalType(DatabaseType.of("BIGINT"), null));
+        assertEquals(LogicalType.OTHER, DatabaseTypes.effectiveLogicalType(DatabaseType.of("TEXT[]"), null));
+    }
+
+    @Test
+    void dialectNormalizationPreservesWhitespaceCaseAliasesAndUnknownNames() {
+        for (String dialect : List.of("h2", "mysql", "postgresql", "oracle", "sqlserver", "sql_server", "generic", "custom")) {
+            String canonical = dialect.toUpperCase(Locale.ROOT);
+            for (String input : List.of(dialect, canonical, " \t" + dialect + "\n",
+                    canonical.substring(0, 1) + dialect.substring(1))) {
+                for (String declaration : List.of("BIGINT", "BOOLEAN", "BIT(1)", "TIMESTAMPTZ", "TIME",
+                        "UUID", "INTERVAL DAY TO SECOND", "TEXT[]", "CUSTOM_TYPE")) {
+                    DatabaseType type = DatabaseType.of(declaration);
+                    assertEquals(DatabaseTypes.parameterType(type, canonical, false),
+                            DatabaseTypes.parameterType(type, input, false), input + ": " + declaration);
+                    assertEquals(DatabaseTypes.effectiveLogicalType(type, canonical),
+                            DatabaseTypes.effectiveLogicalType(type, input));
+                    assertEquals(DatabaseTypes.logicalDeclaration(declaration, canonical),
+                            DatabaseTypes.logicalDeclaration(declaration, input));
+                }
+                assertEquals(DatabaseTypes.legacyOracleBoolean(canonical, false),
+                        DatabaseTypes.legacyOracleBoolean(input, false));
+                assertEquals(DatabaseTypes.mysqlOffsetTimestamp(DatabaseType.of("TIMESTAMPTZ"), canonical),
+                        DatabaseTypes.mysqlOffsetTimestamp(DatabaseType.of("TIMESTAMPTZ"), input));
+            }
+        }
+        // 保留原 Locale.ROOT 大写转换语义，包括一次映射为多个字符的 Unicode 输入。
+        assertEquals(java.util.UUID.class, DatabaseTypes.parameterType(DatabaseType.of("UUID"), "po\uFB06gresql", true));
+    }
 
     @Test
     void doesNotClassifyCustomNamesByKnownTypeSubstrings() {

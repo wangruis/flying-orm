@@ -4,11 +4,12 @@ import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.batch.BatchExecutionEvidence;
-import com.flying.orm.rdb.form.BatchOptimisticUpdate;
+import com.flying.orm.rdb.form.BatchUpdate;
 import com.flying.orm.rdb.form.SyncFormClient;
 import com.flying.orm.rdb.form.spec.BatchSpec;
 import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
+import com.flying.orm.rdb.dialect.RdbDialect;
 import reactor.core.publisher.Flux;
 
 import java.util.List;
@@ -31,39 +32,46 @@ public final class SyncDmlOperator {
     private final SyncSqlExecutor executor;
     private final SqlRenderer renderer;
     private final DataScope defaultDataScope;
+    private final RdbDialect dialect;
 
     /** 原生 JDBC 构造器，统一由同步 DatabaseOperator 装配。 */
     SyncDmlOperator(SyncFormClient formClient,
                     SyncSqlExecutor executor,
                     SqlRenderer renderer,
-                    DataScope defaultDataScope) {
+                    DataScope defaultDataScope, RdbDialect dialect) {
         this.formClient = Objects.requireNonNull(formClient, "sync form client must not be null");
         this.executor = Objects.requireNonNull(executor, "sync sql executor must not be null");
         this.renderer = Objects.requireNonNull(renderer, "sql renderer must not be null");
         this.defaultDataScope = Objects.requireNonNull(defaultDataScope, "default data scope must not be null");
+        this.dialect = Objects.requireNonNull(dialect, "RDB dialect must not be null");
     }
 
     /** 创建单次同步查询构建器。 */
     public SyncQueryOperator query() {
-        return new SyncQueryOperator(formClient, executor, renderer, defaultDataScope);
+        return new SyncQueryOperator(formClient, executor, renderer, defaultDataScope, dialect);
     }
 
     /** 创建绑定动态表单的新查询；元数据、字段保护与 Scope 由原有表单内核处理。 */
     public SyncQueryOperator query(DynamicForm form) { return query().from(form); }
+
+    /** 绑定实体类型，复用当前客户端的字段映射、默认 Scope 与原生 JDBC 执行。 */
+    public <T> SyncEntityDmlOperator<T> entity(Class<T> type) {
+        return formClient.entity(type);
+    }
 
     /** 插入一行，复用表单的类型转换、租户和加密规则。 */
     public long insert(DynamicForm form, Map<String, Object> values) {
         return formClient.insert(WriteSpec.insert(form, values));
     }
 
-    /** 更新动态表单；保留元数据和非空条件保护。 */
+    /** 更新动态表单；复用元数据和有效 Scope。 */
     public SyncDmlUpdateOperator update(DynamicForm form) {
-        return new SyncDmlUpdateOperator(formClient, DmlWriteCommand.update(renderer, form));
+        return new SyncDmlUpdateOperator(formClient, renderer, form.table(), form);
     }
 
     /** 删除动态表单；声明逻辑删除时默认软删除。 */
     public SyncDmlDeleteOperator delete(DynamicForm form) {
-        return new SyncDmlDeleteOperator(formClient, DmlWriteCommand.delete(renderer, form));
+        return new SyncDmlDeleteOperator(formClient, renderer, form.table(), form);
     }
 
     /** 使用有界批量内核插入；返回实际执行证据。 */
@@ -78,9 +86,9 @@ public final class SyncDmlOperator {
         return formClient.writeBatch(BatchSpec.upsert(form, Flux.fromIterable(Objects.requireNonNull(rows, "batch rows must not be null"))));
     }
 
-    /** 每行携带条件及预期版本的批量更新，保留并发冲突证据。 */
+    /** 每行携带条件的批量更新；提供 lock 时严格检查版本冲突。 */
     public BatchExecutionEvidence updateBatch(
-            DynamicForm form, List<BatchOptimisticUpdate> rows) {
+            DynamicForm form, List<BatchUpdate> rows) {
         return formClient.writeBatch(BatchSpec.update(form, Flux.fromIterable(Objects.requireNonNull(rows, "batch rows must not be null"))));
     }
 
@@ -96,11 +104,11 @@ public final class SyncDmlOperator {
 
     /** 创建单次同步更新构建器。 */
     public SyncDmlUpdateOperator update(String table) {
-        return new SyncDmlUpdateOperator(formClient, renderer, table);
+        return new SyncDmlUpdateOperator(formClient, renderer, table, null);
     }
 
     /** 创建单次同步删除构建器。 */
     public SyncDmlDeleteOperator delete(String table) {
-        return new SyncDmlDeleteOperator(formClient, renderer, table);
+        return new SyncDmlDeleteOperator(formClient, renderer, table, null);
     }
 }

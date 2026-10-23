@@ -14,7 +14,7 @@ import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.schema.JdbcSchemaClient;
 import com.flying.orm.rdb.schema.ReactiveSchemaClient;
-import com.flying.orm.rdb.schema.ReviewedSchemaPlan;
+import com.flying.orm.rdb.schema.SchemaMigrationPlan;
 import com.flying.orm.rdb.schema.SchemaCompatibilityMode;
 import com.flying.orm.rdb.schema.SchemaOperation;
 import com.flying.orm.rdb.schema.SchemaSnapshot;
@@ -29,8 +29,6 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -48,22 +46,18 @@ class SqlServerDefaultConstraintMetadataTest {
     }
 
     @Test
-    void changingOnlyTheObservedDefaultNameInvalidatesBothReadersReviewedFingerprints() {
+    void unnamedDesiredDefaultDoesNotRequireRenamingObservedConstraints() {
         Catalog catalog = new Catalog("DF_events_recorded_at_1");
         RelationalTableDefinition desired = desired(ColumnDefault.currentTimestamp());
 
-        List<ReviewedSchemaPlan> first = catalog.reviews(desired);
+        List<SchemaMigrationPlan> first = catalog.reviews(desired);
         catalog.defaultName.set("DF_events_recorded_at_2");
-        List<ReviewedSchemaPlan> second = catalog.reviews(desired);
+        List<SchemaMigrationPlan> second = catalog.reviews(desired);
 
         for (int index = 0; index < first.size(); index++) {
             assertTrue(first.get(index).operations().isEmpty(), "an unnamed desired default matches its observed name");
             assertTrue(second.get(index).operations().isEmpty(), "renaming alone does not change an unnamed target");
-            assertNotEquals(first.get(index).actualFingerprint(), second.get(index).actualFingerprint(),
-                    "the frozen physical name must participate in the pre-execution snapshot fingerprint");
         }
-        assertEquals(first.getFirst().actualFingerprint(), first.getLast().actualFingerprint());
-        assertEquals(second.getFirst().actualFingerprint(), second.getLast().actualFingerprint());
     }
 
     @Test
@@ -74,7 +68,7 @@ class SqlServerDefaultConstraintMetadataTest {
         assertTrue(catalog.reviews(namedDesired).stream().allMatch(plan -> plan.operations().isEmpty()));
         catalog.defaultName.set("DF_events_recorded_at_2");
 
-        for (ReviewedSchemaPlan plan : catalog.reviews(namedDesired)) {
+        for (SchemaMigrationPlan plan : catalog.reviews(namedDesired)) {
             assertEquals(List.of(SchemaOperation.Kind.CHANGE_COLUMN), plan.operations().stream()
                     .map(SchemaOperation::kind).distinct().toList());
         }
@@ -84,8 +78,7 @@ class SqlServerDefaultConstraintMetadataTest {
     void removingTheTimestampDefaultIsReviewedUsingItsObservedConstraintName() {
         Catalog catalog = new Catalog("DF__events__recorded__6E01572D");
 
-        for (ReviewedSchemaPlan plan : catalog.reviews(desired(ColumnDefault.none()))) {
-            assertFalse(plan.requiresManualAction());
+        for (SchemaMigrationPlan plan : catalog.reviews(desired(ColumnDefault.none()))) {
             assertTrue(plan.requests().stream().anyMatch(request ->
                     request.sql().contains("drop constraint [DF__events__recorded__6E01572D]")),
                     "default removal must use the frozen catalog name");
@@ -106,9 +99,9 @@ class SqlServerDefaultConstraintMetadataTest {
 
     @Test
     void otherDialectSnapshotsDoNotImportASqlServerOnlyCatalogFact() {
-        for (InformationSchemaFormMetadataReader.SnapshotDialect dialect
-                : InformationSchemaFormMetadataReader.SnapshotDialect.values()) {
-            if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER) {
+        for (MetadataQueryProfile.SnapshotDialect dialect
+                : MetadataQueryProfile.SnapshotDialect.values()) {
+            if (dialect == MetadataQueryProfile.SnapshotDialect.SQL_SERVER) {
                 continue;
             }
             SchemaSnapshot snapshot = FormMetadataRowConverter.toCompleteSchemaSnapshot(TABLE,
@@ -143,7 +136,7 @@ class SqlServerDefaultConstraintMetadataTest {
         private Catalog(String defaultName, boolean sequenceDefault) {
             this.defaultName = new AtomicReference<>(defaultName);
             this.sequenceDefault = sequenceDefault;
-            SyncSqlExecutor syncExecutor = new SyncSqlExecutor() {
+            SyncSqlExecutor syncExecutor = new com.flying.orm.rdb.support.ListQueryFixture() {
                 @Override
                 public List<DynamicRow> query(SqlRequest request) {
                     return rows(request);
@@ -155,7 +148,7 @@ class SqlServerDefaultConstraintMetadataTest {
                 }
 
                 @Override
-                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                     throw new AssertionError("metadata review must not request generated keys");
                 }
             };
@@ -180,7 +173,7 @@ class SqlServerDefaultConstraintMetadataTest {
             return jdbcReader.readSnapshot(TABLE);
         }
 
-        private List<ReviewedSchemaPlan> reviews(RelationalTableDefinition desired) {
+        private List<SchemaMigrationPlan> reviews(RelationalTableDefinition desired) {
             return List.of(jdbc.reviewRelational(DATABASE, desired, jdbcReader, SchemaCompatibilityMode.EXACT),
                     reactive.reviewRelational(DATABASE, desired, reactiveReader, SchemaCompatibilityMode.EXACT).block());
         }

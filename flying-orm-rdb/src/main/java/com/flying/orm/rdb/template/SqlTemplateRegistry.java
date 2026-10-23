@@ -22,12 +22,8 @@ public final class SqlTemplateRegistry {
 
     private final Map<String, Entry> entries;
 
-    private SqlTemplateRegistry(Map<String, SqlTemplate> templates,
-                                Map<String, Set<String>> serverParameters) {
-        Map<String, Entry> assembled = new LinkedHashMap<>(templates.size());
-        templates.forEach((id, template) -> assembled.put(
-                id, new Entry(template, serverParameters.getOrDefault(id, Set.of()))));
-        this.entries = Collections.unmodifiableMap(assembled);
+    private SqlTemplateRegistry(Map<String, Entry> entries) {
+        this.entries = Collections.unmodifiableMap(new LinkedHashMap<>(entries));
     }
 
     public static Builder builder() {
@@ -67,9 +63,7 @@ public final class SqlTemplateRegistry {
 
     public static final class Builder {
 
-        private final Map<String, SqlTemplate> templates = new LinkedHashMap<>();
-
-        private final Map<String, Set<String>> serverParameters = new LinkedHashMap<>();
+        private final Map<String, Entry> entries = new LinkedHashMap<>();
 
         private Builder() {
         }
@@ -100,16 +94,14 @@ public final class SqlTemplateRegistry {
                 }
             }
             String key = normalize(safeTemplate.id());
-            SqlTemplate previous = templates.putIfAbsent(key, safeTemplate);
-            if (previous != null) {
+            if (entries.putIfAbsent(key, new Entry(safeTemplate, normalizedParameters)) != null) {
                 throw new IllegalArgumentException("duplicate SQL template id");
             }
-            this.serverParameters.put(key, normalizedParameters);
             return this;
         }
 
         public SqlTemplateRegistry build() {
-            return new SqlTemplateRegistry(templates, serverParameters);
+            return new SqlTemplateRegistry(entries);
         }
     }
 

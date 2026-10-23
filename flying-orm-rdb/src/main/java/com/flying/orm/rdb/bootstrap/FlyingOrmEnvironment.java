@@ -42,9 +42,6 @@ public record FlyingOrmEnvironment(
         batchObserver = requireOptional(batchObserver, "batch execution observer");
         migrationObserver = requireOptional(migrationObserver, "schema migration observer");
         sqlLogSink = requireOptional(sqlLogSink, "sql log sink");
-        if (sqlObserver.isPresent() != batchObserver.isPresent()) {
-            throw new IllegalArgumentException("sql and batch observers must be configured together");
-        }
     }
 
     /** 只配置原生 JDBC 内核；上层负责连接获取和释放。 */
@@ -62,7 +59,7 @@ public record FlyingOrmEnvironment(
         return empty(jdbcAccess, reactiveAccess);
     }
 
-    /** 一次设置 SQL 和批量 observer；只允许成对配置，避免观测数据不完整。 */
+    /** 一次设置 SQL 和批量 observer；单独配置可使用记录构造器的独立可选项。 */
     public FlyingOrmEnvironment withObservers(SqlExecutionObserver configuredSqlObserver,
                                               BatchExecutionObserver configuredBatchObserver) {
         return copy(jdbcConnectionAccess, reactiveConnectionAccess,

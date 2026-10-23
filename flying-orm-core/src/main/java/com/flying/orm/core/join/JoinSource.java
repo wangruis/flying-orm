@@ -18,6 +18,11 @@ import java.util.Objects;
  */
 public record JoinSource(int ordinal, DynamicForm form) {
 
+    /** 引用本来源已注册的字段，供 ON 比较等结构化表达使用。 */
+    public JoinFieldRef field(String name) {
+        return new JoinFieldRef(this, name);
+    }
+
     /** 完成序号和表单的基础校验。 */
     public JoinSource {
         if (ordinal < 0) {

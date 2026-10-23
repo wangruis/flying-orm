@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.reactive;
 
+import com.flying.orm.rdb.internal.protection.ProtectedReplacementBatchPlan;
 import com.flying.orm.rdb.dialect.RdbDialect;
 
 import com.flying.orm.core.sql.render.SqlRequest;
@@ -32,14 +33,38 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class R2dbcProtectedSideIndexDmlBatchingTest {
 
     @Test
+    void generatedRowCombinesAllFieldTokensUsingTheReturnedOwner() {
+        SideIndexRecorder recorder = new SideIndexRecorder(6);
+        ProtectedWriteWork base = work();
+        ProtectedWriteWork generated = new ProtectedWriteWork(base.kind(), base.writeRequest(), null,
+                base.ownerFields(), Map.of(), base.ownerPredicateSql(), base.deleteSql(), base.insertSql(),
+                List.of(base.fields().getFirst(),
+                        new ProtectedWriteWork.FieldTokens("email", base.fields().getFirst().tokens())));
+
+        new R2dbcProtectedBatchSideIndex(R2dbcBindMarkers.from(RdbDialect.postgresql()))
+                .completeGeneratedRow(connection(recorder, false),
+                        new ProtectedReplacementBatchPlan.Row(generated, List.of()),
+                        new R2dbcBatchGeneratedKeyWriter.GeneratedWrite(1L,
+                                com.flying.orm.rdb.result.DynamicRow.copyOf(Map.of("id", 19L))),
+                        Long.MAX_VALUE).block(Duration.ofSeconds(5));
+
+        assertEquals(1, recorder.executions.get());
+        assertEquals(6, recorder.parameterSets.size());
+        assertEquals(java.util.Collections.nCopies(6, 19L),
+                recorder.parameterSets.stream().map(values -> values.getFirst()).toList());
+        assertEquals(List.of("phone", "phone", "phone", "email", "email", "email"),
+                recorder.parameterSets.stream().map(values -> values.get(1)).toList());
+    }
+
+    @Test
     void preparedTokenInsertionsSplitOnTheExplicitByteBudgetForInsertAndReplacement() {
         for (ProtectedWriteWork.Kind kind : List.of(ProtectedWriteWork.Kind.INSERT, ProtectedWriteWork.Kind.UPSERT)) {
             ProtectedWriteWork insert = work();
             ProtectedWriteWork work = new ProtectedWriteWork(kind, insert.writeRequest(), null, insert.ownerFields(),
                     insert.knownOwner(), insert.ownerPredicateSql(), insert.deleteSql(), insert.insertSql(), insert.fields());
             SideIndexRecorder recorder = new SideIndexRecorder(3);
-            R2dbcProtectedBatchSideIndex.Prepared prepared = new R2dbcProtectedBatchSideIndex.Prepared(
-                    List.of(new R2dbcProtectedBatchSideIndex.RowState(work, List.of())), 150L);
+            ProtectedReplacementBatchPlan.Prepared prepared = new ProtectedReplacementBatchPlan.Prepared(
+                    List.of(new ProtectedReplacementBatchPlan.Row(work, List.of())), 150L);
             Mono<Void> completion = new R2dbcProtectedBatchSideIndex(R2dbcBindMarkers.from(RdbDialect.postgresql()))
                     .complete(tokenBudgetConnection(recorder), prepared);
             completion.block(Duration.ofSeconds(5));
@@ -53,8 +78,8 @@ class R2dbcProtectedSideIndexDmlBatchingTest {
     @Test
     void preparedTokenInsertionRejectsOneBindingLargerThanTheExplicitByteBudget() {
         SideIndexRecorder recorder = new SideIndexRecorder(3);
-        R2dbcProtectedBatchSideIndex.Prepared prepared = new R2dbcProtectedBatchSideIndex.Prepared(
-                List.of(new R2dbcProtectedBatchSideIndex.RowState(work(), List.of())), 100L);
+        ProtectedReplacementBatchPlan.Prepared prepared = new ProtectedReplacementBatchPlan.Prepared(
+                List.of(new ProtectedReplacementBatchPlan.Row(work(), List.of())), 100L);
         assertThrows(IllegalArgumentException.class, () ->
                 new R2dbcProtectedBatchSideIndex(R2dbcBindMarkers.from(RdbDialect.postgresql()))
                         .complete(connection(recorder, false), prepared).block(Duration.ofSeconds(5)));
@@ -65,10 +90,10 @@ class R2dbcProtectedSideIndexDmlBatchingTest {
     void generatedTokenBatchesPreserveThePreparedByteBudget() {
         for (long budget : List.of(100L, 150L)) {
             SideIndexRecorder recorder = new SideIndexRecorder(3);
-            R2dbcProtectedBatchSideIndex.RowState state = new R2dbcProtectedBatchSideIndex.RowState(work(), List.of());
+            ProtectedReplacementBatchPlan.Row state = new ProtectedReplacementBatchPlan.Row(work(), List.of());
             R2dbcProtectedBatchSideIndex side = new R2dbcProtectedBatchSideIndex(R2dbcBindMarkers.from(RdbDialect.postgresql()));
             R2dbcProtectedBatchSideIndex.GeneratedTokenBatch tokens = side.generatedTokenBatch(
-                    new R2dbcProtectedBatchSideIndex.Prepared(List.of(state), budget));
+                    new ProtectedReplacementBatchPlan.Prepared(List.of(state), budget));
             tokens.add(state, new R2dbcBatchGeneratedKeyWriter.GeneratedWrite(
                     1L, com.flying.orm.rdb.result.DynamicRow.copyOf(Map.of("id", 7L))));
             if (budget == 100L) {
@@ -98,14 +123,32 @@ class R2dbcProtectedSideIndexDmlBatchingTest {
     void executesWideInsertBindingsIndividuallyWithoutRejectingTheirWidth() {
         int count = 2001;
         SideIndexRecorder recorder = new SideIndexRecorder(2, count);
-        List<Object> parameters = java.util.Collections.nCopies(count, 7L);
-        R2dbcProtectedSideIndexDml.insertParameterSets(connection(recorder, false),
+        List<String> owners = java.util.stream.IntStream.range(0, count - 2)
+                .mapToObj(index -> "id_" + index).toList();
+        Map<String, Object> owner = new java.util.LinkedHashMap<>();
+        owners.forEach(name -> owner.put(name, 7L));
+        ProtectedWriteWork base = work(7L, 2);
+        String predicate = owners.stream().map(name -> name + " = ?")
+                .collect(java.util.stream.Collectors.joining(" and "));
+        ProtectedWriteWork wide = new ProtectedWriteWork(
+                base.kind(), base.writeRequest(), null, owners, owner, predicate,
+                "delete from token_index where " + predicate + " and field_tag = ?",
                 "insert into token_index values ("
-                        + String.join(",", java.util.Collections.nCopies(count, "?")) + ")",
-                List.of(parameters, parameters)).block(Duration.ofSeconds(5));
+                        + String.join(",", java.util.Collections.nCopies(count, "?")) + ")", base.fields());
+        new R2dbcProtectedBatchSideIndex(R2dbcBindMarkers.from(RdbDialect.postgresql()))
+                .complete(connection(recorder, false), new ProtectedReplacementBatchPlan.Prepared(
+                        List.of(new ProtectedReplacementBatchPlan.Row(wide, List.of())), Long.MAX_VALUE))
+                .block(Duration.ofSeconds(5));
         assertEquals(2, recorder.executions.get());
         assertEquals(1, recorder.maxParameterSetsPerStatement.get());
-        assertEquals(List.of(parameters, parameters), recorder.parameterSets);
+        assertEquals(2, recorder.parameterSets.size());
+        for (int index = 0; index < recorder.parameterSets.size(); index++) {
+            List<Object> parameters = recorder.parameterSets.get(index);
+            assertEquals(java.util.Collections.nCopies(count - 2, 7L), parameters.subList(0, count - 2));
+            assertEquals("phone", parameters.get(count - 2));
+            assertEquals(ByteBuffer.wrap(new byte[]{(byte) (index + 1)}),
+                    assertInstanceOf(ByteBuffer.class, parameters.getLast()));
+        }
     }
 
     @Test
@@ -127,7 +170,7 @@ class R2dbcProtectedSideIndexDmlBatchingTest {
         Connection external = connection(recorder, true);
 
         R2dbcSqlExecutor.create(com.flying.orm.rdb.execution.ConnectionAccessTestSupport.borrowed(external), RdbDialect.postgresql())
-                .protectedWrite(work(), SqlExecutionOptions.safeDefaults())
+                .protectedWrite(work(), SqlExecutionOptions.unlimited())
                 .block(Duration.ofSeconds(5));
 
         recorder.assertOneBoundedTokenBatch();
@@ -136,9 +179,10 @@ class R2dbcProtectedSideIndexDmlBatchingTest {
     @Test
     void protectedBatchCompletionBatchesAllTokensForOneOwnerField() {
         SideIndexRecorder recorder = new SideIndexRecorder(6);
-        R2dbcProtectedBatchSideIndex.Prepared prepared = new R2dbcProtectedBatchSideIndex.Prepared(
-                List.of(new R2dbcProtectedBatchSideIndex.RowState(work(7L), List.of()),
-                        new R2dbcProtectedBatchSideIndex.RowState(work(8L), List.of())));
+        ProtectedReplacementBatchPlan.Prepared prepared = new ProtectedReplacementBatchPlan.Prepared(
+                List.of(new ProtectedReplacementBatchPlan.Row(work(7L), List.of()),
+                        new ProtectedReplacementBatchPlan.Row(work(8L), List.of())),
+                        com.flying.orm.rdb.batch.BatchWriteOptions.DEFAULT_MAX_BUFFERED_BYTES);
 
         new R2dbcProtectedBatchSideIndex(R2dbcBindMarkers.from(RdbDialect.postgresql()))
                 .complete(connection(recorder, false), prepared)
@@ -151,8 +195,9 @@ class R2dbcProtectedSideIndexDmlBatchingTest {
     void exactAggregatedR2dbcBatchCountIsAccepted() {
         SideIndexRecorder recorder = new SideIndexRecorder(3, true);
         ProtectedWriteWork work = work();
-        R2dbcProtectedBatchSideIndex.Prepared prepared = new R2dbcProtectedBatchSideIndex.Prepared(
-                List.of(new R2dbcProtectedBatchSideIndex.RowState(work, List.of())));
+        ProtectedReplacementBatchPlan.Prepared prepared = new ProtectedReplacementBatchPlan.Prepared(
+                List.of(new ProtectedReplacementBatchPlan.Row(work, List.of())),
+                        com.flying.orm.rdb.batch.BatchWriteOptions.DEFAULT_MAX_BUFFERED_BYTES);
 
         new R2dbcProtectedBatchSideIndex(R2dbcBindMarkers.from(RdbDialect.postgresql()))
                 .complete(connection(recorder, false), prepared)
@@ -165,8 +210,9 @@ class R2dbcProtectedSideIndexDmlBatchingTest {
     void failedPerTokenR2dbcCountCannotSatisfyExactlyOneContract() {
         SideIndexRecorder recorder = new SideIndexRecorder(3, false, 1);
         ProtectedWriteWork work = work();
-        R2dbcProtectedBatchSideIndex.Prepared prepared = new R2dbcProtectedBatchSideIndex.Prepared(
-                List.of(new R2dbcProtectedBatchSideIndex.RowState(work, List.of())));
+        ProtectedReplacementBatchPlan.Prepared prepared = new ProtectedReplacementBatchPlan.Prepared(
+                List.of(new ProtectedReplacementBatchPlan.Row(work, List.of())),
+                        com.flying.orm.rdb.batch.BatchWriteOptions.DEFAULT_MAX_BUFFERED_BYTES);
 
         assertThrows(IllegalStateException.class, () ->
                 new R2dbcProtectedBatchSideIndex(R2dbcBindMarkers.from(RdbDialect.postgresql()))
@@ -178,8 +224,9 @@ class R2dbcProtectedSideIndexDmlBatchingTest {
     void r2dbcRowsUpdatedErrorFailsTheTokenBatch() {
         SideIndexRecorder recorder = new SideIndexRecorder(3, false, -1, 1);
         ProtectedWriteWork work = work();
-        R2dbcProtectedBatchSideIndex.Prepared prepared = new R2dbcProtectedBatchSideIndex.Prepared(
-                List.of(new R2dbcProtectedBatchSideIndex.RowState(work, List.of())));
+        ProtectedReplacementBatchPlan.Prepared prepared = new ProtectedReplacementBatchPlan.Prepared(
+                List.of(new ProtectedReplacementBatchPlan.Row(work, List.of())),
+                        com.flying.orm.rdb.batch.BatchWriteOptions.DEFAULT_MAX_BUFFERED_BYTES);
 
         assertThrows(IllegalStateException.class, () ->
                 new R2dbcProtectedBatchSideIndex(R2dbcBindMarkers.from(RdbDialect.postgresql()))
@@ -189,11 +236,12 @@ class R2dbcProtectedSideIndexDmlBatchingTest {
 
     @Test
     void r2dbcTokenBatchIsSplitAtTheFixedInternalLimit() {
-        int tokenCount = R2dbcProtectedSideIndexDml.MAX_TOKEN_BATCH_SIZE + 1;
+        int tokenCount = 501;
         SideIndexRecorder recorder = new SideIndexRecorder(tokenCount);
         ProtectedWriteWork work = work(7L, tokenCount);
-        R2dbcProtectedBatchSideIndex.Prepared prepared = new R2dbcProtectedBatchSideIndex.Prepared(
-                List.of(new R2dbcProtectedBatchSideIndex.RowState(work, List.of())));
+        ProtectedReplacementBatchPlan.Prepared prepared = new ProtectedReplacementBatchPlan.Prepared(
+                List.of(new ProtectedReplacementBatchPlan.Row(work, List.of())),
+                        com.flying.orm.rdb.batch.BatchWriteOptions.DEFAULT_MAX_BUFFERED_BYTES);
 
         new R2dbcProtectedBatchSideIndex(R2dbcBindMarkers.from(RdbDialect.postgresql()))
                 .complete(connection(recorder, false), prepared)
@@ -201,26 +249,28 @@ class R2dbcProtectedSideIndexDmlBatchingTest {
 
         assertEquals(2, recorder.statements.get());
         assertEquals(2, recorder.executions.get());
-        assertEquals(R2dbcProtectedSideIndexDml.MAX_TOKEN_BATCH_SIZE,
-                     recorder.maxParameterSetsPerStatement.get());
+        assertEquals(500, recorder.maxParameterSetsPerStatement.get());
         assertEquals(tokenCount - 2, recorder.adds.get());
     }
 
     @Test
     void r2dbcTokenBatchIsAlsoSplitAtTheInternalParameterLimit() {
-        int tokenCount = R2dbcProtectedSideIndexDml.MAX_TOKEN_BATCH_SIZE;
+        int tokenCount = 500;
         int parametersPerToken = 5;
         SideIndexRecorder recorder = new SideIndexRecorder(tokenCount, parametersPerToken);
-        List<List<Object>> parameterSets = java.util.stream.IntStream.range(0, tokenCount)
-                .mapToObj(index -> List.<Object>of(
-                        7L, "tenant", 8L, "phone", new byte[]{(byte) index}))
-                .toList();
+        ProtectedWriteWork base = work(7L, tokenCount);
+        ProtectedWriteWork composite = new ProtectedWriteWork(
+                base.kind(), base.writeRequest(), null, List.of("tenant_id", "form_id", "id"),
+                Map.of("tenant_id", 7L, "form_id", "tenant", "id", 8L),
+                "tenant_id = ? and form_id = ? and id = ?",
+                "delete from token_index where tenant_id = ? and form_id = ? and id = ? and field_tag = ?",
+                "insert into token_index(tenant_id, form_id, id, field_tag, token) values (?, ?, ?, ?, ?)",
+                base.fields());
+        ProtectedReplacementBatchPlan.Prepared prepared = new ProtectedReplacementBatchPlan.Prepared(
+                List.of(new ProtectedReplacementBatchPlan.Row(composite, List.of())), Long.MAX_VALUE);
 
-        R2dbcProtectedSideIndexDml.insertParameterSets(
-                        connection(recorder, false),
-                        "insert into token_index(tenant_id, form_id, id, field_tag, token) "
-                                + "values (?, ?, ?, ?, ?)",
-                        parameterSets)
+        new R2dbcProtectedBatchSideIndex(R2dbcBindMarkers.from(RdbDialect.postgresql()))
+                .complete(connection(recorder, false), prepared)
                 .block(Duration.ofSeconds(5));
 
         assertEquals(2, recorder.statements.get());

@@ -14,6 +14,7 @@ import java.util.Set;
 import java.util.function.BiConsumer;
 import java.util.function.Supplier;
 import java.util.function.UnaryOperator;
+import java.util.function.IntFunction;
 
 /**
  * 动态查询的一行紧凑结果。
@@ -28,7 +29,7 @@ import java.util.function.UnaryOperator;
  * @date 2026-08-03
  * @version v1.0
  */
-public final class DynamicRow extends AbstractMap<String, Object> {
+public final class DynamicRow extends AbstractMap<String, Object> implements IntFunction<Object> {
 
     private final RowLayout layout;
 
@@ -85,6 +86,12 @@ public final class DynamicRow extends AbstractMap<String, Object> {
     public Object value(int index) {
         Objects.checkIndex(index, values.length);
         return values[index];
+    }
+
+    /** 按列下标读取，供已绑定的映射计划直接消费。 */
+    @Override
+    public Object apply(int index) {
+        return value(index);
     }
 
     /**
@@ -147,7 +154,8 @@ public final class DynamicRow extends AbstractMap<String, Object> {
      */
     public DynamicRow renameColumns(UnaryOperator<String> renamer) {
         UnaryOperator<String> safeRenamer = Objects.requireNonNull(renamer, "column renamer must not be null");
-        return owned(renamedLayout(safeRenamer), values);
+        RowLayout renamed = layout.rename(safeRenamer);
+        return renamed == layout ? this : owned(renamed, values);
     }
 
     /**
@@ -157,16 +165,8 @@ public final class DynamicRow extends AbstractMap<String, Object> {
     @InternalApi
     public DynamicRow renameColumnsBound(UnaryOperator<String> renamer) {
         UnaryOperator<String> safeRenamer = Objects.requireNonNull(renamer, "column renamer must not be null");
-        RowLayout renamedLayout = layout.mappingBinding(safeRenamer, () -> renamedLayout(safeRenamer));
-        return owned(renamedLayout, values);
-    }
-
-    private RowLayout renamedLayout(UnaryOperator<String> renamer) {
-        java.util.ArrayList<String> names = new java.util.ArrayList<>(values.length);
-        for (int index = 0; index < values.length; index++) {
-            names.add(renamer.apply(layout.columnName(index)));
-        }
-        return RowLayout.of(names);
+        RowLayout renamed = layout.mappingBinding(safeRenamer, () -> layout.rename(safeRenamer));
+        return renamed == layout ? this : owned(renamed, values);
     }
 
     @Override

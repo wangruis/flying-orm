@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.internal.plan;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.cache.BoundedCacheRegion;
 import com.flying.orm.rdb.cache.OrmCachePolicy;
@@ -22,11 +23,13 @@ import java.util.function.Supplier;
 public final class StructuralPlanCaches implements MetadataCacheInvalidator {
 
     private final BoundedCacheRegion<SqlPlanSpec, SqlStructurePlan> sqlPlans;
+    private final boolean sqlPlansEnabled;
 
     private final ConditionPlanCache conditions;
 
     private StructuralPlanCaches(OrmCachePolicy policy) {
         OrmCachePolicy safePolicy = Objects.requireNonNull(policy, "orm cache policy must not be null");
+        sqlPlansEnabled = safePolicy.sqlPlans().enabled();
         sqlPlans = BoundedCacheRegion.create(safePolicy.sqlPlans(), StructuralPlanCaches::sqlWeight);
         conditions = ConditionPlanCache.create(safePolicy.conditionPlans());
     }
@@ -35,7 +38,12 @@ public final class StructuralPlanCaches implements MetadataCacheInvalidator {
         return new StructuralPlanCaches(policy);
     }
 
-    /** 编译或复用完整 SQL 结构及 primitive 参数槽布局。 */
+    /** 让调用方在构造完整结构键之前跳过已关闭的 SQL 缓存。 */
+    public boolean sqlPlansEnabled() {
+        return sqlPlansEnabled;
+    }
+
+    /** 编译或复用完整 SQL 结构及顺序参数数量。 */
     public SqlStructurePlan sqlPlan(SqlPlanSpec spec, Supplier<SqlStructurePlan> compiler) {
         SqlPlanSpec safeSpec = Objects.requireNonNull(spec, "sql plan spec must not be null");
         Supplier<SqlStructurePlan> safeCompiler = Objects.requireNonNull(
@@ -50,24 +58,13 @@ public final class StructuralPlanCaches implements MetadataCacheInvalidator {
         return conditions.condition(dialect, where, renderer);
     }
 
-    /** 清理指定表的 SQL 计划；带 schema 时精确清理。 */
+    /** 清理目标关系的 SQL 计划，不清除无关表与独立条件计划。 */
     @Override
-    public void invalidate(String table) {
-        String normalized = SqlPlanSpec.normalizeTable(table);
-        int separator = normalized.indexOf('.');
-        if (separator >= 0) {
-            invalidate(normalized.substring(0, separator), normalized.substring(separator + 1));
-            return;
-        }
-        sqlPlans.invalidateIf(key -> key.physicalTable().equals(normalized));
-    }
-
-    @Override
-    public void invalidate(String schema, String table) {
-        String normalizedSchema = requireIdentifierPart(schema, "plan cache schema");
-        String normalizedTable = requireIdentifierPart(table, "plan cache table");
-        sqlPlans.invalidateIf(key -> key.schema().equals(normalizedSchema)
-                && key.physicalTable().equals(normalizedTable));
+    public void invalidate(RelationIdentity relation) {
+        RelationIdentity target = Objects.requireNonNull(relation, "plan cache relation must not be null");
+        sqlPlans.invalidateIf(key -> key.table().table().equals(target.table())
+                && (target.schema().isEmpty() || key.table().schema().equals(target.schema()))
+                && (target.catalog().isEmpty() || key.table().catalog().equals(target.catalog())));
     }
 
     @Override
@@ -89,7 +86,7 @@ public final class StructuralPlanCaches implements MetadataCacheInvalidator {
         if (!spec.operation().equalsIgnoreCase(safePlan.operation())) {
             throw new IllegalArgumentException("compiled SQL plan operation does not match its structure spec");
         }
-        if (!spec.table().equals(SqlPlanSpec.normalizeTable(safePlan.table()))) {
+        if (!spec.table().equals(safePlan.table())) {
             throw new IllegalArgumentException("compiled SQL plan table does not match its structure spec");
         }
         return safePlan;
@@ -103,23 +100,12 @@ public final class StructuralPlanCaches implements MetadataCacheInvalidator {
                 .orElse(0);
         return 4 + dividedLength(canonicalSql.length(), 32)
                 + transportWeight
-                + dividedLength(key.table().length(), 16)
-                + dividedLength(key.formFingerprint().length(), 32)
-                + plan.parameterCount();
+                + dividedLength(key.table().qualifiedName().length(), 16)
+                + dividedLength(key.formFingerprint().length(), 32);
     }
 
     private static int dividedLength(int length, int divisor) {
         return Math.max(1, (length + divisor - 1) / divisor);
     }
 
-    private static String requireIdentifierPart(String text, String name) {
-        String normalized = Objects.requireNonNull(text, name + " must not be null").trim();
-        if (normalized.isEmpty()) {
-            throw new IllegalArgumentException(name + " must not be blank");
-        }
-        if (normalized.indexOf('.') >= 0) {
-            throw new IllegalArgumentException(name + " must not contain '.'");
-        }
-        return normalized;
-    }
 }

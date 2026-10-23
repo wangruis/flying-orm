@@ -109,17 +109,17 @@ class H2TypedLiteralReadbackTest {
     }
 
     @Test
-    void typedLiteralsDoNotAcceptExpressionsOrSilentlyChangeTheColumnType() {
-        InformationSchemaFormMetadataReader.SnapshotDialect dialect =
-                InformationSchemaFormMetadataReader.SnapshotDialect.H2;
+    void defaultsPreserveNativeSqlWithoutWeakeningTypedCheckPredicates() {
+        MetadataQueryProfile.SnapshotDialect dialect =
+                MetadataQueryProfile.SnapshotDialect.H2;
         for (LiteralCase literal : LITERALS) {
             for (String expression : List.of(literal.expression() + " + 1", literal.expression() + " || 'x'")) {
-                assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.columnDefault(
+                assertEquals(ColumnDefault.nativeExpression(expression), RelationalMetadataValueParser.columnDefault(
                         expression, DatabaseType.of(literal.type()), dialect));
                 assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.checkPredicate(
                         "event_value >= " + expression, Map.of("event_value", DatabaseType.of(literal.type())), dialect));
             }
-            assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.columnDefault(
+            assertEquals(ColumnDefault.nativeExpression(literal.expression()), RelationalMetadataValueParser.columnDefault(
                     literal.expression(), DatabaseType.of("VARCHAR"), dialect));
             assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.checkPredicate(
                     "event_value >= " + literal.expression(), Map.of("event_value", DatabaseType.of("VARCHAR")), dialect));
@@ -136,8 +136,8 @@ class H2TypedLiteralReadbackTest {
 
     @Test
     void numericCastReadbackPreservesValuesAndRejectsLossyCasts() {
-        InformationSchemaFormMetadataReader.SnapshotDialect dialect =
-                InformationSchemaFormMetadataReader.SnapshotDialect.H2;
+        MetadataQueryProfile.SnapshotDialect dialect =
+                MetadataQueryProfile.SnapshotDialect.H2;
         Map<String, DatabaseType> types = Map.of("amount", DatabaseType.of("BIGINT"));
         assertEquals(CheckPredicate.compare("amount", CheckPredicate.ComparisonOperator.GREATER_THAN, 0L),
                 RelationalMetadataValueParser.checkPredicate("amount > CAST(0 AS BIGINT)", types, dialect));

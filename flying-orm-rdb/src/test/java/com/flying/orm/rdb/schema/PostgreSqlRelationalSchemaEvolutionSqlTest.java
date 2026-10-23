@@ -21,8 +21,8 @@ import java.util.List;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class PostgreSqlRelationalSchemaEvolutionSqlTest {
@@ -144,14 +144,13 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
                 .build();
         RdbDialect dialect = RdbDialect.postgresql();
 
-        ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
+        SchemaMigrationPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
                 DatabaseDescriptor.of("PostgreSQL", "18", dialect),
                 desired,
                 SchemaSnapshot.present(actual),
                 SchemaSnapshotCoverage.complete(),
                 SchemaCompatibilityMode.EXACT);
 
-        assertFalse(plan.requiresManualAction());
         assertEquals(List.of(
                 "alter table \"app\".\"accounts\" drop constraint \"fk_accounts_legacy\"",
                 "alter table \"app\".\"accounts\" drop constraint \"ck_accounts_legacy\"",
@@ -198,7 +197,7 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
     }
 
     @Test
-    void keepsRenamedProtectionManualWhenItsColumnChangesType() {
+    void rejectsRenamedProtectionWhenItsColumnChangesType() {
         RelationalTableDefinition actual = RelationalTableDefinition.builder(ACCOUNTS)
                 .addColumn(ID).addColumn(CODE_32)
                 .addUnique(UniqueConstraintDefinition.of("uq_accounts_code_old", "code"))
@@ -208,11 +207,7 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
                 .addUnique(UniqueConstraintDefinition.of("uq_accounts_code_new", "code"))
                 .build();
 
-        ReviewedSchemaPlan plan = review(actual, desired);
-
-        assertTrue(plan.requiresManualAction());
-        assertEquals(List.of("alter table \"app\".\"accounts\" alter column \"code\" type VARCHAR(64)"),
-                plan.requests().stream().map(request -> request.sql()).toList());
+        assertThrows(UnsupportedOperationException.class, () -> review(actual, desired));
     }
 
     @Test
@@ -220,9 +215,8 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
         RelationalTableDefinition actual = indexedCandidates(CODE_32, 16, false);
         RelationalTableDefinition desired = indexedCandidates(CODE_64, 32, true);
 
-        ReviewedSchemaPlan plan = review(actual, desired);
+        SchemaMigrationPlan plan = review(actual, desired);
 
-        assertFalse(plan.requiresManualAction());
         assertEquals(List.of(
                 "alter table \"app\".\"accounts\" alter column \"code\" type VARCHAR(64)",
                 "alter table \"app\".\"accounts\" alter column \"state\" type VARCHAR(32)",
@@ -236,25 +230,20 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
     }
 
     @Test
-    void keepsDependentCandidateChangesManualWhenTheirColumnChangeIsUnsafe() {
+    void rejectsUnsupportedColumnChangesBeforeDependentCandidateChanges() {
         ColumnDefinition mixedChange = ColumnDefinition.builder("code", "VARCHAR")
-                .length(64).nullable(false).defaultValue(ColumnDefault.literal("active")).build();
+                .length(16).nullable(false).defaultValue(ColumnDefault.literal("active")).build();
         for (ColumnDefinition desiredCode : List.of(
                 column("code", "VARCHAR", 16, false), mixedChange)) {
-            ReviewedSchemaPlan plan = review(
+            UnsupportedOperationException failure = assertThrows(UnsupportedOperationException.class, () -> review(
                     indexedCandidates(CODE_32, 16, false),
-                    indexedCandidates(desiredCode, 16, true));
-
-            assertTrue(plan.requiresManualAction());
-            assertEquals(Set.of(SchemaOperation.Kind.CHANGE_COLUMN,
-                            SchemaOperation.Kind.CHANGE_PRIMARY_KEY, SchemaOperation.Kind.CHANGE_UNIQUE),
-                    plan.steps().stream().filter(step -> !step.executable())
-                            .map(step -> step.operation().kind()).collect(java.util.stream.Collectors.toSet()));
+                    indexedCandidates(desiredCode, 16, true)));
+            assertTrue(failure.getMessage().contains("CHANGE_COLUMN"));
         }
     }
 
     @Test
-    void keepsCheckAndForeignKeyChangesManualWhenTheirColumnWidens() {
+    void rejectsUnresolvedCheckAndForeignKeyChangesWhenTheirColumnWidens() {
         RelationalTableDefinition actual = table(
                 CODE_32,
                 PrimaryKeyDefinition.of("pk_accounts", "code"),
@@ -271,32 +260,11 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
                         "ck_accounts_code",
                         CheckPredicate.compare("code", CheckPredicate.ComparisonOperator.NOT_EQUAL, "")),
                 foreignKey(ReferentialAction.CASCADE));
-        RdbDialect dialect = RdbDialect.postgresql();
-
-        ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
-                DatabaseDescriptor.of("PostgreSQL", "18", dialect),
-                desired,
-                SchemaSnapshot.present(actual),
-                SchemaSnapshotCoverage.complete(),
-                SchemaCompatibilityMode.EXACT);
-
-        assertTrue(plan.requiresManualAction());
-        assertEquals(Set.of(SchemaOperation.Kind.CHANGE_CHECK, SchemaOperation.Kind.CHANGE_FOREIGN_KEY),
-                plan.steps().stream().filter(step -> !step.executable())
-                        .map(step -> step.operation().kind()).collect(java.util.stream.Collectors.toSet()));
-        assertEquals(List.of(
-                "alter table \"app\".\"accounts\" alter column \"code\" type VARCHAR(64)",
-                "alter table \"app\".\"accounts\" drop constraint \"pk_accounts\","
-                        + " add constraint \"pk_accounts\" primary key (\"code\", \"id\")",
-                "alter table \"app\".\"accounts\" drop constraint \"uq_accounts_code\","
-                        + " add constraint \"uq_accounts_code\" unique (\"code\", \"id\")",
-                "drop index \"app\".\"ix_accounts_code\"",
-                "create index \"ix_accounts_code\" on \"app\".\"accounts\" (\"code\" desc)"),
-                plan.requests().stream().map(request -> request.sql()).toList());
+        assertThrows(UnsupportedOperationException.class, () -> review(actual, desired));
     }
 
     @Test
-    void treatsSelfReferencingForeignKeyTargetColumnsAsDependencies() {
+    void replacesSelfReferenceAroundItsReferencedColumnChange() {
         ColumnDefinition parentCode = column("parent_code", "VARCHAR", 32, true);
         ForeignKeyDefinition actualForeignKey = ForeignKeyDefinition.builder("fk_accounts_parent")
                 .addColumn("parent_code")
@@ -311,27 +279,23 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
                 .build();
         RelationalTableDefinition actual = RelationalTableDefinition.builder(ACCOUNTS)
                 .addColumn(ID).addColumn(CODE_32).addColumn(parentCode)
+                .primaryKey(PrimaryKeyDefinition.of("pk_accounts", "code"))
                 .addForeignKey(actualForeignKey)
                 .build();
         RelationalTableDefinition desired = RelationalTableDefinition.builder(ACCOUNTS)
                 .addColumn(ID).addColumn(CODE_64).addColumn(parentCode)
+                .primaryKey(PrimaryKeyDefinition.of("pk_accounts", "code"))
                 .addForeignKey(desiredForeignKey)
                 .build();
-        RdbDialect dialect = RdbDialect.postgresql();
-
-        ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
-                DatabaseDescriptor.of("PostgreSQL", "18", dialect),
-                desired,
-                SchemaSnapshot.present(actual),
-                SchemaSnapshotCoverage.complete(),
-                SchemaCompatibilityMode.EXACT);
-
-        assertTrue(plan.requiresManualAction());
-        assertTrue(plan.requests().isEmpty());
+        assertEquals(List.of(
+                "alter table \"app\".\"accounts\" drop constraint \"fk_accounts_parent\"",
+                "alter table \"app\".\"accounts\" alter column \"code\" type VARCHAR(64)",
+                "alter table \"app\".\"accounts\" add constraint \"fk_accounts_parent\" foreign key (\"parent_code\") "
+                        + "references \"app\".\"accounts\" (\"code\") on delete cascade"), review(actual, desired).sqlTexts());
     }
 
     @Test
-    void keepsCandidateKeyChangesManualWhenAnObservedSelfReferenceDependsOnThem() {
+    void rejectsCandidateKeyChangesWhenAnObservedSelfReferenceDependsOnThem() {
         ColumnDefinition tenant = column("tenant", "VARCHAR", 32, false);
         ColumnDefinition parentCode = column("parent_code", "VARCHAR", 32, true);
         ForeignKeyDefinition selfReference = ForeignKeyDefinition.builder("fk_accounts_parent")
@@ -345,20 +309,16 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
                 .addForeignKey(selfReference)
                 .build();
         RelationalTableDefinition desired = RelationalTableDefinition.builder(ACCOUNTS)
-                .addColumn(CODE_32).addColumn(tenant).addColumn(parentCode)
+                .addColumn(CODE_32).addColumn(parentCode).addColumn(tenant)
                 .primaryKey(PrimaryKeyDefinition.of("pk_accounts", "code", "tenant"))
                 .addForeignKey(selfReference)
                 .build();
 
-        ReviewedSchemaPlan plan = review(actual, desired);
-
-        assertTrue(plan.requiresManualAction());
-        assertEquals(List.of("alter table \"app\".\"accounts\" add column \"tenant\" VARCHAR(32) not null"),
-                plan.requests().stream().map(request -> request.sql()).toList());
+        assertThrows(UnsupportedOperationException.class, () -> review(actual, desired));
     }
 
     @Test
-    void keepsUniqueIndexRemovalManualWhenAnObservedSelfReferenceDependsOnIt() {
+    void rejectsUniqueIndexRemovalWhenAnObservedSelfReferenceDependsOnIt() {
         ColumnDefinition parentCode = column("parent_code", "VARCHAR", 32, true);
         ForeignKeyDefinition selfReference = ForeignKeyDefinition.builder("fk_accounts_parent")
                 .addColumn("parent_code")
@@ -380,15 +340,11 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
                 .addForeignKey(selfReference)
                 .build();
 
-        ReviewedSchemaPlan plan = review(actual, desired);
-
-        assertTrue(plan.requiresManualAction());
-        assertEquals(List.of("alter table \"app\".\"accounts\" add column \"label\" VARCHAR(32)"),
-                plan.requests().stream().map(request -> request.sql()).toList());
+        assertThrows(UnsupportedOperationException.class, () -> review(actual, desired));
     }
 
     @Test
-    void keepsSameColumnCandidateReplacementManualForARetainedSelfReference() {
+    void rejectsSameColumnCandidateReplacementForARetainedSelfReference() {
         ColumnDefinition parentCode = column("parent_code", "VARCHAR", 32, true);
         ForeignKeyDefinition selfReference = ForeignKeyDefinition.builder("fk_accounts_parent")
                 .addColumn("parent_code")
@@ -406,9 +362,7 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
                 .addForeignKey(selfReference)
                 .build();
 
-        ReviewedSchemaPlan plan = review(actual, desired);
-
-        assertTrue(plan.requiresManualAction());
+        assertThrows(UnsupportedOperationException.class, () -> review(actual, desired));
     }
 
     @Test
@@ -427,39 +381,38 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
         IndexDefinition uniqueIndex = uniqueIndex(
                 "ux_accounts_candidate", "code", "tenant");
 
-        List<ReviewedSchemaPlan> dependentChanges = List.of(
-                review(candidateTable(primary, null, null, selfReference),
+        List<org.junit.jupiter.api.function.Executable> dependentChanges = List.of(
+                () -> review(candidateTable(primary, null, null, selfReference),
                         candidateTable(PrimaryKeyDefinition.of(
                                 "pk_accounts", "code", "note"), null, null, selfReference)),
-                review(candidateTable(primary, null, null, selfReference),
+                () -> review(candidateTable(primary, null, null, selfReference),
                         candidateTable(null, null, null, selfReference)),
-                review(candidateTable(null, unique, null, selfReference),
+                () -> review(candidateTable(null, unique, null, selfReference),
                         candidateTable(null, UniqueConstraintDefinition.of(
                                 "uq_accounts_candidate", "code", "note"), null, selfReference)),
-                review(candidateTable(null, unique, null, selfReference),
+                () -> review(candidateTable(null, unique, null, selfReference),
                         candidateTable(null, null, null, selfReference)),
-                review(candidateTable(null, null, uniqueIndex, selfReference),
+                () -> review(candidateTable(null, null, uniqueIndex, selfReference),
                         candidateTable(null, null, uniqueIndex(
                                 "ux_accounts_candidate", "code", "note"), selfReference)),
-                review(candidateTable(null, null, uniqueIndex, selfReference),
+                () -> review(candidateTable(null, null, uniqueIndex, selfReference),
                         candidateTable(null, null, null, selfReference)));
 
-        dependentChanges.forEach(plan -> assertTrue(plan.requiresManualAction(),
-                () -> "permuted retained self-reference dependency was missed: " + plan.steps()));
+        dependentChanges.forEach(change -> assertThrows(UnsupportedOperationException.class, change));
 
         UniqueConstraintDefinition exactBackingKey = UniqueConstraintDefinition.of(
                 "uq_accounts_reference", "code", "tenant");
-        assertFalse(review(
+        assertDoesNotThrow(() -> review(
                 candidateTable(PrimaryKeyDefinition.of("pk_accounts", "code"),
                         exactBackingKey, null, selfReference),
                 candidateTable(PrimaryKeyDefinition.of("pk_accounts", "note"),
-                        exactBackingKey, null, selfReference)).requiresManualAction());
-        assertFalse(review(
+                        exactBackingKey, null, selfReference)));
+        assertDoesNotThrow(() -> review(
                 candidateTable(PrimaryKeyDefinition.of(
                                 "pk_accounts", "code", "tenant", "note"),
                         exactBackingKey, null, selfReference),
                 candidateTable(PrimaryKeyDefinition.of("pk_accounts", "code", "note"),
-                        exactBackingKey, null, selfReference)).requiresManualAction());
+                        exactBackingKey, null, selfReference)));
     }
 
     @Test
@@ -484,9 +437,8 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
                 .primaryKey(PrimaryKeyDefinition.of("pk_accounts", "tenant", "code"))
                 .build();
 
-        ReviewedSchemaPlan plan = review(actual, desired);
+        SchemaMigrationPlan plan = review(actual, desired);
 
-        assertFalse(plan.requiresManualAction());
         assertEquals(List.of(
                         "alter table \"app\".\"accounts\" drop constraint \"fk_accounts_parent\"",
                         "alter table \"app\".\"accounts\" drop constraint \"pk_accounts\","
@@ -516,9 +468,8 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
                 .addForeignKey(selfReference)
                 .build();
 
-        ReviewedSchemaPlan plan = review(actual, desired);
+        SchemaMigrationPlan plan = review(actual, desired);
 
-        assertFalse(plan.requiresManualAction());
     }
 
     @Test
@@ -544,7 +495,7 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
     }
 
     @Test
-    void rejectsNarrowingMixedAndGenerationColumnChanges() {
+    void allowsCombinedWideningButRejectsNarrowingAndGenerationColumnChanges() {
         ColumnDefinition widenedAndRequired = column("code", "VARCHAR", 64, false);
         ColumnDefinition nullableCode = column("code", "VARCHAR", 32, true);
         ColumnDefinition generatedId = ColumnDefinition.builder("id", "BIGINT")
@@ -553,8 +504,11 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
 
         assertThrows(UnsupportedOperationException.class,
                 () -> renderer.render(changeColumn(CODE_64, CODE_32)));
+        assertEquals(List.of("alter table \"app\".\"accounts\" alter column \"code\" type VARCHAR(64)",
+                        "alter table \"app\".\"accounts\" alter column \"code\" set not null"),
+                sql(renderer.render(changeColumn(nullableCode, widenedAndRequired))));
         assertThrows(UnsupportedOperationException.class,
-                () -> renderer.render(changeColumn(nullableCode, widenedAndRequired)));
+                () -> renderer.render(changeColumn(widenedAndRequired, nullableCode)));
         assertThrows(UnsupportedOperationException.class,
                 () -> renderer.render(changeColumn(ID, generatedId)));
     }
@@ -570,7 +524,7 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
     }
 
     @Test
-    void transfersUniqueIndexProtectionBeforeRemovingTheOldDefinition() {
+    void rebuildsTheDeclaredUniqueIndexWithTheDesiredDefinition() {
         IndexDefinition actual = IndexDefinition.builder("ix_accounts_code")
                 .unique().addKey(IndexKeyPart.asc("code")).build();
         IndexDefinition desired = IndexDefinition.builder("ix_accounts_code")
@@ -578,11 +532,8 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
 
         List<String> requests = sql(renderer().render(change(
                 SchemaOperation.Kind.CHANGE_INDEX, actual.name(), actual, desired)));
-        assertEquals(3, requests.size());
-        assertTrue(requests.getFirst().startsWith("create unique index \"fo_guard_"));
-        assertTrue(requests.getFirst().endsWith("on \"app\".\"accounts\" (\"code\" desc)"));
-        assertEquals("drop index \"app\".\"ix_accounts_code\"", requests.get(1));
-        assertTrue(requests.getLast().endsWith("rename to \"ix_accounts_code\""));
+        assertEquals(List.of("drop index \"app\".\"ix_accounts_code\"",
+                "create unique index \"ix_accounts_code\" on \"app\".\"accounts\" (\"code\" desc)"), requests);
     }
 
     @Test
@@ -643,33 +594,31 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
     }
 
     @Test
-    void keepsNarrowingManualOutsidePostgreSql() {
+    void rejectsNarrowingOutsidePostgreSql() {
         for (RdbDialect dialect : List.of(
                 RdbDialect.mysql(), RdbDialect.oracle(), RdbDialect.sqlServer(), RdbDialect.h2())) {
             RelationalTableDefinition actual = simpleTable(CODE_64);
             RelationalTableDefinition desired = simpleTable(CODE_32);
-            ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
+            UnsupportedOperationException failure = assertThrows(UnsupportedOperationException.class,
+                    () -> RelationalSchemaPlanReviewer.create(dialect).review(
                     DatabaseDescriptor.of(dialect.name(), "test", dialect),
                     desired,
                     SchemaSnapshot.present(actual),
                     SchemaSnapshotCoverage.complete(),
-                    SchemaCompatibilityMode.EXACT);
-
-            assertTrue(plan.requiresManualAction(), dialect.name());
-            assertTrue(plan.requests().isEmpty(), dialect.name());
+                    SchemaCompatibilityMode.EXACT));
+            assertTrue(failure.getMessage().contains("CHANGE_COLUMN"), dialect.name());
         }
     }
 
     @Test
     void acceptsAProvenAbsentTableWithoutUnrelatedMetadataCoverage() {
         RdbDialect dialect = RdbDialect.postgresql();
-        ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(dialect).reviewAbsent(
+        SchemaMigrationPlan plan = RelationalSchemaPlanReviewer.create(dialect).reviewAbsent(
                 DatabaseDescriptor.of("PostgreSQL", "18", dialect),
                 ACCOUNTS,
                 SchemaSnapshot.absent(ACCOUNTS),
                 SchemaSnapshotCoverage.of(Set.of(SchemaSnapshotCoverage.Fact.TABLE_EXISTENCE)));
 
-        assertFalse(plan.requiresManualAction());
         assertTrue(plan.steps().isEmpty());
     }
 
@@ -704,12 +653,11 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
 
     private static List<String> replacementSql(RelationalTableDefinition actual,
                                                RelationalTableDefinition desired) {
-        ReviewedSchemaPlan plan = review(actual, desired);
-        assertFalse(plan.requiresManualAction());
+        SchemaMigrationPlan plan = review(actual, desired);
         return plan.requests().stream().map(request -> request.sql()).toList();
     }
 
-    private static ReviewedSchemaPlan review(RelationalTableDefinition actual,
+    private static SchemaMigrationPlan review(RelationalTableDefinition actual,
                                              RelationalTableDefinition desired) {
         RdbDialect dialect = RdbDialect.postgresql();
         return RelationalSchemaPlanReviewer.create(dialect).review(
@@ -723,8 +671,7 @@ class PostgreSqlRelationalSchemaEvolutionSqlTest {
     private static void assertExecutableWidening(ColumnDefinition actual,
                                                  ColumnDefinition desired,
                                                  String expectedSql) {
-        ReviewedSchemaPlan plan = review(simpleTable(actual), simpleTable(desired));
-        assertFalse(plan.requiresManualAction());
+        SchemaMigrationPlan plan = review(simpleTable(actual), simpleTable(desired));
         assertEquals(List.of(expectedSql), plan.requests().stream()
                 .map(request -> request.sql()).toList());
     }

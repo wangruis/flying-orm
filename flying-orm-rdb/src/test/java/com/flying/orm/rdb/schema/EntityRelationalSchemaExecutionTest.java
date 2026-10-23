@@ -1,9 +1,10 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.core.metadata.RelationalTableDefinition;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.annotation.TableCheck;
 import com.flying.orm.core.annotation.KeySequence;
 import com.flying.orm.core.annotation.TableColumn;
-import com.flying.orm.core.annotation.TableComment;
 import com.flying.orm.core.annotation.TableForeignKey;
 import com.flying.orm.core.annotation.TableId;
 import com.flying.orm.core.annotation.TableIndex;
@@ -13,10 +14,8 @@ import com.flying.orm.core.annotation.TablePrimaryKey;
 import com.flying.orm.core.annotation.TableUnique;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.ColumnDefinition;
-import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.ForeignKeyDefinition;
 import com.flying.orm.core.metadata.ReferentialAction;
-import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.DatabaseDescriptor;
@@ -35,14 +34,13 @@ import com.flying.orm.rdb.sync.SyncSqlExecutor;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
-
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -78,14 +76,13 @@ class EntityRelationalSchemaExecutionTest {
         ReactiveSchemaClient client = ReactiveSchemaClient.create(executor, dialect);
         try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.disabled())) {
             EntitySchemaSynchronizer synchronizer = new EntitySchemaSynchronizer(models, client, reader, null, null);
-            EntityRelationalSchemaSyncException difference = assertThrows(
-                    EntityRelationalSchemaSyncException.class,
-                    () -> synchronizer.synchronizeRelationalReactive(
+            EntitySchemaSyncException difference = assertThrows(
+                    EntitySchemaSyncException.class,
+                    () -> synchronizer.synchronizeReactive(
                             database, EntitySchemaSyncMode.VALIDATE,
                             List.of(QualifiedSequenceFirst.class, QualifiedSequenceLater.class)).block());
-            EntityRelationalSchemaSyncReport report = difference.report();
+            EntitySchemaSyncReport report = difference.report();
 
-            assertFalse(report.requiresManualAction());
             assertEquals(0, report.plans().stream().flatMap(plan -> plan.requests().stream())
                     .filter(request -> request.sql().startsWith("create sequence ")).count());
             assertTrue(executor.requests.isEmpty());
@@ -104,7 +101,7 @@ class EntityRelationalSchemaExecutionTest {
         ReactiveSchemaClient client = ReactiveSchemaClient.create(executor, dialect);
         try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.disabled())) {
             EntitySchemaSynchronizer synchronizer = new EntitySchemaSynchronizer(models, client, reader, null, null);
-            EntityRelationalSchemaSyncReport report = synchronizer.synchronizeRelationalReactive(
+            EntitySchemaSyncReport report = synchronizer.synchronizeReactive(
                     database, EntitySchemaSyncMode.SAFE_UPDATE,
                     List.of(SequenceFirst.class, SequenceLater.class)).block();
             assertTrue(report.successful());
@@ -153,13 +150,10 @@ class EntityRelationalSchemaExecutionTest {
         try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.disabled())) {
             EntitySchemaSynchronizer synchronizer = new EntitySchemaSynchronizer(
                     models, client, reader, null, null);
-            Map<String, SchemaMigrationApproval> approvals = exactApprovals(
-                    client, reader, database, desired);
 
-            EntityRelationalSchemaSyncReport report = synchronizer.synchronizeRelationalReactive(
+            EntitySchemaSyncReport report = synchronizer.synchronizeReactive(
                     database,
                     EntitySchemaSyncMode.FULL_UPDATE,
-                    approvals,
                     List.of(Child.class, Parent.class)).block();
 
             assertTrue(report.successful());
@@ -175,17 +169,14 @@ class EntityRelationalSchemaExecutionTest {
         JdbcSchemaClient client = JdbcSchemaClient.create(executor, dialect);
         JdbcFormMetadataReader reader = JdbcFormMetadataReaders.create(executor, dialect);
         Map<String, RelationalTableDefinition> desired = desiredTables(CycleA.class, CycleB.class);
-        Map<String, SchemaMigrationApproval> approvals = exactApprovals(
-                client, reader, database, desired);
 
         try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.disabled())) {
             EntitySchemaSynchronizer synchronizer = new EntitySchemaSynchronizer(
                     models, null, null, client, reader);
 
-            assertThrows(EntityRelationalSchemaSyncException.class, () -> synchronizer.synchronizeRelational(
+            assertThrows(EntitySchemaSyncException.class, () -> synchronizer.synchronize(
                     database,
                     EntitySchemaSyncMode.FULL_UPDATE,
-                    approvals,
                     List.of(CycleA.class, CycleB.class)));
             assertTrue(executor.updates.isEmpty());
         }
@@ -199,18 +190,15 @@ class EntityRelationalSchemaExecutionTest {
         MultiTableReactiveExecutor executor = new MultiTableReactiveExecutor(desired);
         MultiTableSnapshotReader reader = new MultiTableSnapshotReader(executor.current);
         ReactiveSchemaClient client = ReactiveSchemaClient.create(executor, dialect);
-        Map<String, SchemaMigrationApproval> approvals = exactApprovals(
-                client, reader, database, desired);
 
         try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.disabled())) {
             EntitySchemaSynchronizer synchronizer = new EntitySchemaSynchronizer(
                     models, client, reader, null, null);
 
-            assertThrows(EntityRelationalSchemaSyncException.class,
-                    () -> synchronizer.synchronizeRelationalReactive(
+            assertThrows(EntitySchemaSyncException.class,
+                    () -> synchronizer.synchronizeReactive(
                             database,
                             EntitySchemaSyncMode.FULL_UPDATE,
-                            approvals,
                             List.of(CycleA.class, CycleB.class)).block());
             assertTrue(executor.requests.isEmpty());
         }
@@ -231,7 +219,7 @@ class EntityRelationalSchemaExecutionTest {
             EntitySchemaSynchronizer synchronizer = new EntitySchemaSynchronizer(
                     models, client, reader, null, null);
 
-            EntityRelationalSchemaSyncReport report = synchronizer.synchronizeRelationalReactive(
+            EntitySchemaSyncReport report = synchronizer.synchronizeReactive(
                     database,
                     EntitySchemaSyncMode.VALIDATE,
                     List.of(CycleA.class, CycleB.class)).block();
@@ -242,7 +230,7 @@ class EntityRelationalSchemaExecutionTest {
     }
 
     @Test
-    void directExecutionRequiresAnExactApprovalBeforeSendingReviewedRiskSql() {
+    void directExecutionExecutesExplicitForeignKeyPlan() {
         RdbDialect dialect = RdbDialect.h2();
         DatabaseDescriptor database = DatabaseDescriptor.of("H2", "2.3", dialect);
         RelationalTableDefinition base = EntitySchemaDescriptor.builder(Account.class).build().table();
@@ -265,18 +253,13 @@ class EntityRelationalSchemaExecutionTest {
         StatefulReactiveExecutor executor = new StatefulReactiveExecutor(current, desired);
         ReactiveSchemaClient client = ReactiveSchemaClient.create(executor, dialect);
         SnapshotReader reader = new SnapshotReader(current);
-        ReviewedSchemaPlan plan = client.reviewRelational(
+        SchemaMigrationPlan plan = client.reviewRelational(
                 database, desired, reader, SchemaCompatibilityMode.EXACT).block();
 
-        SchemaExecutionReport rejected = client.executeReviewed(plan, reader).block();
-
-        assertEquals(SchemaExecutionStatus.FAILED, rejected.status());
-        assertFalse(rejected.steps().stream().anyMatch(SchemaExecutionReport.StepResult::sqlSent));
-        assertTrue(executor.requests.isEmpty());
-
-        SchemaExecutionReport approved = client.executeReviewed(
-                plan, reader, SchemaMigrationApproval.approve(plan, "已审阅外键建表计划")).block();
-        assertTrue(approved.successful());
+        SchemaMigrationResult approved = client.execute(
+                plan, reader).block();
+        assertNotNull(approved);
+        assertEquals(plan.requests(), executor.requests);
     }
 
     @Test
@@ -293,7 +276,7 @@ class EntityRelationalSchemaExecutionTest {
             EntitySchemaSynchronizer synchronizer = new EntitySchemaSynchronizer(
                     models, client, reader, null, null);
 
-            EntityRelationalSchemaSyncReport report = synchronizer.synchronizeRelationalReactive(
+            EntitySchemaSyncReport report = synchronizer.synchronizeReactive(
                     database, EntitySchemaSyncMode.SAFE_UPDATE, List.of(Account.class)).block();
 
             assertTrue(report.successful());
@@ -311,7 +294,7 @@ class EntityRelationalSchemaExecutionTest {
 
         EmptySyncExecutor jdbcExecutor = new EmptySyncExecutor();
         JdbcSchemaClient jdbc = JdbcSchemaClient.create(jdbcExecutor, dialect);
-        ReviewedSchemaPlan jdbcPlan = jdbc.reviewRelational(
+        SchemaMigrationPlan jdbcPlan = jdbc.reviewRelational(
                 database,
                 desired,
                 JdbcFormMetadataReaders.create(jdbcExecutor, dialect),
@@ -321,19 +304,19 @@ class EntityRelationalSchemaExecutionTest {
         StatefulReactiveExecutor reactiveExecutor = new StatefulReactiveExecutor(current, desired);
         ReactiveSchemaClient reactive = ReactiveSchemaClient.create(reactiveExecutor, dialect);
         SnapshotReader reader = new SnapshotReader(current);
-        ReviewedSchemaPlan reactivePlan = reactive.reviewRelational(
+        SchemaMigrationPlan reactivePlan = reactive.reviewRelational(
                 database, desired, reader, SchemaCompatibilityMode.SAFE_INCREMENTAL).block();
 
         assertCompleteEntityDdl(jdbcPlan);
         assertCompleteEntityDdl(reactivePlan);
 
-        SchemaExecutionReport execution = reactive.executeReviewed(reactivePlan, reader).block();
-        assertTrue(execution.successful());
+        SchemaMigrationResult execution = reactive.execute(reactivePlan, reader).block();
+        assertNotNull(execution);
         assertTrue(reactiveExecutor.requests.stream().anyMatch(
                 request -> request.sql().toLowerCase(Locale.ROOT).contains("constraint uk_accounts_code")));
     }
 
-    private static void assertCompleteEntityDdl(ReviewedSchemaPlan plan) {
+    private static void assertCompleteEntityDdl(SchemaMigrationPlan plan) {
         String sql = String.join("; ", plan.requests().stream().map(SqlRequest::sql).toList())
                 .toLowerCase(Locale.ROOT);
         assertTrue(sql.contains("constraint pk_accounts primary key"));
@@ -353,36 +336,7 @@ class EntityRelationalSchemaExecutionTest {
         return desired;
     }
 
-    private static Map<String, SchemaMigrationApproval> exactApprovals(
-            ReactiveSchemaClient client,
-            ReactiveFormMetadataReader reader,
-            DatabaseDescriptor database,
-            Map<String, RelationalTableDefinition> desired) {
-        Map<String, SchemaMigrationApproval> approvals = new LinkedHashMap<>();
-        desired.forEach((table, definition) -> {
-            ReviewedSchemaPlan plan = client.reviewRelational(
-                    database, definition, reader, SchemaCompatibilityMode.EXACT).block();
-            approvals.put(table, SchemaMigrationApproval.approve(plan, "dependency order regression"));
-        });
-        return approvals;
-    }
-
-    private static Map<String, SchemaMigrationApproval> exactApprovals(
-            JdbcSchemaClient client,
-            JdbcFormMetadataReader reader,
-            DatabaseDescriptor database,
-            Map<String, RelationalTableDefinition> desired) {
-        Map<String, SchemaMigrationApproval> approvals = new LinkedHashMap<>();
-        desired.forEach((table, definition) -> {
-            ReviewedSchemaPlan plan = client.reviewRelational(
-                    database, definition, reader, SchemaCompatibilityMode.EXACT);
-            approvals.put(table, SchemaMigrationApproval.approve(plan, "cycle rejection regression"));
-        });
-        return approvals;
-    }
-
-    @TableName("accounts")
-    @TableComment("账户表")
+    @TableName(value = "accounts", comment = "账户表")
     @TablePrimaryKey(name = "pk_accounts", properties = "id")
     @TableUnique(id = "account-code", name = "uk_accounts_code", properties = "code")
     @TableIndex(id = "account-code-index", name = "idx_accounts_code",
@@ -459,7 +413,7 @@ class EntityRelationalSchemaExecutionTest {
         private Long aId;
     }
 
-    private static final class EmptySyncExecutor implements SyncSqlExecutor {
+    private static final class EmptySyncExecutor implements com.flying.orm.rdb.support.ListQueryFixture {
 
         private final List<SqlRequest> updates = new ArrayList<>();
 
@@ -475,7 +429,7 @@ class EntityRelationalSchemaExecutionTest {
         }
 
         @Override
-        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
             throw new UnsupportedOperationException();
         }
     }
@@ -528,29 +482,17 @@ class EntityRelationalSchemaExecutionTest {
         }
 
         @Override
-        public Mono<SchemaSnapshot> readSnapshot(String table) {
-            return Mono.just(current.get(table));
+        public Mono<SchemaSnapshot> readSnapshot(RelationIdentity relation) {
+            return Mono.just(current.get(relation.table()));
         }
 
         @Override
-        public Mono<SchemaSnapshot> readSnapshot(String schema, String table) {
-            SchemaSnapshot snapshot = current.get(table);
-            assertEquals(schema, snapshot.identity().schema().orElseThrow());
-            return Mono.just(snapshot);
-        }
-
-        @Override
-        public Mono<DynamicForm> readForm(String formId, String table) {
+        public Mono<DynamicForm> readForm(String formId, RelationIdentity relation) {
             return Mono.error(new UnsupportedOperationException());
         }
 
         @Override
-        public Mono<DynamicForm> readForm(String formId, String schema, String table) {
-            return Mono.error(new UnsupportedOperationException());
-        }
-
-        @Override
-        public Mono<TableMetadata> readTable(String table) {
+        public Mono<RelationalTableDefinition> readTable(RelationIdentity relation) {
             return Mono.error(new UnsupportedOperationException());
         }
     }
@@ -594,22 +536,17 @@ class EntityRelationalSchemaExecutionTest {
         }
 
         @Override
-        public Mono<SchemaSnapshot> readSnapshot(String table) {
+        public Mono<SchemaSnapshot> readSnapshot(RelationIdentity relation) {
             return Mono.just(current.get());
         }
 
         @Override
-        public Mono<DynamicForm> readForm(String formId, String table) {
+        public Mono<DynamicForm> readForm(String formId, RelationIdentity relation) {
             return Mono.error(new UnsupportedOperationException());
         }
 
         @Override
-        public Mono<DynamicForm> readForm(String formId, String schema, String table) {
-            return Mono.error(new UnsupportedOperationException());
-        }
-
-        @Override
-        public Mono<TableMetadata> readTable(String table) {
+        public Mono<RelationalTableDefinition> readTable(RelationIdentity relation) {
             return Mono.error(new UnsupportedOperationException());
         }
     }

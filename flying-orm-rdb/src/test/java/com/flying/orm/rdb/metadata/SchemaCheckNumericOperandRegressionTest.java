@@ -42,6 +42,6 @@ class SchemaCheckNumericOperandRegressionTest {
     private static CheckPredicate parse(String expression) {
         return RelationalMetadataValueParser.checkPredicate(expression,
                 Map.of("n", DatabaseType.of("INTEGER")),
-                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL);
+                MetadataQueryProfile.SnapshotDialect.MYSQL);
     }
 }

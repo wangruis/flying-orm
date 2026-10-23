@@ -55,9 +55,9 @@ final class ReactiveSqlExecutionProtection {
                              }
 
                              if (safeOptions.maxResultBytes() > 0 && rowSizer != null) {
-                                 long itemBytes = estimateBytes(rowSizer, tuple.getT2());
+                                 long itemBytes = Math.max(0L, rowSizer.applyAsLong(tuple.getT2()));
                                  long attemptedBytes = saturatingAdd(budget.resultBytes, itemBytes);
-                                 // Long.MAX_VALUE 同时表示估算失败或累计溢出；即使上限也取最大值也必须失败关闭。
+                                 // Long.MAX_VALUE 表示估算值或累计值溢出，不能作为精确等值放行。
                                  if (attemptedBytes == Long.MAX_VALUE
                                          || attemptedBytes > safeOptions.maxResultBytes()) {
                                      sink.error(new SqlResultMemoryLimitExceededException(
@@ -73,27 +73,6 @@ final class ReactiveSqlExecutionProtection {
                          });
         });
         return protectedSource;
-    }
-
-    private static <T> long estimateBytes(ToLongFunction<T> rowSizer, T row) {
-        try {
-            return Math.max(0L, rowSizer.applyAsLong(row));
-        } catch (RuntimeException failure) {
-            VirtualMachineError fatal = findVirtualMachineError(failure);
-            if (fatal != null) {
-                throw fatal;
-            }
-            // 无法检查结果大小时必须失败关闭，不能将未知大小按零字节放行而绕过内存保护。
-            return Long.MAX_VALUE;
-        }
-    }
-
-    static Throwable translateBatchFailure(Throwable error) {
-        if (error instanceof IllegalStateException) {
-            VirtualMachineError fatal = findVirtualMachineError(error);
-            return fatal == null ? error : fatal;
-        }
-        return translate(error);
     }
 
     private static void requireSql(String sql) {

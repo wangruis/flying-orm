@@ -5,16 +5,12 @@ import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.CheckPredicate;
 import com.flying.orm.core.metadata.ColumnDefault;
 import com.flying.orm.core.metadata.ColumnDefinition;
-import com.flying.orm.core.metadata.ForeignKeyDefinition;
 import com.flying.orm.core.metadata.IndexDefinition;
 import com.flying.orm.core.metadata.IndexKeyPart;
-import com.flying.orm.core.metadata.IndexMetadata;
-import com.flying.orm.core.metadata.ReferentialAction;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.RelationalSchemaDefinition;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
-import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.core.type.DatabaseType;
@@ -164,8 +160,9 @@ public final class ProtectedRelationalSchemaProjector {
         return new UniqueConstraintDefinition(unique.name(), projected, unique.nullPolicy());
     }
 
-    private static IndexDefinition projectIndex(DynamicForm form, IndexDefinition index) {
-        List<String> columns = index.keys().stream().map(IndexKeyPart::column).toList();
+    /** 动态与完整关系 Schema 共用索引投影，保留显式名称、唯一性和排序方向。 */
+    public static IndexDefinition projectIndex(DynamicForm form, IndexDefinition index) {
+        List<String> columns = index.columns();
         List<String> projected = projectIndexColumns(form, columns, index.unique());
         if (projected.equals(columns)) {
             return index;
@@ -182,8 +179,7 @@ public final class ProtectedRelationalSchemaProjector {
             ProtectedContainsLayout layout,
             RelationalTableDefinition owner) {
         DynamicForm sideForm = layout.table();
-        RelationIdentity identity = sideForm.relationIdentity()
-                .orElseGet(() -> RelationIdentity.table(sideForm.table()));
+        RelationIdentity identity = sideForm.relationIdentity();
         Map<String, ColumnDefinition> ownerKeys = new LinkedHashMap<>();
         owner.primaryKey().orElseThrow().columns().forEach(name -> {
             ColumnDefinition column = owner.column(name);
@@ -193,49 +189,14 @@ public final class ProtectedRelationalSchemaProjector {
         for (DynamicField field : sideForm.fields()) {
             ColumnDefinition ownerColumn = ownerKeys.get(field.identity().key());
             if (ownerColumn == null) {
-                side.addColumn(ColumnDefinition.builder(field.identity(), field.databaseType())
-                        .nullable(field.nullable())
-                        .length(field.length())
-                        .precision(field.databaseType().isTemporal() ? null : field.precision())
-                        .scale(field.scale())
-                        .temporalPrecision(field.databaseType().isTemporal() ? field.precision() : null)
-                        .build());
+                side.addColumn(field.column());
             } else {
-                side.addColumn(copyOwnerKey(ownerColumn));
+                side.addColumn(ProtectedContainsLayout.ownerColumn(ownerColumn));
             }
         }
-        layout.indexes().forEach(index -> side.addIndex(index(index)));
-        layout.foreignKeys().forEach(foreignKey -> {
-            ForeignKeyDefinition.Builder builder = ForeignKeyDefinition.builder(foreignKey.name())
-                    .reference(owner.identity())
-                    .onDelete(ReferentialAction.CASCADE);
-            foreignKey.columns().forEach(builder::addColumn);
-            foreignKey.referenceColumns().forEach(builder::addReferenceColumn);
-            side.addForeignKey(builder.build());
-        });
+        layout.indexes().forEach(side::addIndex);
+        layout.foreignKeys().forEach(side::addForeignKey);
         return side.build();
-    }
-
-    private static ColumnDefinition copyOwnerKey(ColumnDefinition source) {
-        return ColumnDefinition.builder(source.identity(), source.databaseType())
-                .codecId(source.codecId())
-                .nullable(false)
-                .length(source.length())
-                .precision(source.precision())
-                .scale(source.scale())
-                .temporalPrecision(source.temporalPrecision())
-                .charset(source.charset())
-                .collation(source.collation())
-                .defaultValue(ColumnDefault.none())
-                .generation(ValueGeneration.none())
-                .build();
-    }
-
-    private static IndexDefinition index(IndexMetadata source) {
-        IndexDefinition.Builder builder = IndexDefinition.builder(source.name())
-                .unique(source.unique());
-        source.columns().forEach(column -> builder.addKey(IndexKeyPart.asc(column)));
-        return builder.build();
     }
 
     private static void requireNoRelationalTransform(ColumnDefinition column) {

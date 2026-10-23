@@ -31,6 +31,7 @@ class DefaultPathFeatureOffTest {
         assertNoOptionalCapabilityState(QuerySpec.class);
         assertNoOptionalCapabilityState(WriteSpec.class);
         assertNoOptionalCapabilityState(Class.forName("com.flying.orm.rdb.form.FormOperationPlanner"));
+        assertNoOptionalCapabilityState(Class.forName("com.flying.orm.rdb.form.FormReadPlanner"));
     }
 
     private static void assertNoOptionalCapabilityState(Class<?> type) {

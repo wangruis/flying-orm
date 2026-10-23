@@ -4,8 +4,8 @@ import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.page.CursorPageQuery;
-import com.flying.orm.core.page.CursorSort;
+import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetSort;
 import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.scope.FieldUse;
@@ -46,20 +46,20 @@ class PaginationEffectiveSortGovernanceTest {
     }
 
     @Test
-    void cursorPageChargesEveryFinalSortToTheBudget() {
+    void keysetPageChargesEveryFinalSortToTheBudget() {
         AtomicInteger executions = new AtomicInteger();
         ReactiveFormClient client = ReactiveFormClient.create(
                         reactiveExecutor(executions), renderer())
                 .withQueryShapeLimits(QueryShapeLimits.defaults().withMaxSortCount(1));
 
-        assertThrows(IllegalArgumentException.class, () -> client.cursorPage(
-                cursorQuery(), CursorPageQuery.first(
-                        20, CursorSort.asc("secret"), CursorSort.asc("id"))).block());
+        assertThrows(IllegalArgumentException.class, () -> client.keysetPage(
+                cursorQuery(), KeysetPageQuery.first(
+                        20, KeysetSort.asc("secret", com.flying.orm.core.page.NullOrder.LAST), KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST))).block());
         assertEquals(0, executions.get());
     }
 
     @Test
-    void cursorPageNeverPublishesAHiddenSortValue() {
+    void keysetPageNeverPublishesAHiddenSortValue() {
         AtomicInteger executions = new AtomicInteger();
         FieldUsePolicy policy = FieldUsePolicy.builder()
                 .visibility("id", FieldVisibility.FULL)
@@ -72,8 +72,8 @@ class PaginationEffectiveSortGovernanceTest {
                         reactiveExecutor(executions), renderer())
                 .withFieldUsePolicy(policy);
 
-        assertThrows(ScopeAccessException.class, () -> client.cursorPage(
-                cursorQuery(), CursorPageQuery.first(20, CursorSort.asc("secret"))).block());
+        assertThrows(ScopeAccessException.class, () -> client.keysetPage(
+                cursorQuery(), KeysetPageQuery.first(20, KeysetSort.asc("secret", com.flying.orm.core.page.NullOrder.LAST))).block());
         assertEquals(0, executions.get());
     }
 
@@ -103,11 +103,14 @@ class PaginationEffectiveSortGovernanceTest {
 
     private static SyncSqlExecutor syncExecutor(AtomicInteger executions) {
         return (SyncSqlExecutor) Proxy.newProxyInstance(
-                SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{SyncSqlExecutor.class},
+                SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{com.flying.orm.rdb.support.ListQueryFixture.class},
                 (proxy, method, arguments) -> {
                     if (method.getName().equals("query")) {
                         executions.incrementAndGet();
                         return List.<DynamicRow>of();
+                    }
+                    if (method.isDefault()) {
+                        return java.lang.reflect.InvocationHandler.invokeDefault(proxy, method, arguments);
                     }
                     throw new UnsupportedOperationException(method.toString());
                 });

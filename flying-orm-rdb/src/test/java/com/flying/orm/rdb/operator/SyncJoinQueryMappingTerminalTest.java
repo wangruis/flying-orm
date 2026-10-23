@@ -21,11 +21,12 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 class SyncJoinQueryMappingTerminalTest {
 
     @Test
-    void mapsDynamicJoinRowsInsideTheSyncExecutorTerminal() {
+    void returnsAlreadyDecodedDynamicJoinRowsWithoutRemapping() {
         DynamicForm form = DynamicForm.builder("people", "people")
                                       .addField(DynamicField.primaryKey("id", "BIGINT"))
                                       .addField(DynamicField.of("name", "VARCHAR"))
@@ -41,9 +42,28 @@ class SyncJoinQueryMappingTerminalTest {
                 .executeRows();
 
         assertEquals("Ada", rows.getFirst().get("person_name"));
+        assertSame(executor.row, rows.getFirst());
+        assertEquals(0, executor.mappedQueries);
+        assertEquals(1, executor.materializedQueries);
+    }
+
+    @Test
+    void convertsDynamicJoinValuesInsideTheSyncExecutorTerminal() {
+        DynamicForm form = DynamicForm.builder("people", "people")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("profile", "JSON")).build();
+        SqlRenderer sqlRenderer = SqlRenderer.builder().addDefaultTerms().build();
+        CapturingSqlExecutor executor = new CapturingSqlExecutor(
+                DynamicRow.copyOf(Map.of("person_profile", "{\"name\":\"Ada\"}")));
+        SyncFormClient client = SyncFormClient.create(executor, new UnusedBatchExecutor(),
+                FormDataSqlRenderer.create(sqlRenderer, RdbDialect.h2()));
+
+        List<DynamicRow> rows = new SyncJoinQueryOperator(client, sqlRenderer, form)
+                .selectAs(form, "profile", "person_profile").executeRows();
+
+        assertEquals(Map.of("name", "Ada"), rows.getFirst().get("person_profile"));
         assertEquals(1, executor.mappedQueries);
-        assertEquals(0, executor.materializedQueries,
-                     "dynamic JOIN mapping must not first materialize an intermediate row list");
+        assertEquals(0, executor.materializedQueries);
     }
 
     @Test
@@ -67,11 +87,19 @@ class SyncJoinQueryMappingTerminalTest {
                      "typed JOIN mapping must not first materialize a DynamicRow list");
     }
 
-    private static final class CapturingSqlExecutor implements SyncSqlExecutor {
+    private static final class CapturingSqlExecutor implements com.flying.orm.rdb.support.ListQueryFixture {
 
-        private final DynamicRow row = DynamicRow.copyOf(Map.of("person_name", "Ada"));
+        private final DynamicRow row;
         private int materializedQueries;
         private int mappedQueries;
+
+        private CapturingSqlExecutor() {
+            this(DynamicRow.copyOf(Map.of("person_name", "Ada")));
+        }
+
+        private CapturingSqlExecutor(DynamicRow row) {
+            this.row = row;
+        }
 
         @Override
         public List<DynamicRow> query(SqlRequest request) {
@@ -99,7 +127,7 @@ class SyncJoinQueryMappingTerminalTest {
         }
 
         @Override
-        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
             throw new UnsupportedOperationException();
         }
     }

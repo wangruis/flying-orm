@@ -61,20 +61,19 @@ class JoinProtectedScopeTest {
             JoinQueryPlanner planner = new JoinQueryPlanner(
                     renderer,
                     new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
-                    SqlExecutionOptions.safeDefaults());
+                    SqlExecutionOptions.unlimited());
 
-            JoinQueryPlanner.PlannedJoinPage plan = planner.page(spec, PageQuery.of(2, 25), null);
+            FormReadPlanner.PlannedQuery plan = planner.page(spec, PageQuery.of(2, 25), null);
 
             assertTrue(plan.countRequest().sql().startsWith("select count(*) as total"));
             assertFalse(plan.countRequest().sql().contains(ProtectedConditions.EXACT));
-            assertFalse(plan.dataRequest().sql().contains(ProtectedConditions.EXACT));
-            assertTrue(plan.dataRequest().sql().contains(" order by \"t0\".\"id\" asc"),
-                       plan.dataRequest().sql());
-            assertEquals(plan.countRequest().parameters().size() + 2, plan.dataRequest().parameters().size());
+            assertFalse(plan.request().sql().contains(ProtectedConditions.EXACT));
+            assertTrue(plan.request().sql().contains(" order by \"t0\".\"id\" asc"),
+                       plan.request().sql());
+            assertEquals(plan.countRequest().parameters().size() + 2, plan.request().parameters().size());
             assertArrayEquals((byte[]) plan.countRequest().parameters().getFirst(),
-                              (byte[]) plan.dataRequest().parameters().getFirst());
-            assertThrows(UnsupportedOperationException.class,
-                         () -> plan.scopes().put(account, DataScope.none()));
+                              (byte[]) plan.request().parameters().getFirst());
+            assertEquals(protectedScope, plan.joinSpec().scope(account));
 
             JoinQuerySpec.Builder deniedBuilder = JoinQuerySpec.builder(accounts);
             JoinSource deniedRoot = deniedBuilder.root();
@@ -109,9 +108,9 @@ class JoinProtectedScopeTest {
             JoinQueryPlanner planner = new JoinQueryPlanner(
                     renderer,
                     new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
-                    SqlExecutionOptions.safeDefaults());
+                    SqlExecutionOptions.unlimited());
 
-            JoinQueryPlanner.PlannedJoin plan = assertDoesNotThrow(() -> planner.plan(spec, null));
+            FormReadPlanner.PlannedQuery plan = assertDoesNotThrow(() -> planner.plan(spec, null));
 
             assertFalse(plan.request().sql().contains(ProtectedConditions.EXACT));
         }
@@ -137,9 +136,9 @@ class JoinProtectedScopeTest {
             FormOperationPlanner planner = new FormOperationPlanner(
                     renderer,
                     new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
-                    SqlExecutionOptions.safeDefaults());
+                    SqlExecutionOptions.unlimited());
 
-            FormOperationPlanner.PlannedQuery plan = assertDoesNotThrow(() -> planner.select(
+            FormReadPlanner.PlannedQuery plan = assertDoesNotThrow(() -> planner.reads.select(
                     QuerySpec.of(form, ConditionGroup.and().build()).withScope(scope)));
 
             assertFalse(plan.request().sql().contains(ProtectedConditions.EXACT));

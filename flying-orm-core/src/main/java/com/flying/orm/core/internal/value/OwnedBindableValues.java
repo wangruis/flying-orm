@@ -93,6 +93,7 @@ public final class OwnedBindableValues {
         private final List<Object> values;
         private boolean published;
         private boolean requiresImmutableSnapshot;
+        private Class<?> lastImmutableType;
 
         private Buffer(int expectedSize) {
             if (expectedSize < 0) {
@@ -104,19 +105,33 @@ public final class OwnedBindableValues {
         public void add(Object value) {
             requireOpen();
             values.add(value);
-            requiresImmutableSnapshot |= BindableValueSnapshots.requiresImmutableSnapshot(value);
+            trackMutability(value);
         }
 
         public void addAll(List<?> additions) {
             requireOpen();
             List<?> owned = ownedValues(additions);
-            values.addAll(owned);
+            List<?> source = owned instanceof Published published ? published.values : owned;
+            if (source.size() == 1) {
+                // 单参数直接追加，避免临时数组；多参数保留批量复制。
+                values.add(source.getFirst());
+            } else {
+                values.addAll(source);
+            }
             if (owned instanceof Published published) {
                 requiresImmutableSnapshot |= published.requiresImmutableSnapshot;
                 return;
             }
             for (Object addition : owned) {
-                requiresImmutableSnapshot |= BindableValueSnapshots.requiresImmutableSnapshot(addition);
+                trackMutability(addition);
+            }
+        }
+
+        /** 相同类型的快照规则不变；同一批参数不必逐值重复分类。 */
+        private void trackMutability(Object value) {
+            if (!requiresImmutableSnapshot && value != null && value.getClass() != lastImmutableType) {
+                requiresImmutableSnapshot = BindableValueSnapshots.requiresImmutableSnapshot(value);
+                if (!requiresImmutableSnapshot) lastImmutableType = value.getClass();
             }
         }
 
@@ -163,6 +178,16 @@ public final class OwnedBindableValues {
         @Override
         public int size() {
             return values.size();
+        }
+
+        @Override
+        public Object[] toArray() {
+            return values.toArray();
+        }
+
+        @Override
+        public <T> T[] toArray(T[] target) {
+            return values.toArray(target);
         }
     }
 

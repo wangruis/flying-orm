@@ -40,7 +40,7 @@ class SqlDialectBoundaryContractRegressionTest {
             var reactive = SqlTemplateEngine.compileNative(
                     sql, replaceValues(), RdbDialect.sqlServer(), ValueCodecRegistry.standard());
             var jdbc = SqlTemplateEngine.prepareNative(
-                    sql, RdbDialect.sqlServer(), ValueCodecRegistry.standard(), true).render(replaceValues());
+                    sql, RdbDialect.sqlServer(), ValueCodecRegistry.standard(), true).render(replaceValues(), Map.of());
             assertEquals(prefix + "REPLACE(@P0, @P1, @P2)", reactive.sql());
             assertEquals(prefix + "REPLACE(?, ?, ?)", jdbc.sql());
             assertEquals(List.of("abc", "b", "x"), reactive.parameters());
@@ -60,7 +60,7 @@ class SqlDialectBoundaryContractRegressionTest {
             assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.compileNative(
                     sql, replaceValues(), RdbDialect.sqlServer(), ValueCodecRegistry.standard()));
             assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.prepareNative(
-                    sql, RdbDialect.sqlServer(), ValueCodecRegistry.standard(), true).render(replaceValues()));
+                    sql, RdbDialect.sqlServer(), ValueCodecRegistry.standard(), true).render(replaceValues(), Map.of()));
             assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.create(
                     SqlTemplateRegistry.builder().register(SqlTemplate.query("bad", sql, Set.of())).build(),
                     RdbDialect.sqlServer(), ValueCodecRegistry.standard()));
@@ -92,7 +92,7 @@ class SqlDialectBoundaryContractRegressionTest {
         assertEquals(List.of(7), engine.render("descending", Map.of("v", 7), Map.of()).parameters());
         assertEquals(List.of(7), SqlTemplateEngine.prepareNative(
                 "select :v as v order by v desc",
-                RdbDialect.sqlServer(), ValueCodecRegistry.standard(), true).render(Map.of("v", 7)).parameters());
+                RdbDialect.sqlServer(), ValueCodecRegistry.standard(), true).render(Map.of("v", 7), Map.of()).parameters());
     }
 
     @Test
@@ -119,7 +119,7 @@ class SqlDialectBoundaryContractRegressionTest {
                 assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.compileNative(
                         sql + suffix, Map.of(), RdbDialect.oracle(), ValueCodecRegistry.standard()));
                 assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.prepareNative(
-                        sql + suffix, RdbDialect.oracle(), ValueCodecRegistry.standard(), true).render(Map.of()));
+                        sql + suffix, RdbDialect.oracle(), ValueCodecRegistry.standard(), true).render(Map.of(), Map.of()));
             }
         }
         assertThrows(IllegalArgumentException.class, () -> assertOracle(
@@ -170,7 +170,7 @@ class SqlDialectBoundaryContractRegressionTest {
         var nativeRequest = SqlTemplateEngine.compileNative(
                 sql, Map.of(), RdbDialect.oracle(), ValueCodecRegistry.standard());
         var jdbcRequest = SqlTemplateEngine.prepareNative(
-                sql, RdbDialect.oracle(), ValueCodecRegistry.standard(), true).render(Map.of());
+                sql, RdbDialect.oracle(), ValueCodecRegistry.standard(), true).render(Map.of(), Map.of());
         assertEquals(sql, nativeRequest.sql());
         assertEquals(sql, jdbcRequest.sql());
         assertTrue(nativeRequest.parameters().isEmpty());
@@ -206,7 +206,7 @@ class SqlDialectBoundaryContractRegressionTest {
             assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.compileNative(
                     first + suffix, Map.of(), RdbDialect.oracle(), ValueCodecRegistry.standard()));
             assertThrows(IllegalArgumentException.class, () -> SqlTemplateEngine.prepareNative(
-                    first + suffix, RdbDialect.oracle(), ValueCodecRegistry.standard(), true).render(Map.of()));
+                    first + suffix, RdbDialect.oracle(), ValueCodecRegistry.standard(), true).render(Map.of(), Map.of()));
         }
     }
 }

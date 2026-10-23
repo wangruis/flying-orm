@@ -83,37 +83,55 @@ public final class ConditionNodes {
     /** 访问每个叶子，回调异常立即结束遍历。 */
     public static void forEachTerm(ConditionNode root, Consumer<TermCondition> action) {
         Objects.requireNonNull(action, "condition term action must not be null");
-        for (ConditionNode node : preorder(root)) {
-            if (node instanceof TermCondition term) action.accept(term);
-        }
+        anyTerm(root, term -> {
+            action.accept(term);
+            return false;
+        });
     }
 
     /** 命中第一个叶子后立即返回，不访问后续兄弟节点。 */
     public static boolean anyTerm(ConditionNode root, Predicate<TermCondition> predicate) {
         Objects.requireNonNull(predicate, "condition term predicate must not be null");
-        for (ConditionNode node : preorder(root)) {
-            if (node instanceof TermCondition term && predicate.test(term)) return true;
+        ConditionNode safeRoot = Objects.requireNonNull(root, "condition node must not be null");
+        if (safeRoot instanceof TermCondition term) return predicate.test(term);
+        Iterator<ConditionNode> children = ((ConditionGroup) safeRoot).children().iterator();
+        ArrayDeque<Iterator<ConditionNode>> parents = null;
+        while (true) {
+            while (children.hasNext()) {
+                ConditionNode node = children.next();
+                if (node instanceof TermCondition term) {
+                    if (predicate.test(term)) return true;
+                } else {
+                    List<ConditionNode> nested = ((ConditionGroup) node).children();
+                    if (nested.isEmpty()) continue;
+                    // 只有仍有兄弟节点的嵌套分支需要保存返回路径。
+                    if (children.hasNext()) {
+                        if (parents == null) parents = new ArrayDeque<>();
+                        parents.push(children);
+                    }
+                    children = nested.iterator();
+                }
+            }
+            if (parents == null || parents.isEmpty()) return false;
+            children = parents.pop();
         }
-        return false;
     }
 
     /** 保留逻辑分组和顺序；只有子节点身份发生变化的组才重新构造。 */
     public static ConditionGroup rewrite(ConditionGroup root, UnaryOperator<TermCondition> mapper) {
         Objects.requireNonNull(root, "condition group must not be null");
         Objects.requireNonNull(mapper, "condition term mapper must not be null");
-        ArrayDeque<RewriteFrame> path = new ArrayDeque<>();
-        path.push(new RewriteFrame(root));
+        RewriteFrame frame = new RewriteFrame(root, null);
         while (true) {
-            RewriteFrame frame = path.peek();
             if (frame.index == frame.group.children().size()) {
                 ConditionGroup result = frame.finish();
-                path.pop();
-                if (path.isEmpty()) return result;
-                path.peek().accept(result);
+                frame = frame.parent;
+                if (frame == null) return result;
+                frame.accept(result);
             } else {
                 ConditionNode child = frame.group.children().get(frame.index);
                 if (child instanceof ConditionGroup group) {
-                    path.push(new RewriteFrame(group));
+                    frame = new RewriteFrame(group, frame);
                 } else {
                     frame.accept(Objects.requireNonNull(mapper.apply((TermCondition) child),
                             "condition term mapper must not return null"));
@@ -131,22 +149,20 @@ public final class ConditionNodes {
         Objects.requireNonNull(root, "structured condition input must not be null");
         Objects.requireNonNull(mapper, "structured condition mapper must not be null");
         if (isStructuredTerm(root)) return mapStructuredTerm(root, mapper);
-        ArrayDeque<StructuredRewriteFrame> path = new ArrayDeque<>();
-        path.push(new StructuredRewriteFrame(root));
+        StructuredRewriteFrame frame = new StructuredRewriteFrame(root, null);
         while (true) {
-            StructuredRewriteFrame frame = path.peek();
             if (frame.index == frame.input.terms().size()) {
                 StructuredConditionInput result = frame.finish();
-                path.pop();
-                if (path.isEmpty()) return result;
-                path.peek().accept(result);
+                frame = frame.parent;
+                if (frame == null) return result;
+                frame.accept(result);
             } else {
                 StructuredConditionInput child = Objects.requireNonNull(frame.input.terms().get(frame.index),
                         "structured condition child must not be null");
                 if (isStructuredTerm(child)) {
                     frame.accept(mapStructuredTerm(child, mapper));
                 } else {
-                    path.push(new StructuredRewriteFrame(child));
+                    frame = new StructuredRewriteFrame(child, frame);
                 }
             }
         }
@@ -163,11 +179,13 @@ public final class ConditionNodes {
 
     private static final class StructuredRewriteFrame {
         private final StructuredConditionInput input;
+        private final StructuredRewriteFrame parent;
         private int index;
         private List<StructuredConditionInput> changed;
 
-        private StructuredRewriteFrame(StructuredConditionInput input) {
+        private StructuredRewriteFrame(StructuredConditionInput input, StructuredRewriteFrame parent) {
             this.input = input;
+            this.parent = parent;
         }
 
         private void accept(StructuredConditionInput next) {
@@ -188,11 +206,13 @@ public final class ConditionNodes {
 
     private static final class RewriteFrame {
         private final ConditionGroup group;
+        private final RewriteFrame parent;
         private int index;
         private List<ConditionNode> changed;
 
-        private RewriteFrame(ConditionGroup group) {
+        private RewriteFrame(ConditionGroup group, RewriteFrame parent) {
             this.group = group;
+            this.parent = parent;
         }
 
         private void accept(ConditionNode next) {

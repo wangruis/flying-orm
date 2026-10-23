@@ -3,14 +3,14 @@ package com.flying.orm.rdb.metadata;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.github.benmanes.caffeine.cache.RemovalCause;
-import com.github.benmanes.caffeine.cache.stats.CacheStats;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.RelationIdentity;
-import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.internal.cache.SchemaCacheInvalidationCoordinator;
 import com.flying.orm.rdb.schema.SchemaSnapshot;
 import com.flying.orm.rdb.schema.SchemaSnapshotCoverage;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.Objects;
@@ -47,7 +47,7 @@ final class CachedReactiveFormMetadataReader implements ReactiveFormMetadataCach
 
     private final MetadataCacheRegionStats tableStats;
 
-    private CachedReactiveFormMetadataReader(ReactiveFormMetadataReader delegate,
+    CachedReactiveFormMetadataReader(ReactiveFormMetadataReader delegate,
                                               CacheRegionPolicy policy,
                                               MetadataCacheInvalidator dependentInvalidator) {
         this.delegate = Objects.requireNonNull(delegate, "reactive form metadata reader must not be null");
@@ -58,24 +58,7 @@ final class CachedReactiveFormMetadataReader implements ReactiveFormMetadataCach
         MetadataCacheInvalidator safeDependent = Objects.requireNonNull(dependentInvalidator,
                 "dependent cache invalidator must not be null");
         // 嵌套 reader 的缓存也必须失效，否则下一次读取会把旧结构重新填入本层。
-        this.dependentInvalidator = delegate instanceof MetadataCacheInvalidator invalidator
-                ? SchemaCacheInvalidationCoordinator.of(invalidator, safeDependent)
-                : safeDependent;
-    }
-
-    static CachedReactiveFormMetadataReader create(ReactiveFormMetadataReader delegate) {
-        return create(delegate, CacheRegionPolicy.metadataDefaults());
-    }
-
-    static CachedReactiveFormMetadataReader create(ReactiveFormMetadataReader delegate,
-                                                    CacheRegionPolicy policy) {
-        return create(delegate, policy, NoopInvalidator.INSTANCE);
-    }
-
-    static CachedReactiveFormMetadataReader create(ReactiveFormMetadataReader delegate,
-                                                    CacheRegionPolicy policy,
-                                                    MetadataCacheInvalidator dependentInvalidator) {
-        return new CachedReactiveFormMetadataReader(delegate, policy, dependentInvalidator);
+        this.dependentInvalidator = SchemaCacheInvalidationCoordinator.of(delegate, safeDependent);
     }
 
     @Override
@@ -84,94 +67,55 @@ final class CachedReactiveFormMetadataReader implements ReactiveFormMetadataCach
     }
 
     @Override
-    public Mono<DynamicForm> readForm(String formId, String table) {
-        MetadataCacheKey key = MetadataCacheKey.form(formId, null, table);
-        return cached(formStats, key, () -> delegate.readForm(formId, table));
+    public Flux<String> readTableNames() {
+        return Flux.defer(delegate::readTableNames);
     }
 
     @Override
-    public Mono<DynamicForm> readForm(String formId, String schema, String table) {
-        MetadataCacheKey key = MetadataCacheKey.form(formId, schema, table);
-        return cached(formStats, key, () -> delegate.readForm(formId, schema, table));
+    public Flux<String> readTableNames(String schema) {
+        return Flux.defer(() -> delegate.readTableNames(schema));
     }
 
     @Override
-    public Mono<TableMetadata> readTable(String table) {
-        MetadataCacheKey key = MetadataCacheKey.table(null, table);
-        return cached(tableStats, key, () -> delegate.readTable(table));
+    public Flux<RelationalTableDefinition> readTables() {
+        return Flux.defer(delegate::readTables);
     }
 
     @Override
-    public Mono<TableMetadata> readTableForSchema(String table) {
-        return Mono.defer(() -> delegate.readTableForSchema(table));
+    public Flux<RelationalTableDefinition> readTables(String schema) {
+        return Flux.defer(() -> delegate.readTables(schema));
     }
 
     @Override
-    public Mono<TableMetadata> readTable(String schema, String table) {
-        MetadataCacheKey key = MetadataCacheKey.table(schema, table);
-        return cached(tableStats, key, () -> delegate.readTable(schema, table));
-    }
-
-    /** Schema 审核必须读取当前数据库事实，不能命中或写入普通 CRUD 元数据缓存。 */
-    @Override
-    public Mono<SchemaSnapshot> readSnapshot(String table) {
-        return delegate.readSnapshot(table);
+    public Mono<DynamicForm> readForm(String formId, RelationIdentity relation) {
+        MetadataCacheKey key = MetadataCacheKey.form(formId, relation);
+        return cached(formStats, key, () -> delegate.readForm(formId, relation));
     }
 
     @Override
-    public Mono<SchemaSnapshot> readSnapshot(String schema, String table) {
-        return delegate.readSnapshot(schema, table);
+    public Mono<RelationalTableDefinition> readTable(RelationIdentity relation) {
+        MetadataCacheKey key = MetadataCacheKey.table(relation);
+        return cached(tableStats, key, () -> delegate.readTable(relation));
+    }
+
+    @Override
+    public Mono<RelationalTableDefinition> readTableForSchema(RelationIdentity relation) {
+        return Mono.defer(() -> delegate.readTableForSchema(relation));
     }
 
     @Override
     public Mono<SchemaSnapshot> readSnapshot(RelationIdentity relation) {
-        return delegate.readSnapshot(relation);
-    }
-
-    @Override
-    public void invalidate(String table) {
-        // 未带 schema 时清除所有 schema 下同名表，宁可多失效，也不能留下可能过期的结构。
-        String safeTable = requireText(table, "metadata cache table");
-        int separator = safeTable.indexOf('.');
-        if (separator >= 0) {
-            if (separator == 0 || separator == safeTable.length() - 1 || safeTable.indexOf('.', separator + 1) >= 0) {
-                throw new IllegalArgumentException("metadata cache table must be table or schema.table");
-            }
-            invalidate(safeTable.substring(0, separator), safeTable.substring(separator + 1));
-            return;
-        }
-        try {
-            dependentInvalidator.invalidate(safeTable);
-        } finally {
-            // 下层先失效，本层最后清理，避免通知期间的并发读取留下旧结构。
-            removeMatching(null, safeTable);
-        }
-    }
-
-    @Override
-    public void invalidate(String schema, String table) {
-        String safeSchema = requireText(schema, "metadata cache schema");
-        String safeTable = requireText(table, "metadata cache table");
-        try {
-            dependentInvalidator.invalidate(safeSchema, safeTable);
-        } finally {
-            removeMatching(safeSchema, safeTable);
-        }
+        return Mono.defer(() -> delegate.readSnapshot(relation));
     }
 
     @Override
     public void invalidate(RelationIdentity relation) {
         RelationIdentity target = Objects.requireNonNull(
                 relation, "metadata cache relation must not be null");
-        if (target.catalog().isPresent()) {
-            invalidateAll();
-            return;
-        }
-        MetadataCacheKey key = MetadataCacheKey.table(target);
         try {
             dependentInvalidator.invalidate(target);
         } finally {
-            removeMatching(key.schema(), key.table());
+            entries.asMap().keySet().removeIf(key -> key.matchesInvalidation(target));
         }
     }
 
@@ -182,24 +126,6 @@ final class CachedReactiveFormMetadataReader implements ReactiveFormMetadataCach
         } finally {
             entries.invalidateAll();
         }
-    }
-
-    /**
-     * 表单缓存命中统计。后续接指标系统时可以直接定时读取它。
-     *
-     * @return 表单缓存统计
-     */
-    public CacheStats formStats() {
-        return formStats.caffeineStats();
-    }
-
-    /**
-     * 数据库表缓存命中统计。这里不绑定 Micrometer 之类的框架，主项目保持纯 Java。
-     *
-     * @return 表缓存统计
-     */
-    public CacheStats tableStats() {
-        return tableStats.caffeineStats();
     }
 
     /**
@@ -283,10 +209,6 @@ final class CachedReactiveFormMetadataReader implements ReactiveFormMetadataCach
         entries.asMap().replace(key, original, new MetadataCachedValue<>(value, weight));
     }
 
-    private void removeMatching(String schema, String table) {
-        entries.asMap().keySet().removeIf(key -> key.matchesInvalidation(schema, table));
-    }
-
     private Cache<MetadataCacheKey, MetadataCachedValue<?>> newCache(CacheRegionPolicy policy) {
         Caffeine<MetadataCacheKey, MetadataCachedValue<?>> builder = Caffeine.newBuilder()
                                                    .maximumWeight(policy.maximumWeight())
@@ -299,14 +221,12 @@ final class CachedReactiveFormMetadataReader implements ReactiveFormMetadataCach
                                                                       MetadataCachedValue<?> value,
                                                                       RemovalCause cause) -> {
                                                        if (key != null && value != null) {
-                                                           stats(key.kind()).eviction(value.weight());
+                                                           MetadataCacheRegionStats stats = key.kind() == MetadataCacheKey.Kind.FORM
+                                                                   ? formStats : tableStats;
+                                                           stats.eviction(value.weight());
                                                        }
                                                    });
         return builder.build();
-    }
-
-    private MetadataCacheRegionStats stats(MetadataCacheKey.Kind kind) {
-        return kind == MetadataCacheKey.Kind.FORM ? formStats : tableStats;
     }
 
     @SuppressWarnings("unchecked")
@@ -318,30 +238,11 @@ final class CachedReactiveFormMetadataReader implements ReactiveFormMetadataCach
         if (value instanceof DynamicForm form) {
             return 1 + form.fields().size();
         }
-        if (value instanceof TableMetadata table) {
+        if (value instanceof RelationalTableDefinition table) {
             return 1 + table.columns().size() + table.indexes().size() + table.foreignKeys().size();
         }
         return 1;
     }
 
-    private static String requireText(String value, String name) {
-        String safeValue = Objects.requireNonNull(value, name + " must not be null").trim();
-        if (safeValue.isEmpty()) {
-            throw new IllegalArgumentException(name + " must not be blank");
-        }
-        return safeValue;
-    }
-
-    private enum NoopInvalidator implements MetadataCacheInvalidator {
-        INSTANCE;
-
-        @Override
-        public void invalidate(String table) {
-        }
-
-        @Override
-        public void invalidateAll() {
-        }
-    }
 
 }

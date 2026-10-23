@@ -4,13 +4,12 @@ import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.form.DynamicFormChangeSet;
 import com.flying.orm.core.form.FieldChange;
-import com.flying.orm.core.metadata.ColumnMetadata;
+import com.flying.orm.core.metadata.ColumnDefinition;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
-import com.flying.orm.core.metadata.ForeignKeyMetadata;
-import com.flying.orm.core.metadata.IndexMetadata;
-import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.metadata.ForeignKeyDefinition;
+import com.flying.orm.core.metadata.IndexDefinition;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.sql.render.SqlRequest;
-import com.flying.orm.rdb.dialect.DialectCapabilities;
 import com.flying.orm.rdb.metadata.JdbcFormMetadataReader;
 import com.flying.orm.rdb.metadata.ReactiveFormMetadataReader;
 import reactor.core.publisher.Mono;
@@ -20,96 +19,59 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 /**
- * 负责迁移顺序和风险分流；字段、索引、标识符 SQL 由 {@link SchemaTableSqlRenderer} 负责，
- * 外键报告由 {@link SchemaForeignKeyPlanner} 负责。
+ * 负责迁移顺序和显式变更选项；字段、索引、标识符 SQL 由 {@link RelationalSchemaSqlRenderer} 负责，
+ * 外键操作由 {@link SchemaForeignKeyPlanner} 负责。
  */
 final class SchemaMigrationPlanner {
 
     private final SchemaDialect dialect;
-    private final SchemaTableSqlRenderer tables;
-    private final SchemaIndexPlanner indexChanges;
+    private final FormSchemaSqlRenderer renderer;
+    private final RelationalSchemaSqlRenderer tables;
     private final ProtectedSchemaMigrationPlanner protectedSchemas;
 
-    /** 复用公开渲染器的方言和回滚规则，避免客户端重复装配。 */
+    /** 复用公开渲染器的方言和物理结构规则，避免客户端重复装配。 */
     SchemaMigrationPlanner(FormSchemaSqlRenderer renderer) {
         FormSchemaSqlRenderer safeRenderer = Objects.requireNonNull(renderer,
                                                                      "form schema SQL renderer must not be null");
         this.dialect = safeRenderer.dialect();
+        this.renderer = safeRenderer;
         this.tables = safeRenderer.tableRenderer();
-        this.indexChanges = new SchemaIndexPlanner(this.tables);
-        this.protectedSchemas = new ProtectedSchemaMigrationPlanner(this, safeRenderer);
-    }
-
-    /** 只保留由当前结构事实和方言能力共同证明安全的增量操作。 */
-    List<SchemaOperation> safeIncrementalPlan(List<SchemaOperation> operations,
-                                              SchemaSnapshot actual,
-                                              DialectCapabilities capabilities) {
-        return SchemaMigrationSupport.requireSafeIncremental(operations, actual, capabilities);
+        this.protectedSchemas = new ProtectedSchemaMigrationPlanner(this);
     }
 
     Mono<SchemaMigrationPlan> plan(DynamicForm form,
-                                   List<IndexMetadata> indexes,
-                                   List<ForeignKeyMetadata> foreignKeys,
+                                   List<IndexDefinition> indexes,
+                                   List<ForeignKeyDefinition> foreignKeys,
                                    ReactiveFormMetadataReader metadataReader,
                                    SchemaMigrationOptions options) {
-        DynamicForm safeForm = SchemaMigrationSupport.requireLegacyRelation(form);
-        List<IndexMetadata> safeIndexes = List.copyOf(Objects.requireNonNull(
+        DynamicForm safeForm = Objects.requireNonNull(form, "target dynamic form must not be null");
+        List<IndexDefinition> safeIndexes = List.copyOf(Objects.requireNonNull(
                 indexes, "target indexes must not be null"));
-        List<ForeignKeyMetadata> safeForeignKeys = List.copyOf(Objects.requireNonNull(
+        List<ForeignKeyDefinition> safeForeignKeys = List.copyOf(Objects.requireNonNull(
                 foreignKeys, "target foreign keys must not be null"));
         ReactiveFormMetadataReader safeReader = Objects.requireNonNull(
                 metadataReader, "reactive form metadata reader must not be null");
         SchemaMigrationOptions safeOptions = Objects.requireNonNull(options,
                                                                      "schema migration options must not be null");
-        return safeReader.readTableForSchema(safeForm.table())
-                         .flatMap(current -> migrateSafelyPlanReactive(
-                                 current, safeForm, safeIndexes, safeForeignKeys, safeOptions, safeReader)
+        return Mono.defer(() -> safeReader.readTableForSchema(safeForm.relationIdentity()))
+                         .map(Optional::of)
+                         .onErrorResume(SchemaMigrationPlanner::isTableNotFound,
+                                        failure -> Mono.just(Optional.empty()))
+                         .flatMap(current -> current.map(table -> migrateSafelyPlanReactive(
+                                 table, safeForm, safeIndexes, safeForeignKeys, safeOptions, safeReader)
                                  .flatMap(primary -> protectedSchemas.planExistingReactive(
                                          safeForm, primary, safeReader, safeOptions)))
-                         .onErrorResume(SchemaMigrationPlanner::isTableNotFound,
-                                        failure -> Mono.just(createTablePlan(
-                                                safeForm, safeIndexes, safeForeignKeys)));
-    }
-
-    Mono<ReviewedSchemaMigrationPlan> review(DynamicForm form,
-                                             List<IndexMetadata> indexes,
-                                             List<ForeignKeyMetadata> foreignKeys,
-                                             ReactiveFormMetadataReader metadataReader,
-                                             SchemaMigrationOptions migrationOptions,
-                                             SchemaMigrationReviewPolicy reviewPolicy) {
-        DynamicForm safeForm = SchemaMigrationSupport.requireLegacyRelation(form);
-        List<IndexMetadata> safeIndexes = List.copyOf(Objects.requireNonNull(
-                indexes, "target indexes must not be null"));
-        List<ForeignKeyMetadata> safeForeignKeys = List.copyOf(Objects.requireNonNull(
-                foreignKeys, "target foreign keys must not be null"));
-        ReactiveFormMetadataReader safeReader = Objects.requireNonNull(
-                metadataReader, "reactive form metadata reader must not be null");
-        SchemaMigrationOptions safeOptions = Objects.requireNonNull(migrationOptions,
-                                                                     "schema migration options must not be null");
-        SchemaMigrationReviewPolicy safePolicy = Objects.requireNonNull(reviewPolicy,
-                                                                         "migration review policy must not be null");
-        return safeReader.readTableForSchema(safeForm.table())
-                         .flatMap(current -> reviewSnapshot(current, safeForm, safeOptions, safeReader)
-                                 .map(java.util.Optional::of)
-                                 .defaultIfEmpty(java.util.Optional.empty())
-                                 .flatMap(snapshot -> protectedSchemas.reviewExistingReactive(
-                                         safeForm, current,
-                                         migrateSafelyPlan(current, safeForm, safeIndexes, safeForeignKeys,
-                                                 safeOptions, snapshot.orElse(null)),
-                                         safeReader, safeOptions, safePolicy, snapshot.orElse(null))))
-                         .onErrorResume(SchemaMigrationPlanner::isTableNotFound,
-                                        failure -> Mono.just(protectedSchemas.reviewCreated(
-                                                safeForm,
-                                                createPrimaryTablePlan(safeForm, safeIndexes, safeForeignKeys),
-                                                safePolicy)));
+                                 .orElseGet(() -> Mono.fromSupplier(() -> createTablePlan(
+                                         safeForm, safeIndexes, safeForeignKeys, safeOptions))));
     }
 
     SchemaMigrationPlan planJdbc(DynamicForm form,
-                                   List<IndexMetadata> indexes,
-                                   List<ForeignKeyMetadata> foreignKeys,
+                                   List<IndexDefinition> indexes,
+                                   List<ForeignKeyDefinition> foreignKeys,
                                    JdbcFormMetadataReader metadataReader,
                                    SchemaMigrationOptions options) {
         DynamicForm safeForm = Objects.requireNonNull(form, "target dynamic form must not be null");
@@ -117,71 +79,51 @@ final class SchemaMigrationPlanner {
                 metadataReader, "jdbc form metadata reader must not be null");
         SchemaMigrationOptions safeOptions = Objects.requireNonNull(
                 options, "schema migration options must not be null");
-        SchemaMigrationSupport.requireLegacyRelation(safeForm);
+        RelationalTableDefinition current;
         try {
-            TableMetadata current = safeReader.readTableForSchema(safeForm.table());
-            SchemaMigrationPlan primary = migrateSafelyPlan(
-                    current, safeForm, indexes, foreignKeys, safeOptions,
-                    physicalSnapshotJdbc(current, safeForm, safeOptions, safeReader));
-            return protectedSchemas.planExistingJdbc(safeForm, primary, safeReader, safeOptions);
+            current = safeReader.readTableForSchema(safeForm.relationIdentity());
         } catch (IllegalArgumentException failure) {
             if (!isTableNotFound(failure)) {
                 throw failure;
             }
-            return createTablePlan(safeForm, indexes, foreignKeys);
+            return createTablePlan(safeForm, indexes, foreignKeys, safeOptions);
         }
-    }
-
-    ReviewedSchemaMigrationPlan reviewJdbc(DynamicForm form,
-                                             List<IndexMetadata> indexes,
-                                             List<ForeignKeyMetadata> foreignKeys,
-                                             JdbcFormMetadataReader metadataReader,
-                                             SchemaMigrationOptions migrationOptions,
-                                             SchemaMigrationReviewPolicy reviewPolicy) {
-        DynamicForm safeForm = SchemaMigrationSupport.requireLegacyRelation(form);
-        JdbcFormMetadataReader safeReader = Objects.requireNonNull(
-                metadataReader, "jdbc form metadata reader must not be null");
-        SchemaMigrationOptions safeOptions = Objects.requireNonNull(
-                migrationOptions, "schema migration options must not be null");
-        SchemaMigrationReviewPolicy safePolicy = Objects.requireNonNull(
-                reviewPolicy, "migration review policy must not be null");
-        try {
-            TableMetadata current = safeReader.readTableForSchema(safeForm.table());
-            SchemaSnapshot snapshot = reviewSnapshotJdbc(current, safeForm, safeOptions, safeReader);
-            SchemaMigrationPlan primary = migrateSafelyPlan(
-                    current, safeForm, indexes, foreignKeys, safeOptions, snapshot);
-            return protectedSchemas.reviewExistingJdbc(
-                    safeForm, current, primary, safeReader, safeOptions, safePolicy, snapshot);
-        } catch (IllegalArgumentException failure) {
-            if (!isTableNotFound(failure)) {
-                throw failure;
-            }
-            return protectedSchemas.reviewCreated(
-                    safeForm, createPrimaryTablePlan(safeForm, indexes, foreignKeys), safePolicy);
-        }
+        MigrationChanges changes = prepareChanges(current, safeForm, indexes, foreignKeys, safeOptions);
+        SchemaSnapshot snapshot = needsPhysicalSnapshot(changes.operations())
+                ? safeReader.readSnapshot(safeForm.relationIdentity()) : null;
+        SchemaMigrationPlan primary = renderer.renderPlan(current, snapshot,
+                renderChanges(current, changes, snapshot), safeOptions);
+        return protectedSchemas.planExistingJdbc(safeForm, primary, safeReader, safeOptions);
     }
 
     SchemaMigrationPlan createTablePlan(DynamicForm target,
-                                        List<IndexMetadata> targetIndexes,
-                                        List<ForeignKeyMetadata> targetForeignKeys) {
-        return protectedSchemas.appendCreatePlan(
-                target, createPrimaryTablePlan(target, targetIndexes, targetForeignKeys));
+                                        List<IndexDefinition> targetIndexes,
+                                        List<ForeignKeyDefinition> targetForeignKeys) {
+        return createTablePlan(target, targetIndexes, targetForeignKeys, SchemaMigrationOptions.safe());
+    }
+
+    SchemaMigrationPlan createTablePlan(DynamicForm target,
+                                                List<IndexDefinition> targetIndexes,
+                                                List<ForeignKeyDefinition> targetForeignKeys,
+                                                SchemaMigrationOptions options) {
+        return protectedSchemas.appendCreatePlan(target,
+                renderer.renderPlan(null, null, createPrimaryTablePlan(target, targetIndexes, targetForeignKeys), options),
+                options);
     }
 
     SchemaMigrationPlan createPrimaryTablePlan(DynamicForm target,
-                                                List<IndexMetadata> targetIndexes,
-                                                List<ForeignKeyMetadata> targetForeignKeys) {
+                                                List<IndexDefinition> targetIndexes,
+                                                List<ForeignKeyDefinition> targetForeignKeys) {
         ProtectedSchemaTarget resolved = ProtectedSchemaTarget.resolve(
                 target, targetIndexes, targetForeignKeys);
         DynamicForm safeTarget = resolved.form();
-        List<IndexMetadata> safeIndexes = resolved.indexes();
-        List<ForeignKeyMetadata> safeForeignKeys = resolved.foreignKeys();
-        List<SqlRequest> requests = new ArrayList<>(tables.createTable(safeTarget));
-        requests.addAll(tables.createIndexes(safeTarget.table(), safeIndexes));
-        List<SkippedSchemaChange> skipped = safeForeignKeys.stream()
-                                                           .map(SchemaForeignKeyPlanner::addForeignKeyChange)
-                                                           .toList();
-        return new SchemaMigrationPlan(safeTarget, safeIndexes, safeForeignKeys, false, requests, skipped);
+        List<IndexDefinition> safeIndexes = resolved.indexes();
+        List<ForeignKeyDefinition> safeForeignKeys = resolved.foreignKeys();
+        RelationalTableDefinition definition = SchemaMigrationSupport.tableDefinition(safeTarget, safeIndexes, safeForeignKeys);
+        SchemaOperation operation = SchemaOperation.of(SchemaOperation.Kind.CREATE_TABLE, definition.identity(),
+                definition.identity().table(), null, definition, SchemaOperation.Compatibility.SAFE_INCREMENTAL);
+        return SchemaMigrationPlan.planned(definition, false,
+                List.of(new SchemaPlanStep(operation, tables.render(operation))), List.of());
     }
 
     List<SqlRequest> migrate(DynamicFormChangeSet changeSet) {
@@ -190,392 +132,269 @@ final class SchemaMigrationPlanner {
 
     List<SqlRequest> migrate(DynamicFormChangeSet changeSet, SchemaSnapshot snapshot) {
         DynamicFormChangeSet changes = Objects.requireNonNull(changeSet, "dynamic form change set must not be null");
-        RelationalTableDefinition physical = SchemaTableSqlRenderer.physicalColumns(snapshot);
-        // 变更集已保证 source 和 target 指向同一物理关系，这里只校验一次目标身份。
-        SchemaMigrationSupport.requireLegacyRelation(changes.target());
         if (!changes.source().protections().isEmpty() || !changes.target().protections().isEmpty()) {
             throw new IllegalArgumentException("protected fields require a reviewed schema migration plan");
         }
-        String rawTable = changes.target().table();
-        List<SqlRequest> requests = new ArrayList<>();
-        tables.addSequenceCreates(requests, changes.addedFields(), changes.source().fields(), true);
-        for (DynamicField field : changes.addedFields()) {
-            requests.add(new SqlRequest(dialect.addColumnSql(rawTable, tables.addedColumnDefinition(rawTable, field)), List.of()));
-            tables.addColumnComment(requests, changes.target().table(), field);
-        }
-        addUniqueIndexesForAddedFields(requests, changes);
-        for (FieldChange change : changes.changedFields()) {
-            validateDirectFieldChange(change);
-            DynamicField target = change.target();
-            boolean shapeChanged = storageShapeChanged(change.source(), target);
-            String sourceStorageComment = tables.storageComment(change.source());
-            String targetStorageComment = tables.storageComment(target);
-            boolean commentChanged = !Objects.equals(sourceStorageComment, targetStorageComment);
-            java.util.Optional<String> separateCommentChange = commentChanged
-                    ? dialect.columnCommentChangeSql(rawTable,
-                                                     target.name(),
-                                                     sourceStorageComment,
-                                                     targetStorageComment)
-                    : java.util.Optional.empty();
-            boolean commentInFullDefinition = dialect.inlineColumnComment()
-                    && dialect.rewritesFullColumnDefinition();
-            if (commentChanged
-                    && !commentInFullDefinition
-                    && separateCommentChange.isEmpty()) {
-                throw new IllegalArgumentException("the configured dialect cannot alter the column comment safely");
-            }
-            if (shapeChanged || commentChanged && commentInFullDefinition) {
-                requests.add(new SqlRequest(tables.alterColumnType(rawTable, target,
-                        physical == null ? null : physical.column(change.source().name())), List.of()));
-            }
-            if (commentChanged && !commentInFullDefinition) {
-                requests.add(new SqlRequest(separateCommentChange.orElseThrow(), List.of()));
-            }
-        }
-        for (DynamicField field : changes.removedFields()) {
-            requests.add(tables.dropColumn(rawTable, field.name(),
-                    physical == null ? null : physical.column(field.name())));
-        }
-        return List.copyOf(requests);
+        RelationIdentity relation = changes.target().relationIdentity();
+        RelationalTableDefinition source = changes.source().toTableDefinition(relation);
+        RelationalTableDefinition target = changes.target().toTableDefinition(relation);
+        List<SchemaOperation> operations = new ArrayList<>();
+        Map<String, SchemaSequenceSqlRenderer.Definition> sequences = SchemaSequenceSqlRenderer.definitions(dialect,
+                source.columns(), tables::dataType, true);
+        changes.changedFields().forEach(this::validateDirectFieldChange);
+        SchemaDiffer.diffColumns(relation, target.columns(), source.columns(), operations,
+                dialect, false, Map.of(), null);
+        SchemaDiffer.diffIndexes(relation, target.indexes(), SchemaSnapshot.Observed.present(source.indexes()),
+                operations, dialect);
+        List<SchemaPlanStep> steps = planOperations(operations, source,
+                changes.target(), snapshot, true, sequences);
+        SchemaMigrationPlan builtin = SchemaMigrationPlan.planned(target, true, steps, List.of());
+        return renderer.renderPlan(source, snapshot, builtin).requestsForExecution();
     }
 
-    /** 新增唯一字段必须同时兑现 DynamicForm 自动发布的唯一索引，不能让迁移成功后约束静默缺失。 */
-    private void addUniqueIndexesForAddedFields(List<SqlRequest> requests, DynamicFormChangeSet changes) {
-        Set<String> addedUniqueFields = changes.addedFields().stream()
-                                                .filter(DynamicField::unique)
-                                                .map(DynamicField::normalizedName)
-                                                .collect(java.util.stream.Collectors.toUnmodifiableSet());
-        if (addedUniqueFields.isEmpty()) {
-            return;
-        }
-        List<IndexMetadata> indexes = changes.target().toTableMetadata().indexes().stream()
-                                             .filter(IndexMetadata::unique)
-                                             .filter(index -> index.columns().size() == 1)
-                                             .filter(index -> changes.target().findField(index.columns().getFirst())
-                                                                     .map(DynamicField::normalizedName)
-                                                                     .filter(addedUniqueFields::contains)
-                                                                     .isPresent())
-                                             .toList();
-        requests.addAll(tables.createIndexes(changes.target().table(), indexes));
-    }
-
-    private static void validateDirectFieldChange(FieldChange change) {
+    private void validateDirectFieldChange(FieldChange change) {
         DynamicField source = change.source();
         DynamicField target = change.target();
         if (source.primaryKey() != target.primaryKey()
-                || source.nullable() != target.nullable()
-                || source.unique() != target.unique()
-                || !source.generation().equals(target.generation())) {
+                || !Objects.equals(source.generation().sequenceName(), target.generation().sequenceName())
+                || !SchemaGeneratedValueComparison.sameOptions(
+                        source.generation(), target.generation(), dialect.generatedValueStyle())) {
             throw new IllegalArgumentException("column constraint changes require a reviewed migration plan");
         }
     }
 
-    private static boolean storageShapeChanged(DynamicField source, DynamicField target) {
-        return !source.databaseType().equals(target.databaseType())
-                || !Objects.equals(source.length(), target.length())
-                || !Objects.equals(source.precision(), target.precision())
-                || !Objects.equals(source.scale(), target.scale());
-    }
-
-    SchemaMigrationPlan migrateSafelyPlan(TableMetadata current,
+    SchemaMigrationPlan migrateSafelyPlan(RelationalTableDefinition current,
                                           DynamicForm target,
-                                          List<IndexMetadata> targetIndexes,
-                                          List<ForeignKeyMetadata> targetForeignKeys,
+                                          List<IndexDefinition> targetIndexes,
+                                          List<ForeignKeyDefinition> targetForeignKeys,
                                           SchemaMigrationOptions options) {
         return migrateSafelyPlan(current, target, targetIndexes, targetForeignKeys, options, null);
     }
 
-    Mono<SchemaMigrationPlan> migrateSafelyPlanReactive(TableMetadata current,
+    private Mono<SchemaMigrationPlan> migrateSafelyPlanReactive(RelationalTableDefinition current,
                                                        DynamicForm target,
-                                                       List<IndexMetadata> indexes,
-                                                       List<ForeignKeyMetadata> foreignKeys,
+                                                       List<IndexDefinition> indexes,
+                                                       List<ForeignKeyDefinition> foreignKeys,
                                                        SchemaMigrationOptions options,
                                                        ReactiveFormMetadataReader reader) {
-        return physicalSnapshot(current, target, options, reader)
-                .map(snapshot -> migrateSafelyPlan(current, target, indexes, foreignKeys, options, snapshot))
-                .switchIfEmpty(Mono.fromSupplier(() ->
-                        migrateSafelyPlan(current, target, indexes, foreignKeys, options)));
-    }
-
-    Mono<SchemaSnapshot> physicalSnapshot(TableMetadata current, DynamicForm target,
-                                          SchemaMigrationOptions options, ReactiveFormMetadataReader reader) {
-        return needsPhysicalSnapshot(current, target, options)
-                ? requiredPhysicalSnapshot(reader, target.table())
-                : Mono.empty();
-    }
-
-    private Mono<SchemaSnapshot> requiredPhysicalSnapshot(ReactiveFormMetadataReader reader, String table) {
-        return reader.readSnapshot(table).switchIfEmpty(Mono.error(new IllegalStateException(
-                "rewriting an existing column requires a physical schema snapshot")));
-    }
-
-    SchemaSnapshot physicalSnapshotJdbc(TableMetadata current, DynamicForm target,
-                                         SchemaMigrationOptions options, JdbcFormMetadataReader reader) {
-        return needsPhysicalSnapshot(current, target, options) ? reader.readSnapshot(target.table()) : null;
-    }
-
-    private boolean needsPhysicalSnapshot(TableMetadata current, DynamicForm target,
-                                           SchemaMigrationOptions options) {
-        if (dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.SQL_SERVER
-                && options.dropColumnAllowed()
-                && current.columns().stream().anyMatch(column -> !column.primaryKey()
-                        && target.findField(column.name()).isEmpty()
-                        && SchemaMigrationSupport.renameTargetForSource(
-                                options.columnRenames(), column.name()) == null)) {
-            // SQL Server 删除列前还需删除绑定的 DEFAULT；该名称必须在规划时从字典冻结。
-            return true;
+        MigrationChanges changes = prepareChanges(current, target, indexes, foreignKeys, options);
+        if (!needsPhysicalSnapshot(changes.operations())) {
+            return Mono.fromSupplier(() -> renderer.renderPlan(current, null,
+                    renderChanges(current, changes, null), options));
         }
-        if (!dialect.rewritesFullColumnDefinition()
-                && dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.SQL_SERVER
-                && dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.ORACLE) {
-            return false;
-        }
-        for (DynamicField field : target.fields()) {
-            String source = SchemaMigrationSupport.renameSourceForTarget(options.columnRenames(), field.name());
-            ColumnMetadata column = current.findColumn(source == null ? field.name() : source).orElse(null);
-            if (column == null
-                    || source == null && !column.name().equals(field.name())
-                    || column.primaryKey() != field.primaryKey()) {
-                continue;
-            }
-            if (!dialect.rewritesFullColumnDefinition() && !tables.requiresPhysicalCollation(field)
-                    && !tables.requiresPhysicalCollation(SchemaMigrationSupport.toDynamicField(column))
-                    && !tables.requiresPhysicalLengthUnit(field)
-                    && !tables.requiresPhysicalLengthUnit(SchemaMigrationSupport.toDynamicField(column))) {
-                continue;
-            }
-            // Only fetch physical facts for changes SchemaColumnShapeChange will execute.
-            boolean temporalChanged = SchemaMigrationSupport.logicalTemporalTypeChanged(
-                    column.databaseType(), field.databaseType());
-            if (column.nullable() != field.nullable()) {
-                if (dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.ORACLE) continue;
-                if (!temporalChanged
-                        && SchemaMigrationSupport.sameStorageShape(column, field, tables)
-                        && (field.nullable() || options.columnChangeAllowed())) {
-                    return true;
-                }
-                continue;
-            }
-            if (!ProtectedSchemaTarget.sameProtectedStorage(column, field)) {
-                boolean shapeChanged = !SchemaMigrationSupport.sameColumnShape(column, field, tables);
-                if (shapeChanged || temporalChanged) {
-                    boolean storageApplied = shapeChanged && !temporalChanged
-                            && SchemaMigrationSupport.safeWidening(column, field, tables)
-                            || options.columnChangeAllowed() && SchemaGeneratedValueComparison.same(
-                                    column, field, tables.generatedValueStyle());
-                    if (!storageApplied) {
-                        continue;
-                    }
-                    if (shapeChanged) {
-                        return true;
-                    }
-                }
-            }
-            if (dialect.rewritesFullColumnDefinition()
-                    && !Objects.equals(tables.storageComment(column), tables.storageComment(field))) {
+        return reader.readSnapshot(target.relationIdentity())
+                .switchIfEmpty(Mono.error(new IllegalStateException(
+                        "rewriting an existing column requires a physical schema snapshot")))
+                .map(snapshot -> renderer.renderPlan(current, snapshot,
+                        renderChanges(current, changes, snapshot), options));
+    }
+
+    /** 只为已选中的实际列操作补读物理事实，不重新比较表单和迁移选项。 */
+    private boolean needsPhysicalSnapshot(List<SchemaOperation> operations) {
+        boolean sqlServer = dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.SQL_SERVER;
+        boolean oracle = dialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.ORACLE;
+        boolean fullColumn = dialect.rewritesFullColumnDefinition();
+        if (!fullColumn && !sqlServer && !oracle) return false;
+        for (SchemaOperation operation : operations) {
+            // SQL Server 删除列前还需删除绑定的 DEFAULT；名称必须从字典读取。
+            if (sqlServer && operation.kind() == SchemaOperation.Kind.DROP_COLUMN) return true;
+            if (operation.kind() != SchemaOperation.Kind.CHANGE_COLUMN) continue;
+            ColumnDefinition column = (ColumnDefinition) operation.actual();
+            ColumnDefinition target = (ColumnDefinition) operation.desired();
+            if (sqlServer && target.defaultValue().kind() != com.flying.orm.core.metadata.ColumnDefault.Kind.NONE
+                    && (!SchemaDefinitionEquality.sameDefault(column.defaultValue(), target.defaultValue(), dialect)
+                        || target.defaultConstraintName() != null
+                            && !target.defaultConstraintName().equals(column.defaultConstraintName()))) {
                 return true;
             }
+            if (!fullColumn && !tables.requiresPhysicalCollation(target)
+                    && !tables.requiresPhysicalCollation(column)
+                    && !tables.requiresPhysicalLengthUnit(target)
+                    && !tables.requiresPhysicalLengthUnit(column)) {
+                continue;
+            }
+            boolean storageChanged = !tables.sameDataType(tables.metadataDataType(column), tables.dataType(target))
+                    || !SchemaGeneratedValueComparison.same(column.generation(), target.generation(),
+                                                            dialect.generatedValueStyle());
+            if (column.nullable() != target.nullable()) {
+                if (storageChanged || !oracle
+                        || SchemaMigrationSupport.logicalTemporalTypeChanged(
+                                column.databaseType(), target.databaseType())) return true;
+                continue;
+            }
+            if (storageChanged || fullColumn
+                    && !Objects.equals(tables.storageComment(column), tables.storageComment(target))) return true;
         }
         return false;
     }
 
-    Mono<SchemaSnapshot> reviewSnapshot(TableMetadata current, DynamicForm target,
-                                        SchemaMigrationOptions options, ReactiveFormMetadataReader reader) {
-        return needsReviewSnapshot(current, target, options)
-                ? requiredPhysicalSnapshot(reader, target.table()) : Mono.empty();
-    }
-
-    SchemaSnapshot reviewSnapshotJdbc(TableMetadata current, DynamicForm target,
-                                      SchemaMigrationOptions options, JdbcFormMetadataReader reader) {
-        return needsReviewSnapshot(current, target, options) ? reader.readSnapshot(target.table()) : null;
-    }
-
-    private boolean needsReviewSnapshot(TableMetadata current, DynamicForm target, SchemaMigrationOptions options) {
-        if (needsPhysicalSnapshot(current, target, options)) return true;
-        if (!options.dropColumnAllowed()) {
-            return false;
-        }
-        // 除 SQL Server 正向删除 DEFAULT 的需要外，只有审核为删列回退读取字典。
-        return current.columns().stream().anyMatch(column -> !column.primaryKey()
-                && target.findField(column.name()).isEmpty()
-                && SchemaMigrationSupport.renameTargetForSource(options.columnRenames(), column.name()) == null);
-    }
-
-    SchemaMigrationPlan migrateSafelyPlan(TableMetadata current,
+    SchemaMigrationPlan migrateSafelyPlan(RelationalTableDefinition current,
                                           DynamicForm target,
-                                          List<IndexMetadata> targetIndexes,
-                                          List<ForeignKeyMetadata> targetForeignKeys,
+                                          List<IndexDefinition> targetIndexes,
+                                          List<ForeignKeyDefinition> targetForeignKeys,
                                           SchemaMigrationOptions options,
                                           SchemaSnapshot snapshot) {
-        RelationalTableDefinition physical = SchemaTableSqlRenderer.physicalColumns(snapshot);
-        TableMetadata safeCurrent = Objects.requireNonNull(current, "current table metadata must not be null");
+        return renderChanges(current, prepareChanges(current, target, targetIndexes, targetForeignKeys, options), snapshot);
+    }
+
+    private MigrationChanges prepareChanges(RelationalTableDefinition current, DynamicForm target,
+                                             List<IndexDefinition> targetIndexes,
+                                             List<ForeignKeyDefinition> targetForeignKeys,
+                                             SchemaMigrationOptions options) {
+        RelationalTableDefinition safeCurrent = Objects.requireNonNull(current, "current table metadata must not be null");
         ProtectedSchemaTarget resolved = ProtectedSchemaTarget.resolve(
                 target, targetIndexes, targetForeignKeys);
-        ProtectedSchemaTarget.validateExistingStorage(safeCurrent, target);
+        resolved.validateExistingStorage(safeCurrent, target);
         DynamicForm safeTarget = resolved.form();
-        List<IndexMetadata> safeIndexes = resolved.indexes();
-        List<ForeignKeyMetadata> safeForeignKeys = resolved.foreignKeys();
+        List<IndexDefinition> safeIndexes = resolved.indexes();
+        List<ForeignKeyDefinition> safeForeignKeys = resolved.foreignKeys();
         SchemaMigrationOptions safeOptions = Objects.requireNonNull(options,
                                                                      "schema migration options must not be null");
-        String rawTable = safeTarget.table();
-        List<SqlRequest> requests = new ArrayList<>();
+        RelationIdentity relation = safeTarget.relationIdentity();
+        List<SchemaOperation> operations = new ArrayList<>();
         List<SkippedSchemaChange> skipped = new ArrayList<>();
 
         // 改名必须先校验并加入计划，后面的字段、主键和索引比较才按新名字判断。
         SchemaMigrationSupport.validateColumnRenames(safeCurrent, safeTarget, safeOptions.columnRenames());
-        validateCommentChanges(safeCurrent, safeTarget, safeOptions.columnRenames());
-        safeOptions.columnRenames().forEach((oldName, newName) -> requests.add(new SqlRequest(
-                dialect.renameColumnSql(safeTarget.table(), oldName, newName), List.of())));
+        SchemaForeignKeyPlanner.Changes foreignKeyChanges = SchemaForeignKeyPlanner.planChanges(
+                relation, safeCurrent, safeForeignKeys, safeOptions.columnRenames());
+        operations.addAll(foreignKeyChanges.operations());
+        safeOptions.columnRenames().forEach((oldName, newName) -> {
+            ColumnDefinition source = safeCurrent.column(oldName);
+            operations.add(SchemaOperation.of(SchemaOperation.Kind.RENAME_COLUMN, relation, newName,
+                    source, source.toBuilder(com.flying.orm.core.field.FieldIdentity.of(newName)).build(),
+                    SchemaOperation.Compatibility.REQUIRES_REVIEW));
+        });
+        List<String> physicalPrimaryKeys = SchemaMigrationSupport.currentPrimaryKeys(safeCurrent);
         List<String> currentPrimaryKeys = SchemaMigrationSupport.renamedNames(
-                SchemaMigrationSupport.currentPrimaryKeys(safeCurrent), safeOptions.columnRenames());
+                physicalPrimaryKeys, safeOptions.columnRenames());
         List<String> targetPrimaryKeys = SchemaMigrationSupport.targetPrimaryKeys(safeTarget);
-        boolean primaryKeyChanged = !SchemaMigrationSupport.sameNames(currentPrimaryKeys, targetPrimaryKeys);
+        // 增量声明中未提及的主键列保留；只有显式删列选项才把遗漏列视为删除意图。
+        List<String> comparedPrimaryKeys = safeOptions.dropColumnAllowed() ? currentPrimaryKeys
+                : currentPrimaryKeys.stream().filter(name -> safeTarget.findField(name).isPresent()).toList();
+        boolean primaryKeyChanged = !SchemaMigrationSupport.sameNames(comparedPrimaryKeys, targetPrimaryKeys);
         if (primaryKeyChanged) {
-            skipped.add(SchemaMigrationSupport.primaryKeyChange(safeTarget.table(),
-                                                                currentPrimaryKeys,
-                                                                targetPrimaryKeys,
-                                                                safeOptions));
+            skipped.add(new SkippedSchemaChange(SkippedSchemaChange.Kind.CHANGE_PRIMARY_KEY,
+                    safeTarget.table(), "primary key changes require a complete table target",
+                    Map.of("oldPrimaryKeys", currentPrimaryKeys, "newPrimaryKeys", targetPrimaryKeys)));
         }
 
-        List<DynamicField> addedFields = new ArrayList<>();
-        List<DynamicField> existingFields = new ArrayList<>();
-        for (DynamicField field : safeTarget.fields()) {
-            String currentName = SchemaMigrationSupport.renameSourceForTarget(
-                    safeOptions.columnRenames(), field.name());
-            String lookupName = currentName == null ? field.name() : currentName;
-            boolean missing = safeCurrent.findColumn(lookupName).isEmpty();
-            if (!missing) {
-                existingFields.add(field);
-            } else if (!primaryKeyChanged || !field.primaryKey()) {
-                addedFields.add(field);
-            }
-        }
-        List<DynamicField> sequenceOccupants = new ArrayList<>(existingFields);
-        safeCurrent.columns().stream()
-                   .map(SchemaMigrationSupport::toDynamicField)
-                   .forEach(sequenceOccupants::add);
-        // 数据字典列默认值只能证明物理 sequence 身份，不能证明起点、步长和缓存参数。
-        tables.addSequenceCreates(requests, addedFields, sequenceOccupants, false);
-
-        // 先补目标字段，再处理当前结构里多出来的字段，生成的顺序可以直接拿去审核。
+        List<ColumnDefinition> sequenceOccupants = new ArrayList<>(safeCurrent.columns());
+        // 先生成结构操作；列、索引和外键的执行顺序由共用依赖规则确定。
         Set<String> matchedCurrentColumnNames = new HashSet<>();
         for (DynamicField field : safeTarget.fields()) {
             String currentName = SchemaMigrationSupport.renameSourceForTarget(safeOptions.columnRenames(), field.name());
             String lookupName = currentName == null ? field.name() : currentName;
-            ColumnMetadata column = safeCurrent.findColumn(lookupName).orElse(null);
+            ColumnDefinition column = safeCurrent.findColumn(lookupName).orElse(null);
             if (column != null) {
+                sequenceOccupants.add(field.column());
                 matchedCurrentColumnNames.add(column.name());
                 if (currentName == null && !column.name().equals(field.name())) {
                     skipped.add(new SkippedSchemaChange(
                             SkippedSchemaChange.Kind.CHANGE_COLUMN,
                             field.name(),
                             "physical column name differs; declare an explicit column rename",
-                            Map.of("currentColumn", column.name(), "targetColumn", field.name()),
-                            List.of("declare renameColumn with the exact physical source and target names",
-                                    "review quoted identifier behavior for the selected database")));
+                            Map.of("currentColumn", column.name(), "targetColumn", field.name())));
                     continue;
                 }
-                boolean storageApplied = new SchemaColumnShapeChange(
-                        requests,
-                        skipped,
-                        new SchemaColumnShapeChange.Input(rawTable,
-                                                         column,
-                                                         field,
-                                                         safeOptions,
-                                                         primaryKeyChanged,
-                                                         physical == null ? null : physical.column(lookupName)),
-                        tables).apply();
-                if (storageApplied) {
-                    tables.addMissingComment(requests, safeTarget.table(), column, field,
-                            physical == null ? null : physical.column(lookupName));
+                if (physicalPrimaryKeys.contains(column.name()) != field.primaryKey()) {
+                    if (!primaryKeyChanged) {
+                        skipped.add(new SkippedSchemaChange(SkippedSchemaChange.Kind.CHANGE_PRIMARY_KEY,
+                                field.name(), "primary key changes require a complete table target"));
+                    }
+                    continue;
                 }
+                String skipReason = SchemaMigrationSupport.columnChangeSkipReason(column, field, safeOptions, tables);
+                if (skipReason != null) {
+                    skipped.add(new SkippedSchemaChange(SkippedSchemaChange.Kind.CHANGE_COLUMN, field.name(), skipReason));
+                    continue;
+                }
+                ColumnDefinition desired = field.column();
+                if (ProtectedSchemaTarget.sameProtectedStorage(column, field)) {
+                    desired = column.toBuilder(desired.identity()).comment(desired.comment())
+                            .defaultValue(desired.defaultValue()).build();
+                }
+                operations.add(SchemaOperation.of(SchemaOperation.Kind.CHANGE_COLUMN, relation,
+                        desired.name(), column, desired, SchemaOperation.Compatibility.REQUIRES_REVIEW));
             } else if (!primaryKeyChanged || !field.primaryKey()) {
-                requests.add(new SqlRequest(dialect.addColumnSql(rawTable, tables.addedColumnDefinition(rawTable, field)), List.of()));
-                tables.addColumnComment(requests, safeTarget.table(), field);
+                operations.add(SchemaOperation.of(SchemaOperation.Kind.ADD_COLUMN, relation,
+                        field.name(), null, field.column(), SchemaOperation.Compatibility.SAFE_INCREMENTAL));
             }
         }
+        List<ColumnDefinition> unmatchedColumns = safeCurrent.columns().stream()
+                .filter(column -> !matchedCurrentColumnNames.contains(column.name())
+                        && SchemaMigrationSupport.renameTargetForSource(safeOptions.columnRenames(), column.name()) == null
+                        && (!primaryKeyChanged || !physicalPrimaryKeys.contains(column.name()))).toList();
         Set<String> removedColumns = safeOptions.dropColumnAllowed()
-                ? removedColumnNames(safeCurrent, matchedCurrentColumnNames,
-                                     safeOptions, primaryKeyChanged)
+                ? unmatchedColumns.stream().map(ColumnDefinition::name).collect(java.util.stream.Collectors.toSet())
                 : Set.of();
-        SchemaIndexPlanner.DependencyDrops dependencyDrops = indexChanges.addDependentDrops(
-                requests, safeCurrent, safeTarget, safeIndexes, safeOptions, removedColumns);
-        addRemovedColumns(requests,
-                          skipped,
-                          safeCurrent,
-                          matchedCurrentColumnNames,
-                          rawTable,
-                          safeOptions,
-                          primaryKeyChanged,
-                          dependencyDrops.blockedColumns(),
-                          physical);
-        indexChanges.addChanges(requests, skipped, safeCurrent, safeTarget, safeIndexes, safeOptions,
-                                dependencyDrops.droppedIndexes());
-        SchemaForeignKeyPlanner.addChanges(skipped, safeCurrent, safeForeignKeys, safeOptions.columnRenames());
-        return new SchemaMigrationPlan(safeTarget, safeIndexes, safeForeignKeys, true, requests, skipped);
-    }
-
-    private void validateCommentChanges(TableMetadata current,
-                                        DynamicForm target,
-                                        Map<String, String> renames) {
-        for (DynamicField field : target.fields()) {
-            String sourceName = SchemaMigrationSupport.renameSourceForTarget(renames, field.name());
-            ColumnMetadata column = current.findColumn(sourceName == null ? field.name() : sourceName)
-                                           .orElse(null);
-            if (column == null) {
-                tables.validateNewColumnComment(target.table(), field);
+        SchemaIndexPlanner.Changes indexChanges = SchemaIndexPlanner.planChanges(
+                skipped, safeCurrent, safeTarget, safeIndexes, safeOptions, removedColumns,
+                foreignKeyChanges.retained(), dialect);
+        Set<String> blockedColumns = indexChanges.blockedColumns();
+        for (ForeignKeyDefinition foreignKey : foreignKeyChanges.retained()) {
+            blockedColumns.addAll(foreignKey.columns());
+            if (foreignKey.reference().equals(relation)) {
+                blockedColumns.addAll(foreignKey.referenceColumns());
+            }
+        }
+        operations.addAll(indexChanges.operations());
+        for (ColumnDefinition column : unmatchedColumns) {
+            if (blockedColumns.contains(column.name())) {
+                skipped.add(new SkippedSchemaChange(SkippedSchemaChange.Kind.DROP_COLUMN, column.name(),
+                        "column is still referenced by a retained index or foreign key"));
+            } else if (safeOptions.dropColumnAllowed()) {
+                operations.add(SchemaOperation.of(SchemaOperation.Kind.DROP_COLUMN, relation,
+                        column.name(), column, null, SchemaOperation.Compatibility.REQUIRES_REVIEW));
             } else {
-                tables.validateCommentChange(target.table(), column, field);
+                skipped.add(new SkippedSchemaChange(SkippedSchemaChange.Kind.DROP_COLUMN, column.name(),
+                        "SAFE mode does not drop existing columns"));
             }
         }
+        // 数据字典默认值只证明序列身份；完整声明才校验已有序列参数。
+        Map<String, SchemaSequenceSqlRenderer.Definition> sequences = SchemaSequenceSqlRenderer.definitions(dialect, sequenceOccupants, tables::dataType, false);
+        return new MigrationChanges(safeTarget,
+                SchemaMigrationSupport.tableDefinition(safeTarget, safeIndexes, safeForeignKeys, safeCurrent),
+                operations, skipped, sequences);
     }
 
-    private void addRemovedColumns(List<SqlRequest> requests,
-                                   List<SkippedSchemaChange> skipped,
-                                   TableMetadata current,
-                                   Set<String> matchedCurrentColumnNames,
-                                   String table,
-                                   SchemaMigrationOptions options,
-                                   boolean primaryKeyChanged,
-                                   Set<String> blockedColumns,
-                                   RelationalTableDefinition physical) {
-        for (ColumnMetadata column : current.columns()) {
-            if (!matchedCurrentColumnNames.contains(column.name())
-                    && SchemaMigrationSupport.renameTargetForSource(options.columnRenames(), column.name()) == null) {
-                if (primaryKeyChanged && column.primaryKey()) {
-                    continue;
-                }
-                if (blockedColumns.contains(column.name())) {
-                    skipped.add(new SkippedSchemaChange(
-                            SkippedSchemaChange.Kind.DROP_COLUMN,
-                            column.name(),
-                            "dependent index removal or rebuild is not approved"));
-                } else if (options.dropColumnAllowed()) {
-                    requests.add(tables.dropColumn(table, column.name(),
-                            physical == null ? null : physical.column(column.name())));
-                } else {
-                    skipped.add(new SkippedSchemaChange(SkippedSchemaChange.Kind.DROP_COLUMN,
-                                                        column.name(),
-                                                        "SAFE mode does not drop existing columns"));
-                }
-            }
-        }
+    /** 同一次规划的操作供元数据需求判断和最终 SQL 渲染共同使用。 */
+    private record MigrationChanges(DynamicForm form, RelationalTableDefinition target,
+                                    List<SchemaOperation> operations, List<SkippedSchemaChange> skipped,
+                                    Map<String, SchemaSequenceSqlRenderer.Definition> sequences) {
     }
 
-    private static Set<String> removedColumnNames(TableMetadata current,
-                                                   Set<String> matchedCurrentColumnNames,
-                                                   SchemaMigrationOptions options,
-                                                   boolean primaryKeyChanged) {
-        Set<String> removed = new HashSet<>();
-        for (ColumnMetadata column : current.columns()) {
-            if (!matchedCurrentColumnNames.contains(column.name())
-                    && SchemaMigrationSupport.renameTargetForSource(
-                            options.columnRenames(), column.name()) == null
-                    && (!primaryKeyChanged || !column.primaryKey())) {
-                removed.add(column.name());
-            }
-        }
-        return Set.copyOf(removed);
+    private SchemaMigrationPlan renderChanges(RelationalTableDefinition current,
+                                               MigrationChanges changes, SchemaSnapshot snapshot) {
+        return SchemaMigrationPlan.planned(changes.target(), true,
+                planOperations(changes.operations(), current, changes.form(), snapshot, false, changes.sequences()),
+                changes.skipped());
+    }
+
+    private List<SchemaPlanStep> planOperations(List<SchemaOperation> operations,
+                                              RelationalTableDefinition current, DynamicForm target,
+                                              SchemaSnapshot snapshot, boolean declaredSource,
+                                              Map<String, SchemaSequenceSqlRenderer.Definition> sequences) {
+        RelationalTableDefinition physical = SchemaMigrationSupport.physicalColumns(snapshot);
+        operations.replaceAll(operation -> operation.kind() == SchemaOperation.Kind.CHANGE_COLUMN
+                ? tables.prepareColumnChange(operation, snapshot, declaredSource) : operation);
+        operations.removeIf(Objects::isNull);
+        return SchemaOperationPlanner.plan(operations, current, dialect,
+                operation -> tables.changesType(current.column(((ColumnDefinition) operation.actual()).name()),
+                        (ColumnDefinition) operation.desired(), snapshot, declaredSource),
+                operation -> switch (operation.kind()) {
+                case ADD_COLUMN -> tables.addColumn(target.relationIdentity(),
+                        target.findField(operation.objectName()).orElseThrow(), sequences);
+                case CHANGE_COLUMN -> {
+                    ColumnDefinition source = current.column(((ColumnDefinition) operation.actual()).name());
+                    yield tables.changeColumn(operation, tables.actualType(source, snapshot, declaredSource),
+                            source.databaseType());
+                }
+                case DROP_COLUMN -> tables.render(physical == null ? operation : SchemaOperation.of(
+                        operation.kind(), operation.relation(), operation.objectName(),
+                        physical.column(operation.objectName()), null, operation.compatibility()));
+                default -> tables.render(operation);
+            });
     }
 
     /** 元数据读取器用稳定异常前缀表示目标表还不存在，此时计划应自然退化为建表。 */

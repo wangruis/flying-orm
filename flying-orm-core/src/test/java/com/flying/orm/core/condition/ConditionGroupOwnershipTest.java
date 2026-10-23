@@ -7,11 +7,13 @@ import org.junit.jupiter.api.Test;
 
 import java.lang.management.ManagementFactory;
 import java.lang.reflect.Field;
+import java.util.Date;
 import java.util.List;
 import java.util.function.Supplier;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -20,6 +22,25 @@ class ConditionGroupOwnershipTest {
     private static final int ITERATIONS = 200;
 
     private static final long MAX_TRUSTED_COMBINE_DEPTH_OVERHEAD = 768;
+
+    @Test
+    void repeatedMutableTypesStayIsolatedBetweenImmutableRuns() {
+        Date first = new Date(11);
+        Date second = new Date(22);
+        byte[] firstBytes = {3};
+        byte[] secondBytes = {4};
+        ConditionGroup group = ConditionGroup.and().where("value", "in",
+                List.of(1, 2, first, second, 5L, 6L, firstBytes, secondBytes, 7, 8)).build();
+        first.setTime(111);
+        second.setTime(222);
+        firstBytes[0] = 33;
+        secondBytes[0] = 44;
+        List<?> values = (List<?>) ((TermCondition) group.children().getFirst()).value();
+        assertEquals(List.of(1, 2, new Date(11), new Date(22), 5L, 6L), values.subList(0, 6));
+        assertArrayEquals(new byte[]{3}, (byte[]) values.get(6));
+        assertArrayEquals(new byte[]{4}, (byte[]) values.get(7));
+        assertEquals(List.of(7, 8), values.subList(8, 10));
+    }
 
     @Test
     void builderSnapshotsMutableScalarsDuringItsSingleNormalizationPass() {
@@ -36,13 +57,38 @@ class ConditionGroupOwnershipTest {
     }
 
     @Test
+    void standardAndCustomCollectionsKeepTheirOwnSnapshotPolicy() {
+        TermRegistry terms = TermRegistry.builder()
+                .add(TermHandler.simple("domain-values", ConditionValueShape.COLLECTION))
+                .build();
+        Date time = new Date(123);
+        byte[] bytes = {1, 2};
+        ConditionGroup group = ConditionGroup.and(terms)
+                .where("values", " IN ", List.of(time, bytes))
+                .where("values", "domain-values", List.of(time, bytes))
+                .build();
+        bytes[0] = 9;
+        time.setTime(456);
+        List<?> standard = (List<?>) ((TermCondition) group.children().getFirst()).value();
+        List<?> custom = (List<?>) ((TermCondition) group.children().get(1)).value();
+
+        assertNotSame(time, standard.getFirst());
+        assertSame(time, custom.getFirst());
+        assertNotSame(bytes, standard.get(1));
+        assertNotSame(bytes, custom.get(1));
+        assertEquals(new Date(123), standard.getFirst());
+        assertArrayEquals(new byte[]{1, 2}, (byte[]) standard.get(1));
+        assertArrayEquals(new byte[]{1, 2}, (byte[]) custom.get(1));
+    }
+
+    @Test
     void ownedTermKeepsTheValueNormalizedAtTheBuilderBoundary() throws ReflectiveOperationException {
         FieldIdentity identity = FieldIdentity.of("sequence");
         ConditionValueNormalizer.Result normalized = ConditionValueNormalizer.normalize(
                 ConditionValueShape.COLLECTION,
                 List.of(1, 2, 3),
                 ConditionValuePolicy.REJECT_EMPTY,
-                (scalar, index) -> TermCondition.snapshotScalar("in", scalar),
+                (scalar, index) -> TermCondition.snapshotScalar(true, scalar),
                 Integer.MAX_VALUE, Integer.MAX_VALUE);
         TermCondition term = TermCondition.owned(identity, "in", normalized.value());
         ConditionGroup group = ConditionGroup.and().add(term).build();

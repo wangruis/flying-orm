@@ -34,7 +34,7 @@ final class GovernedTermGuard {
         if (handler == null) {
             // 保护搜索由保护规划器校验并下沉；治理仍审批原逻辑字段的 FILTER 用途。
             // 注册的同名自定义 handler 必须继续经过下面的扩展描述器审批。
-            if (use == FieldUse.FILTER
+            if ((use == FieldUse.FILTER || use == FieldUse.JOIN)
                     && (ProtectedConditions.EXACT.equals(term.operator())
                     || ProtectedConditions.SUFFIX.equals(term.operator())
                     || ProtectedConditions.CONTAINS.equals(term.operator()))) {

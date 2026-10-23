@@ -4,6 +4,8 @@ import org.reactivestreams.Publisher;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
+import java.util.Arrays;
+import java.util.Objects;
 
 /**
  * 不依赖 Spring 的实体生命周期扩展点。
@@ -24,8 +26,9 @@ public interface ReactiveEntityListener<T> {
     Publisher<Void> onEvent(EntityLifecycleEvent<T> event);
 
     /** @return 不产生额外工作、可全局复用的监听器 */
+    @SuppressWarnings("unchecked")
     static <T> ReactiveEntityListener<T> none() {
-        return event -> Mono.empty();
+        return (ReactiveEntityListener<T>) (ReactiveEntityListener<?>) NoopEntityListener.INSTANCE;
     }
 
     /**
@@ -33,9 +36,23 @@ public interface ReactiveEntityListener<T> {
      */
     @SafeVarargs
     static <T> ReactiveEntityListener<T> compose(ReactiveEntityListener<T>... listeners) {
-        List<ReactiveEntityListener<T>> ordered = List.of(listeners);
+        List<ReactiveEntityListener<T>> ordered = Arrays.stream(Objects.requireNonNull(listeners,
+                        "entity listeners must not be null"))
+                .map(listener -> Objects.requireNonNull(listener, "entity listener must not be null"))
+                .filter(listener -> listener != ReactiveEntityListener.<T>none()).toList();
+        if (ordered.isEmpty()) return none();
         return event -> reactor.core.publisher.Flux.fromIterable(ordered)
                                                     .concatMap(listener -> Mono.from(listener.onEvent(event)))
                                                     .then();
+    }
+}
+
+/** 无状态且不读取事件类型，所有实体类型共用同一个空监听器。 */
+enum NoopEntityListener implements ReactiveEntityListener<Object> {
+    INSTANCE;
+
+    @Override
+    public Publisher<Void> onEvent(EntityLifecycleEvent<Object> event) {
+        return Mono.empty();
     }
 }

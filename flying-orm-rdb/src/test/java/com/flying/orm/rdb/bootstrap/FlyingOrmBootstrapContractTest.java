@@ -1,9 +1,13 @@
 package com.flying.orm.rdb.bootstrap;
 
 import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.core.form.DynamicField;
+import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.rdb.batch.BatchMemoryLimits;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
+import com.flying.orm.rdb.form.spec.BatchSpec;
 import com.flying.orm.rdb.jdbc.JdbcConnectionAccess;
+import com.flying.orm.rdb.observation.BatchExecutionObservation;
 import com.flying.orm.rdb.observation.BatchExecutionObserver;
 import com.flying.orm.rdb.observation.SqlExecutionLogOptions;
 import com.flying.orm.rdb.observation.SqlExecutionObservation;
@@ -11,10 +15,13 @@ import com.flying.orm.rdb.observation.SqlExecutionStatus;
 import com.flying.orm.rdb.reactive.R2dbcConnectionAccess;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
+import reactor.core.publisher.Flux;
 
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -88,6 +95,60 @@ class FlyingOrmBootstrapContractTest {
         verifyAcquisitionErrorsAndObservers(true);
     }
 
+    @Test
+    void installsSqlObserverWithoutRequiringBatchObserver() {
+        for (boolean reactive : List.of(false, true)) {
+            List<SqlExecutionObservation> observations = new ArrayList<>();
+            FlyingOrmEnvironment environment = standaloneEnvironment(reactive,
+                    Optional.of(observations::add), Optional.empty());
+            try (FlyingOrmClients clients = FlyingOrmBootstrap.create(
+                    FlyingOrmConfiguration.defaults().withDialect("postgresql"), environment)) {
+                SqlRequest request = new SqlRequest("select 1", List.of());
+                assertThrows(RuntimeException.class, () -> {
+                    if (reactive) clients.executor().query(request).blockLast(Duration.ofSeconds(5));
+                    else clients.syncExecutor().query(request);
+                });
+                assertEquals(1, observations.size());
+                assertEquals(SqlExecutionStatus.ERROR, observations.getFirst().status());
+            }
+        }
+    }
+
+    @Test
+    void installsBatchObserverWithoutRequiringSqlObserver() {
+        for (boolean reactive : List.of(false, true)) {
+            List<BatchExecutionObservation> observations = new ArrayList<>();
+            FlyingOrmEnvironment environment = standaloneEnvironment(reactive,
+                    Optional.empty(), Optional.of(observations::add));
+            DynamicForm form = DynamicForm.builder("samples", "samples")
+                    .addField(DynamicField.of("id", "INTEGER")).build();
+            BatchSpec spec = BatchSpec.insert(form, Flux.just(Map.of("id", 1)));
+            try (FlyingOrmClients clients = FlyingOrmBootstrap.create(
+                    FlyingOrmConfiguration.defaults().withDialect("postgresql"), environment)) {
+                assertThrows(RuntimeException.class, () -> {
+                    if (reactive) clients.forms().writeBatch(spec).block(Duration.ofSeconds(5));
+                    else clients.syncForms().writeBatch(spec);
+                });
+                assertFalse(observations.isEmpty());
+                assertEquals(0, observations.getLast().successfulCount());
+                assertEquals(com.flying.orm.rdb.batch.BatchExecutionState.FAILED, observations.getLast().state());
+            }
+        }
+    }
+
+    private FlyingOrmEnvironment standaloneEnvironment(boolean reactive,
+            Optional<com.flying.orm.rdb.observation.SqlExecutionObserver> sql,
+            Optional<BatchExecutionObserver> batch) {
+        JdbcConnectionAccess jdbc = JdbcConnectionAccess.of(request -> {
+            throw new IllegalStateException("unavailable test connection");
+        }, (connection, request) -> { throw new AssertionError("no connection to release"); });
+        R2dbcConnectionAccess r2dbc = R2dbcConnectionAccess.of(
+                request -> Mono.error(new IllegalStateException("unavailable test connection")),
+                (signal, connection, request) -> { throw new AssertionError("no connection to release"); });
+        return new FlyingOrmEnvironment(reactive ? Optional.empty() : Optional.of(jdbc),
+                reactive ? Optional.of(r2dbc) : Optional.empty(), sql, batch, Optional.empty(), Optional.empty());
+    }
+
     private void verifyAcquisitionErrorsAndObservers(boolean reactive) {
         IllegalStateException failure = new IllegalStateException("connection access failed");
         AtomicInteger acquisitions = new AtomicInteger();
@@ -108,7 +169,7 @@ class FlyingOrmBootstrapContractTest {
         FlyingOrmEnvironment environment = (reactive
                 ? FlyingOrmEnvironment.of(r2dbc) : FlyingOrmEnvironment.of(jdbc))
                 .withObservers(observations::add, BatchExecutionObserver.noop())
-                .withSqlLogSink(messages::add);
+                .withSqlLogSink((level, message) -> messages.add(message));
         FlyingOrmConfiguration configuration = FlyingOrmConfiguration.defaults().withDialect("postgresql")
                 .withSqlLog(FlyingOrmConfiguration.SqlLog.enabled(SqlExecutionLogOptions.defaults()));
         SqlRequest request = new SqlRequest("select ?", List.of("private-business-value"));

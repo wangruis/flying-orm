@@ -2,19 +2,26 @@ package com.flying.orm.rdb.internal.mapping;
 
 import com.flying.orm.core.form.TenantStrategy;
 import com.flying.orm.core.metadata.RelationIdentity;
+import com.flying.orm.core.metadata.IndexDefinition;
+import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 import com.flying.orm.core.protection.FieldProtectionRegistry;
 import com.flying.orm.rdb.mapping.EntityFieldMetadata;
 import com.flying.orm.rdb.mapping.EntityMetadata;
-import com.flying.orm.rdb.mapping.FlyingLogicDelete;
+import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
+import com.flying.orm.core.annotation.TableLogic;
 import com.flying.orm.rdb.mapping.FlyingTenant;
 import com.flying.orm.rdb.mapping.MappingException;
 
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
 
 /**
  * 实体元数据的统一解析入口。
@@ -31,30 +38,26 @@ public final class EntityMetadataResolver {
     private EntityMetadataResolver() {
     }
 
-    /** 注册表缓存未命中时编译一份不可变实体元数据。 */
+    /** 编译一份不可变实体元数据；缓存归注册表管理。 */
     public static <T> EntityMetadata<T> createUncached(Class<T> type) {
-        EntityCompilation<T> compilation = compile(
-                Objects.requireNonNull(type, "entity type must not be null"), false);
-        return compilation.explicitRelationNamespace()
-                ? compilation.relationalMetadata(compilation.fieldMetadata())
-                : compilation.metadata(compilation.fieldMetadata());
+        return compileModel(type, EntityTypeMappingRegistry.standard()).metadata();
     }
 
-    /** 严格关系冷路径复用同一遍实体扫描，并保留 Java 字段及排除字段。 */
-    static <T> EntityCompilation<T> compileModel(Class<T> type) {
-        return compile(Objects.requireNonNull(type, "entity type must not be null"), true);
+    /** 一次扫描的字段事实供 CRUD 和显式 Schema 投影共同使用。 */
+    public static <T> Compilation<T> compileModel(Class<T> type, EntityTypeMappingRegistry mappings) {
+        return compileModel(type, mappings, Map.of(), Map.of());
     }
 
-    private static <T> EntityCompilation<T> compile(Class<T> type, boolean strictRelational) {
-        RelationIdentity relationIdentity = strictRelational
-                ? EntityTableNameResolver.resolveRelationalIdentity(type)
-                : EntityTableNameResolver.resolveIdentity(type);
-        String legacyTable = EntityTableNameResolver.resolveTable(relationIdentity);
+    static <T> Compilation<T> compileModel(Class<T> type, EntityTypeMappingRegistry mappings,
+                                          Map<String, UniqueConstraintDefinition> declaredUniques,
+                                          Map<String, IndexDefinition> declaredIndexes) {
+        Objects.requireNonNull(type, "entity type must not be null");
+        Objects.requireNonNull(mappings, "entity type mappings must not be null");
+        RelationIdentity relationIdentity = EntityTableNameResolver.resolveIdentity(type);
         String formId = EntityFieldNames.snakeCase(type.getSimpleName());
-        Optional<FlyingLogicDelete> classLogicDelete = Optional.ofNullable(type.getAnnotation(FlyingLogicDelete.class));
-        List<Field> persistentFields = strictRelational ? new ArrayList<>() : null;
-        List<Field> excludedFields = strictRelational ? new ArrayList<>() : null;
-        List<EntityFieldMetadata> fieldMetadata = new ArrayList<>();
+        Optional<TableLogic> classLogicDelete = Optional.ofNullable(type.getAnnotation(TableLogic.class));
+        Map<String, Property> properties = new LinkedHashMap<>();
+        List<Field> excludedFields = new ArrayList<>();
         FieldProtectionRegistry.Builder protections = FieldProtectionRegistry.builder();
 
         // 租户声明也在这次字段遍历中采集。先只记住声明，等普通字段语义校验完成后再按旧顺序校验。
@@ -79,41 +82,59 @@ public final class EntityMetadataResolver {
                     continue;
                 }
                 if (!EntityMetadataHierarchy.isPersistentField(field)) {
-                    // 到这里的字段只可能是 Java transient 或 @TableField(exist=false)。
-                    // 严格编译器需要它们检查结构注解冲突，普通 CRUD 不为此保留额外列表。
-                    if (strictRelational) {
-                        excludedFields.add(field);
-                    }
+                    excludedFields.add(field);
                     continue;
                 }
 
                 EntityFieldMetadata metadata = EntityFieldMetadataCompiler.compile(
-                        type, field, classLogicDelete, strictRelational);
-                if (strictRelational) {
-                    persistentFields.add(field);
+                        type, field, classLogicDelete, mappings);
+                if (properties.putIfAbsent(field.getName(), new Property(field, metadata)) != null) {
+                    throw new MappingException("entity declares duplicate persistent property: " + field.getName());
                 }
-                fieldMetadata.add(metadata);
                 EntityFieldProtectionCompiler.compile(field, metadata, protections);
             }
         }
 
-        if (fieldMetadata.isEmpty()) {
+        if (properties.isEmpty()) {
             throw new MappingException("entity has no persistent field: " + type.getName());
         }
-        validateSingleSemanticFields(type, fieldMetadata);
+        Map<String, UniqueConstraintDefinition> uniques = new LinkedHashMap<>(declaredUniques);
+        EntityRelationalConstraintCompiler.mergeAnnotatedUniques(type, properties, uniques);
+        Map<String, IndexDefinition> indexes = new LinkedHashMap<>(declaredIndexes);
+        EntityRelationalConstraintCompiler.mergeAnnotatedIndexes(type, properties, indexes);
+        Set<String> uniqueColumns = EntityRelationalConstraintCompiler.singleColumnUniqueColumns(
+                uniques.values(), indexes.values());
+        if (!uniqueColumns.isEmpty()) {
+            properties.replaceAll((name, property) -> {
+                EntityFieldMetadata field = property.metadata();
+                return uniqueColumns.contains(field.columnName()) && !field.unique()
+                        ? new Property(property.field(), withUnique(field)) : property;
+            });
+        }
+        List<EntityFieldMetadata> fieldMetadata = properties.values().stream().map(Property::metadata).toList();
+        validateSingleSemanticFields(type, fieldMetadata, classLogicDelete);
         TenantDefinition tenant = resolveTenant(
                 type, fieldMetadata, classTenant, fieldTenantCount, fieldTenantName, fieldTenantStrategy);
-        return new EntityCompilation<>(type,
-                formId,
-                legacyTable,
-                relationIdentity,
-                EntityTableNameResolver.hasExplicitNamespace(type),
-                strictRelational ? persistentFields : List.of(),
-                fieldMetadata,
-                strictRelational ? excludedFields : List.of(),
-                tenant == null ? null : tenant.field(),
-                tenant == null ? TenantStrategy.NONE : tenant.strategy(),
-                protections.build());
+        String tenantField = tenant == null ? null : tenant.field();
+        TenantStrategy tenantStrategy = tenant == null ? TenantStrategy.NONE : tenant.strategy();
+        FieldProtectionRegistry fieldProtections = protections.build();
+        try {
+            EntityMetadata<T> metadata = EntityMetadata.create(type, formId, relationIdentity,
+                    EntityTableNameResolver.namingSource(type, relationIdentity),
+                    fieldMetadata, tenantField, tenantStrategy, fieldProtections, Map.of());
+            return new Compilation<>(metadata, properties, excludedFields, uniques, indexes);
+        } catch (IllegalArgumentException | IllegalStateException error) {
+            throw new MappingException("entity metadata is invalid: " + type.getName(), error);
+        }
+    }
+
+    private static EntityFieldMetadata withUnique(EntityFieldMetadata source) {
+        return new EntityFieldMetadata(
+                source.name(), source.javaType(), source.field().withUnique(true), source.typeMapping(),
+                source.version(), source.logicDelete(), source.logicNotDeletedValue(), source.logicDeletedValue(),
+                source.idType(), source.enumStorage(), source.enumValueMember(), source.selectable(),
+                source.ordered(), source.orderAscending(), source.orderPriority(),
+                source.fill(), source.insertStrategy(), source.updateStrategy(), source.insertable(), source.updatable());
     }
 
     private static TenantDefinition resolveTenant(Class<?> type,
@@ -157,7 +178,14 @@ public final class EntityMetadataResolver {
         return field.trim();
     }
 
-    private static void validateSingleSemanticFields(Class<?> type, List<EntityFieldMetadata> fields) {
+    private static void validateSingleSemanticFields(Class<?> type, List<EntityFieldMetadata> fields,
+                                                      Optional<TableLogic> classLogicDelete) {
+        String declared = classLogicDelete.map(TableLogic::field).map(FlyingAnnotationReader::text).orElse(null);
+        if (classLogicDelete.isPresent() && (declared == null || fields.stream().noneMatch(
+                field -> field.logicDelete() && (EntityFieldNames.matches(field.name(), declared)
+                        || EntityFieldNames.matches(field.columnName(), declared))))) {
+            throw new MappingException("class-level @TableLogic must name a persistent field: " + type.getName());
+        }
         int versions = 0;
         int logicDeletes = 0;
         for (EntityFieldMetadata field : fields) {
@@ -172,52 +200,25 @@ public final class EntityMetadataResolver {
 
     private record TenantDefinition(String field, TenantStrategy strategy) {
     }
-}
 
-/**
- * 一次实体反射扫描得到的不可变中间态。
- *
- * <p>严格关系编译器可以在不重新扫描实体的前提下，用替换后的字段结构构造兼容的
- * {@link EntityMetadata}。普通 CRUD 编译不会保留 Java 字段列表。</p>
- */
-record EntityCompilation<T>(Class<T> type,
-                            String formId,
-                            String legacyTable,
-                            RelationIdentity relationIdentity,
-                            boolean explicitRelationNamespace,
-                            List<Field> persistentFields,
-                            List<EntityFieldMetadata> fieldMetadata,
-                            List<Field> excludedFields,
-                            String tenantField,
-                            TenantStrategy tenantStrategy,
-                            FieldProtectionRegistry protections) {
-
-    EntityCompilation {
-        persistentFields = List.copyOf(persistentFields);
-        fieldMetadata = List.copyOf(fieldMetadata);
-        excludedFields = List.copyOf(excludedFields);
+    /** 同一缓存条目拥有实体模型和 Schema 投影需要的 Java 字段，不另建反射缓存。 */
+    public record Compilation<T>(EntityMetadata<T> metadata,
+                                 Map<String, Property> properties,
+                                 List<Field> excludedFields,
+                                 Map<String, UniqueConstraintDefinition> uniques,
+                                 Map<String, IndexDefinition> indexes) {
+        public Compilation {
+            properties = Collections.unmodifiableMap(new LinkedHashMap<>(properties));
+            excludedFields = List.copyOf(excludedFields);
+            uniques = Collections.unmodifiableMap(new LinkedHashMap<>(uniques));
+            indexes = Collections.unmodifiableMap(new LinkedHashMap<>(indexes));
+        }
     }
 
-    /** 用替换后的字段结构构造与旧 Repository 共用的实体元数据。 */
-    EntityMetadata<T> metadata(List<EntityFieldMetadata> fields) {
-        return EntityMetadata.create(type,
-                formId,
-                legacyTable,
-                fields,
-                tenantField,
-                tenantStrategy,
-                protections);
-    }
-
-    /** 3.2 严格关系入口把已解析的 catalog/schema/table 原样交给 Repository 表单。 */
-    EntityMetadata<T> relationalMetadata(List<EntityFieldMetadata> fields) {
-        return EntityMetadata.createRelational(type,
-                formId,
-                legacyTable,
-                relationIdentity,
-                fields,
-                tenantField,
-                tenantStrategy,
-                protections);
+    /** Java 字段和持久化字段的编译绑定，结构投影直接使用。 */
+    public record Property(Field field, EntityFieldMetadata metadata) {
+        EntityTypeMappingRegistry.Mapping mapping() {
+            return metadata.typeMapping();
+        }
     }
 }

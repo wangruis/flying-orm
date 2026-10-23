@@ -10,6 +10,8 @@ import java.sql.SQLRecoverableException;
 import java.sql.SQLTimeoutException;
 import java.sql.SQLTransientConnectionException;
 import java.util.Objects;
+import java.util.List;
+import java.util.function.Function;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
@@ -30,6 +32,20 @@ public final class RdbExceptionTranslator {
     private RdbExceptionTranslator() {
     }
 
+    /** 按声明顺序选择首个改变异常的转换器；返回原对象表示继续匹配。 */
+    @SafeVarargs
+    public static Function<RdbException, RuntimeException> firstMatch(
+            Function<RdbException, RuntimeException>... translators) {
+        List<Function<RdbException, RuntimeException>> snapshot = List.of(translators);
+        return error -> {
+            for (Function<RdbException, RuntimeException> translator : snapshot) {
+                RuntimeException translated = Objects.requireNonNull(translator.apply(error), "translated exception");
+                if (translated != error) return translated;
+            }
+            return error;
+        };
+    }
+
     /**
      * 翻译数据库异常。已有 RdbException 原样返回，普通业务 RuntimeException 也不会被错误包装。
      *
@@ -45,14 +61,14 @@ public final class RdbExceptionTranslator {
         if (databaseError instanceof R2dbcException r2dbcError) {
             RdbErrorKind kind = kind(r2dbcError);
             return new RdbException(kind,
-                                    message(kind),
+                                    kind.message(),
                                     r2dbcError.getSqlState(),
                                     r2dbcError.getErrorCode(),
                                     r2dbcError);
         }
         if (databaseError instanceof SQLTimeoutException sqlTimeout) {
             return new RdbException(RdbErrorKind.TIMEOUT,
-                                    message(RdbErrorKind.TIMEOUT),
+                                    RdbErrorKind.TIMEOUT.message(),
                                     sqlTimeout.getSQLState(),
                                     sqlTimeout.getErrorCode(),
                                     sqlTimeout);
@@ -60,14 +76,14 @@ public final class RdbExceptionTranslator {
         if (databaseError instanceof SQLException sqlError) {
             RdbErrorKind kind = kind(sqlError);
             return new RdbException(kind,
-                                    message(kind),
+                                    kind.message(),
                                     sqlError.getSQLState(),
                                     sqlError.getErrorCode(),
                                     sqlError);
         }
         if (databaseError instanceof TimeoutException) {
             return new RdbException(RdbErrorKind.TIMEOUT,
-                                    "database operation timed out",
+                                    RdbErrorKind.TIMEOUT.message(),
                                     null,
                                     null,
                                     databaseError);
@@ -75,7 +91,7 @@ public final class RdbExceptionTranslator {
         if (databaseError instanceof InterruptedException
                 || databaseError instanceof CancellationException) {
             return new RdbException(RdbErrorKind.CANCELLED,
-                                    "database operation was cancelled",
+                                    RdbErrorKind.CANCELLED.message(),
                                     null,
                                     null,
                                     databaseError);
@@ -84,7 +100,7 @@ public final class RdbExceptionTranslator {
             return runtimeException;
         }
         return new RdbException(RdbErrorKind.UNKNOWN,
-                                "database operation failed",
+                                RdbErrorKind.UNKNOWN.message(),
                                 null,
                                 null,
                                 safeError);
@@ -190,18 +206,4 @@ public final class RdbExceptionTranslator {
         return RdbErrorKind.UNKNOWN;
     }
 
-    private static String message(RdbErrorKind kind) {
-        // 对外消息保持稳定且不带 SQL/参数，详细驱动消息仍可从 cause 获取。
-        return switch (kind) {
-            case DUPLICATE_KEY -> "database duplicate key conflict";
-            case CONSTRAINT -> "database integrity constraint failed";
-            case BAD_SQL -> "database rejected sql";
-            case CONNECTION -> "database connection failed";
-            case TIMEOUT -> "database operation timed out";
-            case DEADLOCK -> "database transaction deadlocked";
-            case LOCK_TIMEOUT -> "database lock wait timed out";
-            case CANCELLED -> "database operation was cancelled";
-            case UNKNOWN -> "database operation failed";
-        };
-    }
 }

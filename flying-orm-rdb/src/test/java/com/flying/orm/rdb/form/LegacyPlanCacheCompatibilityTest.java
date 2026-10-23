@@ -14,8 +14,18 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class LegacyPlanCacheCompatibilityTest {
+
+    @Test
+    void equivalentUnlimitedLimitsDoNotEnableGovernance() {
+        QueryShapeLimits limits = QueryShapeLimits.defaults().withMaxBindCount(1)
+                .withMaxBindCount(Integer.MAX_VALUE);
+        assertFalse(FieldUseGuard.governed(FieldUsePolicy.unrestricted(), limits));
+        assertTrue(FieldUseGuard.governed(FieldUsePolicy.unrestricted(), limits.withMaxBindCount(1)));
+        assertTrue(FieldUseGuard.governed(FieldUsePolicy.builder().build(), limits));
+    }
 
     @Test
     void unrestrictedDefaultsKeepTheLegacyPlanTypeAndSharedSingletons() {
@@ -24,7 +34,7 @@ class LegacyPlanCacheCompatibilityTest {
                                       .addField(DynamicField.primaryKey("id", "BIGINT"))
                                       .build();
 
-        FormOperationPlanner.PlannedQuery plan = planner.select(
+        FormReadPlanner.PlannedQuery plan = planner.reads.select(
                 QuerySpec.of(form, ConditionGroup.and().build()));
 
         assertFalse((Object) plan instanceof GovernedPlanEnvelope<?>);
@@ -39,6 +49,6 @@ class LegacyPlanCacheCompatibilityTest {
         return new FormOperationPlanner(
                 renderer,
                 new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
-                SqlExecutionOptions.safeDefaults());
+                SqlExecutionOptions.unlimited());
     }
 }

@@ -19,15 +19,11 @@ import java.util.Objects;
  */
 final class NativeSqlExecutionState {
 
-    private final SqlTemplateEngine.PreparedNativeSql preparedSql;
+    private final SqlTemplateEngine.PreparedSql preparedSql;
 
     private final Map<String, Object> values = new LinkedHashMap<>();
 
     private SqlExecutionOptions options;
-
-    NativeSqlExecutionState(ValueCodecRegistry valueCodecs, RdbDialect dialect, String sql) {
-        this(valueCodecs, dialect, sql, false);
-    }
 
     NativeSqlExecutionState(ValueCodecRegistry valueCodecs,
                             RdbDialect dialect,
@@ -44,7 +40,8 @@ final class NativeSqlExecutionState {
         if (name == null || name.isBlank()) {
             throw new IllegalArgumentException("native SQL parameter name must not be blank");
         }
-        values.put(name.trim(), value);
+        String parameter = name.trim();
+        if (preparedSql.hasParameter(parameter)) values.put(parameter, value);
     }
 
     void bindNull(String name, Class<?> javaType) {
@@ -65,6 +62,6 @@ final class NativeSqlExecutionState {
 
     SqlRequest request() {
         // SQL 结构已在调用状态创建时编译；这里只校验本次参数并按占位符顺序绑定。
-        return preparedSql.render(values);
+        return preparedSql.render(values, Map.of());
     }
 }

@@ -3,23 +3,27 @@ package com.flying.orm.rdb.schema;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.field.FieldIdentity;
-import com.flying.orm.core.metadata.ColumnMetadata;
-import com.flying.orm.core.metadata.ForeignKeyMetadata;
-import com.flying.orm.core.metadata.IndexMetadata;
+import com.flying.orm.core.internal.Names;
+import com.flying.orm.core.metadata.ForeignKeyDefinition;
+import com.flying.orm.core.metadata.IndexDefinition;
 import com.flying.orm.core.metadata.RelationIdentity;
-import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.metadata.ColumnDefinition;
+import com.flying.orm.core.metadata.PrimaryKeyDefinition;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
+import com.flying.orm.core.sql.render.SqlIdentifiers;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.core.type.LogicalType;
-import com.flying.orm.rdb.dialect.DialectCapabilities;
+import com.flying.orm.rdb.protection.ProtectedContainsLayout;
 
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
 /**
- * 迁移比较中反复使用的纯判断方法。
+ * 迁移规划中共用的纯判断与目标收集方法。
  *
  * <p>这些方法不创建数据库连接，也不持有渲染器状态。单独放出来是为了让迁移编排代码只表达
  * “先比较什么、再生成什么”，而不是被大小写和改名细节淹没。</p>
@@ -33,64 +37,104 @@ final class SchemaMigrationSupport {
     private SchemaMigrationSupport() {
     }
 
-    /** 旧入口只按 String 表名工作，不能静默丢弃命名空间或重新解释关系名中的字面点号。 */
-    static DynamicForm requireLegacyRelation(DynamicForm form) {
+    static RelationalTableDefinition tableDefinition(DynamicForm form, List<IndexDefinition> indexes,
+                                                      List<ForeignKeyDefinition> foreignKeys) {
+        return tableDefinition(form, indexes, foreignKeys, null);
+    }
+
+    static RelationalTableDefinition tableDefinition(DynamicForm form, List<IndexDefinition> indexes,
+                                                      List<ForeignKeyDefinition> foreignKeys,
+                                                      RelationalTableDefinition current) {
+        RelationIdentity relation = form.relationIdentity();
+        RelationalTableDefinition.Builder target = RelationalTableDefinition.builder(relation);
+        form.fields().forEach(field -> target.addColumn(field.column()));
+        if (current != null) {
+            // 增量索引或外键可以引用未重复声明的已有列；使用回读事实，不编造列定义。
+            Set<String> references = new LinkedHashSet<>();
+            indexes.forEach(index -> references.addAll(index.columns()));
+            foreignKeys.forEach(key -> references.addAll(key.columns()));
+            for (String name : references) {
+                if (form.findField(name).isEmpty()) current.findColumn(name).ifPresent(target::addColumn);
+            }
+        }
+        List<String> primaryKeys = targetPrimaryKeys(form);
+        if (!primaryKeys.isEmpty()) {
+            target.primaryKey(PrimaryKeyDefinition.of("pk_" + relation.table(), primaryKeys.toArray(String[]::new)));
+        }
+        indexes.forEach(target::addIndex);
+        foreignKeys.forEach(target::addForeignKey);
+        return target.build();
+    }
+
+    static RelationIdentity relation(String table) {
+        return RelationIdentity.parse(SqlIdentifiers.requireIdentifier(table));
+    }
+
+    static RelationalTableDefinition physicalColumns(SchemaSnapshot snapshot) {
+        if (snapshot == null) {
+            return null;
+        }
+        Set<SchemaSnapshot.UnknownAttribute> unknown = snapshot.unknownAttributes();
+        if (snapshot.tableState() != SchemaSnapshot.State.PRESENT
+                || snapshot.columns().state() != SchemaSnapshot.State.PRESENT
+                || unknown.contains(SchemaSnapshot.UnknownAttribute.COLUMN_DEFAULT)
+                || unknown.contains(SchemaSnapshot.UnknownAttribute.COLUMN_GENERATION)
+                || unknown.contains(SchemaSnapshot.UnknownAttribute.COLUMN_CHARSET)
+                || unknown.contains(SchemaSnapshot.UnknownAttribute.COLUMN_COLLATION)) {
+            throw new IllegalStateException(
+                    "rewriting an existing column requires known physical column attributes");
+        }
+        return snapshot.knownDefinition();
+    }
+
+    /** 同步与响应式执行共享同一份精确失效目标，不负责实际元数据读取或失效。 */
+    static List<RelationIdentity> metadataRelations(SchemaMigrationPlan plan) {
+        LinkedHashSet<RelationIdentity> tables = new LinkedHashSet<>();
+        tables.add(plan.targetIdentity().orElseThrow(() ->
+                new IllegalArgumentException("schema plan must contain a target relation")));
+        tables.addAll(plan.additionalCreatedTables());
+        return List.copyOf(tables);
+    }
+
+    static List<RelationIdentity> metadataTables(DynamicForm form) {
+        return metadataTables(form, List.of());
+    }
+
+    static List<RelationIdentity> metadataTables(DynamicForm form, List<RelationIdentity> additionalTables) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        RelationIdentity identity = safeForm.relationIdentity().orElse(null);
-        if (identity != null && (identity.catalog().isPresent() || identity.schema().isPresent()
-                || identity.table().indexOf('.') >= 0)) {
-            throw new IllegalArgumentException(
-                    "structured relation identity requires the relational schema API");
+        LinkedHashSet<RelationIdentity> tables = new LinkedHashSet<>();
+        tables.add(safeForm.relationIdentity());
+        tables.addAll(Objects.requireNonNull(additionalTables, "additional schema tables must not be null"));
+        ProtectedContainsLayout.resolve(safeForm)
+                               .map(ProtectedContainsLayout::table)
+                               .map(DynamicForm::relationIdentity)
+                               .ifPresent(tables::add);
+        return List.copyOf(tables);
+    }
+
+    /** 增量列选择只执行一次；null 表示将变更加入实际操作。 */
+    static String columnChangeSkipReason(ColumnDefinition current, DynamicField target,
+                                         SchemaMigrationOptions options, RelationalSchemaSqlRenderer tables) {
+        boolean temporalChanged = logicalTemporalTypeChanged(current.databaseType(), target.databaseType());
+        boolean storageChanged = temporalChanged || !sameStorageShape(current, target, tables);
+        boolean nullableChanged = current.nullable() != target.nullable();
+        if (nullableChanged && !options.columnChangeAllowed()) {
+            if (storageChanged) return "combined nullable and storage changes require explicit column change";
+            if (!target.nullable()) return "SAFE mode does not make a nullable column NOT NULL";
         }
-        return safeForm;
-    }
-
-    static boolean safeIncremental(SchemaOperation operation,
-                                   SchemaSnapshot actual,
-                                   DialectCapabilities capabilities) {
-        return SchemaRiskClassifier.safeIncremental(operation, actual, capabilities);
-    }
-
-    static List<SchemaOperation> requireSafeIncremental(List<SchemaOperation> operations,
-                                                        SchemaSnapshot actual,
-                                                        DialectCapabilities capabilities) {
-        List<SchemaOperation> safeOperations = List.copyOf(Objects.requireNonNull(
-                operations, "schema operations must not be null"));
-        Objects.requireNonNull(actual, "schema snapshot must not be null");
-        Objects.requireNonNull(capabilities, "dialect capabilities must not be null");
-        for (SchemaOperation operation : safeOperations) {
-            if (!safeIncremental(operation, actual, capabilities)) {
-                throw new IllegalArgumentException(
-                        "schema operation requires review: " + operation.kind());
-            }
+        if (!storageChanged || ProtectedSchemaTarget.sameProtectedStorage(current, target)) {
+            return null;
         }
-        return safeOperations;
-    }
-
-    static SchemaMigrationRiskLevel highestRisk(List<SchemaOperation> operations,
-                                                SchemaSnapshot actual,
-                                                DialectCapabilities capabilities) {
-        List<SchemaOperation> safeOperations = Objects.requireNonNull(
-                operations, "schema operations must not be null");
-        Objects.requireNonNull(actual, "schema snapshot must not be null");
-        Objects.requireNonNull(capabilities, "dialect capabilities must not be null");
-        SchemaMigrationRiskLevel highest = SchemaMigrationRiskLevel.LOW;
-        for (SchemaOperation operation : safeOperations) {
-            SchemaMigrationRiskLevel risk = SchemaRiskClassifier.classify(operation, actual, capabilities);
-            if (risk.ordinal() > highest.ordinal()) {
-                highest = risk;
-            }
+        if (!nullableChanged && !temporalChanged && safeWidening(current, target, tables)) {
+            return null;
         }
-        return highest;
-    }
-
-    static boolean sameColumnShape(ColumnMetadata column,
-                                   DynamicField target,
-                                   SchemaTableSqlRenderer tables) {
-        return sameDataType(column, target, tables)
-                && column.primaryKey() == target.primaryKey()
-                && column.nullable() == target.nullable()
-                && SchemaGeneratedValueComparison.same(column, target, tables.generatedValueStyle());
+        if (!options.columnChangeAllowed()) {
+            return temporalChanged
+                    ? "SAFE mode does not reinterpret existing values as a different time type"
+                    : "SAFE mode does not change column type, length, precision, or scale";
+        }
+        return SchemaGeneratedValueComparison.same(current.generation(), target.generation(), tables.generatedValueStyle())
+                ? null : "generated value changes are not supported by incremental column changes";
     }
 
     /**
@@ -99,29 +143,19 @@ final class SchemaMigrationSupport {
      * <p>这里只自动放行同一种数据库类型的长度或精度扩宽，不猜测 {@code INT -> BIGINT} 之类的跨类型转换。
      * DECIMAL 除了总精度不能缩小，小数位和整数位容量也都不能减少；任何元数据缺失都会保守返回 false。</p>
      */
-    static boolean safeWidening(ColumnMetadata current,
+    static boolean safeWidening(ColumnDefinition current,
                                 DynamicField target,
-                                SchemaTableSqlRenderer tables) {
-        if (current.primaryKey() != target.primaryKey()
-                || current.nullable() != target.nullable()
-                || !SchemaGeneratedValueComparison.same(current, target, tables.generatedValueStyle())) {
+                                RelationalSchemaSqlRenderer tables) {
+        if (current.nullable() != target.nullable()
+                || !SchemaGeneratedValueComparison.same(current.generation(), target.generation(), tables.generatedValueStyle())) {
             return false;
         }
-        return SchemaDialectTypeSupport.safeWideningDataType(tables.dataType(current),
-                                                              tables.dataType(target));
+        return SchemaDialectTypeSupport.safeWideningDataType(tables.metadataDataType(current),
+                                                              tables.dataType(target.column()));
     }
 
-    private static boolean sameDataType(ColumnMetadata column,
-                                        DynamicField target,
-                                        SchemaTableSqlRenderer tables) {
-        return tables.sameDataType(tables.dataType(column), tables.dataType(target));
-    }
-
-    static List<String> currentPrimaryKeys(TableMetadata current) {
-        return current.columns().stream()
-                      .filter(ColumnMetadata::primaryKey)
-                      .map(ColumnMetadata::name)
-                      .toList();
+    static List<String> currentPrimaryKeys(RelationalTableDefinition current) {
+        return current.primaryKey().map(PrimaryKeyDefinition::columns).orElseGet(List::of);
     }
 
     static List<String> targetPrimaryKeys(DynamicForm target) {
@@ -131,7 +165,7 @@ final class SchemaMigrationSupport {
                      .toList();
     }
 
-    static void validateColumnRenames(TableMetadata current,
+    static void validateColumnRenames(RelationalTableDefinition current,
                                       DynamicForm target,
                                       Map<String, String> renames) {
         renames.forEach((oldName, newName) -> {
@@ -150,8 +184,8 @@ final class SchemaMigrationSupport {
         });
     }
 
-    static ColumnMetadata exactColumn(TableMetadata table, String name) {
-        String exactName = FieldIdentity.of(name).name();
+    static ColumnDefinition exactColumn(RelationalTableDefinition table, String name) {
+        String exactName = Names.requireText(name, "field name");
         return table.columns().stream()
                    .filter(column -> column.name().equals(exactName))
                    .findFirst()
@@ -159,23 +193,23 @@ final class SchemaMigrationSupport {
     }
 
     static DynamicField exactField(DynamicForm form, String name) {
-        String exactName = FieldIdentity.of(name).name();
+        String exactName = Names.requireText(name, "field name");
         return form.fields().stream()
                    .filter(field -> field.name().equals(exactName))
                    .findFirst()
                    .orElse(null);
     }
 
-    static IndexMetadata exactIndex(TableMetadata table, String name) {
-        String exactName = FieldIdentity.of(name).name();
+    static IndexDefinition exactIndex(RelationalTableDefinition table, String name) {
+        String exactName = Names.requireText(name, "field name");
         return table.indexes().stream()
                     .filter(index -> index.name().equals(exactName))
                     .findFirst()
                     .orElse(null);
     }
 
-    static ForeignKeyMetadata exactForeignKey(TableMetadata table, String name) {
-        String exactName = FieldIdentity.of(name).name();
+    static ForeignKeyDefinition exactForeignKey(RelationalTableDefinition table, String name) {
+        String exactName = Names.requireText(name, "field name");
         return table.foreignKeys().stream()
                     .filter(foreignKey -> foreignKey.name().equals(exactName))
                     .findFirst()
@@ -248,86 +282,6 @@ final class SchemaMigrationSupport {
         return left.equals(right);
     }
 
-    static SkippedSchemaChange primaryKeyChange(String table,
-                                                List<String> oldPrimaryKeys,
-                                                List<String> newPrimaryKeys,
-                                                SchemaMigrationOptions options) {
-        return new SkippedSchemaChange(SkippedSchemaChange.Kind.CHANGE_PRIMARY_KEY,
-                                       table,
-                                       options.primaryKeyChangeAllowed()
-                                               ? "primary key change is manual-only and is never executed automatically"
-                                               : "SAFE mode does not change primary key columns",
-                                       Map.of("table", table,
-                                              "oldPrimaryKeys", List.copyOf(oldPrimaryKeys),
-                                              "newPrimaryKeys", List.copyOf(newPrimaryKeys),
-                                              "requestedExecution", options.primaryKeyChangeAllowed(),
-                                              "executionMode", "MANUAL_ONLY",
-                                              "requiresApprovalFingerprint", true),
-                                       List.of("review data that depends on the old primary key",
-                                               "write a checked migration script for the primary key change",
-                                               "run it from the upper layer in a controlled transaction or maintenance window",
-                                               "read table metadata again after the migration"));
-    }
-
-    static boolean sameIndexColumns(IndexMetadata current,
-                                    IndexMetadata target,
-                                    Map<String, String> columnRenames) {
-        if (current.columns().size() != target.columns().size()) {
-            return false;
-        }
-        for (int i = 0; i < current.columns().size(); i++) {
-            String currentName = current.columns().get(i);
-            String renamed = renameTargetForSource(columnRenames, currentName);
-            if (!(renamed == null ? currentName : renamed).equals(target.columns().get(i))) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    /**
-     * 在自动唯一索引因共同方言长度边界缩短时，识别唯一可证明为同一约束的历史名称。
-     *
-     * <p>只允许由 DynamicForm 元数据重新推导的单列 unique target 进入兼容；候选既不能是其他
-     * target 的精确名称，也不能已被前一个 target 消费。多个同形候选一律返回空，调用方继续严格
-     * 按名称规划，避免把显式索引或歧义历史索引误判为同一对象。</p>
-     */
-    static IndexMetadata findLegacyGeneratedUniqueIndex(List<IndexMetadata> currentIndexes,
-                                                         List<IndexMetadata> generatedIndexes,
-                                                         IndexMetadata targetIndex,
-                                                         Set<String> targetIndexNames,
-                                                         Set<String> consumedCurrentIndexNames) {
-        if (!isGeneratedSingleColumnUniqueIndex(generatedIndexes, targetIndex)) {
-            return null;
-        }
-        List<IndexMetadata> candidates = currentIndexes.stream()
-                                                        .filter(IndexMetadata::unique)
-                                                        .filter(index -> index.columns().size() == 1)
-                                                        .filter(index -> !targetIndexNames.contains(
-                                                                index.normalizedName()))
-                                                        .filter(index -> !consumedCurrentIndexNames.contains(
-                                                                index.normalizedName()))
-                                                        .filter(index -> sameNormalizedSingleColumn(index,
-                                                                                                    targetIndex))
-                                                        .toList();
-        return candidates.size() == 1 ? candidates.getFirst() : null;
-    }
-
-    private static boolean isGeneratedSingleColumnUniqueIndex(List<IndexMetadata> generatedIndexes,
-                                                                IndexMetadata targetIndex) {
-        return targetIndex.unique()
-                && targetIndex.columns().size() == 1
-                && generatedIndexes.stream().anyMatch(generatedIndex -> generatedIndex.unique()
-                        && generatedIndex.columns().size() == 1
-                        && generatedIndex.normalizedName().equals(targetIndex.normalizedName())
-                        && sameNormalizedSingleColumn(generatedIndex, targetIndex));
-    }
-
-    /** 自动索引兼容只接受未改名的同一规范化单列，字段改名仍由既有严格迁移规则处理。 */
-    private static boolean sameNormalizedSingleColumn(IndexMetadata left, IndexMetadata right) {
-        return left.columns().getFirst().trim().equalsIgnoreCase(right.columns().getFirst().trim());
-    }
-
     static boolean logicalTemporalTypeChanged(DatabaseType currentType, DatabaseType targetType) {
         int currentKind = logicalTimeKind(currentType);
         int targetKind = logicalTimeKind(targetType);
@@ -342,26 +296,11 @@ final class SchemaMigrationSupport {
     }
 
     /** nullable 单独变化时才允许生成 SQL，避免只改一半后把类型差异漏在数据库里。 */
-    static boolean sameStorageShape(ColumnMetadata column,
+    static boolean sameStorageShape(ColumnDefinition column,
                                     DynamicField target,
-                                    SchemaTableSqlRenderer tables) {
-        return sameDataType(column, target, tables)
-                && column.primaryKey() == target.primaryKey()
-                && SchemaGeneratedValueComparison.same(column, target, tables.generatedValueStyle());
+                                    RelationalSchemaSqlRenderer tables) {
+        return tables.sameDataType(tables.metadataDataType(column), tables.dataType(target.column()))
+                && SchemaGeneratedValueComparison.same(column.generation(), target.generation(), tables.generatedValueStyle());
     }
 
-    /** 把已读取的列结构还原成渲染器可复用的字段描述，不丢失生成值和类型参数。 */
-    static DynamicField toDynamicField(ColumnMetadata column) {
-        ColumnMetadata safeColumn = Objects.requireNonNull(column, "column metadata must not be null");
-        return new DynamicField(safeColumn.name(),
-                                safeColumn.dataType(),
-                                safeColumn.primaryKey(),
-                                safeColumn.nullable(),
-                                false,
-                                safeColumn.length(),
-                                safeColumn.precision(),
-                                safeColumn.scale(),
-                                safeColumn.comment(),
-                                safeColumn.generation());
-    }
 }

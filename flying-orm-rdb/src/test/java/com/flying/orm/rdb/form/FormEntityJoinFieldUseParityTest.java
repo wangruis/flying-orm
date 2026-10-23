@@ -51,6 +51,16 @@ class FormEntityJoinFieldUseParityTest {
                                               .build();
 
         assertThrows(ScopeAccessException.class, () -> client.select(formQuery));
+        assertThrows(ScopeAccessException.class, () -> client.forEach(formQuery,
+                row -> { throw new AssertionError("forbidden row reached consumer"); }));
+        assertThrows(ScopeAccessException.class, () -> client.forEachWhile(formQuery,
+                row -> { throw new AssertionError("forbidden row reached stopping consumer"); }));
+        assertThrows(ScopeAccessException.class, () -> client.entity(Account.class).query()
+                .where(Account::secret, "classified").forEachWhile(
+                        row -> { throw new AssertionError("forbidden entity reached stopping consumer"); }));
+        assertThrows(ScopeAccessException.class, () -> client.entity(Account.class).query()
+                .where(Account::secret, "classified").forEach(
+                        row -> { throw new AssertionError("forbidden entity reached consumer"); }));
         assertThrows(ScopeAccessException.class, () -> client.entity(Account.class)
                                                               .query()
                                                               .select(Account::id)
@@ -69,7 +79,7 @@ class FormEntityJoinFieldUseParityTest {
 
     private static SyncSqlExecutor syncExecutor(AtomicInteger executions) {
         return (SyncSqlExecutor) Proxy.newProxyInstance(
-                SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{SyncSqlExecutor.class},
+                SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{com.flying.orm.rdb.support.ListQueryFixture.class},
                 (proxy, method, arguments) -> {
                     if (method.getName().equals("query")) {
                         executions.incrementAndGet();

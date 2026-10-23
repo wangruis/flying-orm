@@ -68,7 +68,7 @@ final class JdbcProtectedWriteExecutor {
             observation.success(result);
             return result;
         } catch (SQLException | RuntimeException error) {
-            throw observation.failure(error);
+            throw observation.failure(connections.translate(error));
         }
     }
 

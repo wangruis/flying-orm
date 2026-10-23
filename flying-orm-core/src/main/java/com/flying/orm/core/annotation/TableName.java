@@ -29,4 +29,7 @@ public @interface TableName {
      * 不会把某个环境的 schema 硬编码进普通实体。
      */
     String schema() default "";
+
+    /** 数据库表注释；仅在 Schema 编译时读取，首尾空白去除，空白表示未声明。 */
+    String comment() default "";
 }

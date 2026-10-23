@@ -117,7 +117,7 @@ class SelfReferencingIndexSchemaPlanTest {
     private static List<List<String>> plans(RelationalTableDefinition table) {
         RdbDialect dialect = RdbDialect.postgresql();
         DatabaseDescriptor database = DatabaseDescriptor.of("PostgreSQL", "16", dialect);
-        SyncSqlExecutor sync = new SyncSqlExecutor() {
+        SyncSqlExecutor sync = new com.flying.orm.rdb.support.ListQueryFixture() {
             @Override
             public List<DynamicRow> query(SqlRequest request) {
                 return List.of();
@@ -129,7 +129,7 @@ class SelfReferencingIndexSchemaPlanTest {
             }
 
             @Override
-            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                 throw new AssertionError("plan review must not execute DDL");
             }
         };
@@ -144,15 +144,15 @@ class SelfReferencingIndexSchemaPlanTest {
                 return Mono.error(new AssertionError("plan review must not execute DDL"));
             }
         };
-        ReviewedSchemaPlan jdbc = JdbcSchemaClient.create(sync, dialect).reviewRelational(database, table,
+        SchemaMigrationPlan jdbc = JdbcSchemaClient.create(sync, dialect).reviewRelational(database, table,
                 JdbcFormMetadataReaders.create(sync, dialect), SchemaCompatibilityMode.EXACT);
-        ReviewedSchemaPlan r2dbc = ReactiveSchemaClient.create(reactive, dialect).reviewRelational(database, table,
+        SchemaMigrationPlan r2dbc = ReactiveSchemaClient.create(reactive, dialect).reviewRelational(database, table,
                 ReactiveFormMetadataReaders.create(reactive, dialect), SchemaCompatibilityMode.EXACT)
                 .block(Duration.ofSeconds(5));
         return List.of(sql(jdbc), sql(r2dbc));
     }
 
-    private static List<String> sql(ReviewedSchemaPlan plan) {
-        return plan.steps().stream().map(step -> step.request().orElseThrow().sql()).toList();
+    private static List<String> sql(SchemaMigrationPlan plan) {
+        return plan.requests().stream().map(request -> request.sql()).toList();
     }
 }

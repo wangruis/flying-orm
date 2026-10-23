@@ -55,7 +55,8 @@ class JdbcBatchAdmissionBudgetTest {
                         .withMaxRowBytes(128));
 
         try (JdbcBatchRows rows = new JdbcBatchRows(
-                request.rows(), request.parameterCount(), request.options().maxRowBytes())) {
+                request.rows(), request.parameterCount(), request.options().maxRowBytes(), request.options().maxRows(),
+                new com.flying.orm.rdb.batch.BatchExecutionEvidence.Accumulator())) {
             assertEquals(500, JdbcBatchSupport.readBuffer(rows, request).size());
             assertEquals(500, emitted.get());
             assertEquals(500, JdbcBatchSupport.readBuffer(rows, request).size());

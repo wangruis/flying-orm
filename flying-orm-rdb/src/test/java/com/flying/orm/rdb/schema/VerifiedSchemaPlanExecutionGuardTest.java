@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.rdb.execution.SqlExecutionSequenceException;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.DatabaseDescriptor;
@@ -17,26 +18,24 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class VerifiedSchemaPlanExecutionGuardTest {
 
     @Test
-    void directEntriesRetainUnknownReportWhenInvalidationFails() {
+    void directEntriesPropagateInvalidationFailure() {
         for (boolean reactive : new boolean[]{false, true}) {
             for (boolean fullOptions : new boolean[]{false, true}) {
                 Fixture fixture = new Fixture(RdbDialect.postgresql());
-                fixture.invalidator = () -> { throw new IllegalStateException("cache invalidation failed"); };
-
-                SchemaExecutionReport report = reactive
-                        ? fixture.executeReactive(fullOptions)
-                        : fixture.executeJdbc(fullOptions);
-
-                assertEquals(SchemaExecutionStatus.UNKNOWN, report.status());
-                assertFalse(report.successful());
+                IllegalStateException failure = new IllegalStateException("cache invalidation failed");
+                fixture.invalidator = () -> { throw failure; };
+                assertSame(failure, assertThrows(SqlExecutionSequenceException.class, () -> {
+                    if (reactive) fixture.executeReactive(fullOptions);
+                    else fixture.executeJdbc(fullOptions);
+                }).getCause().getCause());
                 assertEquals(1, fixture.executions.get());
             }
         }
@@ -82,25 +81,23 @@ class VerifiedSchemaPlanExecutionGuardTest {
     }
 
     @Test
-    void directJdbcEntryReportsVerifiedFactsWithoutInspectingTransactions() {
+    void directJdbcEntryReportsExecutedFactsWithoutInspectingTransactions() {
         for (boolean fullOptions : new boolean[]{false, true}) {
             Fixture fixture = new Fixture(RdbDialect.postgresql());
-            SchemaExecutionReport report = fixture.executeJdbc(fullOptions);
+            SchemaMigrationResult report = fixture.executeJdbc(fullOptions);
 
-            assertEquals(SchemaExecutionStatus.SUCCESS, report.status());
-            org.junit.jupiter.api.Assertions.assertTrue(report.successful());
+            assertNotNull(report);
             assertEquals(1, fixture.invalidations.get());
         }
     }
 
     @Test
-    void directReactiveEntryReportsVerifiedFactsWithoutInspectingTransactions() {
+    void directReactiveEntryReportsExecutedFactsWithoutInspectingTransactions() {
         for (boolean fullOptions : new boolean[]{false, true}) {
             Fixture fixture = new Fixture(RdbDialect.postgresql());
-            SchemaExecutionReport report = fixture.executeReactive(fullOptions);
+            SchemaMigrationResult report = fixture.executeReactive(fullOptions);
 
-            assertEquals(SchemaExecutionStatus.SUCCESS, report.status());
-            org.junit.jupiter.api.Assertions.assertTrue(report.successful());
+            assertNotNull(report);
             assertEquals(1, fixture.invalidations.get());
         }
     }
@@ -109,8 +106,8 @@ class VerifiedSchemaPlanExecutionGuardTest {
     void directJdbcEntryExecutesMysqlWithoutTransactionAdmission() {
         for (boolean fullOptions : new boolean[]{false, true}) {
             Fixture fixture = new Fixture(RdbDialect.mysql());
-            SchemaExecutionReport report = fixture.executeJdbc(fullOptions);
-            assertEquals(SchemaExecutionStatus.SUCCESS, report.status());
+            SchemaMigrationResult report = fixture.executeJdbc(fullOptions);
+            assertNotNull(report);
             assertEquals(1, fixture.executions.get());
             assertEquals(1, fixture.invalidations.get());
         }
@@ -120,8 +117,8 @@ class VerifiedSchemaPlanExecutionGuardTest {
     void directReactiveEntryExecutesMysqlWithoutTransactionAdmission() {
         for (boolean fullOptions : new boolean[]{false, true}) {
             Fixture fixture = new Fixture(RdbDialect.mysql());
-            SchemaExecutionReport report = fixture.executeReactive(fullOptions);
-            assertEquals(SchemaExecutionStatus.SUCCESS, report.status());
+            SchemaMigrationResult report = fixture.executeReactive(fullOptions);
+            assertNotNull(report);
             assertEquals(1, fixture.executions.get());
             assertEquals(1, fixture.invalidations.get());
         }
@@ -130,12 +127,12 @@ class VerifiedSchemaPlanExecutionGuardTest {
 
 
     private static final class Fixture {
-        private final RelationalTableDefinition desired = VerifiedSchemaPlanFixtures.table(
-                VerifiedSchemaPlanFixtures.ID, VerifiedSchemaPlanFixtures.NOTE);
+        private final RelationalTableDefinition desired = SchemaExecutionFixtures.table(
+                SchemaExecutionFixtures.ID, SchemaExecutionFixtures.NOTE);
         private final AtomicReference<SchemaSnapshot> snapshot = new AtomicReference<>(
-                SchemaSnapshot.present(VerifiedSchemaPlanFixtures.table(VerifiedSchemaPlanFixtures.ID)));
+                SchemaSnapshot.present(SchemaExecutionFixtures.table(SchemaExecutionFixtures.ID)));
         private final AtomicInteger executions = new AtomicInteger();
-        private final ReviewedSchemaPlan plan;
+        private final SchemaMigrationPlan plan;
         private final AtomicInteger invalidations = new AtomicInteger();
         private Runnable invalidator = invalidations::incrementAndGet;
         private Throwable executionFailure;
@@ -146,8 +143,8 @@ class VerifiedSchemaPlanExecutionGuardTest {
                     SchemaSnapshotCoverage.complete(), SchemaCompatibilityMode.SAFE_INCREMENTAL);
         }
 
-        private SchemaExecutionReport executeJdbc(boolean fullOptions) {
-            SyncSqlExecutor executor = new SyncSqlExecutor() {
+        private SchemaMigrationResult executeJdbc(boolean fullOptions) {
+            SyncSqlExecutor executor = new com.flying.orm.rdb.support.ListQueryFixture() {
                 @Override
                 public List<DynamicRow> query(SqlRequest request) {
                     throw new AssertionError("query must not execute");
@@ -159,22 +156,22 @@ class VerifiedSchemaPlanExecutionGuardTest {
                 }
 
                 @Override
-                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                     throw new AssertionError("generated keys must not execute");
                 }
             };
-            return fullOptions ? VerifiedSchemaPlanExecutor.executeJdbc(
-                    plan, executor, snapshot::get, SchemaSnapshotCoverage::complete,
-                    invalidator, SchemaMigrationExecutionOptions.defaults()) : VerifiedSchemaPlanExecutor.executeJdbc(
-                    plan, executor, snapshot::get, SchemaSnapshotCoverage::complete,
-                    invalidator, SqlExecutionOptions.safeDefaults());
+            return fullOptions ? SchemaExecutionFixtures.executeJdbc(
+                    plan, executor,
+                    invalidator, SqlExecutionOptions.unlimited()) : SchemaExecutionFixtures.executeJdbc(
+                    plan, executor,
+                    invalidator, SqlExecutionOptions.unlimited());
         }
 
-        private SchemaExecutionReport executeReactive(boolean fullOptions) {
+        private SchemaMigrationResult executeReactive(boolean fullOptions) {
             return reactiveExecution(fullOptions).block();
         }
 
-        private Mono<SchemaExecutionReport> reactiveExecution(
+        private Mono<SchemaMigrationResult> reactiveExecution(
                 boolean fullOptions) {
             ReactiveSqlExecutor executor = new ReactiveSqlExecutor() {
                 @Override
@@ -187,11 +184,11 @@ class VerifiedSchemaPlanExecutionGuardTest {
                     return Mono.fromSupplier(Fixture.this::execute);
                 }
             };
-            return fullOptions ? VerifiedSchemaPlanExecutor.executeReactive(
-                    plan, executor, () -> Mono.just(snapshot.get()), SchemaSnapshotCoverage::complete,
-                    invalidator, SchemaMigrationExecutionOptions.defaults()) : VerifiedSchemaPlanExecutor.executeReactive(
-                    plan, executor, () -> Mono.just(snapshot.get()), SchemaSnapshotCoverage::complete,
-                    invalidator, SqlExecutionOptions.safeDefaults());
+            return fullOptions ? SchemaExecutionFixtures.executeReactive(
+                    plan, executor,
+                    invalidator, SqlExecutionOptions.unlimited()) : SchemaExecutionFixtures.executeReactive(
+                    plan, executor,
+                    invalidator, SqlExecutionOptions.unlimited());
         }
 
         private long execute() {

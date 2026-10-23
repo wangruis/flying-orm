@@ -33,6 +33,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ProtectedContainsExecutionLimitsTest {
 
     @Test
+    void obsoleteBoundedCandidatePipelineIsAbsent() {
+        assertAll(
+                () -> assertThrows(ClassNotFoundException.class, () -> Class.forName(
+                        "com.flying.orm.rdb.form.ProtectedSearchCandidateLimitExceededException")),
+                () -> assertThrows(NoSuchMethodException.class, () -> ProtectedContainsSqlPlanner.class
+                        .getDeclaredMethod("candidates", ProtectedFieldRuntime.PreparedContainsQuery.class, int.class)),
+                () -> assertThrows(NoSuchMethodException.class, () -> FormProtectionSqlSupport.class
+                        .getDeclaredMethod("containsCandidates",
+                                ProtectedFieldRuntime.PreparedContainsQuery.class, int.class)));
+    }
+
+    @Test
     void rendersTokensAndTotalParametersAbovePortableThresholds() {
         FormDataSqlRenderer renderer = renderer();
         for (List<ProtectedFieldRuntime.ContainsTokenGroup> groups : List.of(

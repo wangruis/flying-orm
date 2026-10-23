@@ -69,6 +69,33 @@ class ScopedBatchUpsertH2Test {
             ConditionGroup.and().where("name", "=", "old").build());
 
     @TestFactory
+    Stream<DynamicTest> explicitUniqueKeyUpdatesAndInsertsWithoutAPrimaryKey() {
+        return Stream.of(false, true).map(reactive -> DynamicTest.dynamicTest("business-key/" + reactive, () -> {
+            try (Database database = new Database(); Statement statement = database.keeper.createStatement()) {
+                statement.execute("create table accounts (email varchar(64) unique, name varchar(64))");
+                statement.execute("insert into accounts values ('a@example.test', 'old')");
+                DynamicForm form = DynamicForm.builder("accounts", "accounts")
+                        .addField(DynamicField.of("email", "VARCHAR"))
+                        .addField(DynamicField.of("name", "VARCHAR")).build();
+                BatchSpec request = BatchSpec.upsert(form, Flux.just(
+                        Map.<String, Object>of("email", "a@example.test", "name", "changed"),
+                        Map.<String, Object>of("email", "b@example.test", "name", "new"))).onConflict("email");
+                assertSuccessful(reactive ? database.base.forms().writeBatch(request).block(TIMEOUT)
+                        : database.base.syncForms().writeBatch(request));
+                try (ResultSet rows = statement.executeQuery("select email, name from accounts order by email")) {
+                    assertTrue(rows.next());
+                    assertEquals("a@example.test", rows.getString(1));
+                    assertEquals("changed", rows.getString(2));
+                    assertTrue(rows.next());
+                    assertEquals("b@example.test", rows.getString(1));
+                    assertEquals("new", rows.getString(2));
+                    assertFalse(rows.next());
+                }
+            }
+        }));
+    }
+
+    @TestFactory
     Stream<DynamicTest> updatesTheScopedConflictTargetAndInsertsNewRowsOnEveryPublicChannel() {
         return Stream.of(false, true).flatMap(reactive -> channels().map(channel -> DynamicTest.dynamicTest(
                 "reactive=" + reactive + " " + channel, () -> {
@@ -266,13 +293,13 @@ class ScopedBatchUpsertH2Test {
             if (reactive) {
                 return switch (channel) {
                     case "result" -> scoped.forms().writeBatch(request).block(TIMEOUT);
-                    case "evidence" -> scoped.forms().writeBatchEvidence(request).block(TIMEOUT);
+                    case "evidence" -> scoped.forms().writeBatch(request).block(TIMEOUT);
                     default -> throw new AssertionError(channel);
                 };
             }
             return switch (channel) {
                 case "result" -> scoped.syncForms().writeBatch(request);
-                case "evidence" -> scoped.syncForms().writeBatchEvidence(request);
+                case "evidence" -> scoped.syncForms().writeBatch(request);
                 default -> throw new AssertionError(channel);
             };
         }

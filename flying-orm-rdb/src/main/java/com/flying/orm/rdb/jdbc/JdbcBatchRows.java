@@ -40,11 +40,6 @@ final class JdbcBatchRows implements Subscriber<Object[]>, AutoCloseable {
     private boolean completed;
     private boolean closed;
 
-    JdbcBatchRows(Publisher<Object[]> publisher, int parameterCount, long maxRowBytes) {
-        this(publisher, parameterCount, maxRowBytes, 0,
-                new com.flying.orm.rdb.batch.BatchExecutionEvidence.Accumulator());
-    }
-
     JdbcBatchRows(Publisher<Object[]> publisher, int parameterCount, long maxRowBytes, long maxRows,
                   com.flying.orm.rdb.batch.BatchExecutionEvidence.Accumulator evidence) {
         this.publisher = Objects.requireNonNull(publisher, "batch row publisher must not be null");

@@ -107,10 +107,17 @@ public record ProtectedWriteWork(Kind kind,
 
     /** 保证 UPDATE 预读到的 owner 集合与实际受影响行集合一致。 */
     public void requireStableOwnerSet(List<? extends Map<String, ?>> owners, SqlWriteResult result) {
-        Objects.requireNonNull(owners, "protected write owners must not be null");
         SqlWriteResult safeResult = Objects.requireNonNull(result, "protected write result must not be null");
-        if (kind == Kind.UPDATE && safeResult.affectedRows() != owners.size()) {
-            throw new IllegalStateException("protected update row set changed concurrently");
+        requireStableOwnerSet(owners, safeResult.affectedRows());
+    }
+
+    /** 批量驱动的未知计数不能证明主表与待替换索引属于同一组 owner。 */
+    public void requireStableOwnerSet(List<? extends Map<String, ?>> owners, long affectedRows) {
+        Objects.requireNonNull(owners, "protected write owners must not be null");
+        if (kind == Kind.UPDATE && affectedRows != owners.size()) {
+            throw new IllegalStateException(affectedRows < 0
+                    ? "driver cannot verify protected update affected rows"
+                    : "protected update row set changed concurrently");
         }
     }
 

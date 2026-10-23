@@ -30,6 +30,58 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class RepositoryBatchRetentionBudgetTest {
 
     @Test
+    void finiteReactiveBudgetTraversesRetainedValuesOnlyOnce() {
+        AtomicInteger estimates = new AtomicInteger();
+        PayloadEntity entity = new PayloadEntity(7L, new byte[16], new byte[16]);
+        entity.lifecycleNumber = new java.math.BigDecimal("123") {
+            @Override
+            public int precision() { estimates.incrementAndGet(); return super.precision(); }
+        };
+        AtomicInteger callbacks = new AtomicInteger();
+        repository(callbacks).insertBatch(Flux.just(entity), options(1_600L)).block();
+        assertEquals(1, callbacks.get());
+        assertEquals(1, estimates.get());
+    }
+
+    @Test
+    void defaultReactiveRetentionDoesNotReadNonWritingFieldsForAnUnusedBudget() {
+        AtomicInteger callbacks = new AtomicInteger();
+        PayloadEntity entity = new PayloadEntity(7L, new byte[16], new byte[16]);
+        repository(callbacks).insertBatch(Flux.just(entity), BatchWriteOptions.defaults()).block();
+        assertEquals(1, callbacks.get());
+        assertEquals(0, entity.retainedReads);
+    }
+
+    @Test
+    void syncRetentionEstimatesOnlyForAnExplicitBudget() {
+        ReactiveFormClient client = ReactiveFormClient.create(successfulBatchExecutor(), renderer());
+        com.flying.orm.rdb.mapping.EntityMetadata<PayloadEntity> metadata =
+                client.entityModels().metadata(PayloadEntity.class);
+        AtomicInteger callbacks = new AtomicInteger();
+        SyncRepositoryLifecycleSupport<PayloadEntity> lifecycle = new SyncRepositoryLifecycleSupport<>(
+                metadata, event -> Mono.fromRunnable(callbacks::incrementAndGet));
+        for (long budget : new long[]{Long.MAX_VALUE, 1_600L}) {
+            com.flying.orm.rdb.internal.mapping.EntityValues<PayloadEntity> values =
+                    com.flying.orm.rdb.internal.mapping.EntityValues.createUncached(PayloadEntity.class, metadata);
+            RepositoryBatchRetention<PayloadEntity> tracker = new RepositoryBatchRetention<>(
+                    RepositoryEntityIdSupport.create(metadata, com.flying.orm.rdb.id.IdGenerator.none()), false, budget,
+                    "lifecycleRetainedBytes", (entity, row) ->
+                    com.flying.orm.rdb.batch.BatchMemoryBudget.estimateRowBytes(values.readRetainedValues(entity)) + 64L);
+            PayloadEntity entity = new PayloadEntity(7L, new byte[1_024], new byte[1_024]);
+            if (budget == Long.MAX_VALUE) {
+                tracker.remember(0, entity, null);
+                lifecycle.fire(EntityLifecyclePhase.POST_PERSIST, tracker.complete(0), 0L);
+                assertEquals(0, entity.retainedReads);
+                assertEquals(1, callbacks.get());
+            } else {
+                assertThrows(BatchMemoryLimitExceededException.class, () -> tracker.remember(0, entity, null));
+                assertEquals(1, entity.retainedReads);
+            }
+            tracker.clear();
+        }
+    }
+
+    @Test
     void reactiveInsertCountsSharedPayloadOnce() {
         AtomicInteger postPersistCalls = new AtomicInteger();
         ReactiveFormRepository<PayloadEntity> repository = repository(postPersistCalls);
@@ -108,6 +160,12 @@ class RepositoryBatchRetentionBudgetTest {
         @TableField(insertStrategy = FieldStrategy.NEVER, updateStrategy = FieldStrategy.NEVER)
         private final byte[] lifecycleOnly;
 
+        @TableField(insertStrategy = FieldStrategy.NEVER, updateStrategy = FieldStrategy.NEVER)
+        private java.math.BigDecimal lifecycleNumber;
+
+        @TableField(exist = false)
+        private int retainedReads;
+
         private PayloadEntity(Long id, byte[] payload, byte[] lifecycleOnly) {
             this.id = id;
             this.payload = payload;
@@ -123,6 +181,7 @@ class RepositoryBatchRetentionBudgetTest {
         }
 
         public byte[] getLifecycleOnly() {
+            retainedReads++;
             return lifecycleOnly;
         }
     }

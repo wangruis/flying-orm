@@ -16,8 +16,60 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class SqlRequestOwnershipTest {
+
+    @Test
+    void emptyFragmentReusesTheImmutableEmptyParameterList() {
+        List<Object> parameters = new java.util.ArrayList<>();
+        SqlFragment fragment = new SqlFragment("  count(*)  ", parameters);
+        parameters.add(1);
+
+        assertEquals("count(*)", fragment.sql());
+        assertSame(List.of(), fragment.parameters());
+        assertSame(List.of(), SqlFragment.of("count(*)").parameters());
+        assertThrows(UnsupportedOperationException.class, () -> fragment.parameters().add(2));
+    }
+
+    @Test
+    void fragmentOwnsNullAndEncodedMutableParametersBeforePublication() {
+        byte[] bytes = {1, 2, 3};
+        Date date = new Date(123L);
+        StringBuilder text = new StringBuilder("initial");
+        List<Object> parameters = new java.util.ArrayList<>();
+        parameters.add(SqlFragment.encodedParameter(bytes));
+        parameters.add(null);
+        parameters.add(date);
+        parameters.add(text);
+        SqlFragment fragment = new SqlFragment("?,?,?,?", parameters);
+        bytes[0] = 9;
+        date.setTime(456L);
+        text.append("changed");
+        parameters.clear();
+
+        List<Object> published = fragment.parameters();
+        assertArrayEquals(new byte[]{1, 2, 3}, (byte[]) published.getFirst());
+        assertEquals(java.util.Arrays.asList(null, new Date(123L), "initial"), published.subList(1, 4));
+        assertThrows(UnsupportedOperationException.class, () -> published.set(1, "changed"));
+        ((byte[]) published.getFirst())[0] = 8;
+        ((Date) published.get(2)).setTime(789L);
+        assertArrayEquals(new byte[]{1, 2, 3}, (byte[]) fragment.parameters().getFirst());
+        assertEquals(new Date(123L), fragment.parameters().get(2));
+    }
+
+    @Test
+    void fragmentSnapshotsSequentialParametersWithoutIndexedTraversal() {
+        CountingLinkedList<Object> parameters = new CountingLinkedList<>();
+        for (int index = 0; index < 512; index++) {
+            parameters.add(index);
+        }
+        SqlFragment fragment = new SqlFragment("?", parameters);
+        assertEquals(parameters, fragment.parameters());
+        assertEquals(0, parameters.indexedGets);
+        parameters.clear();
+        assertEquals(512, fragment.parameters().size());
+    }
 
     @Test
     void rendererOwnsBorrowedMutableCodecOutputBeforePublishingTheFragment() {

@@ -42,7 +42,7 @@ class JdbcFormMetadataReaderTest {
         for (boolean table : List.of(false, true)) {
             AtomicReference<JdbcFormMetadataReader> cached = new AtomicReference<>();
             AtomicInteger loads = new AtomicInteger();
-            SyncSqlExecutor executor = new SyncSqlExecutor() {
+            SyncSqlExecutor executor = new com.flying.orm.rdb.support.ListQueryFixture() {
                 public List<DynamicRow> query(SqlRequest request) {
                     if (request.sql().contains("indexes")) return List.of();
                     DynamicRow id = DynamicRow.copyOf(java.util.Map.of(
@@ -55,7 +55,7 @@ class JdbcFormMetadataReaderTest {
                             "COLUMN_NAME", "name", "DATA_TYPE", "VARCHAR", "PRIMARY_KEY", false)));
                 }
                 public long rowsUpdated(SqlRequest request) { throw new AssertionError("unexpected write"); }
-                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                     throw new AssertionError("unexpected write");
                 }
             };
@@ -121,13 +121,13 @@ class JdbcFormMetadataReaderTest {
     void readTableNeverQueriesTransactionState() {
         AtomicInteger queries = new AtomicInteger();
         SyncSqlExecutor executor = new MetadataExecutor(queries);
-        InformationSchemaFormMetadataReader.Queries metadataQueries =
-                new InformationSchemaFormMetadataReader.Queries(
+        MetadataQueryProfile.Queries metadataQueries =
+                new MetadataQueryProfile.Queries(
                         (schema, table) -> new SqlRequest("select columns", List.of()),
                         null,
                         null,
                         type -> type);
-        JdbcFormMetadataReader reader = new JdbcFormMetadataReader(executor, metadataQueries);
+        JdbcFormMetadataReader reader = new DefaultJdbcFormMetadataReader(executor, new MetadataQueryProfile(metadataQueries), com.flying.orm.rdb.cache.CacheRegionPolicy.disabled(), MetadataCacheInvalidator.none());
 
         reader.readTable("public", "customers");
 
@@ -139,13 +139,11 @@ class JdbcFormMetadataReaderTest {
     @Test
     void readTableRejectsAnEmptyQualifiedTablePart() {
         AtomicInteger queries = new AtomicInteger();
-        JdbcFormMetadataReader reader = new JdbcFormMetadataReader(
-                new MetadataExecutor(queries),
-                new InformationSchemaFormMetadataReader.Queries(
+        JdbcFormMetadataReader reader = new DefaultJdbcFormMetadataReader(new MetadataExecutor(queries), new MetadataQueryProfile(new MetadataQueryProfile.Queries(
                         (schema, table) -> new SqlRequest("select columns", List.of()),
                         null,
                         null,
-                        type -> type));
+                        type -> type)), com.flying.orm.rdb.cache.CacheRegionPolicy.disabled(), MetadataCacheInvalidator.none());
 
         assertThrows(IllegalArgumentException.class, () -> reader.readTable("public."));
         assertEquals(0, queries.get());
@@ -172,9 +170,7 @@ class JdbcFormMetadataReaderTest {
     void relationalSnapshotDoesNotSplitAnUnqualifiedLiteralDotTable() {
         AtomicReference<String> requestedSchema = new AtomicReference<>();
         AtomicReference<String> requestedTable = new AtomicReference<>();
-        JdbcFormMetadataReader reader = new JdbcFormMetadataReader(
-                new MetadataExecutor(new AtomicInteger()),
-                new InformationSchemaFormMetadataReader.Queries(
+        JdbcFormMetadataReader reader = new DefaultJdbcFormMetadataReader(new MetadataExecutor(new AtomicInteger()), new MetadataQueryProfile(new MetadataQueryProfile.Queries(
                         (schema, table) -> {
                             requestedSchema.set(schema);
                             requestedTable.set(table);
@@ -182,7 +178,7 @@ class JdbcFormMetadataReaderTest {
                         },
                         null,
                         null,
-                        type -> type));
+                        type -> type)), com.flying.orm.rdb.cache.CacheRegionPolicy.disabled(), MetadataCacheInvalidator.none());
         RelationIdentity target = RelationIdentity.table("accounts.v2");
 
         SchemaSnapshot snapshot = reader.readSnapshot(target);
@@ -197,18 +193,14 @@ class JdbcFormMetadataReaderTest {
     }
 
     private static JdbcFormMetadataReader reader(SyncSqlExecutor executor, CacheRegionPolicy policy) {
-        return new JdbcFormMetadataReader(
-                executor,
-                new InformationSchemaFormMetadataReader.Queries(
+        return new DefaultJdbcFormMetadataReader(executor, new MetadataQueryProfile(new MetadataQueryProfile.Queries(
                         (schema, table) -> new SqlRequest("select columns", List.of()),
                         (schema, table) -> new SqlRequest("select indexes", List.of()),
                         null,
-                        type -> type),
-                policy,
-                MetadataCacheInvalidator.none());
+                        type -> type)), policy, MetadataCacheInvalidator.none());
     }
 
-    private static final class MetadataExecutor implements SyncSqlExecutor {
+    private static final class MetadataExecutor implements com.flying.orm.rdb.support.ListQueryFixture {
 
         private final AtomicInteger queries;
 
@@ -232,12 +224,12 @@ class JdbcFormMetadataReaderTest {
         }
 
         @Override
-        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
             throw new UnsupportedOperationException();
         }
     }
 
-    private static final class BudgetExecutor implements SyncSqlExecutor {
+    private static final class BudgetExecutor implements com.flying.orm.rdb.support.ListQueryFixture {
 
         private final AtomicInteger queries;
         private BudgetExecutor(AtomicInteger queries) {
@@ -263,7 +255,7 @@ class JdbcFormMetadataReaderTest {
         }
 
         @Override
-        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
             throw new UnsupportedOperationException();
         }
     }

@@ -1,8 +1,6 @@
 package com.flying.orm.rdb.metadata;
 
 import com.flying.orm.core.metadata.ColumnDefinition;
-import com.flying.orm.core.form.DynamicField;
-import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
@@ -92,10 +90,11 @@ class SqlServerNullableUniqueTest {
 
     @Test
     void legacyMetadataDoesNotMisrepresentAFilteredKeyAsAnUnfilteredIndex() {
-        DynamicForm form = DynamicForm.builder("accounts", "accounts")
-                .addField(DynamicField.of("email", "VARCHAR")).build();
-        assertThrows(IllegalStateException.class, () -> FormMetadataRowConverter.toTableMetadata(
-                "accounts", form, List.of(indexRow("[email] IS NOT NULL", true, "ASC")), List.of()));
+        assertThrows(IllegalStateException.class, () -> FormMetadataRowConverter.toTableDefinition(RelationIdentity.table("accounts"),
+                FormMetadataRowConverter.tableBuilder(RelationIdentity.table("accounts"), List.of(
+                        Map.of("COLUMN_NAME", "email", "DATA_TYPE", "VARCHAR")), value -> value),
+                List.of(indexRow("[email] IS NOT NULL", true, "ASC")), List.of(), List.of(),
+                MetadataQueryProfile.SnapshotDialect.PARTIAL));
     }
 
     @Test
@@ -142,7 +141,7 @@ class SqlServerNullableUniqueTest {
                         Map.of("COLUMN_NAME", "region", "DATA_TYPE", "VARCHAR", "NULLABLE", true)),
                 List.of(Map.of("TABLE_REPRESENTABLE", true)), List.of(), List.of(), List.of(first, second),
                 List.of(), List.of(), value -> value,
-                InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER);
+                MetadataQueryProfile.SnapshotDialect.SQL_SERVER);
         assertEquals(List.of("email", "region"), actual.completeTable().orElseThrow()
                 .uniqueConstraints().getFirst().columns());
         second.put("INDEX_FILTER", "[email] IS NOT NULL");
@@ -181,7 +180,7 @@ class SqlServerNullableUniqueTest {
                 ? List.of(DynamicRow.copyOf(Map.of("TABLE_REPRESENTABLE", true))) : List.of();
     }
 
-    private static final class CatalogExecutor implements SyncSqlExecutor {
+    private static final class CatalogExecutor implements com.flying.orm.rdb.support.ListQueryFixture {
         @Override
         public List<DynamicRow> query(SqlRequest request) {
             return catalog(request);
@@ -193,7 +192,7 @@ class SqlServerNullableUniqueTest {
         }
 
         @Override
-        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
             throw new AssertionError("read-only verification must not execute DDL");
         }
     }
@@ -204,6 +203,6 @@ class SqlServerNullableUniqueTest {
                         "CHARACTER_MAXIMUM_LENGTH", 32)),
                 List.of(Map.of("TABLE_REPRESENTABLE", true)), List.of(), List.of(), indexes,
                 List.of(), List.of(), value -> value,
-                InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER);
+                MetadataQueryProfile.SnapshotDialect.SQL_SERVER);
     }
 }

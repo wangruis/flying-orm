@@ -24,43 +24,34 @@ record UpsertFieldPlan(List<DynamicField> insertFields,
         insertFields = List.copyOf(insertFields);
         conflictFields = List.copyOf(conflictFields);
         updateFields = List.copyOf(updateFields);
-        parameterFields = List.copyOf(parameterFields);
+        parameterFields = insertFields.equals(parameterFields) ? insertFields : List.copyOf(parameterFields);
     }
 
-    static UpsertFieldPlan create(DynamicForm logicalForm,
-                                  Map<String, Object> preparedLogicalValues,
-                                  DynamicForm physicalForm,
-                                  List<DynamicField> availableFields,
-                                  RepositoryUpsertValues stagedValues) {
-        return create(logicalForm, preparedLogicalValues, physicalForm, availableFields, stagedValues, false);
-    }
-
-    static UpsertFieldPlan create(DynamicForm logicalForm,
-                                  Map<String, Object> preparedLogicalValues,
-                                  DynamicForm physicalForm,
-                                  List<DynamicField> availableFields,
-                                  RepositoryUpsertValues stagedValues,
-                                  boolean scopedTarget) {
+    static UpsertFieldPlan create(DynamicForm logicalForm, Map<String, Object> preparedLogicalValues,
+                                  DynamicForm physicalForm, List<DynamicField> availableFields,
+                                  RepositoryUpsertValues stagedValues, boolean scopedTarget,
+                                  List<String> conflictNames) {
         DynamicForm logical = Objects.requireNonNull(logicalForm, "logical form must not be null");
         if (!scopedTarget) {
-            requireTenantConflictIdentity(logical);
+            requireTenantConflictIdentity(logical, conflictNames);
         }
         List<DynamicField> available = Objects.requireNonNull(
                 availableFields, "available upsert fields must not be null");
-        List<DynamicField> conflicts = physicalForm.fields().stream()
-                                                        .filter(DynamicField::primaryKey)
-                                                        .toList();
+        List<DynamicField> conflicts = conflictNames.isEmpty()
+                ? physicalForm.fields().stream().filter(DynamicField::primaryKey).toList()
+                : conflictNames.stream().map(physicalForm::field).toList();
         if (stagedValues == null) {
             return new UpsertFieldPlan(
                     available,
                     conflicts,
-                    available.stream().filter(field -> updateCandidate(logical, field, false)).toList(),
+                    available.stream().filter(field -> !conflictNames.contains(field.normalizedName())
+                            && updateCandidate(logical, field, false)).toList(),
                     available);
         }
 
         Set<String> staged = normalized(logical, stagedValues);
-        Set<String> inserts = new LinkedHashSet<>(normalized(logical, stagedValues.insertValues()));
-        Set<String> updates = new LinkedHashSet<>(normalized(logical, stagedValues.updateValues()));
+        Set<String> inserts = normalized(logical, stagedValues.insertValues());
+        Set<String> updates = normalized(logical, stagedValues.updateValues());
         Set<String> preparedNames = normalized(logical, preparedLogicalValues);
         for (String prepared : preparedNames) {
             if (!staged.contains(prepared)) {
@@ -75,30 +66,28 @@ record UpsertFieldPlan(List<DynamicField> insertFields,
             updates.remove(tenantName);
         });
         requireContainsStageConsistency(logical, inserts, updates);
-        Map<String, String> physicalOwners = physicalOwners(logical, physicalForm);
+        boolean sameLayout = logical == physicalForm && logical.protections().isEmpty();
+        Map<String, String> physicalOwners = sameLayout ? Map.of() : physicalOwners(logical, physicalForm);
         List<DynamicField> insertFields = new ArrayList<>();
         List<DynamicField> updateFields = new ArrayList<>();
+        List<DynamicField> parameters = new ArrayList<>(available.size());
         for (DynamicField field : available) {
-            String owner = physicalOwners.get(field.normalizedName());
+            String owner = sameLayout ? field.normalizedName() : physicalOwners.get(field.normalizedName());
             if (owner == null) {
                 throw new IllegalArgumentException("batch upsert physical field has no logical owner");
             }
-            if (inserts.contains(owner)) {
+            boolean inserted = inserts.contains(owner);
+            if (inserted) {
                 insertFields.add(field);
             }
-            if (updates.contains(owner) && updateCandidate(logical, field, true)) {
+            if (updates.contains(owner) && !conflictNames.contains(field.normalizedName())
+                    && updateCandidate(logical, field, true)) {
                 updateFields.add(field);
+                if (!inserted) parameters.add(field);
             }
         }
-
-        List<DynamicField> parameters = new ArrayList<>(insertFields);
-        Set<String> parameterNames = new LinkedHashSet<>();
-        insertFields.forEach(field -> parameterNames.add(field.normalizedName()));
-        for (DynamicField field : updateFields) {
-            if (parameterNames.add(field.normalizedName())) {
-                parameters.add(field);
-            }
-        }
+        // 可用物理字段已经唯一；INSERT 参数在前，UPDATE 独有参数在后，不再重复建立名称集合。
+        parameters.addAll(0, insertFields);
         return new UpsertFieldPlan(insertFields, conflicts, updateFields, parameters);
     }
 
@@ -110,11 +99,13 @@ record UpsertFieldPlan(List<DynamicField> insertFields,
                 .orElse(true));
     }
 
-    private static void requireTenantConflictIdentity(DynamicForm form) {
+    private static void requireTenantConflictIdentity(DynamicForm form, List<String> conflictNames) {
         form.tenant().ifPresent(tenant -> {
-            if (!form.field(tenant.fieldName()).primaryKey()) {
+            DynamicField field = form.field(tenant.fieldName());
+            if (conflictNames.isEmpty() ? !field.primaryKey() : !conflictNames.contains(field.normalizedName())) {
                 throw new IllegalArgumentException(
-                        "batch upsert tenant field must be part of the primary key");
+                        "batch upsert tenant field must be part of the "
+                                + (conflictNames.isEmpty() ? "primary key" : "conflict key"));
             }
         });
     }
@@ -164,7 +155,7 @@ record UpsertFieldPlan(List<DynamicField> insertFields,
         if (physicalIndex != physicalFields.size()) {
             throw layoutMismatch();
         }
-        return Map.copyOf(owners);
+        return owners;
     }
 
     private static IllegalArgumentException layoutMismatch() {
@@ -174,6 +165,6 @@ record UpsertFieldPlan(List<DynamicField> insertFields,
     private static Set<String> normalized(DynamicForm form, Map<String, Object> values) {
         Set<String> names = new LinkedHashSet<>();
         values.keySet().forEach(name -> names.add(form.field(name).normalizedName()));
-        return Set.copyOf(names);
+        return names;
     }
 }

@@ -1,21 +1,20 @@
 package com.flying.orm.rdb.mapping;
 
 import com.flying.orm.core.codec.ValueCodecRegistry;
-import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.join.QueryRelation;
+import com.flying.orm.core.internal.Names;
 import com.flying.orm.core.metadata.CheckConstraintDefinition;
 import com.flying.orm.core.metadata.ForeignKeyDefinition;
 import com.flying.orm.core.metadata.IndexDefinition;
 import com.flying.orm.core.metadata.PrimaryKeyDefinition;
 import com.flying.orm.core.metadata.RelationalSchemaDefinition;
-import com.flying.orm.core.metadata.RelationalSchemaFingerprint;
+import com.flying.orm.core.metadata.RelationalMetadataFingerprint;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.internal.mapping.EntityRelationalMetadataCompiler;
 
-import java.util.Collections;
-import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -23,7 +22,7 @@ import java.util.Objects;
 /**
  * 实体在 Repository 与 Schema 路径共享的完整关系描述。
  *
- * <p>描述对象只在显式进入关系元数据路径时创建。构建完成后，旧 CRUD 使用的
+ * <p>描述对象只在显式进入关系元数据路径时创建。构建完成后，CRUD 使用的
  * {@link EntityMetadata}/{@link DynamicForm} 与 Schema 使用的 {@link RelationalTableDefinition}
  * 来自同一次实体编译，不会各自猜测字段类型或重新扫描注解。</p>
  *
@@ -36,57 +35,19 @@ public final class EntitySchemaDescriptor<T> {
 
     private final EntityTypeMappingRegistry typeMappings;
     private final EntityMetadata<T> metadata;
-    private final DynamicForm form;
-    private final RelationalTableDefinition table;
     private final RelationalSchemaDefinition schema;
-    private final ValueCodecRegistry valueCodecs;
-    private final Map<String, EntityTypeMappingRegistry.Mapping> customFieldMappings;
-    private final Map<DynamicField, EntityTypeMappingRegistry.Mapping> customFieldCodecs;
-    private final String typeMappingsFingerprint;
     private final String relationalFingerprint;
 
     private EntitySchemaDescriptor(EntityTypeMappingRegistry typeMappings,
                                    EntityMetadata<T> metadata,
-                                   RelationalTableDefinition table,
-                                   RelationalSchemaDefinition schema,
-                                   Map<String, EntityTypeMappingRegistry.Mapping> fieldMappings) {
+                                   RelationalSchemaDefinition schema) {
         this.typeMappings = Objects.requireNonNull(typeMappings, "entity type mappings must not be null");
         this.metadata = Objects.requireNonNull(metadata, "entity metadata must not be null");
-        this.table = Objects.requireNonNull(table, "relational table must not be null");
         this.schema = Objects.requireNonNull(schema, "relational schema must not be null");
-        if (schema.tables().isEmpty() || schema.tables().getFirst() != table) {
-            throw new IllegalArgumentException(
-                    "relational schema must publish its primary table first");
+        if (schema.tables().isEmpty()) {
+            throw new IllegalArgumentException("relational schema must contain a primary table");
         }
-        form = Objects.requireNonNull(metadata.toDynamicForm(), "entity dynamic form must not be null");
-        Map<String, EntityTypeMappingRegistry.Mapping> customMappings = new LinkedHashMap<>();
-        Map<DynamicField, EntityTypeMappingRegistry.Mapping> fieldCodecs =
-                new IdentityHashMap<>();
-        Objects.requireNonNull(fieldMappings, "entity field mappings must not be null")
-               .forEach((property, mapping) -> {
-                   EntityTypeMappingRegistry.Mapping safeMapping = Objects.requireNonNull(
-                           mapping, "entity field mapping must not be null");
-                   if (!safeMapping.custom()) {
-                       return;
-                   }
-                   EntityFieldMetadata field = metadata.field(property);
-                   if (!safeMapping.databaseType().equals(field.databaseType())) {
-                       throw new IllegalArgumentException(
-                               "entity field mapping database type must match entity metadata");
-                   }
-                   customMappings.put(field.name(), safeMapping);
-                   fieldCodecs.put(form.findField(field.columnName())
-                                           .orElseThrow(() -> new IllegalArgumentException(
-                                                   "entity field must exist in its dynamic form")), safeMapping);
-               });
-        customFieldMappings = customMappings.isEmpty() ? Map.of() : Map.copyOf(customMappings);
-        customFieldCodecs = fieldCodecs.isEmpty()
-                ? Map.of() : Collections.unmodifiableMap(fieldCodecs);
-        valueCodecs = Objects.requireNonNull(typeMappings.valueCodecs(),
-                                             "entity value codecs must not be null");
-        typeMappingsFingerprint = Objects.requireNonNull(typeMappings.fingerprint(),
-                                                         "entity type mappings fingerprint must not be null");
-        relationalFingerprint = RelationalSchemaFingerprint.of(schema);
+        relationalFingerprint = RelationalMetadataFingerprint.of(schema);
     }
 
     /** 创建实体完整关系描述的构建器。 */
@@ -99,15 +60,8 @@ public final class EntitySchemaDescriptor<T> {
     public static <T> EntitySchemaDescriptor<T> create(
             EntityTypeMappingRegistry typeMappings,
             EntityMetadata<T> metadata,
-            RelationalSchemaDefinition schema,
-            Map<String, EntityTypeMappingRegistry.Mapping> fieldMappings) {
-        RelationalSchemaDefinition safeSchema = Objects.requireNonNull(
-                schema, "relational schema must not be null");
-        if (safeSchema.tables().isEmpty()) {
-            throw new IllegalArgumentException("relational schema must contain a primary table");
-        }
-        return new EntitySchemaDescriptor<>(typeMappings, metadata,
-                safeSchema.tables().getFirst(), safeSchema, fieldMappings);
+            RelationalSchemaDefinition schema) {
+        return new EntitySchemaDescriptor<>(typeMappings, metadata, schema);
     }
 
     /** @return 本描述使用的不可变类型映射注册表 */
@@ -122,12 +76,12 @@ public final class EntitySchemaDescriptor<T> {
 
     /** @return 与 {@link #metadata()} 持有的同一个动态表单实例 */
     public DynamicForm form() {
-        return form;
+        return metadata.toDynamicForm();
     }
 
     /** @return Schema、迁移和 DDL 共用的规范关系定义 */
     public RelationalTableDefinition table() {
-        return table;
+        return schema.tables().getFirst();
     }
 
     /** @return 主关系在首位、并包含保护辅助关系的完整最终物理 Schema */
@@ -137,12 +91,12 @@ public final class EntitySchemaDescriptor<T> {
 
     /** @return 类型映射注册表派生的只读值转换注册表 */
     public ValueCodecRegistry valueCodecs() {
-        return valueCodecs;
+        return typeMappings.valueCodecs();
     }
 
     /** @return 构建时计算的稳定类型映射指纹 */
     public String typeMappingsFingerprint() {
-        return typeMappingsFingerprint;
+        return typeMappings.fingerprint();
     }
 
     /** @return 构建时计算的稳定关系结构指纹 */
@@ -150,20 +104,10 @@ public final class EntitySchemaDescriptor<T> {
         return relationalFingerprint;
     }
 
-    Map<String, EntityTypeMappingRegistry.Mapping> customFieldMappings() {
-        return customFieldMappings;
-    }
-
-    /** 启动装配器使用精确 DynamicField 身份挂接业务 codec，不在逐值路径重新解析类型。 */
-    @InternalApi
-    public Map<DynamicField, EntityTypeMappingRegistry.Mapping> customFieldCodecs() {
-        return customFieldCodecs;
-    }
-
     /**
      * 收集实体注解之外的显式关系定义。
      *
-     * <p>构建器只在配置线程中使用。每次 {@link #build()} 都把当前集合复制成只读快照，之后继续配置
+     * <p>构建器只在配置线程中使用。每次 {@link #build()} 由编译器发布只读快照，之后继续配置
      * 同一个构建器不会反向修改已经发布的描述对象。</p>
      */
     public static final class Builder<T> {
@@ -175,6 +119,7 @@ public final class EntitySchemaDescriptor<T> {
         private final Map<String, IndexDefinition> indexes = new LinkedHashMap<>();
         private final Map<String, ForeignKeyDefinition> foreignKeys = new LinkedHashMap<>();
         private final Map<String, CheckConstraintDefinition> checks = new LinkedHashMap<>();
+        private Map<String, QueryRelation> relations = Map.of();
 
         private Builder(Class<T> entityType) {
             this.entityType = Objects.requireNonNull(entityType, "entity type must not be null");
@@ -219,16 +164,24 @@ public final class EntitySchemaDescriptor<T> {
             return this;
         }
 
+        /** 声明查询关系，键和路径使用模型列名；不声明物理外键，不触发目标解析。 */
+        public Builder<T> relation(String name, QueryRelation relation) {
+            if (relations.isEmpty()) relations = new LinkedHashMap<>();
+            addDefinition(relations, Names.key(name, "query relation name"), relation, "query relation");
+            return this;
+        }
+
         /** 编译注解和显式定义，发布一份不可变的实体关系描述。 */
         public EntitySchemaDescriptor<T> build() {
             return EntityRelationalMetadataCompiler.compile(
                     entityType,
                     typeMappings,
                     primaryKey,
-                    snapshot(uniqueConstraints),
-                    snapshot(indexes),
-                    snapshot(foreignKeys),
-                    snapshot(checks));
+                    uniqueConstraints,
+                    indexes,
+                    foreignKeys,
+                    checks,
+                    relations);
         }
 
         private static <D> void addDefinition(Map<String, D> definitions,
@@ -249,8 +202,5 @@ public final class EntitySchemaDescriptor<T> {
             return id.trim();
         }
 
-        private static <D> Map<String, D> snapshot(Map<String, D> definitions) {
-            return Collections.unmodifiableMap(new LinkedHashMap<>(definitions));
-        }
     }
 }

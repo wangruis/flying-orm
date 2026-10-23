@@ -5,8 +5,8 @@ import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import reactor.core.publisher.Flux;
 
-import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -28,23 +28,34 @@ final class ProtectedContainsResultSupport {
         this.renderer = Objects.requireNonNull(renderer, "form data sql renderer must not be null");
     }
 
-    List<DynamicRow> finish(DynamicForm form,
-                            ProtectedFieldRuntime.PreparedContainsQuery query,
-                            List<DynamicRow> decryptedRows,
-                            List<String> outputFields,
-                            SensitiveDisplayMode displayMode,
-                            SqlExecutionOptions options) {
-        List<DynamicRow> verified = new ArrayList<>(decryptedRows.size());
-        DynamicRow projectionTemplate = null;
-        Map<Integer, Object> replacements = null;
+    /** 逐行复核并发布最终投影；每次订阅独立持有投影和预算状态，不收集整次查询。 */
+    Flux<DynamicRow> finish(DynamicForm form,
+                                  ProtectedFieldRuntime.PreparedContainsQuery query,
+                                  Flux<DynamicRow> decryptedRows,
+                                  List<String> outputFields,
+                                  SensitiveDisplayMode displayMode,
+                                  SqlExecutionOptions options) {
+        return Flux.defer(() -> decryptedRows
+                .mapNotNull(rowFinisher(form, query, outputFields, displayMode, options)));
+    }
+
+    /** 单次查询的逐行复核、展示和投影；未匹配的候选返回 null，不发布给调用方。 */
+    UnaryOperator<DynamicRow> rowFinisher(DynamicForm form,
+                                         ProtectedFieldRuntime.PreparedContainsQuery query,
+                                         List<String> outputFields, SensitiveDisplayMode displayMode,
+                                         SqlExecutionOptions options) {
         UnaryOperator<DynamicRow> display = renderer.protection().displayOperation(form, displayMode);
         FormResultDecoder.DecodedResultBudget budget = new FormResultDecoder.DecodedResultBudget(options.maxResultBytes());
-        for (DynamicRow row : decryptedRows) {
-            if (renderer.protection().matchesContains(form, query, row)) {
+        return new UnaryOperator<>() {
+            private DynamicRow projectionTemplate;
+            private Map<Integer, Object> replacements;
+
+            @Override
+            public DynamicRow apply(DynamicRow row) {
+                if (!renderer.protection().matchesContains(form, query, row)) return null;
                 DynamicRow displayed = budget.accept(display.apply(row));
                 if (sameLayout(displayed, outputFields)) {
-                    verified.add(displayed);
-                    continue;
+                    return displayed;
                 }
                 if (projectionTemplate == null) {
                     projectionTemplate = projectionTemplate(outputFields);
@@ -53,10 +64,9 @@ final class ProtectedContainsResultSupport {
                         replacements.put(index, null);
                     }
                 }
-                verified.add(project(displayed, projectionTemplate, replacements));
+                return project(displayed, projectionTemplate, replacements);
             }
-        }
-        return List.copyOf(verified);
+        };
     }
 
     private static boolean sameLayout(DynamicRow row, List<String> outputFields) {

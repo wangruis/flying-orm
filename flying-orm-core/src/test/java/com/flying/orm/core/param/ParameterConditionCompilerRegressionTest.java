@@ -35,6 +35,18 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ParameterConditionCompilerRegressionTest {
 
     @Test
+    void defaultsDoNotRejectApplicationSizedCollectionsOrText() {
+        ParameterConditionCompiler compiler = ParameterConditionCompiler.builder()
+                .add(ParameterConditionSpec.of("ids", "id", "in"))
+                .add(ParameterConditionSpec.of("text", "text", "="))
+                .build();
+        ConditionGroup where = compiler.compile(Map.of("ids", Collections.nCopies(1_001, 7),
+                "text", "x".repeat(4_097)));
+        assertEquals(1_001, ((List<?>) ((TermCondition) where.children().getFirst()).value()).size());
+        assertEquals("x".repeat(4_097), ((TermCondition) where.children().getLast()).value());
+    }
+
+    @Test
     void ignoresDuplicateUnknownInputNames() {
         ParameterConditionCompiler compiler = ParameterConditionCompiler.builder()
                 .add(ParameterConditionSpec.of("known", "known_field", "="))
@@ -142,7 +154,7 @@ class ParameterConditionCompilerRegressionTest {
     }
 
     @Test
-    void builtInIdentityKeepsCleaningAndDefaultFallbackInAndAndOrGroups() {
+    void builtInIdentityFiltersEmptyValuesAndPreservesTextInBothGroups() {
         for (boolean orGroup : List.of(false, true)) {
             ParameterConditionSpec spec = ParameterConditionSpec.builder("states", "state", "in")
                     .defaultValue(Arrays.asList(null, " ", " fallback "))
@@ -153,7 +165,7 @@ class ParameterConditionCompilerRegressionTest {
                     Map.of("states", List.of()), Map.of("states", Arrays.asList(null, " ")));
 
             for (Map<String, ?> input : emptyInputs) {
-                assertEquals(List.of("fallback"), firstTerm(compiler.compile(input), orGroup).value());
+                assertEquals(List.of(" fallback "), firstTerm(compiler.compile(input), orGroup).value());
             }
             AtomicInteger iterations = new AtomicInteger();
             Iterable<Object> input = () -> {
@@ -161,7 +173,7 @@ class ParameterConditionCompilerRegressionTest {
                 return Arrays.<Object>asList(null, " ", " active ").iterator();
             };
 
-            assertEquals(List.of("active"),
+            assertEquals(List.of(" active "),
                          firstTerm(compiler.compile(Map.of("STATES", input)), orGroup).value());
             assertEquals(1, iterations.get());
         }
@@ -208,7 +220,7 @@ class ParameterConditionCompilerRegressionTest {
     }
 
     @Test
-    void userConverterReceivesCleanedInputOnceAndItsOutputIsCleanedInBothGroups() {
+    void userConverterReceivesOriginalTextOnceAndEmptyValuesAreFilteredInBothGroups() {
         for (boolean orGroup : List.of(false, true)) {
             List<Object> convertedInputs = new ArrayList<>();
             ParameterConditionSpec spec = ParameterConditionSpec.builder("states", "state", "in")
@@ -219,11 +231,11 @@ class ParameterConditionCompilerRegressionTest {
                     }).build();
             ParameterConditionCompiler compiler = compiler(spec, orGroup);
 
-            assertEquals(List.of("converted"), firstTerm(compiler.compile(
+            assertEquals(List.of(" converted "), firstTerm(compiler.compile(
                     Map.of("states", Arrays.asList(null, " ", " active "))), orGroup).value());
-            assertEquals(List.of(List.of("active")), convertedInputs);
-            assertEquals(List.of("converted"), firstTerm(compiler.compile(Map.of()), orGroup).value());
-            assertEquals(List.of(List.of("active"), List.of("fallback")), convertedInputs);
+            assertEquals(List.of(List.of(" active ")), convertedInputs);
+            assertEquals(List.of(" converted "), firstTerm(compiler.compile(Map.of()), orGroup).value());
+            assertEquals(List.of(List.of(" active "), List.of(" fallback ")), convertedInputs);
         }
     }
 
@@ -452,12 +464,12 @@ class ParameterConditionCompilerRegressionTest {
     }
 
     @Test
-    void keepsCompiledSpecRecordEqualityAndHashBasedOnTheNormalizedDefaultValue() {
+    void keepsCompiledSpecRecordEqualityAndHashBasedOnTheOriginalDefaultValue() {
         Function<Object, Object> converter = value -> value;
         ParameterConditionSpec source = new ParameterConditionSpec(
                 "state", "state", "=", " active ", true, converter);
         ParameterConditionSpec expected = new ParameterConditionSpec(
-                "state", "state", "=", "active", true, converter);
+                "state", "state", "=", " active ", true, converter);
 
         ParameterConditionSpec actual = ParameterConditionCompiler.builder()
                                                                     .add(source)

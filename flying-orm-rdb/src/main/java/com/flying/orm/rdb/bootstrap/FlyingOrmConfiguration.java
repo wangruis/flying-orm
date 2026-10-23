@@ -6,7 +6,6 @@ import com.flying.orm.rdb.cache.OrmCachePolicy;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.observation.SqlExecutionLogOptions;
 import com.flying.orm.rdb.observation.SqlExecutionLogSelection;
-import com.flying.orm.rdb.schema.SchemaMigrationExecutionOptions;
 
 import java.util.Objects;
 
@@ -39,7 +38,7 @@ public record FlyingOrmConfiguration(String dialect,
                                      BatchWriteOptions batchWriteOptions,
                                      BatchMemoryLimits batchMemoryLimits,
                                      OrmCachePolicy cachePolicy,
-                                     SchemaMigrationExecutionOptions migrationExecutionOptions,
+                                     SqlExecutionOptions migrationExecutionOptions,
                                      SqlLog sqlLog) {
 
     public FlyingOrmConfiguration {
@@ -58,11 +57,11 @@ public record FlyingOrmConfiguration(String dialect,
     /** 返回与现有纯 Java Builder 相同的安全默认配置。 */
     public static FlyingOrmConfiguration defaults() {
         return new FlyingOrmConfiguration(null,
-                                          SqlExecutionOptions.safeDefaults(),
+                                          SqlExecutionOptions.unlimited(),
                                           BatchWriteOptions.defaults(),
                                           BatchMemoryLimits.defaults(),
                                           OrmCachePolicy.safeDefaults(),
-                                          SchemaMigrationExecutionOptions.defaults(),
+                                          SqlExecutionOptions.unlimited(),
                                           SqlLog.disabled());
     }
 
@@ -101,17 +100,12 @@ public record FlyingOrmConfiguration(String dialect,
             selection = Objects.requireNonNull(selection, "sql execution log selection must not be null");
         }
 
-        /** 保留 V1.0.0 的简短构造方式，未指定筛选项时完整记录原有字段和事件。 */
-        public SqlLog(boolean enabled, SqlExecutionLogOptions options) {
-            this(enabled, options, SqlExecutionLogSelection.defaults());
-        }
-
         public static SqlLog disabled() {
-            return new SqlLog(false, SqlExecutionLogOptions.defaults());
+            return new SqlLog(false, SqlExecutionLogOptions.defaults(), SqlExecutionLogSelection.defaults());
         }
 
         public static SqlLog enabled(SqlExecutionLogOptions options) {
-            return new SqlLog(true, options);
+            return new SqlLog(true, options, SqlExecutionLogSelection.defaults());
         }
 
         /** 开启日志并明确指定内容与事件筛选策略。 */

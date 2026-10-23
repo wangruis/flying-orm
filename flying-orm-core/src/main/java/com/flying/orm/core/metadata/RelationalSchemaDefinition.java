@@ -78,7 +78,7 @@ public final class RelationalSchemaDefinition {
     }
 
     public Optional<RelationalTableDefinition> findTable(String tableName) {
-        return tablesByName.find(tableName, "table name");
+        return tablesByName.find(tableName);
     }
 
     public RelationalTableDefinition table(String tableName) {

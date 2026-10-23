@@ -13,7 +13,7 @@ class JdbcBatchRowsNullContractTest {
     @Test
     void rejectsNullRowAtSubscriberBoundary() {
         JdbcBatchRows rows = new JdbcBatchRows(subscriber -> {
-        }, 0, 4096L);
+        }, 0, 4096L, 0, new com.flying.orm.rdb.batch.BatchExecutionEvidence.Accumulator());
 
         assertThrows(NullPointerException.class, () -> rows.onNext(null));
     }
@@ -21,7 +21,7 @@ class JdbcBatchRowsNullContractTest {
     @Test
     void rejectsNullFailureEvenAfterTermination() {
         JdbcBatchRows rows = new JdbcBatchRows(subscriber -> {
-        }, 0, 4096L);
+        }, 0, 4096L, 0, new com.flying.orm.rdb.batch.BatchExecutionEvidence.Accumulator());
         rows.onComplete();
 
         assertThrows(NullPointerException.class, () -> rows.onError(null));
@@ -41,7 +41,7 @@ class JdbcBatchRowsNullContractTest {
             @Override
             public void cancel() {
             }
-        }), 1, 4096L);
+        }), 1, 4096L, 0, new com.flying.orm.rdb.batch.BatchExecutionEvidence.Accumulator());
 
         ProtectedBatchRows.RowView snapshot = rows.nextRowView();
 

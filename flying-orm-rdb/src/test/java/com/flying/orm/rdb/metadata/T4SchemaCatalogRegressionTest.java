@@ -4,7 +4,7 @@ import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.ColumnDefault;
 import com.flying.orm.core.metadata.ColumnDefinition;
-import com.flying.orm.core.metadata.IndexMetadata;
+import com.flying.orm.core.metadata.IndexDefinition;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.sql.render.SqlRequest;
@@ -16,7 +16,7 @@ import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.schema.JdbcSchemaClient;
 import com.flying.orm.rdb.schema.ReactiveSchemaClient;
-import com.flying.orm.rdb.schema.ReviewedSchemaPlan;
+import com.flying.orm.rdb.schema.SchemaMigrationPlan;
 import com.flying.orm.rdb.schema.SchemaCompatibilityMode;
 import com.flying.orm.rdb.schema.SchemaMigrationOptions;
 import com.flying.orm.rdb.schema.SchemaSnapshot;
@@ -101,7 +101,7 @@ class T4SchemaCatalogRegressionTest {
                 "NUMERIC_PRECISION", 8, "NUMERIC_SCALE", 0, "NULLABLE", true)));
         RelationalTableDefinition desired = RelationalTableDefinition.builder(catalog.table)
                 .addColumn(ColumnDefinition.builder("amount", "NUMBER").precision(8).scale(0).build()).build();
-        for (ReviewedSchemaPlan plan : catalog.reviews(desired)) {
+        for (SchemaMigrationPlan plan : catalog.reviews(desired)) {
             assertTrue(plan.operations().isEmpty());
         }
     }
@@ -112,11 +112,11 @@ class T4SchemaCatalogRegressionTest {
             Catalog catalog = mysql(true);
             var table = reactive ? catalog.reactiveReader.readTable("app", "items").block()
                     : catalog.jdbcReader.readTable("app", "items");
-            assertEquals(List.of("uq_code"), table.indexes().stream().map(IndexMetadata::name).toList());
+            assertEquals(List.of("uq_code"), table.indexes().stream().map(IndexDefinition::name).toList());
             assertTrue(table.index("uq_code").unique());
             DynamicForm target = DynamicForm.builder("items", "app.items")
                     .addField(DynamicField.of("code", "VARCHAR").withLength(16).withNullable(false)).build();
-            catalog.migrate(target, List.of(IndexMetadata.builder("uq_code").unique().addColumn("code").build()),
+            catalog.migrate(target, List.of(IndexDefinition.builder("uq_code").unique().addColumn("code").build()),
                     reactive);
             assertTrue(catalog.ddl.isEmpty(), catalog.ddl.toString());
             SchemaSnapshot snapshot = reactive ? catalog.reactiveReader.readSnapshot(catalog.table).block()
@@ -143,7 +143,7 @@ class T4SchemaCatalogRegressionTest {
             RelationalTableDefinition desired = RelationalTableDefinition.builder(catalog.table)
                     .addColumn(ColumnDefinition.builder("value", "INT")
                             .defaultConstraintName("DF_items_value").build()).build();
-            for (ReviewedSchemaPlan plan : catalog.reviews(desired)) {
+            for (SchemaMigrationPlan plan : catalog.reviews(desired)) {
                 assertTrue(plan.operations().isEmpty());
             }
         }
@@ -270,7 +270,7 @@ class T4SchemaCatalogRegressionTest {
             this.dialect = dialect;
             this.table = RelationIdentity.of(null, schema, "items");
             this.columns = columns;
-            SyncSqlExecutor sync = new SyncSqlExecutor() {
+            SyncSqlExecutor sync = new com.flying.orm.rdb.support.ListQueryFixture() {
                 @Override
                 public List<DynamicRow> query(SqlRequest request) {
                     return rows(request);
@@ -283,7 +283,7 @@ class T4SchemaCatalogRegressionTest {
                 }
 
                 @Override
-                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                     throw new AssertionError("schema must not request generated keys");
                 }
             };
@@ -307,7 +307,7 @@ class T4SchemaCatalogRegressionTest {
             reactive = ReactiveSchemaClient.create(async, dialect);
         }
 
-        private void migrate(DynamicForm target, List<IndexMetadata> indexes, boolean async) {
+        private void migrate(DynamicForm target, List<IndexDefinition> indexes, boolean async) {
             if (async) {
                 reactive.createOrAlterDetailed(target, indexes, List.of(), reactiveReader,
                         SchemaMigrationOptions.safe()).block();
@@ -316,7 +316,7 @@ class T4SchemaCatalogRegressionTest {
             }
         }
 
-        private List<ReviewedSchemaPlan> reviews(RelationalTableDefinition desired) {
+        private List<SchemaMigrationPlan> reviews(RelationalTableDefinition desired) {
             DatabaseDescriptor database = DatabaseDescriptor.of(dialect.name(), dialect.version(), dialect);
             return List.of(jdbc.reviewRelational(database, desired, jdbcReader, SchemaCompatibilityMode.EXACT),
                     reactive.reviewRelational(database, desired, reactiveReader, SchemaCompatibilityMode.EXACT).block());

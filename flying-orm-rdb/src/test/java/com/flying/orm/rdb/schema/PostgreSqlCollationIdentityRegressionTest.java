@@ -65,7 +65,7 @@ class PostgreSqlCollationIdentityRegressionTest {
         column.put("NULLABLE", true);
         column.put("COLUMN_REPRESENTABLE", true);
         column.put("COLUMN_COLLATION", collation);
-        SyncSqlExecutor executor = new SyncSqlExecutor() {
+        SyncSqlExecutor executor = new com.flying.orm.rdb.support.ListQueryFixture() {
             @Override
             public List<DynamicRow> query(SqlRequest request) {
                 requests.add(request);
@@ -82,7 +82,7 @@ class PostgreSqlCollationIdentityRegressionTest {
             }
 
             @Override
-            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                 throw new UnsupportedOperationException();
             }
         };

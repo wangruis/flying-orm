@@ -111,7 +111,8 @@ class JdbcBatchChunkCapacityTest {
     }
 
     private static JdbcBatchRows rows(BatchWriteRequest request) {
-        return new JdbcBatchRows(request.rows(), request.parameterCount(), request.options().maxRowBytes());
+        return new JdbcBatchRows(request.rows(), request.parameterCount(), request.options().maxRowBytes(), request.options().maxRows(),
+                new com.flying.orm.rdb.batch.BatchExecutionEvidence.Accumulator());
     }
 
 }

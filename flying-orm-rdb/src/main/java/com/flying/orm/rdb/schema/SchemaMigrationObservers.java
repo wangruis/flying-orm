@@ -1,6 +1,11 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.core.internal.error.ThrowableGraph;
+import com.flying.orm.rdb.execution.SqlExecutionSequenceException;
+import com.flying.orm.rdb.execution.SqlExecutionStepResult;
+import com.flying.orm.rdb.exception.RdbException;
 import com.flying.orm.rdb.observation.SqlExecutionStatus;
+import com.flying.orm.rdb.observation.SqlFailureCategory;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -22,15 +27,61 @@ public final class SchemaMigrationObservers {
 
     /** 返回不做任何事情的 observer，适合作为默认配置。 */
     public static SchemaMigrationObserver noop() {
-        return SchemaMigrationObserver.noop();
+        return Noop.INSTANCE;
+    }
+
+    private enum Noop implements SchemaMigrationObserver {
+        INSTANCE;
+        @Override
+        public void onMigration(SchemaMigrationObservation observation) {
+        }
     }
 
     /** observer 的普通故障只丢本次观测；直接抛出的 {@link Error} 仍原样传播。 */
     public static SchemaMigrationObserver safe(SchemaMigrationObserver observer) {
         SchemaMigrationObserver delegate = Objects.requireNonNull(observer,
                                                                    "schema migration observer must not be null");
-        return delegate instanceof SafeSchemaMigrationObserver
+        return delegate == Noop.INSTANCE || delegate instanceof SafeSchemaMigrationObserver
                 ? delegate : new SafeSchemaMigrationObserver(delegate);
+    }
+
+    /** 两种执行方式共享同一组完成步骤、失败阶段和计数规则。 */
+    static void observe(SchemaMigrationObserver observer, SchemaMigrationPlan plan,
+                        SchemaMigrationResult result, List<SqlExecutionStepResult> completedSteps,
+                        long startedAt, SqlExecutionStatus status, Throwable error) {
+        if (observer == Noop.INSTANCE) {
+            return;
+        }
+        SqlExecutionSequenceException sequenceFailure =
+                ThrowableGraph.findCause(error, SqlExecutionSequenceException.class);
+        List<SqlExecutionStepResult> progress;
+        if (result != null) {
+            progress = result.steps();
+        } else if (sequenceFailure != null) {
+            progress = sequenceFailure.completedWorkSteps();
+        } else {
+            synchronized (completedSteps) {
+                progress = List.copyOf(completedSteps);
+            }
+        }
+        long rows;
+        try {
+            rows = result == null
+                    ? progress.stream().mapToLong(SqlExecutionStepResult::rowsUpdated)
+                            .reduce(0L, SchemaMigrationResult::addRows)
+                    : result.rowsUpdated();
+        } catch (RdbException overflow) {
+            // 计数不可精确表示时不伪造观测，也不覆盖原始执行错误。
+            return;
+        }
+        SqlFailureCategory category = status == SqlExecutionStatus.SUCCESS
+                ? SqlFailureCategory.NONE : status == SqlExecutionStatus.CANCELLED
+                ? SqlFailureCategory.CANCELLED : SqlFailureCategory.classify(error);
+        observer.onMigration(new SchemaMigrationObservation(
+                status, plan.executableSqlCount(), progress.size(), rows,
+                System.nanoTime() - startedAt, category,
+                sequenceFailure == null ? null : sequenceFailure.phase(),
+                sequenceFailure == null ? null : sequenceFailure.stepIndex(), error));
     }
 
     private record SafeSchemaMigrationObserver(SchemaMigrationObserver delegate)

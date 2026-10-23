@@ -23,27 +23,20 @@ public final class EntityDmlOperator<T> {
     private final SqlRenderer renderer;
     private final EntityDmlModel<T> model;
 
-    private EntityDmlOperator(ReactiveFormClient client, SqlRenderer renderer, Class<T> type) {
-        this(client, renderer, null, type);
-    }
-
     private EntityDmlOperator(ReactiveFormClient client,
                               SqlRenderer renderer,
                               DynamicForm form,
                               Class<T> type) {
         this.client = Objects.requireNonNull(client, "form client must not be null");
         this.renderer = Objects.requireNonNull(renderer, "sql renderer must not be null");
-        var metadata = this.client.entityModels()
-                                  .metadata(Objects.requireNonNull(type, "entity type must not be null"));
-        this.model = new EntityDmlModel<>(metadata, form == null ? metadata.toDynamicForm() : form,
-                metadata.hasEnumConditionValues() ? client.entityModels().entityValues(type) : null);
+        this.model = new EntityDmlModel<>(client.entityModels(), form, type);
     }
 
     /** 创建绑定实体映射的响应式 DML 入口。 */
     public static <T> EntityDmlOperator<T> create(ReactiveFormClient client,
                                                    SqlRenderer renderer,
                                                    Class<T> type) {
-        return new EntityDmlOperator<>(client, renderer, type);
+        return new EntityDmlOperator<>(client, renderer, null, type);
     }
 
     /** Repository 内部使用显式表单时，实体字段映射不应偷偷换回注解生成的表单。 */
@@ -59,16 +52,16 @@ public final class EntityDmlOperator<T> {
     /** @return 当前实体的新查询命令 */
     public EntityDmlQueryOperator<T> query() {
         return new EntityDmlQueryOperator<>(client,
-                new EntityQueryCommand<>(model.newState(renderer), client.defaultFieldScope()));
+                model, renderer);
     }
 
     /** @return 当前实体的新更新命令 */
     public EntityDmlUpdateOperator<T> update() {
-        return new EntityDmlUpdateOperator<>(client, new EntityUpdateCommand<>(model.newState(renderer)));
+        return new EntityDmlUpdateOperator<>(client, model, renderer);
     }
 
     /** @return 当前实体的新删除命令；存在逻辑删除定义时默认执行逻辑删除 */
     public EntityDmlDeleteOperator<T> delete() {
-        return new EntityDmlDeleteOperator<>(client, new EntityDeleteCommand<>(model.newState(renderer)));
+        return new EntityDmlDeleteOperator<>(client, model, renderer);
     }
 }

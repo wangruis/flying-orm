@@ -2,13 +2,14 @@ package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.condition.ConditionGroup;
-import com.flying.orm.core.condition.StructuredConditionCompiler;
 import com.flying.orm.core.condition.StructuredConditionInput;
 import com.flying.orm.core.condition.StructuredConditionPolicy;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.form.DynamicField;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Function;
 
 /**
  * 客户端把前端结构化条件变成内部条件树时会走这里。
@@ -21,7 +22,16 @@ import java.util.Objects;
 @FunctionalInterface
 public interface StructuredConditionResolver {
 
-    ConditionGroup compile(DynamicForm form, StructuredConditionInput input, StructuredConditionPolicy policy);
+    /** 单表条件也使用同一字段解析入口。 */
+    default ConditionGroup compile(DynamicForm form, StructuredConditionInput input, StructuredConditionPolicy policy) {
+        return compileFields(form, name -> form.findField(name).orElse(null), input, policy);
+    }
+
+    /**
+     * 使用查询实际绑定的字段元数据编译条件；自定义实现同样接收关联字段解析器。
+     */
+    ConditionGroup compileFields(DynamicForm form, Function<String, DynamicField> fields,
+                                 StructuredConditionInput input, StructuredConditionPolicy policy);
 
     static StructuredConditionResolver defaults() {
         return defaults(ValueCodecRegistry.standard());
@@ -44,6 +54,20 @@ public interface StructuredConditionResolver {
         return composite(ValueCodecRegistry.standard(), customizers);
     }
 
+    /** 放行自定义 operator；标准字段条件仍使用默认 codec。 */
+    static StructuredConditionResolver allowOperators(String... operators) {
+        return allowOperators(ValueCodecRegistry.standard(), operators);
+    }
+
+    /** 放行自定义 operator，同时保留应用级字段值转换。 */
+    static StructuredConditionResolver allowOperators(ValueCodecRegistry valueCodecs, String... operators) {
+        StructuredConditionCustomizer[] customizers = new StructuredConditionCustomizer[operators.length];
+        for (int i = 0; i < operators.length; i++) {
+            customizers[i] = StructuredConditionCustomizer.allowOperator(operators[i]);
+        }
+        return composite(valueCodecs, customizers);
+    }
+
     /**
      * 创建带 customizer 的条件解析器。标准字段条件复用应用级 codec，自定义 term 则由对应
      * customizer 决定值形状和适配方式，不能误按挂载字段的 Java 类型强转。
@@ -56,21 +80,6 @@ public interface StructuredConditionResolver {
                                                   StructuredConditionCustomizer... customizers) {
         List<StructuredConditionCustomizer> safeCustomizers = List.of(Objects.requireNonNull(customizers,
                                                                                              "structured condition customizers must not be null"));
-        StructuredConditionCompiler compiler = StructuredConditionCompiler.create(valueCodecs);
-        StructuredConditionResolver validatedSeam = (form, input, policy) -> {
-            StructuredConditionInput adaptedInput = Objects.requireNonNull(input,
-                                                                           "structured condition input must not be null");
-            StructuredConditionPolicy adaptedPolicy = Objects.requireNonNull(policy,
-                                                                             "structured condition policy must not be null");
-            for (StructuredConditionCustomizer customizer : safeCustomizers) {
-                StructuredConditionCustomizer safeCustomizer = Objects.requireNonNull(customizer,
-                                                                                     "structured condition customizer must not be null");
-                safeCustomizer.validate(form, adaptedInput, adaptedPolicy);
-                adaptedInput = safeCustomizer.adapt(form, adaptedInput);
-                adaptedPolicy = safeCustomizer.customize(adaptedPolicy);
-            }
-            return compiler.compile(form, adaptedInput, adaptedPolicy);
-        };
-        return StructuredConditionResolvers.validating(validatedSeam);
+        return StructuredConditionResolvers.compiling(valueCodecs, safeCustomizers);
     }
 }

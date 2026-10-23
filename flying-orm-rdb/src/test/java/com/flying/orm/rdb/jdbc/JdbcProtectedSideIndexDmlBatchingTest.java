@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.jdbc;
 
+import com.flying.orm.rdb.internal.protection.ProtectedReplacementBatchPlan;
 import com.flying.orm.rdb.dialect.RdbDialect;
 
 import com.flying.orm.core.sql.render.SqlRequest;
@@ -29,6 +30,27 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class JdbcProtectedSideIndexDmlBatchingTest {
+
+    @Test
+    void generatedRowCombinesAllFieldTokensUsingTheReturnedOwner() throws Exception {
+        SideIndexRecorder recorder = new SideIndexRecorder(6);
+        ProtectedWriteWork base = work();
+        ProtectedWriteWork generated = new ProtectedWriteWork(base.kind(), base.writeRequest(), null,
+                base.ownerFields(), Map.of(), base.ownerPredicateSql(), base.deleteSql(), base.insertSql(),
+                List.of(base.fields().getFirst(),
+                        new ProtectedWriteWork.FieldTokens("email", base.fields().getFirst().tokens())));
+
+        JdbcProtectedBatchSideIndex.completeGeneratedRow(connection(recorder, false),
+                new ProtectedReplacementBatchPlan.Row(generated, List.of()), 1L,
+                com.flying.orm.rdb.result.DynamicRow.copyOf(Map.of("id", 19L)), Long.MAX_VALUE);
+
+        assertEquals(1, recorder.executeBatches.get());
+        assertEquals(6, recorder.parameterSets.size());
+        assertEquals(java.util.Collections.nCopies(6, 19L),
+                recorder.parameterSets.stream().map(values -> values.getFirst()).toList());
+        assertEquals(List.of("phone", "phone", "phone", "email", "email", "email"),
+                recorder.parameterSets.stream().map(values -> values.get(1)).toList());
+    }
 
     @Test
     void executesSingleDeleteWiderThanTheInternalBatchParameterTarget() throws Exception {
@@ -63,8 +85,9 @@ class JdbcProtectedSideIndexDmlBatchingTest {
         SideIndexRecorder recorder = new SideIndexRecorder(2);
         recorder.current.addAll(java.util.Collections.nCopies(fields.size() - 1, null));
         new JdbcProtectedBatchSideIndex().complete(connection(recorder, false),
-                new JdbcProtectedBatchSideIndex.Prepared(
-                        List.of(new JdbcProtectedBatchSideIndex.RowState(work, List.of()))));
+                new ProtectedReplacementBatchPlan.Prepared(
+                        List.of(new ProtectedReplacementBatchPlan.Row(work, List.of())),
+                        com.flying.orm.rdb.batch.BatchWriteOptions.DEFAULT_MAX_BUFFERED_BYTES));
         assertEquals(2, recorder.executeBatches.get());
         assertEquals(2, recorder.addBatches.get());
         assertEquals(fields.size() + 2, recorder.parameterSets.getFirst().size());
@@ -75,7 +98,7 @@ class JdbcProtectedSideIndexDmlBatchingTest {
         SideIndexRecorder recorder = new SideIndexRecorder(3);
         JdbcSqlExecutor executor = externalExecutor(connection(recorder, true));
 
-        executor.protectedWrite(work(), SqlExecutionOptions.safeDefaults());
+        executor.protectedWrite(work(), SqlExecutionOptions.unlimited());
 
         recorder.assertOneBoundedTokenBatch();
     }
@@ -89,7 +112,7 @@ class JdbcProtectedSideIndexDmlBatchingTest {
 
         try {
             RdbException failure = assertThrows(RdbException.class,
-                    () -> executor.protectedWrite(work(), SqlExecutionOptions.safeDefaults()));
+                    () -> executor.protectedWrite(work(), SqlExecutionOptions.unlimited()));
 
             assertEquals(RdbErrorKind.CANCELLED, failure.kind());
             assertEquals("HY008", failure.sqlState());
@@ -104,9 +127,10 @@ class JdbcProtectedSideIndexDmlBatchingTest {
     @Test
     void protectedBatchCompletionBatchesAllTokensForOneOwnerField() throws Exception {
         SideIndexRecorder recorder = new SideIndexRecorder(6);
-        JdbcProtectedBatchSideIndex.Prepared prepared = new JdbcProtectedBatchSideIndex.Prepared(
-                List.of(new JdbcProtectedBatchSideIndex.RowState(work(7L), List.of()),
-                        new JdbcProtectedBatchSideIndex.RowState(work(8L), List.of())));
+        ProtectedReplacementBatchPlan.Prepared prepared = new ProtectedReplacementBatchPlan.Prepared(
+                List.of(new ProtectedReplacementBatchPlan.Row(work(7L), List.of()),
+                        new ProtectedReplacementBatchPlan.Row(work(8L), List.of())),
+                        com.flying.orm.rdb.batch.BatchWriteOptions.DEFAULT_MAX_BUFFERED_BYTES);
 
         new JdbcProtectedBatchSideIndex().complete(
                 connection(recorder, false), prepared);
@@ -118,8 +142,9 @@ class JdbcProtectedSideIndexDmlBatchingTest {
     void jdbcSuccessNoInfoIsAcceptedOnlyForGeneratedSingleRowTokenInsert() throws Exception {
         SideIndexRecorder recorder = new SideIndexRecorder(3, Statement.SUCCESS_NO_INFO);
         ProtectedWriteWork work = work();
-        JdbcProtectedBatchSideIndex.Prepared prepared = new JdbcProtectedBatchSideIndex.Prepared(
-                List.of(new JdbcProtectedBatchSideIndex.RowState(work, List.of())));
+        ProtectedReplacementBatchPlan.Prepared prepared = new ProtectedReplacementBatchPlan.Prepared(
+                List.of(new ProtectedReplacementBatchPlan.Row(work, List.of())),
+                        com.flying.orm.rdb.batch.BatchWriteOptions.DEFAULT_MAX_BUFFERED_BYTES);
 
         new JdbcProtectedBatchSideIndex().complete(
                 connection(recorder, false), prepared);
@@ -131,8 +156,9 @@ class JdbcProtectedSideIndexDmlBatchingTest {
     void jdbcExecuteFailedCannotSatisfyPerTokenExactlyOneContract() {
         SideIndexRecorder recorder = new SideIndexRecorder(3, Statement.EXECUTE_FAILED);
         ProtectedWriteWork work = work();
-        JdbcProtectedBatchSideIndex.Prepared prepared = new JdbcProtectedBatchSideIndex.Prepared(
-                List.of(new JdbcProtectedBatchSideIndex.RowState(work, List.of())));
+        ProtectedReplacementBatchPlan.Prepared prepared = new ProtectedReplacementBatchPlan.Prepared(
+                List.of(new ProtectedReplacementBatchPlan.Row(work, List.of())),
+                        com.flying.orm.rdb.batch.BatchWriteOptions.DEFAULT_MAX_BUFFERED_BYTES);
 
         assertThrows(IllegalStateException.class, () -> new JdbcProtectedBatchSideIndex().complete(
                 connection(recorder, false), prepared));
@@ -143,8 +169,9 @@ class JdbcProtectedSideIndexDmlBatchingTest {
         for (int invalid : List.of(0, 2)) {
             SideIndexRecorder recorder = new SideIndexRecorder(3, invalid);
             ProtectedWriteWork work = work();
-            JdbcProtectedBatchSideIndex.Prepared prepared = new JdbcProtectedBatchSideIndex.Prepared(
-                    List.of(new JdbcProtectedBatchSideIndex.RowState(work, List.of())));
+            ProtectedReplacementBatchPlan.Prepared prepared = new ProtectedReplacementBatchPlan.Prepared(
+                    List.of(new ProtectedReplacementBatchPlan.Row(work, List.of())),
+                        com.flying.orm.rdb.batch.BatchWriteOptions.DEFAULT_MAX_BUFFERED_BYTES);
 
             assertThrows(IllegalStateException.class, () -> new JdbcProtectedBatchSideIndex().complete(
                     connection(recorder, false), prepared));
@@ -153,11 +180,12 @@ class JdbcProtectedSideIndexDmlBatchingTest {
 
     @Test
     void jdbcTokenBatchIsSplitAtTheFixedInternalLimit() throws Exception {
-        int tokenCount = JdbcProtectedSideIndexDml.MAX_TOKEN_BATCH_SIZE + 1;
+        int tokenCount = 501;
         SideIndexRecorder recorder = new SideIndexRecorder(tokenCount);
         ProtectedWriteWork work = work(7L, tokenCount);
-        JdbcProtectedBatchSideIndex.Prepared prepared = new JdbcProtectedBatchSideIndex.Prepared(
-                List.of(new JdbcProtectedBatchSideIndex.RowState(work, List.of())));
+        ProtectedReplacementBatchPlan.Prepared prepared = new ProtectedReplacementBatchPlan.Prepared(
+                List.of(new ProtectedReplacementBatchPlan.Row(work, List.of())),
+                        com.flying.orm.rdb.batch.BatchWriteOptions.DEFAULT_MAX_BUFFERED_BYTES);
 
         new JdbcProtectedBatchSideIndex().complete(
                 connection(recorder, false), prepared);

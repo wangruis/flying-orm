@@ -1,6 +1,8 @@
 package com.flying.orm.rdb.internal.mapping;
 
 import com.flying.orm.core.type.DatabaseType;
+import com.flying.orm.core.annotation.FieldStrategy;
+import com.flying.orm.core.annotation.FieldFill;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.condition.TermHandler;
@@ -11,7 +13,7 @@ import com.flying.orm.rdb.mapping.EntityEnumStorage;
 import com.flying.orm.rdb.mapping.EntityFieldMetadata;
 import com.flying.orm.rdb.mapping.EntityFieldFiller;
 import com.flying.orm.rdb.mapping.EntityMetadata;
-import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
+import com.flying.orm.rdb.mapping.EntityValueWriter;
 import com.flying.orm.rdb.mapping.MappingException;
 import com.flying.orm.rdb.protection.ProtectedConditions;
 
@@ -32,7 +34,8 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
-import java.util.function.BiPredicate;
+import java.util.function.Function;
+import java.util.function.BiConsumer;
 import java.util.function.UnaryOperator;
 
 /**
@@ -51,10 +54,13 @@ public final class EntityValues<T> {
     private static final DatabaseType VARCHAR_TYPE = DatabaseType.of("VARCHAR");
 
     private final Map<String, ValueReader> readers;
+    private final Map<String, ValueReader> identityReaders;
     private final Map<String, UnaryOperator<Object>> conditionEncoders;
 
     private final EntityMetadata<T> metadata;
     private final EntityFieldFiller fieldFiller;
+    private final Map<String, BiConsumer<Object, Object>> fillWriters;
+    private final Object upsertLayoutIdentity;
 
     private EntityValues(Map<String, ValueReader> readers,
                          Map<String, UnaryOperator<Object>> conditionEncoders,
@@ -64,17 +70,39 @@ public final class EntityValues<T> {
         this.conditionEncoders = conditionEncoders;
         this.metadata = Objects.requireNonNull(metadata, "entity metadata must not be null");
         this.fieldFiller = Objects.requireNonNull(fieldFiller, "entity field filler must not be null");
+        this.fillWriters = EntityValueWriter.fillWriters(metadata);
+        this.upsertLayoutIdentity = metadata.fields().stream().noneMatch(field ->
+                field.primaryKey() && field.generation().generated()
+                        || field.insertable() && conditional(field.insertStrategy())
+                        || field.updatable() && (conditional(field.updateStrategy())
+                                || field.fill() == FieldFill.INSERT_DEFAULT)) ? new Object() : null;
+        Map<String, ValueReader> identities = new LinkedHashMap<>();
+        readers.forEach((name, reader) -> {
+            EntityFieldMetadata field = reader.field();
+            if (field.primaryKey() || field.version()) {
+                identities.put(name, reader);
+            }
+        });
+        this.identityReaders = identities;
     }
 
-    /**
-     * 读取一份实体快照，返回按实体元数据顺序排列的“数据库列名 -> Java 值”。
-     *
-     * @param entity 本次写入的实体
-     * @return 新建的可修改 Map；修改它不会反向修改实体或缓存计划
-     * @throws MappingException getter 或字段无法读取时抛出
-     */
-    public Map<String, Object> read(T entity) {
-        return read(entity, null, (field, value) -> true);
+    /** 按读取计划顺序提取全部持久值供保留预算估算；不填充或复制元素，不建立中间字段 Map。 */
+    public Object[] readRetainedValues(T entity) {
+        T safeEntity = Objects.requireNonNull(entity, "entity must not be null");
+        Object[] values = new Object[readers.size()];
+        int index = 0;
+        for (ValueReader reader : readers.values()) {
+            values[index++] = reader.stored(reader.read(safeEntity));
+        }
+        return values;
+    }
+
+    /** 只读取缓存的主键和版本取值计划，不访问无关属性，也不执行写入字段填充。 */
+    public Map<String, Object> readIdentity(T entity) {
+        T safeEntity = Objects.requireNonNull(entity, "entity must not be null");
+        Map<String, Object> values = new LinkedHashMap<>(identityReaders.size());
+        identityReaders.forEach((name, reader) -> values.put(name, reader.stored(reader.read(safeEntity))));
+        return values;
     }
 
     /**
@@ -84,16 +112,38 @@ public final class EntityValues<T> {
      * 才会触发 identity 或 sequence 默认值。生成键读取和回填是另一段执行职责，这里只保证插入参数不会压掉数据库默认值。</p>
      */
     public Map<String, Object> readForInsert(T entity) {
-        return read(entity, EntityFieldFiller.Operation.INSERT, (field, value) -> field.insertable()
-                && !field.generation().generated()
-                && EntityWriteValuePolicy.accepts(field.insertStrategy(), value));
+        return read(entity, EntityFieldFiller.Operation.INSERT, field ->
+                field.insertable() && !field.generation().generated() ? field.insertStrategy() : FieldStrategy.NEVER);
     }
 
     /** 读取 update 的 SET 列表，只保留明确允许更新的字段。 */
     public Map<String, Object> readForUpdate(T entity) {
         return read(entity, EntityFieldFiller.Operation.UPDATE,
-                    (field, value) -> field.updatable()
-                            && EntityWriteValuePolicy.accepts(field.updateStrategy(), value));
+                field -> field.updatable() ? field.updateStrategy() : FieldStrategy.NEVER);
+    }
+
+    /** Repository 的主键和版本由独立定位计划读取，不进入 SET，也不触发其更新填充。 */
+    public Map<String, Object> readForRepositoryUpdate(T entity) {
+        return read(entity, EntityFieldFiller.Operation.UPDATE, field ->
+                field.updatable() && !field.primaryKey() && !field.version()
+                        ? field.updateStrategy() : FieldStrategy.NEVER);
+    }
+
+    /** 仅读取已选数据库列；沿用实体填充、存储编码及更新策略，不访问其他 getter。 */
+    public Map<String, Object> readForUpdate(T entity, Set<String> columns) {
+        T safeEntity = Objects.requireNonNull(entity, "entity must not be null");
+        Map<String, Object> values = new LinkedHashMap<>();
+        for (String column : columns) {
+            EntityFieldMetadata field = metadata.field(column);
+            if (!field.updatable() || field.updateStrategy() == FieldStrategy.NEVER) {
+                continue;
+            }
+            Object value = readValue(safeEntity, field, readers.get(column), EntityFieldFiller.Operation.UPDATE);
+            if (EntityWriteValuePolicy.accepts(field.updateStrategy(), value)) {
+                values.put(column, value);
+            }
+        }
+        return values;
     }
 
     /** Reuse the write plan's enum representation before the shared field/dialect condition encoding. */
@@ -120,30 +170,46 @@ public final class EntityValues<T> {
                                                  .where(fieldName, operator, value)
                                                  .build();
         TermCondition term = (TermCondition) condition.children().getFirst();
-        return normalizedConditionValue(term, terms);
+        return encodedConditionValue(term, term.value(), conditionEncoder(term.field(), term.operator(), terms));
     }
 
     private TermCondition normalizeTerm(TermCondition term, TermRegistry terms) {
+        UnaryOperator<Object> encoder = conditionEncoder(term.field(), term.operator(), terms);
+        if (encoder == null) {
+            return term;
+        }
         Object source = term.value();
-        Object encoded = normalizedConditionValue(term, terms);
-        return encoded == source ? term : TermCondition.of(term.field(), term.operator(), encoded);
+        Object encoded = encodedConditionValue(term, source, encoder);
+        return encoded == source ? term : TermCondition.of(term.identity(), term.operator(), encoded);
     }
 
-    private Object normalizedConditionValue(TermCondition term, TermRegistry terms) {
-        Object value = term.value();
-        UnaryOperator<Object> encoder = enumEncoder(term.field());
-        if (encoder == null) {
+    /** 结构化编译器已经整理值形状，此处只映射单个枚举值，不创建或遍历中间条件树。 */
+    public Object normalizeConditionScalar(String field, String operator, Object value, TermRegistry terms) {
+        if (!(value instanceof Enum<?>)) {
             return value;
         }
+        UnaryOperator<Object> encoder = conditionEncoder(field, operator, terms);
+        return encoder == null ? value : encoder.apply(value);
+    }
+
+    private UnaryOperator<Object> conditionEncoder(String field, String operator, TermRegistry terms) {
+        UnaryOperator<Object> encoder = enumEncoder(field);
+        if (encoder == null) return null;
+        TermHandler standard = TermRegistry.standard().find(operator).orElse(null);
+        return ProtectedConditions.EXACT.equals(operator)
+                || ProtectedConditions.SUFFIX.equals(operator)
+                || ProtectedConditions.CONTAINS.equals(operator)
+                || standard != null && terms.find(operator).orElse(null) == standard ? encoder : null;
+    }
+
+    private static Object encodedConditionValue(TermCondition term, Object value, UnaryOperator<Object> encoder) {
+        if (encoder == null) return value;
         if (ProtectedConditions.EXACT.equals(term.operator())
                 || ProtectedConditions.SUFFIX.equals(term.operator())
                 || ProtectedConditions.CONTAINS.equals(term.operator())) {
             return value instanceof Enum<?> ? encoder.apply(value) : value;
         }
         TermHandler standard = TermRegistry.standard().find(term.operator()).orElse(null);
-        if (standard == null || terms.find(term.operator()).orElse(null) != standard) {
-            return value;
-        }
         return switch (standard.shape()) {
             case SCALAR -> value instanceof Enum<?> ? encoder.apply(value) : value;
             case COLLECTION, RANGE -> encodeEnumElements(value, encoder);
@@ -184,50 +250,82 @@ public final class EntityValues<T> {
     public RepositoryUpsertValues repositoryUpsertValues(T entity) {
         T safeEntity = Objects.requireNonNull(entity, "entity must not be null");
         Map<String, Object> values = new LinkedHashMap<>();
-        Map<String, Object> insertValues = new LinkedHashMap<>();
-        Map<String, Object> updateValues = new LinkedHashMap<>();
-        readers.forEach((name, reader) -> {
-            EntityFieldMetadata field = metadata.field(name);
-            Object value = EntityWriteValuePolicy.fill(
-                    safeEntity,
-                    field,
-                    EntityFieldFiller.Operation.UPSERT,
-                    reader.read(safeEntity),
-                    fieldFiller);
-            value = reader.stored(value);
-            boolean insert = field.insertable()
-                    && EntityWriteValuePolicy.accepts(field.insertStrategy(), value);
-            boolean update = field.updatable()
+        Map<String, Object> insertValues = values;
+        Map<String, Object> updateValues = values;
+        for (Map.Entry<String, ValueReader> entry : readers.entrySet()) {
+            String name = entry.getKey();
+            ValueReader reader = entry.getValue();
+            EntityFieldMetadata field = reader.field();
+            boolean generatedIdentity = field.primaryKey() && field.generation().generated();
+            boolean insert = field.insertable() && !field.generation().generated()
+                    && field.insertStrategy() != FieldStrategy.NEVER;
+            boolean update = field.updatable() && field.updateStrategy() != FieldStrategy.NEVER;
+            if (!insert && !update && !generatedIdentity) {
+                continue;
+            }
+            Object original = reader.read(safeEntity);
+            if (generatedIdentity) {
+                insert = original != null;
+                update = false;
+                if (!insert) continue;
+            }
+            boolean insertDefault = field.fill() == FieldFill.INSERT_DEFAULT;
+            Object filled = generatedIdentity || insertDefault && !insert ? original : EntityWriteValuePolicy.fill(
+                    safeEntity, field, EntityFieldFiller.Operation.UPSERT, original, fieldFiller);
+            Object value = reader.stored(safeEntity, fillWriters, original, filled);
+            insert &= generatedIdentity || EntityWriteValuePolicy.accepts(field.insertStrategy(), value);
+            update &= !(insertDefault && original == null && filled != null)
                     && EntityWriteValuePolicy.accepts(field.updateStrategy(), value);
-            if (insert) {
+            if (!insert && !update) {
+                continue;
+            }
+            // 阶段字段与并集相同就共用；遇到首个不属于该阶段的字段时，才复制已有前缀。
+            if (!insert && insertValues == values) {
+                insertValues = new LinkedHashMap<>(values);
+            }
+            if (!update && updateValues == values) {
+                updateValues = new LinkedHashMap<>(values);
+            }
+            values.put(name, value);
+            if (insert && insertValues != values) {
                 insertValues.put(name, value);
             }
-            if (update) {
+            if (update && updateValues != values) {
                 updateValues.put(name, value);
             }
-            if (insert || update) {
-                values.put(name, value);
-            }
-        });
-        return new RepositoryUpsertValues(values, insertValues, updateValues);
+        }
+        return new RepositoryUpsertValues(values, insertValues, updateValues, upsertLayoutIdentity);
+    }
+
+    private static boolean conditional(FieldStrategy strategy) {
+        return strategy == FieldStrategy.NOT_NULL || strategy == FieldStrategy.NOT_EMPTY;
     }
 
     private Map<String, Object> read(T entity,
                                      EntityFieldFiller.Operation operation,
-                                     BiPredicate<EntityFieldMetadata, Object> included) {
+                                     Function<EntityFieldMetadata, FieldStrategy> strategy) {
         T safeEntity = Objects.requireNonNull(entity, "entity must not be null");
         Map<String, Object> values = new LinkedHashMap<>();
         // LinkedHashMap 保留元数据声明顺序，让单行和批量 SQL 都能得到稳定列顺序。
         readers.forEach((name, reader) -> {
-            EntityFieldMetadata field = metadata.field(name);
-            Object value = reader.read(safeEntity);
-            value = EntityWriteValuePolicy.fill(safeEntity, field, operation, value, fieldFiller);
-            value = reader.stored(value);
-            if (included.test(field, value)) {
+            EntityFieldMetadata field = reader.field();
+            FieldStrategy writeStrategy = strategy.apply(field);
+            if (writeStrategy == FieldStrategy.NEVER) {
+                return;
+            }
+            Object value = readValue(safeEntity, field, reader, operation);
+            if (EntityWriteValuePolicy.accepts(writeStrategy, value)) {
                 values.put(name, value);
             }
         });
         return values;
+    }
+
+    private Object readValue(T entity, EntityFieldMetadata field, ValueReader reader,
+                              EntityFieldFiller.Operation operation) {
+        Object original = reader.read(entity);
+        Object filled = EntityWriteValuePolicy.fill(entity, field, operation, original, fieldFiller);
+        return reader.stored(entity, fillWriters, original, filled);
     }
 
     /** 仅供内部测试或注册表缓存未命中时创建计划。 */
@@ -244,27 +342,13 @@ public final class EntityValues<T> {
     public static <T> EntityValues<T> createUncached(Class<T> type,
                                                      EntityMetadata<T> metadata,
                                                      EntityFieldFiller fieldFiller) {
-        return createUncached(type, metadata, fieldFiller, Map.of());
-    }
-
-    /** 注册表在冷路径绑定精确字段映射，取值时保留应用 codec 所需的领域类型。 */
-    public static <T> EntityValues<T> createUncached(
-            Class<T> type,
-            EntityMetadata<T> metadata,
-            EntityFieldFiller fieldFiller,
-            Map<String, EntityTypeMappingRegistry.Mapping> customMappings) {
-        Map<String, EntityTypeMappingRegistry.Mapping> safeCustomMappings = Objects.requireNonNull(
-                customMappings, "custom entity field mappings must not be null");
-        if (type.isRecord()) {
-            return recordValues(type, metadata, fieldFiller, safeCustomMappings);
-        }
-        return beanValues(type, metadata, fieldFiller, safeCustomMappings);
+        return type.isRecord() ? recordValues(type, metadata, fieldFiller)
+                : beanValues(type, metadata, fieldFiller);
     }
 
     private static <T> EntityValues<T> recordValues(Class<T> type,
                                                     EntityMetadata<T> metadata,
-                                                    EntityFieldFiller fieldFiller,
-                                                    Map<String, EntityTypeMappingRegistry.Mapping> customMappings) {
+                                                    EntityFieldFiller fieldFiller) {
         Map<String, ValueReader> readers = new LinkedHashMap<>();
         Map<String, UnaryOperator<Object>> conditionEncoders = new LinkedHashMap<>();
         for (RecordComponent component : type.getRecordComponents()) {
@@ -277,16 +361,15 @@ public final class EntityValues<T> {
             Method accessor = component.getAccessor();
             requireAccessible(accessor, "record accessor");
             // 这里的 key 必须是数据库列名。Repository 后面会拿它去找 DynamicForm 字段并渲染 SQL。
-            readers.put(field.columnName(), stored(new MethodValueReader(accessor), field, component.getType(),
-                                                   customMappings.containsKey(field.name()), conditionEncoders));
+            readers.put(field.columnName(), stored(new MethodValueReader(accessor, field), field, component.getType(),
+                                                   conditionEncoders));
         }
         return new EntityValues<>(readers, conditionEncoders, metadata, fieldFiller);
     }
 
     private static <T> EntityValues<T> beanValues(Class<T> type,
                                                   EntityMetadata<T> metadata,
-                                                  EntityFieldFiller fieldFiller,
-                                                  Map<String, EntityTypeMappingRegistry.Mapping> customMappings) {
+                                                  EntityFieldFiller fieldFiller) {
         try {
             Map<String, ValueReader> readers = new LinkedHashMap<>();
             Map<String, UnaryOperator<Object>> conditionEncoders = new LinkedHashMap<>();
@@ -301,9 +384,9 @@ public final class EntityValues<T> {
                         && !"class".equals(property.getName())) {
                     requireAccessible(readMethod, "bean getter");
                     // Java 里叫 name，表里可能叫 user_name。写库时直接交出列名，调用方不用自己转。
-                    readers.put(field.columnName(), stored(new MethodValueReader(readMethod), field,
-                                                           readMethod.getReturnType(),
-                                                           customMappings.containsKey(field.name()), conditionEncoders));
+                    readers.put(field.columnName(), stored(new MethodValueReader(readMethod, field), field,
+                                                           EntityMetadataHierarchy.memberClass(type, readMethod.getGenericReturnType()),
+                                                           conditionEncoders));
                     readProperties.add(field.name());
                 }
             }
@@ -315,8 +398,9 @@ public final class EntityValues<T> {
                     requireAccessible(field, "bean field");
                     // 没有 getter 的字段也按同一套实体元数据走，避免 Bean 和 record 表现不一致。
                     readers.put(persistentField.columnName(),
-                                stored(new FieldValueReader(field), persistentField, field.getType(),
-                                       customMappings.containsKey(persistentField.name()), conditionEncoders));
+                                stored(new FieldValueReader(field, persistentField), persistentField,
+                                       EntityMetadataHierarchy.memberClass(type, field.getGenericType()),
+                                       conditionEncoders));
                 }
             }
             return new EntityValues<>(readers, conditionEncoders, metadata, fieldFiller);
@@ -327,7 +411,7 @@ public final class EntityValues<T> {
 
     public int logicalWeight() {
         // 与元数据、行映射计划统一使用“反射槽”计量，避免固定头部被三种派生模型重复收费。
-        return Math.max(1, readers.size());
+        return Math.max(1, readers.size() + fillWriters.size());
     }
 
     /**
@@ -343,15 +427,32 @@ public final class EntityValues<T> {
 
     private interface ValueReader {
 
+        EntityFieldMetadata field();
+
         Object read(Object target);
 
         default Object stored(Object value) {
             return value;
         }
+
+        default Object stored(Object entity, Map<String, BiConsumer<Object, Object>> writers,
+                              Object original, Object filled) {
+            Object stored = stored(filled);
+            if (filled != original && !writers.isEmpty()) {
+                BiConsumer<Object, Object> writer = writers.get(field().name());
+                if (writer != null) writer.accept(entity, filled);
+            }
+            return stored;
+        }
     }
 
     private record EncodedValueReader(ValueReader source,
                                       UnaryOperator<Object> encoder) implements ValueReader {
+
+        @Override
+        public EntityFieldMetadata field() {
+            return source.field();
+        }
 
         @Override
         public Object read(Object target) {
@@ -367,8 +468,8 @@ public final class EntityValues<T> {
     private static ValueReader stored(ValueReader reader,
                                        EntityFieldMetadata field,
                                        Class<?> javaType,
-                                       boolean customMapping,
                                        Map<String, UnaryOperator<Object>> conditionEncoders) {
+        boolean customMapping = field.customMapping() != null;
         UnaryOperator<Object> enumEncoder;
         String enumMember = field.enumValueMember();
         if (enumMember != null) {
@@ -417,7 +518,7 @@ public final class EntityValues<T> {
         return value;
     }
 
-    private record MethodValueReader(Method method) implements ValueReader {
+    private record MethodValueReader(Method method, EntityFieldMetadata field) implements ValueReader {
 
         @Override
         public Object read(Object target) {
@@ -430,14 +531,14 @@ public final class EntityValues<T> {
         }
     }
 
-    private record FieldValueReader(Field field) implements ValueReader {
+    private record FieldValueReader(Field member, EntityFieldMetadata field) implements ValueReader {
 
         @Override
         public Object read(Object target) {
             try {
-                return field.get(target);
+                return member.get(target);
             } catch (IllegalAccessException error) {
-                throw new MappingException("entity field cannot be read: " + field.getName(), error);
+                throw new MappingException("entity field cannot be read: " + member.getName(), error);
             }
         }
     }

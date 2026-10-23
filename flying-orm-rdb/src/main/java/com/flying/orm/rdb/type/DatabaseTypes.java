@@ -10,6 +10,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
+import java.time.OffsetTime;
 import java.time.Period;
 import java.util.List;
 import java.util.Locale;
@@ -39,7 +40,7 @@ public final class DatabaseTypes {
         }
         return switch (effectiveLogicalType(safeType, dialectName)) {
             case SMALL_INTEGER, INTEGER, BIG_INTEGER, DECIMAL, FLOAT, BOOLEAN, DATE, TIME,
-                    TIMESTAMP, OFFSET_TIMESTAMP -> true;
+                    TIMESTAMP, OFFSET_TIMESTAMP, OFFSET_TIME -> true;
             default -> false;
         };
     }
@@ -50,7 +51,7 @@ public final class DatabaseTypes {
      */
     public static Class<?> parameterType(DatabaseType type, String dialectName, boolean nativeBoolean) {
         DatabaseType safeType = requireType(type);
-        String dialect = normalizeDialect(dialectName);
+        String dialect = Objects.requireNonNull(dialectName, "dialect name must not be null");
         if (safeType.isArray()) {
             return Object.class;
         }
@@ -61,12 +62,16 @@ public final class DatabaseTypes {
             case DECIMAL -> BigDecimal.class;
             case FLOAT -> Double.class;
             case BOOLEAN -> legacyOracleBoolean(dialect, nativeBoolean) ? Integer.class : Boolean.class;
-            case OFFSET_TIMESTAMP -> "MYSQL".equals(dialect) ? LocalDateTime.class : OffsetDateTime.class;
+            case OFFSET_TIMESTAMP -> "MYSQL".equals(normalizeDialect(dialect)) ? LocalDateTime.class : OffsetDateTime.class;
             case TIMESTAMP -> LocalDateTime.class;
             case DATE -> LocalDate.class;
-            case TIME -> "ORACLE".equals(dialect) ? String.class : LocalTime.class;
-            case INTERVAL -> oracleIntervalParameterType(safeType, dialect);
-            case UUID -> switch (dialect) {
+            case TIME -> "ORACLE".equals(normalizeDialect(dialect)) ? String.class : LocalTime.class;
+            case OFFSET_TIME -> switch (normalizeDialect(dialect)) {
+                case "H2", "POSTGRESQL" -> OffsetTime.class;
+                default -> String.class;
+            };
+            case INTERVAL -> oracleIntervalParameterType(safeType, normalizeDialect(dialect));
+            case UUID -> switch (normalizeDialect(dialect)) {
                 case "H2", "POSTGRESQL" -> UUID.class;
                 case "MYSQL", "ORACLE", "SQLSERVER" -> String.class;
                 default -> Object.class;
@@ -81,10 +86,11 @@ public final class DatabaseTypes {
         if (safeType.isArray()) {
             return LogicalType.OTHER;
         }
-        String dialect = normalizeDialect(dialectName);
-        if ("MYSQL".equals(dialect)
-                && "BIT".equals(safeType.baseName())
-                && safeType.arguments().equals(List.of("1"))) {
+        Objects.requireNonNull(dialectName, "dialect name must not be null");
+        // 只有 BIT(1) 的逻辑含义依赖方言，普通字段不处理与类型无关的方言文本。
+        if ("BIT".equals(safeType.baseName())
+                && safeType.arguments().equals(List.of("1"))
+                && "MYSQL".equals(normalizeDialect(dialectName))) {
             return LogicalType.BOOLEAN;
         }
         return safeType.logicalType();
@@ -301,7 +307,9 @@ public final class DatabaseTypes {
     }
 
     private static String upper(DatabaseType type) {
-        return type.canonical().toUpperCase(Locale.ROOT);
+        String declaration = type.canonical();
+        return declaration.indexOf('\'') >= 0 || declaration.indexOf('"') >= 0 || declaration.indexOf('`') >= 0
+                ? declaration : declaration.toUpperCase(Locale.ROOT);
     }
 
     private static DatabaseType requireType(DatabaseType type) {
@@ -309,6 +317,17 @@ public final class DatabaseTypes {
     }
 
     private static String normalizeDialect(String value) {
-        return Objects.requireNonNull(value, "dialect name must not be null").trim().toUpperCase(Locale.ROOT);
+        String dialect = Objects.requireNonNull(value, "dialect name must not be null").trim();
+        // 字段绑定会反复调用；内置方言复用名称，其他输入仍保留原有规范化语义。
+        return switch (dialect) {
+            case "h2", "H2" -> "H2";
+            case "mysql", "MYSQL" -> "MYSQL";
+            case "postgresql", "POSTGRESQL" -> "POSTGRESQL";
+            case "oracle", "ORACLE" -> "ORACLE";
+            case "sqlserver", "SQLSERVER" -> "SQLSERVER";
+            case "sql_server", "SQL_SERVER" -> "SQL_SERVER";
+            case "generic", "GENERIC" -> "GENERIC";
+            default -> dialect.toUpperCase(Locale.ROOT);
+        };
     }
 }

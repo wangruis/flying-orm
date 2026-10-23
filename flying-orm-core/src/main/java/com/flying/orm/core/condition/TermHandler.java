@@ -27,7 +27,7 @@ public interface TermHandler {
     }
 
     /**
-     * 返回可配置查询使用的显式扩展契约。空值保留既有 trusted startup extension 语义。
+     * 返回可选扩展契约；没有额外能力或成本声明时无需提供。
      */
     default Optional<TermExtensionDescriptor> descriptor() {
         return Optional.empty();

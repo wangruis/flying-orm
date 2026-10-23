@@ -1,9 +1,6 @@
 package com.flying.orm.rdb.jdbc;
 
-import static com.flying.orm.rdb.jdbc.JdbcFailureSupport.suppress;
-
 import com.flying.orm.core.sql.render.SqlRequest;
-import com.flying.orm.rdb.exception.RdbExceptionTranslator;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.observation.SqlExecutionOperation;
 import com.flying.orm.rdb.observation.SqlStatementType;
@@ -66,7 +63,7 @@ public final class JdbcAdvancedOperations {
                                  statementType, 0L, startedAt);
             return result;
         } catch (SQLException | RuntimeException error) {
-            RuntimeException translated = RdbExceptionTranslator.translate(error);
+            RuntimeException translated = requestValidator.translate(error);
             observations.failure(SqlExecutionOperation.QUERY, safeRequest, executionParameters,
                                  statementType, 0L, startedAt, translated);
             throw translated;
@@ -88,38 +85,18 @@ public final class JdbcAdvancedOperations {
             return callback.apply(value.apply(connection));
         } catch (SQLException | RuntimeException error) {
             failure = error;
-            throw RdbExceptionTranslator.translate(error);
+            throw requestValidator.translate(error);
         } catch (Error error) {
             failure = error;
             throw error;
         } finally {
             if (connection != null) {
-                releaseConnection(connection, failure);
+                try {
+                    requestValidator.release(connection, null, SqlExecutionOperation.QUERY, failure == null, failure);
+                } catch (RuntimeException cleanup) {
+                    throw requestValidator.translate(cleanup);
+                }
             }
-        }
-    }
-    /**
-     * 元数据回调本身没有 SQL 请求，不能借用 QUERY 观测去伪造一条 SQL 事件。
-     * 连接释放失败仍会被稳定翻译；回调本来已失败时则作为 suppressed 保留，优先保住根因。
-     */
-    private void releaseConnection(java.sql.Connection connection,
-                                             Throwable failure) {
-        try {
-            requestValidator.release(connection, null, SqlExecutionOperation.QUERY, failure == null, failure);
-        } catch (RuntimeException | Error cleanupError) {
-            if (failure instanceof VirtualMachineError failureFatal) {
-                suppress(failureFatal, cleanupError);
-                throw failureFatal;
-            }
-            if (cleanupError instanceof VirtualMachineError cleanupFatal) {
-                suppress(cleanupFatal, failure);
-                throw cleanupFatal;
-            }
-            if (failure != null) {
-                suppress(failure, cleanupError);
-                return;
-            }
-            throw RdbExceptionTranslator.translate(cleanupError);
         }
     }
     private <T> T executeScrollable(java.sql.Connection connection,

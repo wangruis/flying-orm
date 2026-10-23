@@ -8,6 +8,6 @@ class RdbDialectUpsertFeatureTest {
 
     @Test
     void h2ReportsItsMergeUpsertCapability() {
-        assertTrue(RdbDialect.h2().supports(DialectFeature.MERGE_UPSERT));
+        assertTrue(RdbDialect.h2().supports(DialectCapabilityId.MERGE_UPSERT));
     }
 }

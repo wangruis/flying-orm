@@ -76,39 +76,9 @@ final class R2dbcLargeObjectRows {
 
     static Mono<DynamicRow> map(Result.RowSegment segment,
                                 SqlExecutionOptions options,
-                                R2dbcLargeObjectScope cleanupScope) {
-        Row row = segment.row();
-        return mapper(row.getMetadata(), options, cleanupScope).map(row);
-    }
-
-    static Mono<DynamicRow> map(Result.RowSegment segment,
-                                SqlExecutionOptions options,
                                 Supplier<R2dbcLargeObjectScope> cleanupScope) {
         Row row = segment.row();
         return mapper(row.getMetadata(), options, cleanupScope).map(row);
-    }
-
-    static Mono<DynamicRow> map(Row row,
-                                RowMetadata metadata,
-                                SqlExecutionOptions options,
-                                R2dbcLargeObjectScope cleanupScope) {
-        return mapper(metadata, options, cleanupScope).map(row);
-    }
-
-    static Mono<DynamicRow> map(Row row, RowMetadata metadata, SqlExecutionOptions options) {
-        return Mono.usingWhen(Mono.fromSupplier(R2dbcLargeObjectScope::new),
-                              scope -> map(row, metadata, options, scope),
-                              R2dbcLargeObjectScope::complete,
-                              R2dbcLargeObjectScope::error,
-                              R2dbcLargeObjectScope::cancel);
-    }
-
-    static Mono<DynamicRow> materialize(DynamicRow row, SqlExecutionOptions options) {
-        return Mono.usingWhen(Mono.fromSupplier(R2dbcLargeObjectScope::new),
-                              scope -> scope.materialize(row, options),
-                              R2dbcLargeObjectScope::complete,
-                              R2dbcLargeObjectScope::error,
-                              R2dbcLargeObjectScope::cancel);
     }
 
     static Mapper mapper(RowMetadata metadata,

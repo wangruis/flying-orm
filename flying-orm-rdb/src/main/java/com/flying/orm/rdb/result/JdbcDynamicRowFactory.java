@@ -22,6 +22,8 @@ import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Function;
+import java.util.function.IntFunction;
 
 /**
  * 把一个 JDBC {@link ResultSet} 当前行压缩成 {@link DynamicRow}。
@@ -43,6 +45,8 @@ public final class JdbcDynamicRowFactory {
     private final SqlExecutionOptions options;
     private final boolean[] limitedColumns;
     private final boolean[] timeColumns;
+    private Object[] mappedValues;
+    private IntFunction<Object> mappedReader;
 
     private JdbcDynamicRowFactory(ResultSet resultSet, RowLayout layout,
                                   SqlExecutionOptions options, boolean[] limitedColumns, boolean[] timeColumns) {
@@ -93,6 +97,22 @@ public final class JdbcDynamicRowFactory {
      */
     public DynamicRow readCurrentRow() throws SQLException {
         Object[] values = new Object[layout.size()];
+        readValues(values);
+        return DynamicRow.owned(layout, values);
+    }
+
+    /** 布局绑定后的同步映射；数组仅在本次结果消费中复用，映射器不得保存读取器。 */
+    public <T> T readCurrentRow(Function<IntFunction<Object>, T> mapper) throws SQLException {
+        if (mappedValues == null) {
+            Object[] values = new Object[layout.size()];
+            mappedValues = values;
+            mappedReader = index -> values[index];
+        }
+        readValues(mappedValues);
+        return mapper.apply(mappedReader);
+    }
+
+    private void readValues(Object[] values) throws SQLException {
         for (int index = 0; index < values.length; index++) {
             // java.sql.Time drops fractional seconds; read TIME through its lossless JDBC carrier.
             Object value = timeColumns != null && timeColumns[index]
@@ -100,7 +120,6 @@ public final class JdbcDynamicRowFactory {
             values[index] = materialize(value,
                     limitedColumns != null && limitedColumns[index]);
         }
-        return DynamicRow.owned(layout, values);
     }
 
     private static boolean limitMaterializedColumn(int jdbcType) {

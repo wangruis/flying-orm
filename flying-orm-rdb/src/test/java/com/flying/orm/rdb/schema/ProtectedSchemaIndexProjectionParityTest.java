@@ -6,7 +6,6 @@ import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.metadata.ColumnDefinition;
 import com.flying.orm.core.metadata.IndexDefinition;
 import com.flying.orm.core.metadata.IndexKeyPart;
-import com.flying.orm.core.metadata.IndexMetadata;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
@@ -30,8 +29,49 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ProtectedSchemaIndexProjectionParityTest {
 
     @Test
+    void encryptedIndexProjectionPreservesDescendingDirection() {
+        IndexDefinition index = IndexDefinition.builder("idx_secret_desc").addKey(IndexKeyPart.desc("secret")).build();
+        IndexDefinition projected = ProtectedSchemaTarget.resolve(exactForm(false), List.of(index), List.of()).indexes().getFirst();
+        assertEquals(IndexKeyPart.Direction.DESC, projected.keys().getFirst().direction());
+        assertTrue(!projected.columns().equals(index.columns()));
+    }
+
+    @Test
+    void unencryptedFieldUniquenessIsIncludedInBothCreationPaths() {
+        DynamicForm form = DynamicForm.builder("ordinary_unique", "ordinary_unique")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("code", "VARCHAR(80)").withUnique(true)).build();
+        FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(
+                com.flying.orm.rdb.dialect.RdbDialect.h2());
+
+        SchemaMigrationPlan plan = renderer.createTablePlan(form, List.of());
+        assertEquals(renderer.createTable(form).stream().map(com.flying.orm.core.sql.render.SqlRequest::sql).toList(),
+                plan.sqlTexts());
+        assertEquals(1, plan.target().indexes().size());
+        assertTrue(plan.target().indexes().getFirst().unique());
+        assertEquals(List.of("code"), plan.target().indexes().getFirst().columns());
+    }
+
+    @Test
+    void explicitOrdinaryUniqueIndexReplacesItsAutomaticEquivalent() {
+        DynamicForm form = DynamicForm.builder("ordinary_unique", "ordinary_unique")
+                .addField(DynamicField.of("code", "VARCHAR(80)").withUnique(true)).build();
+        IndexDefinition explicit = IndexDefinition.builder("uq_code_business").unique().addColumn("code").build();
+
+        ProtectedSchemaTarget target = ProtectedSchemaTarget.resolve(form, List.of(explicit), List.of());
+
+        assertEquals(1, target.indexes().size());
+        assertEquals("uq_code_business", target.indexes().getFirst().name());
+        assertTrue(target.indexes().getFirst().unique());
+        IndexDefinition conflict = IndexDefinition.builder(form.toTableDefinition().indexes().getFirst().name())
+                .addColumn("code").build();
+        assertThrows(IllegalArgumentException.class,
+                () -> ProtectedSchemaTarget.resolve(form, List.of(conflict), List.of()));
+    }
+
+    @Test
     void explicitUniqueIndexRequiresStableUniqueTokensInTheLogicalForm() {
-        IndexMetadata explicit = IndexMetadata.builder("uq_secret_business")
+        IndexDefinition explicit = IndexDefinition.builder("uq_secret_business")
                 .unique().addColumn("secret").build();
 
         assertThrows(IllegalArgumentException.class,
@@ -60,7 +100,7 @@ class ProtectedSchemaIndexProjectionParityTest {
     @Test
     void declaredUniqueIndexKeepsTheSameTokenAcrossEncryptionKeyRotation() {
         DynamicForm form = exactForm(true);
-        IndexMetadata explicit = IndexMetadata.builder("uq_secret_business")
+        IndexDefinition explicit = IndexDefinition.builder("uq_secret_business")
                 .unique().addColumn("secret").build();
         ProtectedSchemaTarget target = ProtectedSchemaTarget.resolve(form, List.of(explicit), List.of());
         String hashColumn = target.indexes().getFirst().columns().getFirst();
@@ -86,14 +126,14 @@ class ProtectedSchemaIndexProjectionParityTest {
     @Test
     void explicitExactIndexesUseTheSameHashColumnInBothSchemaPaths() {
         DynamicForm form = exactForm(false);
-        IndexMetadata legacyIndex = IndexMetadata.builder("idx_secret_lookup")
+        IndexDefinition legacyIndex = IndexDefinition.builder("idx_secret_lookup")
                 .addColumn("secret").build();
         ProtectedSchemaTarget legacy = ProtectedSchemaTarget.resolve(
                 form, List.of(legacyIndex), List.of());
         RelationalTableDefinition relational = ProtectedRelationalSchemaProjector.project(
                 form, logicalTable(false, false)).tables().getFirst();
 
-        IndexMetadata projectedLegacy = legacy.indexes().stream()
+        IndexDefinition projectedLegacy = legacy.indexes().stream()
                 .filter(index -> index.name().equals("idx_secret_lookup"))
                 .findFirst().orElseThrow();
         assertEquals(relational.indexes().getFirst().keys().getFirst().column(),
@@ -104,14 +144,14 @@ class ProtectedSchemaIndexProjectionParityTest {
     @Test
     void explicitUniqueExactIndexReplacesTheEquivalentAutomaticIndex() {
         DynamicForm form = exactForm(true);
-        IndexMetadata explicit = IndexMetadata.builder("uq_secret_business")
+        IndexDefinition explicit = IndexDefinition.builder("uq_secret_business")
                 .unique().addColumn("secret").build();
 
         ProtectedSchemaTarget target = ProtectedSchemaTarget.resolve(
                 form, List.of(explicit), List.of());
 
-        List<IndexMetadata> uniqueIndexes = target.indexes().stream()
-                .filter(IndexMetadata::unique).toList();
+        List<IndexDefinition> uniqueIndexes = target.indexes().stream()
+                .filter(IndexDefinition::unique).toList();
         assertEquals(1, uniqueIndexes.size());
         assertEquals("uq_secret_business", uniqueIndexes.getFirst().name());
         assertTrue(uniqueIndexes.getFirst().columns().getFirst().startsWith("__fop_e_"));
@@ -122,14 +162,14 @@ class ProtectedSchemaIndexProjectionParityTest {
         ProtectedSchemaTarget target = ProtectedSchemaTarget.resolve(
                 exactForm(true), List.of(), List.of());
 
-        assertEquals(1, target.indexes().stream().filter(IndexMetadata::unique).count());
+        assertEquals(1, target.indexes().stream().filter(IndexDefinition::unique).count());
         assertTrue(target.indexes().getFirst().columns().getFirst().startsWith("__fop_e_"));
     }
 
     @Test
     void bothPathsRejectCompositeAndNoExactProtectedIndexes() {
         DynamicForm exact = exactForm(false);
-        IndexMetadata composite = IndexMetadata.builder("idx_composite")
+        IndexDefinition composite = IndexDefinition.builder("idx_composite")
                 .addColumn("id").addColumn("secret").build();
         assertThrows(IllegalArgumentException.class,
                 () -> ProtectedSchemaTarget.resolve(exact, List.of(composite), List.of()));
@@ -140,7 +180,7 @@ class ProtectedSchemaIndexProjectionParityTest {
                 .addField(DynamicField.of("secret", "VARCHAR"))
                 .encrypted("secret", EncryptedFieldDefinition.builder().searchModes().build())
                 .build();
-        IndexMetadata unsupported = IndexMetadata.builder("idx_no_exact")
+        IndexDefinition unsupported = IndexDefinition.builder("idx_no_exact")
                 .addColumn("secret").build();
         assertThrows(IllegalArgumentException.class,
                 () -> ProtectedSchemaTarget.resolve(noExact, List.of(unsupported), List.of()));

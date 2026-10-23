@@ -2,6 +2,7 @@ package com.flying.orm.core.condition;
 
 import com.flying.orm.core.field.FieldIdentity;
 import com.flying.orm.core.internal.Names;
+import com.flying.orm.core.internal.condition.ConditionValueNormalizer;
 import com.flying.orm.core.internal.value.BindableValueSnapshots;
 
 import java.util.ArrayList;
@@ -108,27 +109,57 @@ public record TermCondition(FieldIdentity identity, String operator, Object valu
     }
 
     /** 在条件入口的单次规范化中取得可变标量所有权，避免发布 AST 时再次遍历集合。 */
-    static Object snapshotScalar(String operator, Object value) {
-        return isStandardOperator(operator)
+    static Object snapshotScalar(boolean standardOperator, Object value) {
+        return standardOperator
                 ? BindableValueSnapshots.logicalValue(value)
                 : BindableValueSnapshots.arrayGraph(value);
     }
 
+    /** 每个条件独享；仅复用不可变类型的判断，不复用可变值的副本。 */
+    static ConditionValueNormalizer.ScalarConverter snapshotConverter(boolean standardOperator) {
+        return new ConditionValueNormalizer.ScalarConverter() {
+            private Class<?> immutableType;
+
+            @Override
+            public Object convert(Object value, int index) {
+                Class<?> type = value.getClass();
+                if (type == immutableType) return value;
+                boolean mutable = standardOperator
+                        ? BindableValueSnapshots.requiresImmutableSnapshot(value) : type.isArray();
+                if (!mutable) {
+                    immutableType = type;
+                    return value;
+                }
+                return snapshotScalar(standardOperator, value);
+            }
+        };
+    }
+
     private static Object snapshotValue(String operator, Object value) {
+        return snapshotValue(operator, value, ConditionValueShape.SCALAR);
+    }
+
+    /** Builder 已知注册形状；自定义多值容器与标准多值容器在同一入口取得所有权。 */
+    static Object snapshotValue(String operator, Object value, ConditionValueShape shape) {
         // 直接 AST 的自定义 term 只有处理器自己知道值形状；不能因其实现 Collection 就改写驱动标量的类型。
         // 因而仅对内置多值 term 做集合快照，数组仍一律按值复制以阻断发布后的元素改写。
-        if (requiresCollectionSnapshot(operator)) {
+        if (requiresCollectionSnapshot(operator)
+                || shape == ConditionValueShape.COLLECTION || shape == ConditionValueShape.RANGE
+                || shape == ConditionValueShape.SCALAR_OR_COLLECTION) {
             if (value instanceof Iterable<?> iterable) {
                 return snapshotIterable(iterable);
             }
         }
-        return snapshotScalar(operator, value);
+        return snapshotScalar(isStandardOperator(operator), value);
     }
 
     /**
      * 标准多值 term 只在发布 AST 时消费一次 Iterable；既防止后续可变源改写 SQL，也不重复遍历一次性数据源。
      */
     private static List<Object> snapshotIterable(Iterable<?> values) {
+        if (values instanceof List<?> list) {
+            return BindableValueSnapshots.logicalValues(list);
+        }
         List<Object> snapshot = new ArrayList<>();
         for (Object item : values) {
             snapshot.add(item);

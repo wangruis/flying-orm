@@ -8,8 +8,6 @@ import com.flying.orm.core.condition.TermExtensionDescriptor;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.page.PageResult;
-import com.flying.orm.core.page.CursorPageQuery;
-import com.flying.orm.core.page.CursorSort;
 import com.flying.orm.core.page.KeysetPageQuery;
 import com.flying.orm.core.page.KeysetSort;
 import com.flying.orm.core.page.NullOrder;
@@ -131,6 +129,28 @@ class OperatorUsabilityAcceptanceTest {
     }
 
     @Test
+    void syncDmlEntityEntryKeepsScopeMappingAndLogicalDelete() {
+        clients.syncOperator().dml().insertBatch(USERS, List.of(row(1, "Alice", 7), row(2, "Bob", 8)));
+        SyncDatabaseOperator scoped = clients.syncOperator().withDefaultDataScope(DataScope.orgOnly("org_id", 7));
+        SyncEntityDmlOperator<ScopedUser> entity = scoped.dml().entity(ScopedUser.class);
+        assertEquals(List.of(new ScopedUser(1, "Alice", 7, 0)), entity.query().fetch());
+        assertEquals(1L, entity.update().where(ScopedUser::id, 1).set(ScopedUser::name, "Changed").execute());
+        assertEquals(0L, entity.update().where(ScopedUser::id, 2).set(ScopedUser::name, "Denied").execute());
+        assertEquals("Changed", scoped.dml(ScopedUser.class).query().where(ScopedUser::id, 1).one().name());
+        assertEquals(1L, entity.delete().where(ScopedUser::id, 1).execute());
+        assertEquals(List.of(), entity.query().fetch());
+        assertEquals("Bob", clients.syncOperator().dml().entity(ScopedUser.class).query().one().name());
+        Integer deleted = clients.syncOperator().unsafeNativeSql("select deleted from users where id = 1")
+                .one(row -> ((Number) row.get("deleted")).intValue());
+        assertEquals(Integer.valueOf(1), deleted);
+    }
+
+    @com.flying.orm.core.annotation.TableName("users")
+    public record ScopedUser(@com.flying.orm.core.annotation.TableId Integer id, String name,
+                             @com.flying.orm.core.annotation.TableField("org_id") Integer orgId,
+                             @com.flying.orm.core.annotation.TableLogic Integer deleted) { }
+
+    @Test
     void frontendFilterAndBusinessWhereOnlyNarrowTrustedScope() {
         var dml = clients.syncOperator().dml();
         dml.insertBatch(USERS, List.of(row(1, "Alice", 7), row(2, "Bob", 7), row(3, "Bob", 8)));
@@ -142,11 +162,11 @@ class OperatorUsabilityAcceptanceTest {
         assertEquals(2, query.one().block(WAIT).get("id"));
         assertEquals(1, query.page(1, 10).block(WAIT).total());
         assertEquals(0, clients.syncOperator().withDefaultDataScope(scope).dml().query(USERS)
-                .filter(input).where("name", "Alice").fetchMap().size());
+                .filter(input).where("name", "Alice").fetch().size());
         var count = AggregateExpression.count("id", "total");
         assertEquals(1L, query.aggregate(report -> report.aggregate(count)).single().block(WAIT).get(count));
         assertThrows(IllegalArgumentException.class, () -> dml.query(USERS)
-                .filter(StructuredConditionInput.term("id) or 1=1 --", "=", 1)).fetchMap());
+                .filter(StructuredConditionInput.term("id) or 1=1 --", "=", 1)).fetch());
     }
 
     @Test
@@ -175,24 +195,25 @@ class OperatorUsabilityAcceptanceTest {
     }
 
     @Test
-    void formWritesRetainLogicDeleteScopeAndEmptyPredicateProtection() {
+    void formWritesRetainLogicDeleteAndScopeWithoutBusinessPredicates() {
         var dml = clients.operator().withDefaultDataScope(DataScope.orgOnly("org_id", 7)).dml();
         clients.syncOperator().dml().insertBatch(USERS,
                 List.of(row(1, "Alice", 7), row(2, "Bob", 8)));
-        assertEquals(1L, dml.update(USERS).set("name", "Changed").where("id", "in", List.of(1, 2))
+        assertEquals(1L, dml.update(USERS).set("name", "Changed")
                 .execute().block(WAIT));
         assertEquals("Bob", clients.syncOperator().dml().query(USERS).where("id", 2).one().get("name"));
-        assertThrows(IllegalArgumentException.class, () -> dml.delete(USERS).execute().block(WAIT));
-        assertEquals(1L, dml.delete(USERS).where("id", "in", List.of(1, 2)).execute().block(WAIT));
-        assertEquals(0, dml.query(USERS).fetchMap().collectList().block(WAIT).size());
+        assertEquals(1L, dml.delete(USERS).execute().block(WAIT));
+        assertEquals(0L, dml.delete(USERS).where("id", "in", List.of(1, 2)).execute().block(WAIT));
+        assertEquals(0, dml.query(USERS).fetch().collectList().block(WAIT).size());
         assertEquals(1, clients.syncOperator().dml().query().from("users").where("id", 1).one().get("deleted"));
+        assertEquals(0, clients.syncOperator().dml().query().from("users").where("id", 2).one().get("deleted"));
     }
 
     @Test
     void reactiveBatchStaysLazyAndProducesExecutionEvidence() {
         var dml = clients.operator().dml();
         var pending = dml.insertBatch(USERS, Flux.just(row(1, "Alice", 7), row(2, "Bob", 7)));
-        assertEquals(0, clients.syncOperator().dml().query(USERS).fetchMap().size());
+        assertEquals(0, clients.syncOperator().dml().query(USERS).fetch().size());
         assertEquals(2, pending.block(WAIT).successfulCount());
         assertEquals(1, dml.upsertBatch(USERS, Flux.just(row(1, "Updated", 7))).block(WAIT).successfulCount());
         assertEquals("Updated", dml.query(USERS).where("id", 1).one().block(WAIT).get("name"));
@@ -204,9 +225,9 @@ class OperatorUsabilityAcceptanceTest {
                 List.of(row(1, "Alice", 7), row(2, "Bob", 7), row(3, "Other", 8)));
         var reactive = clients.operator().withDefaultDataScope(DataScope.orgOnly("org_id", 7)).dml();
         var sync = clients.syncOperator().withDefaultDataScope(DataScope.orgOnly("org_id", 7)).dml();
-        var cursor = CursorPageQuery.after(10, List.of(1), CursorSort.asc("id"));
-        assertEquals(sync.query(USERS).cursorPage(cursor), reactive.query(USERS).cursorPage(cursor).block(WAIT));
-        assertEquals(1, sync.query(USERS).cursorPage(cursor).rows().size());
+        var cursor = KeysetPageQuery.after(10, com.flying.orm.core.page.CursorPosition.of(List.of(1)), KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST));
+        assertEquals(sync.query(USERS).keysetPage(cursor), reactive.query(USERS).keysetPage(cursor).block(WAIT));
+        assertEquals(1, sync.query(USERS).keysetPage(cursor).rows().size());
         var first = sync.query(USERS).keysetPage(KeysetPageQuery.first(1, KeysetSort.asc("id", NullOrder.LAST)));
         var keyset = KeysetPageQuery.after(10, first.nextPosition(), KeysetSort.asc("id", NullOrder.LAST));
         assertEquals(sync.query(USERS).keysetPage(keyset), reactive.query(USERS).keysetPage(keyset).block(WAIT));
@@ -246,18 +267,18 @@ class OperatorUsabilityAcceptanceTest {
                 .page(1, 10, PhoneView.class).rows());
         assertEquals(List.of(masked), reactive.query(protectedForm).select("id", "phone").masked()
                 .page(1, 10, PhoneView.class).block(WAIT).rows());
-        CursorPageQuery cursor = CursorPageQuery.first(10, CursorSort.asc("id"));
+        KeysetPageQuery cursor = KeysetPageQuery.first(10, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST));
         assertEquals(List.of(masked), sync.query(protectedForm).select("id", "phone").masked()
-                .cursorPage(cursor, PhoneView.class).rows());
+                .keysetPage(cursor, PhoneView.class).rows());
         assertEquals(List.of(masked), reactive.query(protectedForm).select("id", "phone").masked()
-                .cursorPage(cursor, PhoneView.class).block(WAIT).rows());
+                .keysetPage(cursor, PhoneView.class).block(WAIT).rows());
         KeysetPageQuery keyset = KeysetPageQuery.first(10, KeysetSort.asc("id", NullOrder.LAST));
         assertEquals(List.of(masked), sync.query(protectedForm).select("id", "phone").masked()
                 .keysetPage(keyset, PhoneView.class).rows());
         assertEquals(List.of(masked), reactive.query(protectedForm).select("id", "phone").masked()
                 .keysetPage(keyset, PhoneView.class).block(WAIT).rows());
         assertEquals(0, sync.query(protectedForm)
-                .where("phone", ProtectedConditions.EXACT, "13800001234").fetchMap().size());
+                .where("phone", ProtectedConditions.EXACT, "13800001234").fetch().size());
         assertEquals(1L, sync.delete(protectedForm).where("id", 1).execute());
     }
 
@@ -303,11 +324,11 @@ class OperatorUsabilityAcceptanceTest {
         assertEquals(1200, page.rows().size());
         assertEquals(1201, page.total());
         assertEquals(page, reactive.get().orderByAsc("id").page(1, 1200, UserView.class).block(WAIT));
-        CursorPageQuery cursor = CursorPageQuery.first(1200, CursorSort.asc("id"));
-        assertEquals(1200, sync.get().cursorPage(cursor, UserView.class).rows().size());
-        assertTrue(sync.get().cursorPage(cursor, UserView.class).hasMore());
-        assertEquals(sync.get().cursorPage(cursor, UserView.class),
-                reactive.get().cursorPage(cursor, UserView.class).block(WAIT));
+        KeysetPageQuery cursor = KeysetPageQuery.first(1200, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST));
+        assertEquals(1200, sync.get().keysetPage(cursor, UserView.class).rows().size());
+        assertTrue(sync.get().keysetPage(cursor, UserView.class).hasMore());
+        assertEquals(sync.get().keysetPage(cursor, UserView.class),
+                reactive.get().keysetPage(cursor, UserView.class).block(WAIT));
         KeysetPageQuery keyset = KeysetPageQuery.first(1200, KeysetSort.asc("id", NullOrder.LAST));
         assertEquals(1200, sync.get().keysetPage(keyset, UserView.class).rows().size());
         assertTrue(sync.get().keysetPage(keyset, UserView.class).hasMore());
@@ -335,10 +356,10 @@ class OperatorUsabilityAcceptanceTest {
         assertEquals(2, page.total());
         assertEquals(List.of(new UserView(2, "Bob")), page.rows());
         assertEquals(page, reactive.get().orderByDesc("id").page(1, 1, UserView.class).block(WAIT));
-        CursorPageQuery cursor = CursorPageQuery.first(1, CursorSort.asc("id"));
-        assertEquals(List.of(alice), sync.get().cursorPage(cursor, UserView.class).rows());
-        assertEquals(sync.get().cursorPage(cursor, UserView.class),
-                reactive.get().cursorPage(cursor, UserView.class).block(WAIT));
+        KeysetPageQuery cursor = KeysetPageQuery.first(1, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST));
+        assertEquals(List.of(alice), sync.get().keysetPage(cursor, UserView.class).rows());
+        assertEquals(sync.get().keysetPage(cursor, UserView.class),
+                reactive.get().keysetPage(cursor, UserView.class).block(WAIT));
         KeysetPageQuery keyset = KeysetPageQuery.first(1, KeysetSort.asc("id", NullOrder.LAST));
         assertEquals(List.of(alice), sync.get().keysetPage(keyset, UserView.class).rows());
         assertEquals(sync.get().keysetPage(keyset, UserView.class),
@@ -415,18 +436,18 @@ class OperatorUsabilityAcceptanceTest {
     @Test
     void configurationCopiesPreserveExplicitGovernanceWithoutMakingDefaultPoliciesSticky() {
         clients.syncOperator().dml().insert(USERS, row(1, "Alice", 7));
-        var limits = QueryShapeLimits.defaults();
+        QueryShapeLimits limits = QueryShapeLimits.defaults().withMaxBindCount(Integer.MAX_VALUE);
         var policy = FieldUsePolicy.unrestricted();
         var sync = clients.syncForms().withQueryGovernance(policy, limits)
                 .withDefaultDataScope(DataScope.none())
-                .withDefaultExecutionOptions(SqlExecutionOptions.safeDefaults())
+                .withDefaultExecutionOptions(SqlExecutionOptions.unlimited())
                 .withDefaultBatchWriteOptions(BatchWriteOptions.defaults())
                 .withEntityModelRegistry(clients.syncForms().entityModels())
                 .withStructuredConditionResolver(StructuredConditionResolver.defaults())
                 .withFieldUsePolicy(policy).withQueryShapeLimits(limits);
         var reactive = clients.forms().withQueryGovernance(policy, limits)
                 .withDefaultDataScope(DataScope.none())
-                .withDefaultExecutionOptions(SqlExecutionOptions.safeDefaults())
+                .withDefaultExecutionOptions(SqlExecutionOptions.unlimited())
                 .withDefaultBatchWriteOptions(BatchWriteOptions.defaults())
                 .withEntityModelRegistry(clients.forms().entityModels())
                 .withStructuredConditionResolver(StructuredConditionResolver.defaults())
@@ -450,32 +471,32 @@ class OperatorUsabilityAcceptanceTest {
                 .from(USERS, FieldUsePolicy.unrestricted()).where("id", term, 1);
         Supplier<QueryOperator> reactive = () -> clients.operator().dml().query()
                 .from(USERS, FieldUsePolicy.unrestricted()).where("id", term, 1);
-        var cursor = CursorPageQuery.first(10, CursorSort.asc("id"));
+        var cursor = KeysetPageQuery.first(10, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST));
         var keyset = KeysetPageQuery.first(10, KeysetSort.asc("id", NullOrder.LAST));
         var count = AggregateExpression.count("id", "total");
         assertAll(term,
-                () -> assertThrows(failure, () -> sync.get().fetchMap()),
+                () -> assertThrows(failure, () -> sync.get().fetch()),
                 () -> assertThrows(failure, () -> sync.get().fetch(UserView.class)),
                 () -> assertThrows(failure, () -> sync.get().fetch(row -> row)),
                 () -> assertThrows(failure, () -> sync.get().one()),
                 () -> assertThrows(failure, () -> sync.get().one(UserView.class)),
                 () -> assertThrows(failure, () -> sync.get().page(1, 10, UserView.class)),
-                () -> assertThrows(failure, () -> sync.get().cursorPage(cursor, UserView.class)),
+                () -> assertThrows(failure, () -> sync.get().keysetPage(cursor, UserView.class)),
                 () -> assertThrows(failure, () -> sync.get().keysetPage(keyset, UserView.class)),
                 () -> assertThrows(failure, () -> sync.get().page(1, 10)),
-                () -> assertThrows(failure, () -> sync.get().cursorPage(cursor)),
+                () -> assertThrows(failure, () -> sync.get().keysetPage(cursor)),
                 () -> assertThrows(failure, () -> sync.get().keysetPage(keyset)),
                 () -> assertThrows(failure, () -> sync.get().aggregate(a -> a.aggregate(count))),
-                () -> assertThrows(failure, () -> reactive.get().fetchMap().blockLast(WAIT)),
+                () -> assertThrows(failure, () -> reactive.get().fetch().blockLast(WAIT)),
                 () -> assertThrows(failure, () -> reactive.get().fetch(UserView.class).blockLast(WAIT)),
                 () -> assertThrows(failure, () -> reactive.get().fetch(row -> row).blockLast(WAIT)),
                 () -> assertThrows(failure, () -> reactive.get().one().block(WAIT)),
                 () -> assertThrows(failure, () -> reactive.get().one(UserView.class).block(WAIT)),
                 () -> assertThrows(failure, () -> reactive.get().page(1, 10, UserView.class).block(WAIT)),
-                () -> assertThrows(failure, () -> reactive.get().cursorPage(cursor, UserView.class).block(WAIT)),
+                () -> assertThrows(failure, () -> reactive.get().keysetPage(cursor, UserView.class).block(WAIT)),
                 () -> assertThrows(failure, () -> reactive.get().keysetPage(keyset, UserView.class).block(WAIT)),
                 () -> assertThrows(failure, () -> reactive.get().page(1, 10).block(WAIT)),
-                () -> assertThrows(failure, () -> reactive.get().cursorPage(cursor).block(WAIT)),
+                () -> assertThrows(failure, () -> reactive.get().keysetPage(cursor).block(WAIT)),
                 () -> assertThrows(failure, () -> reactive.get().keysetPage(keyset).block(WAIT)),
                 () -> assertThrows(failure, () -> reactive.get().aggregate(a -> a.aggregate(count)).blockLast(WAIT)));
     }

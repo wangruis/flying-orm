@@ -19,8 +19,8 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class BuiltInRelationalSchemaEvolutionTest {
 
@@ -28,15 +28,50 @@ class BuiltInRelationalSchemaEvolutionTest {
     private static final ColumnDefinition ID = ColumnDefinition.builder("id", "BIGINT").nullable(false).build();
 
     @Test
+    void mysqlIdentityUsesTheDeclaredIndexWithoutRequiringAPrimaryKey() {
+        ColumnDefinition generated = ColumnDefinition.builder("id", "BIGINT")
+                .nullable(false).generation(ValueGeneration.identity()).build();
+        for (boolean unique : List.of(false, true)) {
+            RelationalTableDefinition table = RelationalTableDefinition.builder(TABLE)
+                    .addColumn(generated).addColumn(code(32))
+                    .addIndex(IndexDefinition.builder("ix_identity").unique(unique)
+                            .addKey(IndexKeyPart.asc("id")).addKey(IndexKeyPart.desc("code")).build())
+                    .build();
+            List<String> statements = RelationalSchemaSqlRenderer.create(RdbDialect.mysql().schema())
+                    .render(SchemaOperation.of(SchemaOperation.Kind.CREATE_TABLE, TABLE, TABLE.table(),
+                            null, table, SchemaOperation.Compatibility.SAFE_INCREMENTAL))
+                    .stream().map(com.flying.orm.core.sql.render.SqlRequest::sql).toList();
+            assertEquals(1, statements.size());
+            assertTrue(statements.getFirst().contains((unique ? "unique " : "")
+                    + "index `ix_identity` (`id` asc, `code` desc)"), statements.toString());
+        }
+        RelationalTableDefinition table = RelationalTableDefinition.builder(TABLE)
+                .addColumn(generated).addColumn(code(32))
+                .addUnique(UniqueConstraintDefinition.of("uq_identity", "id")).build();
+        assertEquals(1, RelationalSchemaSqlRenderer.create(RdbDialect.mysql().schema())
+                .render(SchemaOperation.of(SchemaOperation.Kind.CREATE_TABLE, TABLE, TABLE.table(),
+                        null, table, SchemaOperation.Compatibility.SAFE_INCREMENTAL)).size());
+        RelationalTableDefinition indexed = RelationalTableDefinition.builder(TABLE)
+                .addColumn(generated).addColumn(code(32).toBuilder().nullable(false).build())
+                .primaryKey(PrimaryKeyDefinition.of("pk_code", "code", "id"))
+                .addIndex(IndexDefinition.builder("ix_identity").addColumn("id").build()).build();
+        List<String> statements = RelationalSchemaSqlRenderer.create(RdbDialect.mysql().schema())
+                .render(SchemaOperation.of(SchemaOperation.Kind.CREATE_TABLE, TABLE, TABLE.table(),
+                        null, indexed, SchemaOperation.Compatibility.SAFE_INCREMENTAL))
+                .stream().map(com.flying.orm.core.sql.render.SqlRequest::sql).toList();
+        assertEquals(1, statements.size());
+        assertTrue(statements.getFirst().contains("index `ix_identity` (`id` asc)"));
+    }
+
+    @Test
     void reviewsExplicitTableRemovalForEveryBuiltInDialect() {
         for (RdbDialect dialect : dialects()) {
-            ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(dialect).reviewAbsent(
+            SchemaMigrationPlan plan = RelationalSchemaPlanReviewer.create(dialect).reviewAbsent(
                     database(dialect), TABLE, SchemaSnapshot.present(table(code(32))),
                     SchemaSnapshotCoverage.complete());
 
-            assertFalse(plan.requiresManualAction(), dialect.name());
             assertEquals(List.of("drop table " + dialect.schema().relationIdentifier(TABLE)), sql(plan));
-            assertEquals(ReviewedSchemaPlan.TargetState.ABSENT, plan.targetState().orElseThrow());
+            assertEquals(SchemaMigrationPlan.TargetState.ABSENT, plan.targetState().orElseThrow());
         }
     }
 
@@ -53,12 +88,11 @@ class BuiltInRelationalSchemaEvolutionTest {
                         .addColumn("legacy").reference(RelationIdentity.of(null, "app", "groups"))
                         .addReferenceColumn("id").build()).build();
         for (RdbDialect dialect : dialects()) {
-            ReviewedSchemaPlan plan = review(dialect, actual, table(code(32)));
+            SchemaMigrationPlan plan = review(dialect, actual, table(code(32)));
             SchemaDialect schema = dialect.schema();
             String alter = "alter table " + schema.relationIdentifier(TABLE);
             boolean mysql = dialect.name().equals("mysql");
 
-            assertFalse(plan.requiresManualAction(), dialect.name());
             assertEquals(List.of(
                     alter + (mysql ? " drop foreign key " : " drop constraint ") + schema.identifier("fk_accounts"),
                     alter + (mysql ? " drop check " : " drop constraint ") + schema.identifier("ck_accounts"),
@@ -72,18 +106,17 @@ class BuiltInRelationalSchemaEvolutionTest {
     }
 
     @Test
-    void reviewsNonUniqueIndexReplacementWithoutAllowingUniqueArbitrationGaps() {
+    void reviewsIndexReplacementUsingNativeReplacementOrDirectRebuild() {
         for (RdbDialect dialect : dialects()) {
-            ReviewedSchemaPlan plan = review(dialect,
+            SchemaMigrationPlan plan = review(dialect,
                     indexedTable(index("code", false)), indexedTable(index("id", false)));
-            assertFalse(plan.requiresManualAction(), dialect.name());
             assertEquals(2, plan.requests().size());
-            assertEquals(List.of(SchemaOperation.Kind.CHANGE_INDEX, SchemaOperation.Kind.CHANGE_INDEX),
+            assertEquals(List.of(SchemaOperation.Kind.CHANGE_INDEX),
                     plan.operations().stream().map(SchemaOperation::kind).toList());
-            ReviewedSchemaPlan unique = review(dialect, indexedTable(index("code", true)),
+            assertEquals(plan.requests(), plan.steps().getFirst().requests());
+            SchemaMigrationPlan unique = review(dialect, indexedTable(index("code", true)),
                     indexedTable(index("id", true)));
-            assertFalse(unique.requiresManualAction(), dialect.name());
-            assertEquals(dialect.name().equals("mysql") || dialect.name().equals("sqlserver") ? 1 : 3,
+            assertEquals(dialect.name().equals("mysql") || dialect.name().equals("sqlserver") ? 1 : 2,
                     unique.requests().size());
         }
     }
@@ -91,9 +124,8 @@ class BuiltInRelationalSchemaEvolutionTest {
     @Test
     void widensVariableLengthTextWithoutDroppingOtherColumnFacts() {
         for (RdbDialect dialect : dialects()) {
-            ReviewedSchemaPlan plan = review(dialect, table(code(32)), table(code(64)));
+            SchemaMigrationPlan plan = review(dialect, table(code(32)), table(code(64)));
 
-            assertFalse(plan.requiresManualAction(), dialect.name());
             String expected = switch (dialect.name()) {
                 case "mysql" -> "alter table `app`.`accounts` modify column `code` VARCHAR(64)"
                         + " not null default 'active' comment 'business code'";
@@ -111,8 +143,7 @@ class BuiltInRelationalSchemaEvolutionTest {
         ColumnDefinition desired = ColumnDefinition.builder("code", "VARCHAR").length(32)
                 .defaultValue(ColumnDefault.literal("active")).comment("business code").build();
         for (RdbDialect dialect : dialects()) {
-            ReviewedSchemaPlan plan = review(dialect, table(code(32)), table(desired));
-            assertFalse(plan.requiresManualAction(), dialect.name());
+            SchemaMigrationPlan plan = review(dialect, table(code(32)), table(desired));
             String expected = switch (dialect.name()) {
                 case "mysql" -> "alter table `app`.`accounts` modify column `code` VARCHAR(32)"
                         + " default 'active' comment 'business code'";
@@ -126,12 +157,39 @@ class BuiltInRelationalSchemaEvolutionTest {
     }
 
     @Test
+    void widensAndChangesNullabilityWithoutDroppingOtherColumnFacts() {
+        for (RdbDialect dialect : List.of(RdbDialect.postgresql(), RdbDialect.mysql(),
+                RdbDialect.oracle(), RdbDialect.sqlServer())) {
+            for (boolean nullable : List.of(true, false)) {
+                ColumnDefinition actual = ColumnDefinition.builder("code", "VARCHAR").length(32)
+                        .nullable(!nullable).defaultValue(ColumnDefault.literal("active"))
+                        .comment("business code").build();
+                ColumnDefinition desired = ColumnDefinition.builder("code", "VARCHAR").length(64)
+                        .nullable(nullable).defaultValue(ColumnDefault.literal("active"))
+                        .comment("business code").build();
+                SchemaMigrationPlan plan = review(dialect, table(actual), table(desired));
+                List<String> expected = switch (dialect.name()) {
+                    case "mysql" -> List.of("alter table `app`.`accounts` modify column `code` VARCHAR(64)"
+                            + (nullable ? "" : " not null") + " default 'active' comment 'business code'");
+                    case "sqlserver" -> List.of("alter table [app].[accounts] alter column [code] NVARCHAR(64)"
+                            + (nullable ? " null" : " not null"));
+                    case "oracle" -> List.of("alter table \"app\".\"accounts\" modify (\"code\" VARCHAR2(64))",
+                            "alter table \"app\".\"accounts\" modify (\"code\" " + (nullable ? "null)" : "not null)"));
+                    case "postgresql" -> List.of("alter table \"app\".\"accounts\" alter column \"code\" type VARCHAR(64)",
+                            "alter table \"app\".\"accounts\" alter column \"code\" " + (nullable ? "drop" : "set") + " not null");
+                    default -> throw new AssertionError(dialect.name());
+                };
+                assertEquals(expected, sql(plan), dialect.name());
+            }
+        }
+    }
+
+    @Test
     void preservesObservedStorageOptionsWhenTheTargetDoesNotOverrideThem() {
         ColumnDefinition mysqlActual = ColumnDefinition.builder("code", "VARCHAR").length(32).nullable(false)
                 .defaultValue(ColumnDefault.literal("active")).comment("business code")
                 .charset("utf8mb4").collation("utf8mb4_bin").build();
-        ReviewedSchemaPlan mysql = review(RdbDialect.mysql(), table(mysqlActual), table(code(64)));
-        assertFalse(mysql.requiresManualAction());
+        SchemaMigrationPlan mysql = review(RdbDialect.mysql(), table(mysqlActual), table(code(64)));
         assertEquals(List.of("alter table `app`.`accounts` modify column `code` VARCHAR(64)"
                 + " character set `utf8mb4` collate `utf8mb4_bin` not null default 'active'"
                 + " comment 'business code'"), sql(mysql));
@@ -139,11 +197,19 @@ class BuiltInRelationalSchemaEvolutionTest {
         ColumnDefinition sqlServerActual = ColumnDefinition.builder("code", "VARCHAR").length(32).nullable(false)
                 .defaultValue(ColumnDefault.literal("active")).comment("business code")
                 .collation("Latin1_General_100_BIN2").build();
-        ReviewedSchemaPlan sqlServer = review(RdbDialect.sqlServer(), table(sqlServerActual), table(code(64)));
-        assertFalse(sqlServer.requiresManualAction());
+        SchemaMigrationPlan sqlServer = review(RdbDialect.sqlServer(), table(sqlServerActual), table(code(64)));
         // COLLATE 使用已校验的排序规则名称，不按表名或列名添加方括号。
         assertEquals(List.of("alter table [app].[accounts] alter column [code] NVARCHAR(64)"
                 + " collate Latin1_General_100_BIN2 not null"), sql(sqlServer));
+
+        ColumnDefinition nullable = ColumnDefinition.builder("code", "VARCHAR").length(64)
+                .defaultValue(ColumnDefault.literal("active")).comment("business code").build();
+        assertEquals(List.of("alter table `app`.`accounts` modify column `code` VARCHAR(64)"
+                + " character set `utf8mb4` collate `utf8mb4_bin` default 'active' comment 'business code'"),
+                sql(review(RdbDialect.mysql(), table(mysqlActual), table(nullable))));
+        assertEquals(List.of("alter table [app].[accounts] alter column [code] NVARCHAR(64)"
+                + " collate Latin1_General_100_BIN2 null"),
+                sql(review(RdbDialect.sqlServer(), table(sqlServerActual), table(nullable))));
     }
 
     @Test
@@ -151,13 +217,11 @@ class BuiltInRelationalSchemaEvolutionTest {
         ColumnDefinition desired = ColumnDefinition.builder("code", "VARCHAR").length(32)
                 .nullable(false).comment("business code").build();
         for (RdbDialect dialect : dialects()) {
-            ReviewedSchemaPlan plan = review(dialect, table(code(32)), table(desired));
             if (dialect.name().equals("sqlserver")) {
-                assertTrue(plan.requiresManualAction());
-                assertTrue(plan.requests().isEmpty());
+                assertThrows(UnsupportedOperationException.class, () -> review(dialect, table(code(32)), table(desired)));
                 continue;
             }
-            assertFalse(plan.requiresManualAction(), dialect.name());
+            SchemaMigrationPlan plan = review(dialect, table(code(32)), table(desired));
             String expected = dialect.name().equals("mysql")
                     ? "alter table `app`.`accounts` alter column `code` drop default"
                     : dialect.name().equals("oracle")
@@ -172,8 +236,7 @@ class BuiltInRelationalSchemaEvolutionTest {
         ColumnDefinition desired = ColumnDefinition.builder("code", "VARCHAR").length(32).nullable(false)
                 .defaultValue(ColumnDefault.literal("active")).comment("changed").build();
         for (RdbDialect dialect : dialects()) {
-            ReviewedSchemaPlan plan = review(dialect, table(code(32)), table(desired));
-            assertFalse(plan.requiresManualAction(), dialect.name());
+            SchemaMigrationPlan plan = review(dialect, table(code(32)), table(desired));
             String expected = dialect.name().equals("mysql")
                     ? "alter table `app`.`accounts` modify column `code` VARCHAR(32)"
                             + " not null default 'active' comment 'changed'"
@@ -184,16 +247,13 @@ class BuiltInRelationalSchemaEvolutionTest {
     }
 
     @Test
-    void keepsUnsupportedColumnAndCandidateChangesManual() {
+    void rejectsUnsupportedColumnsAndKeepsSupportedCandidateChanges() {
         for (RdbDialect dialect : dialects()) {
-            assertTrue(review(dialect, table(code(64)), table(code(32))).requiresManualAction());
-            ColumnDefinition mixed = ColumnDefinition.builder("code", "VARCHAR").length(64)
-                    .defaultValue(ColumnDefault.literal("active")).comment("business code").build();
-            assertTrue(review(dialect, table(code(32)), table(mixed)).requiresManualAction());
+            assertThrows(UnsupportedOperationException.class, () -> review(dialect, table(code(64)), table(code(32))));
             ColumnDefinition generated = ColumnDefinition.builder("id", "BIGINT").nullable(false)
                     .generation(ValueGeneration.identity()).build();
-            assertTrue(review(dialect, table(code(32)), RelationalTableDefinition.builder(TABLE)
-                    .addColumn(generated).addColumn(code(32)).build()).requiresManualAction());
+            assertThrows(UnsupportedOperationException.class, () -> review(dialect, table(code(32)),
+                    RelationalTableDefinition.builder(TABLE).addColumn(generated).addColumn(code(32)).build()));
             RelationalTableDefinition actual = RelationalTableDefinition.builder(TABLE)
                     .addColumn(ID).addColumn(code(32))
                     .primaryKey(PrimaryKeyDefinition.of("pk_accounts", "id"))
@@ -202,30 +262,44 @@ class BuiltInRelationalSchemaEvolutionTest {
                     .addColumn(ID).addColumn(code(32))
                     .primaryKey(PrimaryKeyDefinition.of("pk_accounts", "id", "code"))
                     .addUnique(UniqueConstraintDefinition.of("uq_accounts", "code", "id")).build();
-            ReviewedSchemaPlan plan = review(dialect, actual, desired);
-            assertFalse(plan.requiresManualAction(), dialect.name());
-            assertEquals(dialect.name().equals("mysql") ? 2 : dialect.name().equals("h2") ? 7
-                            : dialect.name().equals("sqlserver") ? 8 : 10,
+            SchemaMigrationPlan plan = review(dialect, actual, desired);
+            assertEquals(dialect.name().equals("mysql") ? 2 : 4,
                     plan.requests().size(), dialect.name());
         }
     }
 
     @Test
-    void keepsSqlServerDefaultedColumnRemovalManualWithoutGuessingItsConstraintName() {
-        ReviewedSchemaPlan plan = review(RdbDialect.sqlServer(), table(code(32)),
-                RelationalTableDefinition.builder(TABLE).addColumn(ID).build());
-        assertTrue(plan.requiresManualAction());
-        assertTrue(plan.requests().isEmpty());
+    void combinesTypeNullabilityDefaultAndCommentChanges() {
+        ColumnDefinition actual = code(32).toBuilder().defaultConstraintName("df_code").build();
+        ColumnDefinition desired = ColumnDefinition.builder("code", "VARCHAR").length(64)
+                .defaultValue(ColumnDefault.literal("inactive")).comment("changed").build();
+        for (RdbDialect dialect : List.of(RdbDialect.postgresql(), RdbDialect.mysql(),
+                RdbDialect.oracle(), RdbDialect.sqlServer())) {
+            SchemaMigrationPlan plan = review(dialect, table(actual), table(desired));
+            if (dialect.name().equals("mysql")) {
+                assertEquals(List.of("alter table `app`.`accounts` modify column `code` VARCHAR(64)"
+                        + " default 'inactive' comment 'changed'"), sql(plan));
+            } else {
+                assertTrue(sql(plan).stream().anyMatch(sql -> sql.contains("inactive")), dialect.name());
+                assertTrue(sql(plan).stream().anyMatch(sql -> sql.contains("changed")), dialect.name());
+                assertEquals(4, plan.requests().size(), dialect.name());
+            }
+        }
+    }
+
+    @Test
+    void rejectsSqlServerDefaultedColumnRemovalWithoutGuessingItsConstraintName() {
+        assertThrows(UnsupportedOperationException.class, () -> review(RdbDialect.sqlServer(), table(code(32)),
+                RelationalTableDefinition.builder(TABLE).addColumn(ID).build()));
     }
 
     @Test
     void removesAnObservedDefaultAndItsColumnInOneStatement() {
         ColumnDefinition column = ColumnDefinition.builder("code", "VARCHAR").length(32)
                 .defaultValue(ColumnDefault.literal("active")).defaultConstraintName("DF_accounts_code").build();
-        ReviewedSchemaPlan plan = review(RdbDialect.sqlServer(), table(column),
+        SchemaMigrationPlan plan = review(RdbDialect.sqlServer(), table(column),
                 RelationalTableDefinition.builder(TABLE).addColumn(ID).build());
 
-        assertFalse(plan.requiresManualAction());
         assertEquals(List.of("alter table [app].[accounts] drop constraint [DF_accounts_code], column [code]"),
                 sql(plan));
     }
@@ -236,9 +310,8 @@ class BuiltInRelationalSchemaEvolutionTest {
         ColumnDefinition plain = ColumnDefinition.builder("code", "VARCHAR").length(32).build();
         ColumnDefinition named = ColumnDefinition.builder("code", "VARCHAR").length(32)
                 .defaultValue(ColumnDefault.literal("active")).defaultConstraintName("DF_accounts_code").build();
-        ReviewedSchemaPlan plan = review(dialect, table(plain), table(named));
+        SchemaMigrationPlan plan = review(dialect, table(plain), table(named));
 
-        assertFalse(plan.requiresManualAction());
         assertEquals(List.of("alter table [app].[accounts] add constraint [DF_accounts_code] default N'active' for [code]"),
                 sql(plan));
         RelationalSchemaSqlRenderer renderer = RelationalSchemaSqlRenderer.create(dialect.schema());
@@ -254,15 +327,51 @@ class BuiltInRelationalSchemaEvolutionTest {
     }
 
     @Test
+    void replacesObservedDefaultsWithoutLosingTheirConstraintIdentity() {
+        ColumnDefinition actual = ColumnDefinition.builder("code", "VARCHAR").length(32)
+                .defaultValue(ColumnDefault.literal("active")).defaultConstraintName("DF_old").build();
+        for (String name : List.of("", "DF_old", "DF_new")) {
+            ColumnDefinition desired = ColumnDefinition.builder("code", "VARCHAR").length(32)
+                    .defaultValue(ColumnDefault.literal("停用'值"))
+                    .defaultConstraintName(name.isEmpty() ? null : name).build();
+            SchemaMigrationPlan plan = review(RdbDialect.sqlServer(), table(actual), table(desired));
+            assertEquals(List.of("alter table [app].[accounts] drop constraint [DF_old]",
+                    "alter table [app].[accounts] add constraint [" + (name.isEmpty() ? "DF_old" : name)
+                            + "] default N'停用''值' for [code]"), sql(plan));
+        }
+    }
+
+    @Test
+    void replacesWithAnExplicitNullDefaultAndRenamesAnUnchangedDefault() {
+        ColumnDefinition actual = ColumnDefinition.builder("code", "VARCHAR").length(32)
+                .defaultValue(ColumnDefault.literal("active")).defaultConstraintName("DF_old").build();
+        for (ColumnDefault value : List.of(ColumnDefault.none(), ColumnDefault.literal("active"))) {
+            ColumnDefinition desired = ColumnDefinition.builder("code", "VARCHAR").length(32)
+                    .defaultValue(value).defaultConstraintName("DF_new").build();
+            SchemaMigrationPlan plan = review(RdbDialect.sqlServer(), table(actual), table(desired));
+            assertEquals(List.of("alter table [app].[accounts] drop constraint [DF_old]",
+                    "alter table [app].[accounts] add constraint [DF_new] default "
+                            + (value.kind() == ColumnDefault.Kind.NONE ? "null" : "N'active'") + " for [code]"), sql(plan));
+        }
+    }
+
+    @Test
+    void rejectsReplacementWhenTheObservedDefaultNameIsMissing() {
+        ColumnDefinition actual = ColumnDefinition.builder("code", "VARCHAR").length(32)
+                .defaultValue(ColumnDefault.literal("active")).build();
+        ColumnDefinition desired = ColumnDefinition.builder("code", "VARCHAR").length(32)
+                .defaultValue(ColumnDefault.literal("inactive")).defaultConstraintName("DF_new").build();
+        assertThrows(UnsupportedOperationException.class, () -> review(RdbDialect.sqlServer(), table(actual), table(desired)));
+    }
+
+    @Test
     void neverTreatsRenamingASequenceDefaultAsRemovingItsGeneration() {
         ColumnDefinition actual = ColumnDefinition.builder("code", "BIGINT")
                 .generation(ValueGeneration.sequence("account_seq")).defaultConstraintName("DF_old").build();
         ColumnDefinition desired = ColumnDefinition.builder("code", "BIGINT")
                 .generation(ValueGeneration.sequence("account_seq")).defaultConstraintName("DF_new").build();
-        ReviewedSchemaPlan plan = review(RdbDialect.sqlServer(), table(actual), table(desired));
-
-        assertTrue(plan.requiresManualAction());
-        assertTrue(plan.requests().isEmpty(), "a name change cannot remove NEXT VALUE FOR generation");
+        assertThrows(UnsupportedOperationException.class, () -> review(RdbDialect.sqlServer(), table(actual), table(desired)),
+                "a name change cannot remove NEXT VALUE FOR generation");
     }
 
     private static List<RdbDialect> dialects() {
@@ -273,14 +382,14 @@ class BuiltInRelationalSchemaEvolutionTest {
         return DatabaseDescriptor.of(dialect.name(), "test", dialect);
     }
 
-    private static ReviewedSchemaPlan review(RdbDialect dialect,
+    private static SchemaMigrationPlan review(RdbDialect dialect,
                                              RelationalTableDefinition actual,
                                              RelationalTableDefinition desired) {
         return RelationalSchemaPlanReviewer.create(dialect).review(database(dialect), desired,
                 SchemaSnapshot.present(actual), SchemaSnapshotCoverage.complete(), SchemaCompatibilityMode.EXACT);
     }
 
-    private static List<String> sql(ReviewedSchemaPlan plan) {
+    private static List<String> sql(SchemaMigrationPlan plan) {
         return plan.requests().stream().map(request -> request.sql()).toList();
     }
 

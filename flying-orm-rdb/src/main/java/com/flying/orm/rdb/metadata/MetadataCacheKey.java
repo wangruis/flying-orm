@@ -8,60 +8,37 @@ import java.util.Objects;
 /**
  * 元数据缓存内部使用的稳定键和值。
  *
- * <p>表名只在这里拆成 schema 和 table，读取、命中和失效就不会各自维护一套解析规则。</p>
+ * <p>缓存直接保存关系身份；相同展示名的不同分段关系不会共用条目。</p>
  */
-record MetadataCacheKey(Kind kind, String formId, String schema, String table) {
+record MetadataCacheKey(Kind kind, String formId, RelationIdentity relation) {
 
-    static MetadataCacheKey form(String formId, String schema, String table) {
-        String[] tableParts = splitTable(schema, table);
-        return new MetadataCacheKey(Kind.FORM,
-                                    requireText(formId, "metadata cache form id"),
-                                    tableParts[0],
-                                    tableParts[1]);
+    String schema() {
+        return relation.schema().orElse(null);
     }
 
-    static MetadataCacheKey table(String schema, String table) {
-        String[] tableParts = splitTable(schema, table);
-        return new MetadataCacheKey(Kind.TABLE, null, tableParts[0], tableParts[1]);
+    String table() {
+        return relation.table();
     }
 
-    /** 关系型入口已经完成分段，不能再按点号猜测。catalog 由连接身份承接，不进入本地缓存键。 */
+    static MetadataCacheKey form(String formId, RelationIdentity relation) {
+        return new MetadataCacheKey(Kind.FORM, requireText(formId, "metadata cache form id"),
+                Objects.requireNonNull(relation, "metadata relation must not be null"));
+    }
+
+    /** 已分段的身份不重新解析，也不丢弃 catalog。 */
     static MetadataCacheKey table(RelationIdentity relation) {
         RelationIdentity target = Objects.requireNonNull(
                 relation, "metadata cache relation must not be null");
-        String schema = target.schema().map(value -> requireText(value, "metadata cache schema"))
-                .orElse(null);
-        return new MetadataCacheKey(
-                Kind.TABLE, null, schema, requireText(target.table(), "metadata cache table"));
-    }
-
-    MetadataCacheKey asForm(String formId) {
-        return new MetadataCacheKey(
-                Kind.FORM, requireText(formId, "metadata cache form id"), schema, table);
+        return new MetadataCacheKey(Kind.TABLE, null, target);
     }
 
     /** 读取键仍区分大小写；失效覆盖数据库可能折叠的别名，不让旧结构留在另一个入口。 */
-    boolean matchesInvalidation(String targetSchema, String targetTable) {
-        return table.equalsIgnoreCase(targetTable)
-                && (targetSchema == null || schema == null || schema.equalsIgnoreCase(targetSchema));
-    }
-
-    private static String[] splitTable(String schema, String table) {
-        String safeTable = requireText(table, "metadata cache table");
-        if (schema != null) {
-            return new String[]{requireText(schema, "metadata cache schema"), safeTable};
-        }
-        int separator = safeTable.indexOf('.');
-        if (separator < 0) {
-            return new String[]{null, safeTable};
-        }
-        if (separator == 0
-                || separator == safeTable.length() - 1
-                || safeTable.indexOf('.', separator + 1) >= 0) {
-            throw new IllegalArgumentException("metadata cache table must be table or schema.table");
-        }
-        return new String[]{requireText(safeTable.substring(0, separator), "metadata cache schema"),
-                            requireText(safeTable.substring(separator + 1), "metadata cache table")};
+    boolean matchesInvalidation(RelationIdentity target) {
+        return table().equalsIgnoreCase(target.table())
+                && (target.schema().isEmpty() || relation.schema().isEmpty()
+                    || target.schema().orElseThrow().equalsIgnoreCase(schema()))
+                && (target.catalog().isEmpty() || relation.catalog().isEmpty()
+                    || target.catalog().orElseThrow().equalsIgnoreCase(relation.catalog().orElseThrow()));
     }
 
     private static String requireText(String value, String name) {

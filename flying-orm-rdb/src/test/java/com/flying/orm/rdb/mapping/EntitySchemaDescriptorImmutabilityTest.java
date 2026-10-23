@@ -12,12 +12,41 @@ import com.flying.orm.core.metadata.IndexKeyPart;
 import com.flying.orm.core.metadata.PrimaryKeyDefinition;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
+import com.flying.orm.core.join.QueryRelation;
 import org.junit.jupiter.api.Test;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 class EntitySchemaDescriptorImmutabilityTest {
+
+    @Test
+    void queryRelationsShareEntityFormWithoutChangingPhysicalSchema() {
+        EntitySchemaDescriptor.Builder<BuilderEntity> builder = EntitySchemaDescriptor.builder(BuilderEntity.class);
+        EntitySchemaDescriptor<BuilderEntity> plain = builder.build();
+        AtomicInteger resolutions = new AtomicInteger();
+        QueryRelation relation = QueryRelation.of(() -> {
+            resolutions.incrementAndGet();
+            return plain.form();
+        }, "tenant_code", "tenant_code");
+        EntitySchemaDescriptor<BuilderEntity> first = builder.relation("tenant", relation).build();
+        EntitySchemaDescriptor<BuilderEntity> second = builder.relation("external", relation).build();
+
+        assertEquals(Set.of("tenant"), first.form().relations().keySet());
+        assertEquals(Set.of("tenant", "external"), second.form().relations().keySet());
+        assertEquals(Set.of(), plain.form().relations().keySet());
+        assertSame(first.form(), first.metadata().toDynamicForm());
+        assertSame(relation, first.form().relations().get("tenant"));
+        assertEquals(0, resolutions.get());
+        assertEquals(plain.relationalFingerprint(), first.relationalFingerprint());
+        assertEquals(plain.metadata().structureFingerprint(), first.metadata().structureFingerprint());
+        assertEquals(plain.form().structureFingerprint(), first.form().structureFingerprint());
+        assertEquals(0, first.table().foreignKeys().size());
+        assertThrows(UnsupportedOperationException.class, () -> first.form().relations().clear());
+    }
 
     @Test
     void publishesSnapshotsThatAreIsolatedFromLaterBuilderChanges() {
@@ -68,7 +97,7 @@ class EntitySchemaDescriptorImmutabilityTest {
     private static ForeignKeyDefinition foreignKey(String name, String localColumn, String targetColumn) {
         return ForeignKeyDefinition.builder(name)
                 .addColumn(localColumn)
-                .referencedTable(RelationIdentity.table("tenants"))
+                .reference(RelationIdentity.table("tenants"))
                 .addReferenceColumn(targetColumn)
                 .build();
     }

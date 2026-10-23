@@ -12,6 +12,29 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SqlExecutionLogFormatterTest {
 
     @Test
+    void shortParametersDoNotAllocateTheConfiguredMaximumLength() {
+        java.lang.management.ThreadMXBean bean = java.lang.management.ManagementFactory.getThreadMXBean();
+        org.junit.jupiter.api.Assumptions.assumeTrue(bean instanceof com.sun.management.ThreadMXBean);
+        com.sun.management.ThreadMXBean memory = (com.sun.management.ThreadMXBean) bean;
+        org.junit.jupiter.api.Assumptions.assumeTrue(memory.isThreadAllocatedMemorySupported());
+        memory.setThreadAllocatedMemoryEnabled(true);
+        SqlExecutionObservation observation = new SqlExecutionObservation(
+                SqlExecutionOperation.QUERY, SqlExecutionBackend.JDBC, SqlStatementType.SELECT,
+                SqlExecutionStatus.SUCCESS, SqlFailureCategory.NONE, "select ?", 1, 0, 1, 1, null);
+        SqlExecutionLogOptions options = SqlExecutionLogOptions.defaults()
+                .withParameters(true).withLimits(1_000_000, 4096);
+        SqlExecutionLogSelection selection = SqlExecutionLogSelection.defaults();
+        List<Object> parameters = List.of("abc");
+        SqlExecutionLogFormatter.sql(observation, options, selection, parameters);
+        long thread = Thread.currentThread().threadId();
+        long before = memory.getThreadAllocatedBytes(thread);
+        String message = SqlExecutionLogFormatter.sql(observation, options, selection, parameters);
+        long allocated = memory.getThreadAllocatedBytes(thread) - before;
+        assertTrue(message.contains("\"a*c\""));
+        assertTrue(allocated < 65_536, "short parameter allocated " + allocated + " bytes");
+    }
+
+    @Test
     void masksMysqlDoubleQuotedStringLiteralsWhenSqlLoggingIsEnabled() {
         SqlExecutionObservation observation = new SqlExecutionObservation(
                 SqlExecutionOperation.QUERY,

@@ -12,7 +12,7 @@ import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.schema.SchemaCompatibilityMode;
 import com.flying.orm.rdb.schema.JdbcSchemaClient;
 import com.flying.orm.rdb.schema.ReactiveSchemaClient;
-import com.flying.orm.rdb.schema.ReviewedSchemaPlan;
+import com.flying.orm.rdb.schema.SchemaMigrationPlan;
 import com.flying.orm.rdb.schema.SchemaSnapshot;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
 import org.junit.jupiter.api.Test;
@@ -39,7 +39,7 @@ class SqlServerMaxBinaryMetadataTest {
     @Test
     void builtInMaxBinaryTypesHaveAnExactCompleteSnapshotOnBothReaders() {
         RdbDialect dialect = RdbDialect.sqlServer();
-        SyncSqlExecutor jdbc = new SyncSqlExecutor() {
+        SyncSqlExecutor jdbc = new com.flying.orm.rdb.support.ListQueryFixture() {
             @Override
             public List<DynamicRow> query(SqlRequest request) {
                 return catalogRows(request);
@@ -51,7 +51,7 @@ class SqlServerMaxBinaryMetadataTest {
             }
 
             @Override
-            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                 throw new UnsupportedOperationException();
             }
         };
@@ -81,12 +81,12 @@ class SqlServerMaxBinaryMetadataTest {
         for (String logicalType : List.of("BLOB", "BINARY", "PROTECTED_BINARY")) {
             RelationalTableDefinition desired = RelationalTableDefinition.builder(snapshots.getFirst().identity())
                     .addColumn(ColumnDefinition.builder("payload", logicalType).build()).build();
-            List<ReviewedSchemaPlan> plans = List.of(
+            List<SchemaMigrationPlan> plans = List.of(
                     JdbcSchemaClient.create(jdbc, dialect).reviewRelational(
                             database, desired, jdbcReader, SchemaCompatibilityMode.EXACT),
                     ReactiveSchemaClient.create(reactive, dialect).reviewRelational(
                             database, desired, reactiveReader, SchemaCompatibilityMode.EXACT).block());
-            for (ReviewedSchemaPlan plan : plans) {
+            for (SchemaMigrationPlan plan : plans) {
                 assertTrue(plan.operations().isEmpty(), logicalType);
                 assertTrue(plan.requests().isEmpty(), logicalType);
             }

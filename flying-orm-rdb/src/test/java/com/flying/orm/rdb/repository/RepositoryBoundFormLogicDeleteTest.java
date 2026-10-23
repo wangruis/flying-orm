@@ -9,6 +9,8 @@ import com.flying.orm.core.annotation.Version;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.join.QueryRelation;
+import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.aggregate.AggregateExpression;
@@ -37,13 +39,126 @@ import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 class RepositoryBoundFormLogicDeleteTest {
+
+    @Test
+    void logicDeleteBindingPreservesLazyRelationsAndExplicitFormRules() {
+        AtomicInteger resolutions = new AtomicInteger();
+        DynamicForm form = relatedForm(resolutions);
+        try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())) {
+            DynamicForm bound = RepositoryLogicDeletes.bind(models.metadata(Person.class), form);
+            assertEquals(form.relations(), bound.relations());
+            assertSame(form.relations().get("related"), bound.relations().get("related"));
+            assertEquals(0, resolutions.get());
+            assertSame(bound, RepositoryLogicDeletes.bind(models.metadata(Person.class), bound));
+            assertEquals(0, bound.logicDelete().orElseThrow().notDeletedValue());
+        }
+    }
+
+    @Test
+    void syncBoundLogicalDeleteKeepsRelationQueries() {
+        assertRelatedQuery(false);
+    }
+
+    @Test
+    void reactiveBoundLogicalDeleteKeepsRelationQueries() {
+        assertRelatedQuery(true);
+    }
+
+    private static void assertRelatedQuery(boolean reactive) {
+        RecordingSql sql = new RecordingSql();
+        AtomicInteger resolutions = new AtomicInteger();
+        DynamicForm form = relatedForm(resolutions);
+        ConditionGroup where = ConditionGroup.and().where("related.name", "=", "Ada").build();
+        if (reactive) {
+            ReactiveFormRepository<Person> repository = ReactiveFormRepository.create(
+                    ReactiveFormClient.create(sql.reactive(), renderer()), form, Person.class);
+            Flux<Person> query = repository.select(where);
+            assertEquals(0, resolutions.get());
+            query.collectList().block();
+            assertEquals(1, resolutions.get());
+            query.collectList().block();
+            assertEquals(2, resolutions.get());
+        } else {
+            SyncFormRepository<Person> repository = SyncFormRepository.create(
+                    SyncFormClient.create(sql.sync(), batches(), renderer()), form, Person.class);
+            assertEquals(0, resolutions.get());
+            repository.select(where);
+            assertEquals(1, resolutions.get());
+        }
+        assertTrue(sql.last.sql().contains("join \"related_people\""), sql.last.sql());
+        assertActive(sql.last);
+        assertEquals(List.of(0, "Ada"), sql.last.parameters());
+    }
+
+    private static DynamicForm relatedForm(AtomicInteger resolutions) {
+        DynamicForm target = DynamicForm.builder("related_people", "related_people")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("name", "VARCHAR")).build();
+        return DynamicForm.builder("bound_people", "bound_people")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("name", "VARCHAR"))
+                .addField(DynamicField.of("deleted", "INTEGER"))
+                .relation("related", QueryRelation.of(() -> {
+                    resolutions.incrementAndGet();
+                    return target;
+                }, "id", "id")).build();
+    }
+
+    @Test
+    void syncLogicalDeleteScopeKeepsAggregateOrderingAndExecutionOptions() {
+        assertAggregateConfiguration(false);
+    }
+
+    @Test
+    void reactiveLogicalDeleteScopeKeepsAggregateOrderingAndExecutionOptions() {
+        assertAggregateConfiguration(true);
+    }
+
+    private static void assertAggregateConfiguration(boolean reactive) {
+        RecordingSql sql = new RecordingSql();
+        DynamicForm form = form();
+        SqlExecutionOptions options = SqlExecutionOptions.unlimited().withFetchSize(37).withMaxRows(19);
+        AggregateSpec original = AggregateSpec.builder(QuerySpec.of(form, where())
+                        .withExecutionOptions(SqlExecutionOptions.maxRows(5)))
+                .group("name", "person_name").countRows("person_count")
+                .having(condition -> condition.where("person_count", ">", 2L))
+                .orderByFirst("person_name", "Ada").orderBy(PageSort.desc("person_count"))
+                .executionOptions(options).build();
+        if (reactive) {
+            ReactiveFormRepository.create(ReactiveFormClient.create(sql.reactive(), renderer()), form, Person.class)
+                    .aggregate(original).collectList().block();
+        } else {
+            SyncFormRepository.create(SyncFormClient.create(sql.sync(), batches(), renderer()), form, Person.class)
+                    .aggregate(original);
+        }
+        assertAll(
+                () -> assertActive(sql.last),
+                () -> assertTrue(sql.last.sql().endsWith(
+                        "order by case \"name\" when ? then 0 else 1 end asc, \"person_count\" desc"), sql.last.sql()),
+                () -> assertEquals(List.of(7L, 0, 2L, "Ada"), sql.last.parameters()),
+                () -> assertEquals(options, sql.options));
+        try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults())) {
+            DynamicForm effective = RepositoryLogicDeletes.bind(models.metadata(Person.class), form);
+            AggregateSpec scoped = RepositoryLogicDeletes.aggregate(original, effective);
+            assertSame(form, scoped.query().form());
+            assertSame(original.groups(), scoped.groups());
+            assertSame(original.aggregates(), scoped.aggregates());
+            assertSame(original.sorts(), scoped.sorts());
+            assertSame(original.sortExpressions(), scoped.sortExpressions());
+            assertSame(original.having().orElseThrow(), scoped.having().orElseThrow());
+            assertSame(original, RepositoryLogicDeletes.aggregate(original, form));
+            assertEquals(1, original.query().where().children().size());
+        }
+    }
 
     @Test
     void syncOrdinaryEnumLogicDeleteUsesStoredLiterals() {
@@ -179,7 +294,7 @@ class RepositoryBoundFormLogicDeleteTest {
 
         assertAll(
                 () -> {
-                    repository.createQuery().where(Person::getId, 7L).execute();
+                    repository.createQuery().where(Person::getId, 7L).fetch();
                     assertActive(sql.last);
                 },
                 () -> {
@@ -210,7 +325,7 @@ class RepositoryBoundFormLogicDeleteTest {
 
         assertAll(
                 () -> {
-                    repository.createQuery().where(Person::getId, 7L).execute().collectList().block();
+                    repository.createQuery().where(Person::getId, 7L).fetch().collectList().block();
                     assertActive(sql.last);
                 },
                 () -> {
@@ -264,9 +379,14 @@ class RepositoryBoundFormLogicDeleteTest {
 
     private static final class RecordingSql {
         private SqlRequest last;
+        private SqlExecutionOptions options;
 
         private SyncSqlExecutor sync() {
-            return new SyncSqlExecutor() {
+            return new com.flying.orm.rdb.support.ListQueryFixture() {
+                @Override public List<DynamicRow> query(SqlRequest request, SqlExecutionOptions executionOptions) {
+                    options = executionOptions;
+                    return query(request);
+                }
                 @Override public List<DynamicRow> query(SqlRequest request) {
                     last = request;
                     return List.of();
@@ -276,7 +396,7 @@ class RepositoryBoundFormLogicDeleteTest {
                     return 1L;
                 }
                 @Override public SqlWriteResult rowsUpdatedReturningKeys(
-                        SqlRequest request, SqlExecutionOptions options) {
+                        SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                     throw new UnsupportedOperationException();
                 }
             };
@@ -284,6 +404,12 @@ class RepositoryBoundFormLogicDeleteTest {
 
         private ReactiveSqlExecutor reactive() {
             return new ReactiveSqlExecutor() {
+                @Override public Flux<DynamicRow> query(SqlRequest request, SqlExecutionOptions executionOptions) {
+                    return Flux.defer(() -> {
+                        options = executionOptions;
+                        return query(request);
+                    });
+                }
                 @Override public Flux<DynamicRow> query(SqlRequest request) {
                     return Flux.defer(() -> {
                         last = request;

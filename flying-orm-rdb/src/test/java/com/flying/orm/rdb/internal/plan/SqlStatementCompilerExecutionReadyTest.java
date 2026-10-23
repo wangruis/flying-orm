@@ -48,4 +48,21 @@ class SqlStatementCompilerExecutionReadyTest {
         assertFalse(components.contains("parameterCount"));
         assertFalse(components.contains("bindMarkerStyle"));
     }
+
+    @Test
+    void executionUsesTheActualProductForAliasesAndPreviouslyVerifiedPlans() {
+        SqlStatementPlan postgres = SqlStatementCompiler.compile(
+                "select ?", 1, SqlBindMarkerStyle.CANONICAL, "postgresql");
+        String[][] cases = {
+                {"postgresql", "select $1"}, {"R2DBC PostgreSQL", "select $1"},
+                {"mysql", "select ?"}, {"MariaDB ConnectionFactory", "select ?"},
+                {"oracle", "select ?"}, {"Oracle Database", "select ?"},
+                {"sqlserver", "select @P0"}, {"Microsoft SQL Server", "select @P0"},
+                {"h2", "select ?"}
+        };
+        for (String[] entry : cases) {
+            assertEquals("select ?", SqlExecutionStatements.canonical(postgres, entry[0]));
+            assertEquals(entry[1], SqlExecutionStatements.r2dbc(postgres, entry[0]), entry[0]);
+        }
+    }
 }

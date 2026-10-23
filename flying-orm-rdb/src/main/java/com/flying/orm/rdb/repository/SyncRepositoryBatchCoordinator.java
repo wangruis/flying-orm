@@ -4,24 +4,28 @@ import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchGeneratedKeys;
+import com.flying.orm.rdb.batch.BatchMemoryBudget;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
-import com.flying.orm.rdb.form.BatchOptimisticUpdate;
 import com.flying.orm.rdb.form.SyncFormClient;
-import com.flying.orm.rdb.form.spec.BatchSpec;
 import com.flying.orm.rdb.internal.mapping.EntityValues;
+import com.flying.orm.rdb.lifecycle.EntityLifecyclePhase;
 import com.flying.orm.rdb.mapping.EntityMetadata;
 import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
 
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
+import java.util.function.Function;
 
 /** Converts entity batches into Form requests and releases per-row lifecycle retention. */
 final class SyncRepositoryBatchCoordinator<T> {
 
     private final SyncFormClient client;
     private final DynamicForm form;
-    private final SyncRepositoryBatchSupport<T> support;
+    private final EntityMetadata<T> metadata;
+    private final EntityValues<T> entityValues;
+    private final SyncRepositoryLifecycleSupport<T> lifecycle;
+    private final RepositoryEntityIdSupport<T> ids;
 
     SyncRepositoryBatchCoordinator(SyncFormClient client,
                                    DynamicForm form,
@@ -31,102 +35,59 @@ final class SyncRepositoryBatchCoordinator<T> {
                                    RepositoryEntityIdSupport<T> ids) {
         this.client = Objects.requireNonNull(client, "sync form client must not be null");
         this.form = Objects.requireNonNull(form, "repository form must not be null");
-        this.support = new SyncRepositoryBatchSupport<>(metadata, entityValues, lifecycle, ids);
+        this.metadata = Objects.requireNonNull(metadata, "repository entity metadata must not be null");
+        this.entityValues = Objects.requireNonNull(entityValues, "repository entity values must not be null");
+        this.lifecycle = Objects.requireNonNull(lifecycle, "repository lifecycle support must not be null");
+        this.ids = Objects.requireNonNull(ids, "repository entity id support must not be null");
     }
 
-    BatchExecutionEvidence insert(List<T> entities) { return insert(support.fromList(entities)); }
-    BatchExecutionEvidence upsert(List<T> entities) { return upsert(support.fromList(entities)); }
-    BatchExecutionEvidence update(List<T> entities) { return update(support.fromList(entities)); }
-
-    BatchExecutionEvidence insert(Publisher<T> entities) {
-        return insert(entities, client.defaultBatchWriteOptions());
+    BatchExecutionEvidence write(List<T> entities, RepositoryBatchKind kind, String[] conflictProperties) {
+        return write(fromList(entities), client.defaultBatchWriteOptions(), null, kind, conflictProperties);
     }
 
-    BatchExecutionEvidence upsert(Publisher<T> entities) {
-        return upsert(entities, client.defaultBatchWriteOptions());
+    BatchExecutionEvidence writeSingle(T entity, RepositoryBatchKind kind, String[] conflictProperties) {
+        return write(List.of(Objects.requireNonNull(entity, "repository entity must not be null")), kind, conflictProperties);
     }
 
-    BatchExecutionEvidence update(Publisher<T> entities) {
-        return update(entities, client.defaultBatchWriteOptions());
-    }
-
-    BatchExecutionEvidence insert(Publisher<T> entities, BatchWriteOptions options) {
-        return write(entities, options, null, BatchKind.INSERT);
-    }
-
-    BatchExecutionEvidence upsert(Publisher<T> entities, BatchWriteOptions options) {
-        return write(entities, options, null, BatchKind.UPSERT);
-    }
-
-    BatchExecutionEvidence update(Publisher<T> entities, BatchWriteOptions options) {
-        return write(entities, options, null, BatchKind.UPDATE);
-    }
-
-    BatchExecutionEvidence update(Publisher<T> entities, DataScope scope, BatchWriteOptions options) {
-        return write(entities, options, scope, BatchKind.UPDATE);
-    }
-
-    BatchExecutionEvidence insertEvidence(Publisher<T> entities, BatchWriteOptions options) {
-        return write(entities, options, null, BatchKind.INSERT);
-    }
-
-    BatchExecutionEvidence upsertEvidence(Publisher<T> entities, BatchWriteOptions options) {
-        return write(entities, options, null, BatchKind.UPSERT);
-    }
-
-    BatchExecutionEvidence updateEvidence(Publisher<T> entities, BatchWriteOptions options) {
-        return write(entities, options, null, BatchKind.UPDATE);
-    }
-
-    BatchExecutionEvidence updateEvidence(Publisher<T> entities, DataScope scope, BatchWriteOptions options) {
-        return write(entities, options, scope, BatchKind.UPDATE);
-    }
-
-
-
-
-
-    private BatchExecutionEvidence write(Publisher<T> entities,
-                                         BatchWriteOptions options, DataScope scope, BatchKind kind) {
-        BatchWriteOptions safeOptions = requireOptions(options);
-        support.requireStableWriteLayout(kind);
-        boolean returnGeneratedKeys = support.returnsGeneratedKeys(kind);
-        if (!support.requiresLifecycleTracking(kind, returnGeneratedKeys)) {
-            return client.writeBatch(spec(support.directRows(entities, kind), safeOptions, scope, kind,
-                    BatchGeneratedKeys.none()));
+    BatchExecutionEvidence write(Publisher<T> entities,
+                                 BatchWriteOptions options, DataScope scope, RepositoryBatchKind kind,
+                                 String[] conflictProperties) {
+        String[] columns = RepositoryBatchKind.conflictColumns(metadata, conflictProperties);
+        BatchWriteOptions safeOptions = Objects.requireNonNull(options, "batch write options must not be null");
+        Function<T, ?> mapper = kind.mapper(metadata, entityValues, ids, columns != null);
+        EntityLifecyclePhase after = kind.after();
+        boolean returnGeneratedKeys = (kind == RepositoryBatchKind.INSERT
+                || kind == RepositoryBatchKind.UPSERT && columns == null) && ids.databaseGenerated();
+        boolean postLifecycle = lifecycle.hasWork();
+        if (!postLifecycle && !returnGeneratedKeys) {
+            return client.writeBatch(kind.spec(form, Flux.from(entities).map(mapper),
+                    safeOptions, scope, BatchGeneratedKeys.none(), columns));
         }
-        SyncRepositoryBatchLifecycle<T> retained = support.retention(kind, safeOptions, returnGeneratedKeys);
+        RepositoryBatchRetention<T> retained = new RepositoryBatchRetention<>(ids, returnGeneratedKeys,
+                safeOptions.maxBufferedBytes(), "lifecycleRetainedBytes", this::retainedMemory);
         try {
-            return client.writeBatch(spec(support.trackedRows(entities, kind, retained), safeOptions,
-                    scope, kind, retained.generatedKeys()), retained::rowCompleted);
+            return client.writeBatch(kind.spec(form,
+                    retained.map(lifecycle.beforeRows(entities, kind.before()), mapper),
+                    safeOptions, scope, retained.generatedKeys(), columns), offset -> {
+                        T entity = retained.complete(offset);
+                        if (entity != null && postLifecycle) lifecycle.fire(after, entity, offset);
+                    });
         } finally {
-            retained.abort();
+            retained.clear();
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private BatchSpec spec(Publisher<?> rows,
-                           BatchWriteOptions options,
-                           DataScope scope,
-                           BatchKind kind,
-                           BatchGeneratedKeys generatedKeys) {
-        BatchSpec spec = switch (kind) {
-            case INSERT -> BatchSpec.insert(form, (Publisher<Map<String, Object>>) rows);
-            case UPSERT -> BatchSpec.upsert(form, (Publisher<Map<String, Object>>) rows);
-            case UPDATE -> BatchSpec.update(form, (Publisher<BatchOptimisticUpdate>) rows);
-        };
-        if (scope != null) {
-            spec = spec.withScope(scope);
-        }
-        spec = spec.withOptions(options);
-        return kind == BatchKind.INSERT
-                ? spec.withGeneratedKeys(generatedKeys)
-                : spec;
+    private long retainedMemory(T entity, Object row) {
+        long bytes = BatchMemoryBudget.estimateRowBytes(entityValues.readRetainedValues(entity));
+        return bytes > Long.MAX_VALUE - 64L ? Long.MAX_VALUE : bytes + 64L;
     }
 
-    private static BatchWriteOptions requireOptions(BatchWriteOptions options) {
-        return Objects.requireNonNull(options, "batch write options must not be null");
+    private Publisher<T> fromList(List<T> entities) {
+        lifecycle.rejectNonBlockingThread();
+        // 同步调用返回前消费完列表，不复制整批引用数组。
+        List<T> safeEntities = Objects.requireNonNull(entities, "repository entities must not be null");
+        safeEntities.forEach(entity -> Objects.requireNonNull(entity, "repository entity must not be null"));
+        return Flux.fromIterable(safeEntities);
     }
 
-    enum BatchKind { INSERT, UPSERT, UPDATE }
 }

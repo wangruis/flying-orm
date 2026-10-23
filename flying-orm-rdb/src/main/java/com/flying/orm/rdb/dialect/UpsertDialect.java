@@ -35,6 +35,17 @@ public interface UpsertDialect {
                   List<String> updateColumns,
                   List<String> valueExpressions);
 
+    /**
+     * 只插入新行，指定键冲突时不更新已有行；其他约束错误必须继续失败。
+     * 未实现该语义的方言明确拒绝，不能用宽泛的错误忽略代替。
+     */
+    default String renderIgnoreConflicts(String table,
+                                         List<String> columns,
+                                         List<String> conflictColumns,
+                                         List<String> valueExpressions) {
+        throw new UnsupportedOperationException("upsert dialect does not support conflict ignore");
+    }
+
     /** @return H2 upsert 方言。 */
     static UpsertDialect h2() {
         return BuiltInUpsertDialects.h2();

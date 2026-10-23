@@ -3,7 +3,7 @@ package com.flying.orm.core.scope;
 import com.flying.orm.core.field.FieldIdentity;
 import com.flying.orm.core.join.JoinFieldRef;
 
-import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
@@ -25,8 +25,8 @@ public final class FieldUseRequirements {
     private final List<Requirement> requirements;
     private final List<JoinRequirement> joinRequirements;
 
-    private FieldUseRequirements(List<Requirement> requirements,
-                                 List<JoinRequirement> joinRequirements) {
+    private FieldUseRequirements(Collection<Requirement> requirements,
+                                 Collection<JoinRequirement> joinRequirements) {
         this.requirements = List.copyOf(requirements);
         this.joinRequirements = List.copyOf(joinRequirements);
     }
@@ -106,8 +106,7 @@ public final class FieldUseRequirements {
             return requirements.isEmpty() && noJoinRequirements
                     ? EMPTY
                     : new FieldUseRequirements(
-                            new ArrayList<>(requirements),
-                            noJoinRequirements ? List.of() : new ArrayList<>(joinRequirements));
+                            requirements, noJoinRequirements ? List.of() : joinRequirements);
         }
     }
 }

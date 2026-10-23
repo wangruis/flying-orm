@@ -206,7 +206,7 @@ class EntityEnumCompositeMatrixTest {
                 assertSame(constant, models.rawRowMapper(TextOffsetRecord.class, mappings.valueCodecs())
                         .map(Map.of("value", constant.value.toString())).value());
                 assertEquals(constant.value, models.entityValues(TextOffsetRecord.class)
-                        .read(new TextOffsetRecord(constant)).get("value"));
+                        .readRetainedValues(new TextOffsetRecord(constant))[0]);
             }
         }
     }

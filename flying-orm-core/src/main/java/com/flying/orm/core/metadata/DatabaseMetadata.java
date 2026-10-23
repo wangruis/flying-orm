@@ -69,7 +69,7 @@ public final class DatabaseMetadata {
      * @return 匹配 Schema；不存在时返回空
      */
     public Optional<SchemaMetadata> findSchema(String name) {
-        return schemasByName.find(name, "schema name");
+        return schemasByName.find(name);
     }
 
     /**
@@ -104,7 +104,7 @@ public final class DatabaseMetadata {
      * @param tableName  表名
      * @return 匹配表；不存在时返回空
      */
-    public Optional<TableMetadata> findTable(String schemaName, String tableName) {
+    public Optional<RelationalTableDefinition> findTable(String schemaName, String tableName) {
         return findSchema(schemaName).flatMap(schema -> schema.findTable(tableName));
     }
 
@@ -116,7 +116,7 @@ public final class DatabaseMetadata {
      * @return 匹配表
      * @throws IllegalArgumentException Schema 或表不存在时抛出
      */
-    public TableMetadata table(String schemaName, String tableName) {
+    public RelationalTableDefinition table(String schemaName, String tableName) {
         return schema(schemaName).table(tableName);
     }
 

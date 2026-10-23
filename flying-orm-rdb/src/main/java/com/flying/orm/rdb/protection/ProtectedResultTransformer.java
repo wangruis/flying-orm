@@ -32,15 +32,6 @@ final class ProtectedResultTransformer {
         this.masking = Objects.requireNonNull(masking, "masked field result transformer must not be null");
     }
 
-    /** 解密业务可见列后应用本次查询的显示策略。 */
-    DynamicRow transform(DynamicForm form,
-                         DynamicRow row,
-                         DataScope scope,
-                         SensitiveDisplayMode displayMode,
-                         ValueCodecRegistry codecs) {
-        return plan(form, scope, displayMode, codecs).transform(row);
-    }
-
     ResultPlan plan(DynamicForm form,
                     DataScope scope,
                     SensitiveDisplayMode displayMode,

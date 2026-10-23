@@ -113,7 +113,7 @@ class PostgreSqlIndexOwnershipQueryTest {
         }
     }
 
-    private record SyncCapture(CapturedQueries queries) implements SyncSqlExecutor {
+    private record SyncCapture(CapturedQueries queries) implements com.flying.orm.rdb.support.ListQueryFixture {
         @Override
         public List<DynamicRow> query(SqlRequest request) {
             return queries.rows(request);
@@ -125,7 +125,7 @@ class PostgreSqlIndexOwnershipQueryTest {
         }
 
         @Override
-        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
             throw new UnsupportedOperationException();
         }
     }

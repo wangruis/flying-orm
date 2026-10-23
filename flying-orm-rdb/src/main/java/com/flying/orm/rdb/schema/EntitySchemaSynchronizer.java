@@ -3,11 +3,10 @@ package com.flying.orm.rdb.schema;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.RelationalSchemaDefinition;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
-import com.flying.orm.core.metadata.UniqueNullPolicy;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.IndexMetadata;
 import com.flying.orm.rdb.dialect.DatabaseDescriptor;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
+import com.flying.orm.rdb.mapping.EntitySchemaDescriptor;
 import com.flying.orm.rdb.metadata.JdbcFormMetadataReader;
 import com.flying.orm.rdb.metadata.ReactiveFormMetadataReader;
 import reactor.core.publisher.Flux;
@@ -26,7 +25,7 @@ import java.util.Set;
  * 把一组实体声明编排成启动期表结构校验或迁移。
  *
  * <p>它不负责猜测怎样扫描 classpath。Spring、Micronaut、自研容器或纯 Java 只要把扫描到的实体类型集合交进来，
- * 后面的元数据编译、差异计算、风险审核、方言渲染、执行和缓存失效都复用 flying-orm 自己的同一条链路。</p>
+ * 后面的元数据编译、差异计算、方言渲染、执行和缓存失效都复用 flying-orm 自己的同一条链路。</p>
  *
  * <p>同步 JDBC 与响应式 R2DBC 是两个明确入口。响应式入口保持冷发布器语义，调用方订阅后才读取元数据和执行 DDL，
  * 不会在构建客户端时隐藏 {@code block()}。</p>
@@ -35,13 +34,6 @@ import java.util.Set;
  * @version v2.0.0
  */
 public final class EntitySchemaSynchronizer {
-
-    private static final SchemaMigrationOptions FULL_OPTIONS = SchemaMigrationOptions.safe()
-            .allowDropColumn()
-            .allowColumnChange()
-            .allowPrimaryKeyChange()
-            .allowDropIndex()
-            .allowRebuildIndex();
 
     private final EntityModelRegistry models;
     private final ReactiveSchemaClient reactive;
@@ -77,31 +69,30 @@ public final class EntitySchemaSynchronizer {
             DatabaseDescriptor database,
             Collection<Class<?>> entityTypes,
             MultiTableSchemaPlanner.ForeignKeyCycleSupport cycleSupport) {
-        List<EntitySchemaTarget> targets = EntitySchemaSyncSupport.targets(models, entityTypes);
+        List<EntitySchemaDescriptor<?>> targets = EntitySchemaSyncSupport.targets(models, entityTypes);
         RelationalSchemaDefinition desired = relationalSchema(targets);
         return new MultiTableSchemaPlanner(database, cycleSupport).plan(desired);
     }
 
-    /** 使用实体规范关系模型完成同步 JDBC 审阅、执行和执行后验证。 */
-    public EntityRelationalSchemaSyncReport synchronizeRelational(
-            DatabaseDescriptor database,
-            EntitySchemaSyncMode mode,
-            Collection<Class<?>> entityTypes) {
-        return synchronizeRelational(database, mode, Map.of(), entityTypes);
+    public EntitySchemaSyncReport synchronize(DatabaseDescriptor database,
+                                               EntitySchemaSyncMode mode, Class<?>... entityTypes) {
+        return synchronize(database, mode, List.of(entityTypes));
     }
 
-    /**
-     * JDBC 完整关系同步入口。所有表先审阅并核对人工步骤与精确批准，确认整批可执行后才发送第一条 DDL。
-     */
-    public EntityRelationalSchemaSyncReport synchronizeRelational(
+    public Mono<EntitySchemaSyncReport> synchronizeReactive(DatabaseDescriptor database,
+                                                             EntitySchemaSyncMode mode, Class<?>... entityTypes) {
+        return synchronizeReactive(database, mode, List.of(entityTypes));
+    }
+
+    /** JDBC 实体同步：先规划所有表的完整结构差异与依赖，再按顺序执行 DDL。 */
+    public EntitySchemaSyncReport synchronize(
             DatabaseDescriptor database,
             EntitySchemaSyncMode mode,
-            Map<String, SchemaMigrationApproval> approvals,
             Collection<Class<?>> entityTypes) {
         EntitySchemaSyncMode safeMode = Objects.requireNonNull(
                 mode, "entity schema sync mode must not be null");
         if (safeMode == EntitySchemaSyncMode.OFF) {
-            return EntityRelationalSchemaSyncReport.off();
+            return EntitySchemaSyncReport.off();
         }
         requireJdbc();
         DatabaseDescriptor safeDatabase = Objects.requireNonNull(
@@ -112,39 +103,29 @@ public final class EntitySchemaSynchronizer {
         List<SchemaSnapshot> snapshots = batch.targets().stream()
                 .map(target -> JdbcSchemaClient.readSnapshot(jdbcMetadata, target.identity()))
                 .toList();
-        List<ReviewedSchemaPlan> plans = reviewRelationalBatch(
+        List<SchemaMigrationPlan> plans = reviewRelationalBatch(
                 safeDatabase, safeMode, batch, snapshots, jdbcMetadata.snapshotCoverage(), reviewer);
         rejectManualClosure(safeMode, batch, plans);
-        Map<String, SchemaMigrationApproval> safeApprovals = authorizeRelational(
-                safeMode, plans, approvals);
+        validateRelationalPlans(safeMode, plans);
         if (safeMode == EntitySchemaSyncMode.VALIDATE) {
-            return new EntityRelationalSchemaSyncReport(safeMode, plans, List.of());
+            return new EntitySchemaSyncReport(safeMode, plans, List.of());
         }
-        List<SchemaExecutionReport> results = plans.stream()
-                .map(plan -> executeRelationalJdbc(plan, safeApprovals))
+        List<SchemaMigrationResult> results = plans.stream()
+                .map(this::executeRelationalJdbc)
                 .toList();
-        return new EntityRelationalSchemaSyncReport(safeMode, plans, results);
+        return new EntitySchemaSyncReport(safeMode, plans, results);
     }
 
-    /** 响应式完整关系同步入口；订阅前不编译实体、不读字典、不执行 DDL。 */
-    public Mono<EntityRelationalSchemaSyncReport> synchronizeRelationalReactive(
+    /** 响应式完整关系同步入口；订阅后规划和执行，与 JDBC 共用结构规则。 */
+    public Mono<EntitySchemaSyncReport> synchronizeReactive(
             DatabaseDescriptor database,
             EntitySchemaSyncMode mode,
-            Collection<Class<?>> entityTypes) {
-        return synchronizeRelationalReactive(database, mode, Map.of(), entityTypes);
-    }
-
-    /** 响应式完整关系同步入口，批准规则与同步 JDBC 入口一致。 */
-    public Mono<EntityRelationalSchemaSyncReport> synchronizeRelationalReactive(
-            DatabaseDescriptor database,
-            EntitySchemaSyncMode mode,
-            Map<String, SchemaMigrationApproval> approvals,
             Collection<Class<?>> entityTypes) {
         return Mono.defer(() -> {
             EntitySchemaSyncMode safeMode = Objects.requireNonNull(
                     mode, "entity schema sync mode must not be null");
             if (safeMode == EntitySchemaSyncMode.OFF) {
-                return Mono.just(EntityRelationalSchemaSyncReport.off());
+                return Mono.just(EntitySchemaSyncReport.off());
             }
             requireReactive();
             DatabaseDescriptor safeDatabase = Objects.requireNonNull(
@@ -159,106 +140,28 @@ public final class EntitySchemaSynchronizer {
                     .map(snapshots -> reviewRelationalBatch(safeDatabase, safeMode, batch,
                             snapshots, reactiveMetadata.snapshotCoverage(), reviewer))
                     .flatMap(plans -> executeRelationalReactive(
-                            safeMode, batch, plans, approvals));
+                            safeMode, batch, plans));
         });
     }
 
-    public EntitySchemaSyncReport synchronize(EntitySchemaSyncMode mode, Class<?>... entityTypes) {
-        return synchronize(mode, Map.of(), List.of(entityTypes));
-    }
-
-    public EntitySchemaSyncReport synchronize(EntitySchemaSyncMode mode,
-                                               Map<String, SchemaMigrationApproval> approvals,
-                                               Collection<Class<?>> entityTypes) {
-        EntitySchemaSyncMode safeMode = Objects.requireNonNull(mode, "entity schema sync mode must not be null");
-        if (safeMode == EntitySchemaSyncMode.OFF) {
-            return EntitySchemaSyncReport.off();
-        }
-        requireJdbc();
-        List<EntitySchemaTarget> targets = legacyTargets(entityTypes);
-        if (safeMode != EntitySchemaSyncMode.FULL_UPDATE) {
-            List<SchemaMigrationPlan> plans = targets.stream().map(this::planJdbc).toList();
-            if (safeMode == EntitySchemaSyncMode.VALIDATE) {
-                return validate(plans);
-            }
-            rejectSkipped(safeMode, plans, List.of());
-            List<SchemaMigrationResult> results = targets.stream().map(this::executeSafeJdbc).toList();
-            return new EntitySchemaSyncReport(safeMode, plans, List.of(), results);
-        }
-        List<ReviewedSchemaMigrationPlan> reviews = targets.stream().map(this::reviewJdbc).toList();
-        List<SchemaMigrationPlan> reviewedPlans = reviews.stream()
-                                                         .map(ReviewedSchemaMigrationPlan::migration)
-                                                         .toList();
-        rejectSkipped(safeMode, reviewedPlans, reviews);
-        Map<String, SchemaMigrationApproval> safeApprovals = EntitySchemaSyncSupport.normalizedApprovals(approvals);
-        EntitySchemaSyncSupport.verifyApprovals(reviews, safeApprovals);
-        List<SchemaMigrationResult> results = reviews.stream()
-                .map(review -> executeReviewedJdbc(review, safeApprovals))
-                .toList();
-        return new EntitySchemaSyncReport(safeMode, reviewedPlans, reviews, results);
-    }
-
-    public Mono<EntitySchemaSyncReport> synchronizeReactive(EntitySchemaSyncMode mode, Class<?>... entityTypes) {
-        return synchronizeReactive(mode, Map.of(), List.of(entityTypes));
-    }
-
-    public Mono<EntitySchemaSyncReport> synchronizeReactive(EntitySchemaSyncMode mode,
-                                                             Map<String, SchemaMigrationApproval> approvals,
-                                                             Collection<Class<?>> entityTypes) {
-        return Mono.defer(() -> {
-            EntitySchemaSyncMode safeMode = Objects.requireNonNull(mode,
-                                                                    "entity schema sync mode must not be null");
-            if (safeMode == EntitySchemaSyncMode.OFF) {
-                return Mono.just(EntitySchemaSyncReport.off());
-            }
-            requireReactive();
-            List<EntitySchemaTarget> targets = legacyTargets(entityTypes);
-            if (safeMode == EntitySchemaSyncMode.FULL_UPDATE) {
-                return Flux.fromIterable(targets)
-                           .concatMap(this::reviewReactive)
-                           .collectList()
-                           .flatMap(reviews -> executeReviewedReactive(approvals, reviews));
-            }
-            return Flux.fromIterable(targets)
-                       .concatMap(this::planReactive)
-                       .collectList()
-                       .flatMap(plans -> executeReactive(safeMode, targets, plans));
-        });
-    }
-
-    private Mono<EntitySchemaSyncReport> executeReactive(EntitySchemaSyncMode mode,
-                                                          List<EntitySchemaTarget> targets,
-                                                          List<SchemaMigrationPlan> plans) {
-        if (mode == EntitySchemaSyncMode.VALIDATE) {
-            return Mono.fromCallable(() -> validate(plans));
-        }
-        rejectSkipped(mode, plans, List.of());
-        return Flux.fromIterable(targets)
-                   .concatMap(this::executeSafeReactive)
-                   .collectList()
-                   .map(results -> new EntitySchemaSyncReport(mode, plans, List.of(), results));
-    }
-
-    private Mono<EntityRelationalSchemaSyncReport> executeRelationalReactive(
+    private Mono<EntitySchemaSyncReport> executeRelationalReactive(
             EntitySchemaSyncMode mode,
             RelationalBatch batch,
-            List<ReviewedSchemaPlan> plans,
-            Map<String, SchemaMigrationApproval> approvals) {
+            List<SchemaMigrationPlan> plans) {
         rejectManualClosure(mode, batch, plans);
-        Map<String, SchemaMigrationApproval> safeApprovals = authorizeRelational(
-                mode, plans, approvals);
+        validateRelationalPlans(mode, plans);
         if (mode == EntitySchemaSyncMode.VALIDATE) {
-            return Mono.just(new EntityRelationalSchemaSyncReport(mode, plans, List.of()));
+            return Mono.just(new EntitySchemaSyncReport(mode, plans, List.of()));
         }
         return Flux.fromIterable(plans)
-                .concatMap(plan -> executeRelationalReactive(plan, safeApprovals))
+                .concatMap(this::executeRelationalReactive)
                 .collectList()
-                .map(results -> new EntityRelationalSchemaSyncReport(mode, plans, results));
+                .map(results -> new EntitySchemaSyncReport(mode, plans, results));
     }
 
     private static RelationalBatch relationalBatch(
             DatabaseDescriptor database,
-            List<EntitySchemaTarget> targets) {
+            List<EntitySchemaDescriptor<?>> targets) {
         RelationalSchemaDefinition desired = relationalSchema(targets);
         MultiTableSchemaPlanner.Plan batch = new MultiTableSchemaPlanner(
                 database, MultiTableSchemaPlanner.ForeignKeyCycleSupport.MANUAL_REQUIRED)
@@ -284,7 +187,7 @@ public final class EntitySchemaSynchronizer {
 
     private static void rejectManualClosure(EntitySchemaSyncMode mode,
                                              RelationalBatch batch,
-                                             List<ReviewedSchemaPlan> plans) {
+                                             List<SchemaMigrationPlan> plans) {
         if (mode == EntitySchemaSyncMode.VALIDATE || batch.manualForeignKeys().isEmpty()) {
             return;
         }
@@ -292,10 +195,10 @@ public final class EntitySchemaSynchronizer {
                 .flatMap(plan -> plan.operations().stream())
                 .anyMatch(operation -> requiresManualClosure(batch, operation));
         if (required) {
-            throw new EntityRelationalSchemaSyncException(
+            throw new EntitySchemaSyncException(
                     "entity relational schema synchronization contains foreign-key dependencies "
                             + "that require manual two-phase closure",
-                    new EntityRelationalSchemaSyncReport(mode, plans, List.of()));
+                    new EntitySchemaSyncReport(mode, plans, List.of()));
         }
     }
 
@@ -311,20 +214,20 @@ public final class EntitySchemaSynchronizer {
                 operation.relation(), operation.objectName()));
     }
 
-    private static RelationalSchemaDefinition relationalSchema(List<EntitySchemaTarget> targets) {
+    private static RelationalSchemaDefinition relationalSchema(List<EntitySchemaDescriptor<?>> targets) {
         List<RelationalTableDefinition> tables = targets.stream()
-                .flatMap(target -> target.descriptor().schema().tables().stream())
+                .flatMap(target -> target.schema().tables().stream())
                 .toList();
         rejectManagedReferencesToProtectedColumns(targets, tables);
         return RelationalSchemaDefinition.of(tables);
     }
 
     private static void rejectManagedReferencesToProtectedColumns(
-            List<EntitySchemaTarget> targets,
+            List<EntitySchemaDescriptor<?>> targets,
             List<RelationalTableDefinition> tables) {
         Map<RelationIdentity, DynamicForm> managedForms = new HashMap<>(targets.size());
         targets.forEach(target -> managedForms.put(
-                target.descriptor().table().identity(), target.descriptor().form()));
+                target.table().identity(), target.form()));
         for (RelationalTableDefinition table : tables) {
             table.foreignKeys().forEach(foreignKey -> {
                 DynamicForm target = managedForms.get(foreignKey.reference());
@@ -343,86 +246,49 @@ public final class EntitySchemaSynchronizer {
 
     private record ForeignKeyKey(RelationIdentity relation, String name) { }
 
-    private static List<ReviewedSchemaPlan> reviewRelationalBatch(
+    private static List<SchemaMigrationPlan> reviewRelationalBatch(
             DatabaseDescriptor database, EntitySchemaSyncMode mode, RelationalBatch batch,
             List<SchemaSnapshot> snapshots, SchemaSnapshotCoverage coverage,
             RelationalSchemaPlanReviewer reviewer) {
         // 先收齐全部实际快照，后面的已有表也可能持有前面新表复用的序列。
         var sequences = reviewer.observedSequences(snapshots);
-        List<ReviewedSchemaPlan> plans = new ArrayList<>(batch.targets().size());
+        List<SchemaMigrationPlan> plans = new ArrayList<>(batch.targets().size());
         for (int index = 0; index < batch.targets().size(); index++) {
             plans.add(reviewer.review(database, batch.targets().get(index),
                     snapshots.get(index), coverage, compatibilityMode(mode), sequences));
         }
-        List<ReviewedSchemaPlan> reviewed = List.copyOf(plans);
+        List<SchemaMigrationPlan> reviewed = List.copyOf(plans);
         EntitySchemaSyncSupport.rejectReferencedCandidateKeyChanges(
                 mode, snapshots, reviewed, reviewer.schemaDialect());
         return reviewed;
     }
 
-    private SchemaExecutionReport executeRelationalJdbc(
-            ReviewedSchemaPlan plan,
-            Map<String, SchemaMigrationApproval> approvals) {
-        SchemaMigrationApproval approval = approvalFor(plan, approvals);
-        return approval == null
-                ? jdbc.executeReviewed(plan, jdbcMetadata)
-                : jdbc.executeReviewed(plan, jdbcMetadata, approval);
+    private SchemaMigrationResult executeRelationalJdbc(
+            SchemaMigrationPlan plan) {
+        return jdbc.execute(plan, jdbcMetadata);
     }
 
-    private Mono<SchemaExecutionReport> executeRelationalReactive(
-            ReviewedSchemaPlan plan,
-            Map<String, SchemaMigrationApproval> approvals) {
-        SchemaMigrationApproval approval = approvalFor(plan, approvals);
-        return approval == null
-                ? reactive.executeReviewed(plan, reactiveMetadata)
-                : reactive.executeReviewed(plan, reactiveMetadata, approval);
+    private Mono<SchemaMigrationResult> executeRelationalReactive(
+            SchemaMigrationPlan plan) {
+        return reactive.execute(plan, reactiveMetadata);
     }
 
-    private static Map<String, SchemaMigrationApproval> authorizeRelational(
+    private static void validateRelationalPlans(
             EntitySchemaSyncMode mode,
-            List<ReviewedSchemaPlan> plans,
-            Map<String, SchemaMigrationApproval> approvals) {
-        EntityRelationalSchemaSyncReport report = new EntityRelationalSchemaSyncReport(
+            List<SchemaMigrationPlan> plans) {
+        EntitySchemaSyncReport report = new EntitySchemaSyncReport(
                 mode, plans, List.of());
         if (mode == EntitySchemaSyncMode.VALIDATE && report.hasDifferences()) {
-            throw new EntityRelationalSchemaSyncException(
+            throw new EntitySchemaSyncException(
                     "entity relational schema validation found database differences", report);
         }
-        if (report.requiresManualAction()) {
-            throw new EntityRelationalSchemaSyncException(
-                    "entity relational schema synchronization requires manual SQL", report);
-        }
         if (mode == EntitySchemaSyncMode.SAFE_UPDATE
-                && plans.stream().anyMatch(plan -> plan.risk() != SchemaMigrationRiskLevel.LOW)) {
-            throw new EntityRelationalSchemaSyncException(
-                    "safe entity relational schema synchronization contains reviewed-risk operations", report);
+                && plans.stream().flatMap(plan -> plan.operations().stream())
+                        .anyMatch(operation -> operation.compatibility()
+                                != SchemaOperation.Compatibility.SAFE_INCREMENTAL)) {
+            throw new EntitySchemaSyncException(
+                    "safe entity relational schema synchronization contains non-incremental operations", report);
         }
-        Map<String, SchemaMigrationApproval> normalized =
-                EntitySchemaSyncSupport.normalizedApprovals(approvals);
-        if (mode == EntitySchemaSyncMode.FULL_UPDATE) {
-            for (ReviewedSchemaPlan plan : plans) {
-                SchemaMigrationApproval approval = approvalFor(plan, normalized);
-                if (!plan.acceptsApproval(approval)) {
-                    throw new EntityRelationalSchemaSyncException(
-                            "entity relational schema plan requires an exact approval and its execution prerequisites",
-                            report);
-                }
-            }
-        }
-        return normalized;
-    }
-
-    private static SchemaMigrationApproval approvalFor(
-            ReviewedSchemaPlan plan,
-            Map<String, SchemaMigrationApproval> approvals) {
-        return approvals.get(qualifiedName(plan.desiredTable().orElseThrow().identity()));
-    }
-
-    private static String qualifiedName(com.flying.orm.core.metadata.RelationIdentity identity) {
-        StringBuilder name = new StringBuilder();
-        identity.catalog().ifPresent(catalog -> name.append(catalog).append('.'));
-        identity.schema().ifPresent(schema -> name.append(schema).append('.'));
-        return name.append(identity.table()).toString();
     }
 
     private static SchemaCompatibilityMode compatibilityMode(EntitySchemaSyncMode mode) {
@@ -431,120 +297,6 @@ public final class EntitySchemaSynchronizer {
             case SAFE_UPDATE -> SchemaCompatibilityMode.SAFE_INCREMENTAL;
             case OFF -> throw new IllegalArgumentException("OFF mode does not create a relational schema plan");
         };
-    }
-
-    private Mono<EntitySchemaSyncReport> executeReviewedReactive(
-            Map<String, SchemaMigrationApproval> approvals,
-            List<ReviewedSchemaMigrationPlan> reviews) {
-        List<SchemaMigrationPlan> reviewedPlans = reviews.stream()
-                                                         .map(ReviewedSchemaMigrationPlan::migration)
-                                                         .toList();
-        rejectSkipped(EntitySchemaSyncMode.FULL_UPDATE, reviewedPlans, reviews);
-        Map<String, SchemaMigrationApproval> safeApprovals = EntitySchemaSyncSupport.normalizedApprovals(approvals);
-        EntitySchemaSyncSupport.verifyApprovals(reviews, safeApprovals);
-        return Flux.fromIterable(reviews)
-                   .concatMap(review -> executeReviewedReactive(review, safeApprovals))
-                   .collectList()
-                   .map(results -> new EntitySchemaSyncReport(
-                           EntitySchemaSyncMode.FULL_UPDATE, reviewedPlans, reviews, results));
-    }
-
-    private SchemaMigrationPlan planJdbc(EntitySchemaTarget target) {
-        return jdbc.planCreateOrAlter(target.descriptor().form(),
-                                      legacyIndexes(target), jdbcMetadata,
-                                      SchemaMigrationOptions.safe());
-    }
-
-    private Mono<SchemaMigrationPlan> planReactive(EntitySchemaTarget target) {
-        return reactive.planCreateOrAlter(target.descriptor().form(),
-                                           legacyIndexes(target), reactiveMetadata,
-                                           SchemaMigrationOptions.safe());
-    }
-
-    private SchemaMigrationResult executeSafeJdbc(EntitySchemaTarget target) {
-        return jdbc.createOrAlterDetailed(target.descriptor().form(),
-                                           legacyIndexes(target), jdbcMetadata);
-    }
-
-    private Mono<SchemaMigrationResult> executeSafeReactive(EntitySchemaTarget target) {
-        return reactive.createOrAlterDetailed(target.descriptor().form(),
-                                               legacyIndexes(target), reactiveMetadata);
-    }
-
-    private ReviewedSchemaMigrationPlan reviewJdbc(EntitySchemaTarget target) {
-        return jdbc.reviewCreateOrAlter(target.descriptor().form(),
-                                        legacyIndexes(target), List.of(), jdbcMetadata,
-                                        FULL_OPTIONS, SchemaMigrationReviewPolicy.preferOnline());
-    }
-
-    private Mono<ReviewedSchemaMigrationPlan> reviewReactive(EntitySchemaTarget target) {
-        return reactive.reviewCreateOrAlter(target.descriptor().form(),
-                                             legacyIndexes(target),
-                                             List.of(), reactiveMetadata,
-                                             FULL_OPTIONS, SchemaMigrationReviewPolicy.preferOnline());
-    }
-
-    private List<EntitySchemaTarget> legacyTargets(Collection<Class<?>> entityTypes) {
-        List<EntitySchemaTarget> targets = EntitySchemaSyncSupport.targets(models, entityTypes);
-        for (EntitySchemaTarget target : targets) {
-            for (var unique : target.descriptor().table().uniqueConstraints()) {
-                if (unique.nullPolicy() != UniqueNullPolicy.DEFAULT) {
-                    throw new UnsupportedOperationException(
-                            "explicit unique NULL policy requires relational schema synchronization");
-                }
-            }
-        }
-        return targets;
-    }
-
-    private static List<IndexMetadata> legacyIndexes(EntitySchemaTarget target) {
-        var descriptor = target.descriptor();
-        if (descriptor.form().protections().encryptedFields().isEmpty()) {
-            return descriptor.metadata().targetIndexes();
-        }
-        RelationalTableDefinition table = descriptor.table();
-        List<IndexMetadata> indexes = new ArrayList<>(
-                table.uniqueConstraints().size() + table.indexes().size());
-        table.uniqueConstraints().forEach(unique -> {
-            IndexMetadata.Builder index = IndexMetadata.builder(unique.name()).unique();
-            unique.columns().forEach(index::addColumn);
-            indexes.add(index.build());
-        });
-        table.indexes().forEach(source -> {
-            IndexMetadata.Builder index = IndexMetadata.builder(source.name());
-            if (source.unique()) {
-                index.unique();
-            }
-            source.keys().forEach(key -> index.addColumn(key.column()));
-            indexes.add(index.build());
-        });
-        return List.copyOf(indexes);
-    }
-
-    private static EntitySchemaSyncReport validate(List<SchemaMigrationPlan> plans) {
-        return EntitySchemaSyncSupport.validate(plans);
-    }
-
-    private static void rejectSkipped(EntitySchemaSyncMode mode,
-                                      List<SchemaMigrationPlan> plans,
-                                      List<ReviewedSchemaMigrationPlan> reviews) {
-        EntitySchemaSyncSupport.rejectSkipped(mode, plans, reviews);
-    }
-
-    private SchemaMigrationResult executeReviewedJdbc(
-            ReviewedSchemaMigrationPlan review,
-            Map<String, SchemaMigrationApproval> approvals) {
-        SchemaMigrationApproval approval = EntitySchemaSyncSupport.approvalFor(review, approvals);
-        return jdbc.executeReviewed(review, jdbcMetadata, approval);
-    }
-
-    private Mono<SchemaMigrationResult> executeReviewedReactive(
-            ReviewedSchemaMigrationPlan review,
-            Map<String, SchemaMigrationApproval> approvals) {
-        SchemaMigrationApproval approval = EntitySchemaSyncSupport.approvalFor(review, approvals);
-        return approval == null
-                ? reactive.executeReviewed(review, reactiveMetadata)
-                : reactive.executeReviewed(review, reactiveMetadata, approval);
     }
 
     private void requireJdbc() {

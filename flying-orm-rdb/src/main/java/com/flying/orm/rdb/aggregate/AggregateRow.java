@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.aggregate;
 
 import com.flying.orm.core.internal.value.BindableValueSnapshots;
+import com.flying.orm.core.internal.value.OwnedBindableValues;
 
 import java.util.List;
 import java.util.Objects;
@@ -16,12 +17,15 @@ import java.util.Objects;
 public final class AggregateRow {
 
     private final AggregateRowLayout layout;
-    private final List<Object> values;
+    private final List<?> values;
 
     private AggregateRow(AggregateRowLayout layout, List<?> values) {
         this.layout = Objects.requireNonNull(layout, "aggregate row layout must not be null");
-        this.values = BindableValueSnapshots.logicalValues(
-                Objects.requireNonNull(values, "aggregate row values must not be null"));
+        List<?> safeValues = Objects.requireNonNull(values, "aggregate row values must not be null");
+        // 解码器拥有列表结构；只有不含标准可变载荷时才可直接交接，领域值不做绑定转换。
+        this.values = OwnedBindableValues.isPublished(safeValues)
+                && !OwnedBindableValues.requiresImmutableSnapshot(safeValues)
+                ? safeValues : BindableValueSnapshots.logicalValues(safeValues);
         if (layout.size() != this.values.size()) {
             throw new IllegalArgumentException("aggregate row value count does not match its layout");
         }
@@ -33,6 +37,16 @@ public final class AggregateRow {
 
     public AggregateRowLayout layout() {
         return layout;
+    }
+
+    /**
+     * 按声明的结果别名读取，大小写精确匹配；不隐式转换类型。
+     * 缺失或歧义别名抛出 IllegalArgumentException，已存在列的 SQL NULL 返回 null。
+     */
+    public <T> T get(String alias, Class<T> javaType) {
+        Objects.requireNonNull(javaType, "aggregate result Java type must not be null");
+        Object value = BindableValueSnapshots.logicalValue(values.get(layout.indexOf(alias)));
+        return value == null ? null : javaType.cast(value);
     }
 
     public <T> T get(AggregateExpression<T> expression) {

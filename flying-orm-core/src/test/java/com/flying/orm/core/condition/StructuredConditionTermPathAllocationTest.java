@@ -20,6 +20,24 @@ class StructuredConditionTermPathAllocationTest {
     private static final long MAX_ALLOCATED_BYTES = NODE_COUNT * 4_096L;
 
     @Test
+    void unboundedStructureValidationDoesNotWalkContainerValues() {
+        com.sun.management.ThreadMXBean allocations = allocationCounter();
+        StructuredConditionPolicy policy = StructuredConditionPolicy.defaults();
+        StructuredConditionInput warmup = StructuredConditionInput.term("id", "in", java.util.List.of(7));
+        for (int iteration = 0; iteration < 1_000; iteration++) {
+            StructuredConditionCompiler.validateStructure(warmup, policy);
+        }
+        StructuredConditionInput input = StructuredConditionInput.term("id", "in",
+                java.util.Collections.nCopies(16_384, 7));
+
+        long allocated = allocatedBytes(allocations,
+                () -> StructuredConditionCompiler.validateStructure(input, policy));
+
+        assertTrue(allocated < 8_192,
+                () -> "unbounded value validation allocated " + allocated + " bytes for an unchanged value graph");
+    }
+
+    @Test
     void compilationDoesNotAllocateACompletePathForEverySuccessfulTerm() {
         com.sun.management.ThreadMXBean allocations = allocationCounter();
         DynamicForm form = DynamicForm.builder("samples", "samples")

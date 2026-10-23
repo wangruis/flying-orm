@@ -8,7 +8,7 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * BatchWriteRequest 是普通批量写入执行器消费的共享请求，原生 JDBC 和 R2DBC 都按同一套 SQL 和参数顺序执行。
+ * BatchWriteRequest 是批量写入执行器消费的共享请求，默认使用同一套 SQL 和参数顺序。
  *
  * <p>rows 在订阅时才开始消费，每次订阅都会重新执行一次写入。需要重复订阅时，调用方必须保证 Publisher
  * 本身可以重放，并确认重复写入符合业务幂等要求；不要把执行结果随手 cache 后当成普通查询结果复用。</p>
@@ -17,7 +17,10 @@ import java.util.Objects;
  * 不要继续修改或循环复用同一个数组，否则输入缓冲里已经接收的参数也会跟着变化。请求对象会冻结参数类型列表，
  * 但不会复制每一行的大字段和参数数组，这样才能保持真正的流式批量和可控内存。</p>
  *
- * @param statement       唯一的已编译 SQL 结构计划
+ * <p>表单只向声明支持逐行布局的执行器发送内部 Layout 尾槽；原生 JDBC/R2DBC 会剥离尾槽，按相邻布局
+ * 执行不同 SQL，保持原输入顺序。普通自定义执行器仍接收固定布局；底层 renderer 的批量请求也保持固定 SQL。</p>
+ *
+ * @param statement       默认的已编译 SQL 结构计划
  * @param parameterTypes  每个参数位置的 Java 类型
  * @param rows            一行一组参数，不提前收集整批；发出后不能再修改该参数数组
  * @param options         批量写入选项

@@ -2,7 +2,10 @@ package com.flying.orm.core.internal.error;
 
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.UndeclaredThrowableException;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.ExecutionException;
 
@@ -18,10 +21,6 @@ import java.util.concurrent.ExecutionException;
  * @version v3.1
  */
 public final class ThrowableGraph {
-
-    private static final int MAX_KNOWN_WRAPPERS = 8;
-
-    private static final int MAX_CAUSE_DEPTH = 32;
 
     private ThrowableGraph() {
     }
@@ -40,7 +39,7 @@ public final class ThrowableGraph {
     }
 
     /**
-     * 在直接异常、反射目标异常和有限 JDK 异步包装链中查找指定类型。
+     * 在直接异常、反射目标异常和 JDK 异步包装链中查找指定类型。
      *
      * @param root 异常入口；允许为 {@code null}
      * @param type 目标异常类型
@@ -48,23 +47,11 @@ public final class ThrowableGraph {
      * @return 第一个匹配节点；未找到时返回 {@code null}
      */
     static <T extends Throwable> T find(Throwable root, Class<T> type) {
-        Objects.requireNonNull(type, "throwable type must not be null");
-        Throwable current = root;
-        for (int depth = 0; current != null && depth <= MAX_KNOWN_WRAPPERS; depth++) {
-            if (type.isInstance(current)) {
-                return type.cast(current);
-            }
-            Throwable next = knownWrapperTarget(current);
-            if (next == current) {
-                return null;
-            }
-            current = next;
-        }
-        return null;
+        return find(root, type, false);
     }
 
     /**
-     * 在有限 cause 链中查找指定异常类型；用于 flying-orm 自己的领域异常分类。
+     * 在 cause 链中查找指定异常类型；用于 flying-orm 自己的领域异常分类。
      *
      * @param root cause 链入口；允许为 {@code null}
      * @param type 目标异常类型
@@ -72,14 +59,25 @@ public final class ThrowableGraph {
      * @return 第一个匹配节点；未找到时返回 {@code null}
      */
     public static <T extends Throwable> T findCause(Throwable root, Class<T> type) {
+        return find(root, type, true);
+    }
+
+    private static <T extends Throwable> T find(Throwable root, Class<T> type, boolean followCause) {
         Objects.requireNonNull(type, "throwable type must not be null");
+        Set<Throwable> visited = null;
         Throwable current = root;
-        for (int depth = 0; current != null && depth <= MAX_CAUSE_DEPTH; depth++) {
+        while (current != null) {
             if (type.isInstance(current)) {
                 return type.cast(current);
             }
-            Throwable next = current.getCause();
-            if (next == current) {
+            Throwable next = followCause ? current.getCause() : knownWrapperTarget(current);
+            if (next == null || next == current) {
+                return null;
+            }
+            if (visited == null) {
+                visited = Collections.newSetFromMap(new IdentityHashMap<>());
+            }
+            if (!visited.add(current)) {
                 return null;
             }
             current = next;
@@ -118,18 +116,24 @@ public final class ThrowableGraph {
         if (root == null || target == null) {
             return false;
         }
+        Set<Throwable> visited = null;
         Throwable current = root;
-        for (int depth = 0; current != null && depth <= MAX_KNOWN_WRAPPERS; depth++) {
+        while (true) {
             if (current == target) {
                 return true;
             }
             Throwable next = knownWrapperTarget(current);
-            if (next == current) {
+            if (next == null || next == current) {
+                return false;
+            }
+            if (visited == null) {
+                visited = Collections.newSetFromMap(new IdentityHashMap<>());
+            }
+            if (!visited.add(current)) {
                 return false;
             }
             current = next;
         }
-        return false;
     }
 
     private static boolean hasDirectSuppressed(Throwable error, Throwable target) {

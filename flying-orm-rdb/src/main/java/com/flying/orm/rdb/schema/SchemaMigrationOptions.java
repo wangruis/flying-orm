@@ -6,38 +6,31 @@ import java.util.Map;
 import java.util.Objects;
 
 /**
- * createOrAlter 的危险动作开关。
+ * createOrAlter 的显式结构变更选项。
  * <p>
- * 默认 safe() 什么危险动作都不做；调用 allowXxx() 才会把对应动作放进执行计划。
+ * 默认 safe() 保留未选择的已有结构；调用 allowXxx() 显式选择相应变化。
  *
  * @param dropColumnAllowed       是否允许删掉库里多出来的列
  * @param columnChangeAllowed     是否允许改列类型、长度、精度或小数位
- * @param primaryKeyChangeAllowed 是否允许主键变化进入危险迁移策略
  * @param dropIndexAllowed        是否允许删掉库里多出来的索引
  * @param rebuildIndexAllowed     是否允许重建定义不一致的索引
  * @param columnRenames           明确声明的旧字段名到新字段名映射
+ * @param concurrentIndexesPreferred 是否优先使用方言支持的并发索引语法
  * @author wangr
  * @date 2026-07-29
  * @version v1.0
  */
 public record SchemaMigrationOptions(boolean dropColumnAllowed,
                                      boolean columnChangeAllowed,
-                                     boolean primaryKeyChangeAllowed,
                                      boolean dropIndexAllowed,
                                      boolean rebuildIndexAllowed,
-                                     Map<String, String> columnRenames) {
+                                     Map<String, String> columnRenames,
+                                     boolean concurrentIndexesPreferred) {
 
-    public SchemaMigrationOptions(boolean dropColumnAllowed,
-                                  boolean columnChangeAllowed,
-                                  boolean primaryKeyChangeAllowed,
-                                  boolean dropIndexAllowed,
-                                  boolean rebuildIndexAllowed) {
-        this(dropColumnAllowed,
-             columnChangeAllowed,
-             primaryKeyChangeAllowed,
-             dropIndexAllowed,
-             rebuildIndexAllowed,
-             Map.of());
+    /** 优先使用方言支持的并发索引语法；数据库会话和上线策略仍由调用方管理。 */
+    public SchemaMigrationOptions preferConcurrentIndexes() {
+        return new SchemaMigrationOptions(dropColumnAllowed, columnChangeAllowed,
+                dropIndexAllowed, rebuildIndexAllowed, columnRenames, true);
     }
 
     public SchemaMigrationOptions {
@@ -47,67 +40,39 @@ public record SchemaMigrationOptions(boolean dropColumnAllowed,
     }
 
     public static SchemaMigrationOptions safe() {
-        return new SchemaMigrationOptions(false, false, false, false, false, Map.of());
-    }
-
-    /**
-     * 判断这份配置是否可能生成破坏性 DDL。只要显式放开删除、改型、主键、索引重建或字段重命名，
-     * 就必须先走审核计划，不能再使用自动执行入口跳过风险确认。
-     *
-     * @return 需要先审核再执行时返回 true
-     */
-    public boolean requiresReviewedExecution() {
-        return dropColumnAllowed
-                || columnChangeAllowed
-                || primaryKeyChangeAllowed
-                || dropIndexAllowed
-                || rebuildIndexAllowed
-                || !columnRenames.isEmpty();
+        return new SchemaMigrationOptions(false, false, false, false, Map.of(), false);
     }
 
     public SchemaMigrationOptions allowDropColumn() {
         return new SchemaMigrationOptions(true,
                                           columnChangeAllowed,
-                                          primaryKeyChangeAllowed,
                                           dropIndexAllowed,
                                           rebuildIndexAllowed,
-                                          columnRenames);
+                                          columnRenames, concurrentIndexesPreferred);
     }
 
     public SchemaMigrationOptions allowColumnChange() {
         return new SchemaMigrationOptions(dropColumnAllowed,
                                           true,
-                                          primaryKeyChangeAllowed,
                                           dropIndexAllowed,
                                           rebuildIndexAllowed,
-                                          columnRenames);
-    }
-
-    public SchemaMigrationOptions allowPrimaryKeyChange() {
-        return new SchemaMigrationOptions(dropColumnAllowed,
-                                          columnChangeAllowed,
-                                          true,
-                                          dropIndexAllowed,
-                                          rebuildIndexAllowed,
-                                          columnRenames);
+                                          columnRenames, concurrentIndexesPreferred);
     }
 
     public SchemaMigrationOptions allowDropIndex() {
         return new SchemaMigrationOptions(dropColumnAllowed,
                                           columnChangeAllowed,
-                                          primaryKeyChangeAllowed,
                                           true,
                                           rebuildIndexAllowed,
-                                          columnRenames);
+                                          columnRenames, concurrentIndexesPreferred);
     }
 
     public SchemaMigrationOptions allowRebuildIndex() {
         return new SchemaMigrationOptions(dropColumnAllowed,
                                           columnChangeAllowed,
-                                          primaryKeyChangeAllowed,
                                           dropIndexAllowed,
                                           true,
-                                          columnRenames);
+                                          columnRenames, concurrentIndexesPreferred);
     }
 
     /**
@@ -136,10 +101,9 @@ public record SchemaMigrationOptions(boolean dropColumnAllowed,
         renames.put(safeOldName, safeNewName);
         return new SchemaMigrationOptions(dropColumnAllowed,
                                           columnChangeAllowed,
-                                          primaryKeyChangeAllowed,
                                           dropIndexAllowed,
                                           rebuildIndexAllowed,
-                                          renames);
+                                          renames, concurrentIndexesPreferred);
     }
 
     private static String requireText(String value, String name) {

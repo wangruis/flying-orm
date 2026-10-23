@@ -29,8 +29,7 @@ class SchemaSequenceCacheReuseTest {
                     RelationalTableDefinition desired = RelationalTableDefinition.builder(TABLE)
                             .addColumn(column("first_value", cache, 1))
                             .addColumn(column("second_value", cache, 1)).build();
-                    ReviewedSchemaPlan plan = assertDoesNotThrow(() -> review(dialect, existing, desired));
-                    assertFalse(plan.requiresManualAction(), plan.operations().toString());
+                    SchemaMigrationPlan plan = assertDoesNotThrow(() -> review(dialect, existing, desired));
                     assertEquals(1, plan.requests().stream()
                             .filter(request -> request.sql().startsWith("alter table ")).count());
                     assertTrue(plan.requests().stream()
@@ -49,7 +48,7 @@ class SchemaSequenceCacheReuseTest {
                     DynamicForm source = DynamicForm.builder("events", "events").addField(existing).build();
                     DynamicForm target = DynamicForm.builder("events", "events")
                             .addField(existing).addField(added).build();
-                    var changes = new DynamicFormChangeSet(source, target, List.of(added), List.of(), List.of());
+                    var changes = source.diffTo(target);
                     var requests = assertDoesNotThrow(() -> FormSchemaSqlRenderer.create(dialect).migrate(changes));
                     assertEquals(1, requests.stream()
                             .filter(request -> request.sql().startsWith("alter table ")).count());
@@ -74,7 +73,7 @@ class SchemaSequenceCacheReuseTest {
                     DynamicField added = field("second_value", cache, increment);
                     DynamicForm source = DynamicForm.builder("events", "events").addField(old).build();
                     DynamicForm target = DynamicForm.builder("events", "events").addField(old).addField(added).build();
-                    var changes = new DynamicFormChangeSet(source, target, List.of(added), List.of(), List.of());
+                    var changes = source.diffTo(target);
                     assertThrows(IllegalArgumentException.class,
                             () -> FormSchemaSqlRenderer.create(dialect).migrate(changes));
                 })));
@@ -90,10 +89,9 @@ class SchemaSequenceCacheReuseTest {
             RelationIdentity addedTable = RelationIdentity.table("new_events");
             var desired = RelationalTableDefinition.builder(addedTable)
                     .addColumn(column("second_value", 0, 1)).build();
-            ReviewedSchemaPlan plan = reviewer.review(DatabaseDescriptor.of(dialect.name(), "test", dialect),
+            SchemaMigrationPlan plan = reviewer.review(DatabaseDescriptor.of(dialect.name(), "test", dialect),
                     desired, SchemaSnapshot.absent(addedTable), SchemaSnapshotCoverage.complete(),
                     SchemaCompatibilityMode.EXACT, sequences);
-            assertFalse(plan.requiresManualAction());
             assertEquals(1, plan.requests().stream()
                     .filter(request -> request.sql().startsWith("create table ")).count());
             assertTrue(plan.requests().stream().noneMatch(request -> request.sql().startsWith("create sequence ")));
@@ -112,7 +110,7 @@ class SchemaSequenceCacheReuseTest {
                     DynamicForm source = DynamicForm.builder("events", "events").addField(existing).build();
                     DynamicForm target = DynamicForm.builder("events", "events").addField(existing)
                             .addField(added.get(0)).addField(added.get(1)).build();
-                    var changes = new DynamicFormChangeSet(source, target, added, List.of(), List.of());
+                    var changes = source.diffTo(target);
                     var requests = assertDoesNotThrow(() -> FormSchemaSqlRenderer.create(dialect).migrate(changes));
                     assertEquals(2, requests.stream()
                             .filter(request -> request.sql().startsWith("alter table ")).count());
@@ -132,7 +130,7 @@ class SchemaSequenceCacheReuseTest {
                     DynamicForm source = DynamicForm.builder("events", "events").addField(ordinary).build();
                     DynamicForm target = DynamicForm.builder("events", "events").addField(ordinary)
                             .addField(added.get(0)).addField(added.get(1)).build();
-                    var changes = new DynamicFormChangeSet(source, target, added, List.of(), List.of());
+                    var changes = source.diffTo(target);
                     assertThrows(IllegalArgumentException.class,
                             () -> FormSchemaSqlRenderer.create(dialect).migrate(changes));
                 })));
@@ -147,6 +145,42 @@ class SchemaSequenceCacheReuseTest {
         assertThrows(IllegalArgumentException.class, () -> review(RdbDialect.sqlServer(), existing, desired));
     }
 
+    @TestFactory
+    Stream<DynamicTest> addedColumnsCannotTurnANewSequenceDeclarationIntoAnObservedSequence() {
+        return dialects().flatMap(dialect -> Stream.of(false, true).map(reverse ->
+                DynamicTest.dynamicTest(dialect.name() + " added declarations reverse=" + reverse, () -> {
+                    ColumnDefinition existing = ColumnDefinition.builder("id", "BIGINT").build();
+                    RelationalTableDefinition desired = RelationalTableDefinition.builder(TABLE).addColumn(existing)
+                            .addColumn(column("first_value", reverse ? 0 : 20, 1))
+                            .addColumn(column("second_value", reverse ? 20 : 0, 1)).build();
+                    assertThrows(IllegalArgumentException.class, () -> review(dialect, existing, desired));
+                })));
+    }
+
+    @Test
+    void ordinaryMetadataReusesIdentityWithoutInventingSequenceOptions() {
+        DynamicField existing = field("first_value", 0, 1);
+        DynamicField added = field("second_value", 20, 2);
+        RelationalTableDefinition current = RelationalTableDefinition.builder(TABLE)
+                .addColumn(existing.column()).build();
+        DynamicForm target = DynamicForm.builder("events", "events").addField(existing).addField(added).build();
+        SchemaMigrationPlan plan = FormSchemaSqlRenderer.create(RdbDialect.postgresql())
+                .migrateSafelyPlan(current, target, List.of());
+        assertEquals(1, plan.requests().size());
+        assertTrue(plan.requests().getFirst().sql().startsWith("alter table "));
+    }
+
+    @Test
+    void unknownObservedOptionsDoNotAllowConflictingNewDeclarations() {
+        DynamicField existing = field("first_value", 0, 1);
+        RelationalTableDefinition current = RelationalTableDefinition.builder(TABLE)
+                .addColumn(existing.column()).build();
+        DynamicForm target = DynamicForm.builder("events", "events").addField(existing)
+                .addField(field("second_value", 20, 1)).addField(field("third_value", 30, 1)).build();
+        assertThrows(IllegalArgumentException.class, () -> FormSchemaSqlRenderer.create(RdbDialect.postgresql())
+                .migrateSafelyPlan(current, target, List.of()));
+    }
+
     @Test
     void mysqlStillRejectsNamedSequences() {
         var desired = RelationalTableDefinition.builder(TABLE).addColumn(column("first_value", 0, 1)).build();
@@ -156,7 +190,7 @@ class SchemaSequenceCacheReuseTest {
                 () -> RelationalSchemaSqlRenderer.create(RdbDialect.mysql().schema()).render(operation));
     }
 
-    private static ReviewedSchemaPlan review(RdbDialect dialect, ColumnDefinition existing,
+    private static SchemaMigrationPlan review(RdbDialect dialect, ColumnDefinition existing,
                                              RelationalTableDefinition desired) {
         SchemaSnapshot actual = SchemaSnapshot.present(
                 RelationalTableDefinition.builder(TABLE).addColumn(existing).build());

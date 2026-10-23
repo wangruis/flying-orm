@@ -1,11 +1,13 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.core.metadata.RelationIdentity;
+
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.ColumnMetadata;
-import com.flying.orm.core.metadata.ForeignKeyMetadata;
-import com.flying.orm.core.metadata.IndexMetadata;
-import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.metadata.ForeignKeyDefinition;
+import com.flying.orm.core.metadata.ReferentialAction;
+import com.flying.orm.core.metadata.IndexDefinition;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import org.junit.jupiter.api.Test;
@@ -20,9 +22,38 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class SchemaPhysicalIdentifierIdentityTest {
 
     @Test
+    void detectsForeignKeyActionAndReferenceNamespaceChanges() {
+        ForeignKeyDefinition currentKey = foreignKey(RelationIdentity.table("accounts"),
+                ReferentialAction.NO_ACTION, ReferentialAction.NO_ACTION);
+        RelationalTableDefinition current = RelationalTableDefinition.builder("customers")
+                .addColumn(DynamicField.of("customerId", "BIGINT").column()).addForeignKey(currentKey).build();
+        List<String> references = List.of("references \"auth\".\"accounts\" (\"id\")",
+                "references \"accounts\" (\"id\") on delete cascade",
+                "references \"accounts\" (\"id\") on update cascade");
+        int index = 0;
+        for (ForeignKeyDefinition target : List.of(
+                foreignKey(RelationIdentity.of(null, "auth", "accounts"), ReferentialAction.NO_ACTION, ReferentialAction.NO_ACTION),
+                foreignKey(RelationIdentity.table("accounts"), ReferentialAction.CASCADE, ReferentialAction.NO_ACTION),
+                foreignKey(RelationIdentity.table("accounts"), ReferentialAction.NO_ACTION, ReferentialAction.CASCADE))) {
+            SchemaMigrationPlan plan = renderer().migrateSafelyPlan(current, sameCaseTargetForm(),
+                    List.of(), List.of(target), SchemaMigrationOptions.safe());
+            assertEquals(List.of("alter table \"customers\" drop constraint \"fk_customer\", "
+                    + "add constraint \"fk_customer\" foreign key (\"customerId\") "
+                            + references.get(index++)), plan.sqlTexts());
+            assertTrue(plan.skippedChanges().isEmpty());
+        }
+    }
+
+    private static ForeignKeyDefinition foreignKey(RelationIdentity reference,
+                                                    ReferentialAction onDelete, ReferentialAction onUpdate) {
+        return ForeignKeyDefinition.builder("fk_customer").addColumn("customerId")
+                .reference(reference).addReferenceColumn("id").onDelete(onDelete).onUpdate(onUpdate).build();
+    }
+
+    @Test
     void acceptsExplicitCaseOnlyRenameAndRendersIt() {
         DynamicForm target = targetForm();
-        TableMetadata current = currentMetadata();
+        RelationalTableDefinition current = currentMetadata();
 
         SchemaMigrationPlan plan = renderer().migrateSafelyPlan(
                 current,
@@ -36,32 +67,15 @@ class SchemaPhysicalIdentifierIdentityTest {
     }
 
     @Test
-    void keepsExactPhysicalNamesWhenBuildingRenameRollback() {
-        SchemaMigrationPlan plan = renderer().migrateSafelyPlan(
-                currentMetadata(),
-                targetForm(),
-                List.of(),
-                SchemaMigrationOptions.safe().renameColumn("customerId", "CustomerId"));
-
-        ReviewedSchemaMigrationPlan reviewed = SchemaMigrationReviewer.create(renderer())
-                .review(currentMetadata(), plan,
-                        SchemaMigrationReviewPolicy.allowBlocking()
-                                                    .withColumnRenames(Map.of("customerId", "CustomerId")));
-
-        assertEquals(List.of("alter table \"customers\" rename column \"CustomerId\" to \"customerId\""),
-                     reviewed.rollback().requests().stream().map(SqlRequest::sql).toList());
-    }
-
-    @Test
     void doesNotRebuildAnIndexThatOnlyFollowsAColumnRename() {
-        IndexMetadata currentIndex = IndexMetadata.builder("ix_customer")
+        IndexDefinition currentIndex = IndexDefinition.builder("ix_customer")
                                                   .addColumn("customerId")
                                                   .build();
-        IndexMetadata targetIndex = IndexMetadata.builder("ix_customer")
+        IndexDefinition targetIndex = IndexDefinition.builder("ix_customer")
                                                  .addColumn("CustomerId")
                                                  .build();
-        TableMetadata current = TableMetadata.builder("customers")
-                                             .addColumn(ColumnMetadata.of("customerId", "BIGINT"))
+        RelationalTableDefinition current = RelationalTableDefinition.builder("customers")
+                                             .addColumn(DynamicField.of("customerId", "BIGINT").column())
                                              .addIndex(currentIndex)
                                              .build();
         SchemaMigrationOptions options = SchemaMigrationOptions.safe()
@@ -69,28 +83,23 @@ class SchemaPhysicalIdentifierIdentityTest {
         SchemaMigrationPlan plan = renderer().migrateSafelyPlan(
                 current, targetForm(), List.of(targetIndex), options);
 
-        ReviewedSchemaMigrationPlan reviewed = SchemaMigrationReviewer.create(renderer())
-                .review(current, plan,
-                        SchemaMigrationReviewPolicy.allowBlocking()
-                                                   .withColumnRenames(options.columnRenames()));
+        SchemaMigrationPlan reviewed = renderer().renderPlan(current, null, plan, SchemaMigrationOptions.safe());
 
         assertEquals(List.of("alter table \"customers\" rename column \"customerId\" to \"CustomerId\""),
                      plan.requests().stream().map(SqlRequest::sql).toList());
-        assertEquals(List.of("alter table \"customers\" rename column \"CustomerId\" to \"customerId\""),
-                     reviewed.rollback().requests().stream().map(SqlRequest::sql).toList());
     }
 
     @Test
-    void restoresAChangedIndexAfterRestoringItsRenamedColumn() {
-        IndexMetadata currentIndex = IndexMetadata.builder("ix_customer")
+    void rebuildsAChangedIndexAfterRenamingItsColumn() {
+        IndexDefinition currentIndex = IndexDefinition.builder("ix_customer")
                                                   .addColumn("customerId")
                                                   .build();
-        IndexMetadata targetIndex = IndexMetadata.builder("ix_customer")
+        IndexDefinition targetIndex = IndexDefinition.builder("ix_customer")
                                                  .unique()
                                                  .addColumn("CustomerId")
                                                  .build();
-        TableMetadata current = TableMetadata.builder("customers")
-                                             .addColumn(ColumnMetadata.of("customerId", "BIGINT"))
+        RelationalTableDefinition current = RelationalTableDefinition.builder("customers")
+                                             .addColumn(DynamicField.of("customerId", "BIGINT").column())
                                              .addIndex(currentIndex)
                                              .build();
         SchemaMigrationOptions options = SchemaMigrationOptions.safe()
@@ -99,21 +108,13 @@ class SchemaPhysicalIdentifierIdentityTest {
         SchemaMigrationPlan plan = renderer().migrateSafelyPlan(
                 current, targetForm(), List.of(targetIndex), options);
 
-        ReviewedSchemaMigrationPlan reviewed = SchemaMigrationReviewer.create(renderer())
-                .review(current, plan,
-                        SchemaMigrationReviewPolicy.allowBlocking()
-                                                   .withColumnRenames(options.columnRenames()));
+        SchemaMigrationPlan reviewed = renderer().renderPlan(current, null, plan, SchemaMigrationOptions.safe());
 
-        assertEquals(List.of(
-                "alter table \"customers\" rename column \"customerId\" to \"CustomerId\"",
-                "drop index \"ix_customer\"",
-                "create unique index \"ix_customer\" on \"customers\" (\"CustomerId\")"),
-                     plan.requests().stream().map(SqlRequest::sql).toList());
-        assertEquals(List.of(
-                "drop index \"ix_customer\"",
-                "alter table \"customers\" rename column \"CustomerId\" to \"customerId\"",
-                "create index \"ix_customer\" on \"customers\" (\"customerId\")"),
-                     reviewed.rollback().requests().stream().map(SqlRequest::sql).toList());
+        List<String> sql = plan.sqlTexts();
+        assertEquals(3, sql.size());
+        assertEquals("alter table \"customers\" rename column \"customerId\" to \"CustomerId\"", sql.get(0));
+        assertEquals("drop index \"ix_customer\"", sql.get(1));
+        assertEquals("create unique index \"ix_customer\" on \"customers\" (\"CustomerId\" asc)", sql.get(2));
     }
 
     @Test
@@ -128,9 +129,9 @@ class SchemaPhysicalIdentifierIdentityTest {
 
     @Test
     void renamesCaseDistinctPhysicalSourcesIndependently() {
-        TableMetadata current = TableMetadata.builder("customers")
-                                             .addColumn(ColumnMetadata.of("customerId", "BIGINT"))
-                                             .addColumn(ColumnMetadata.of("CustomerId", "BIGINT"))
+        RelationalTableDefinition current = RelationalTableDefinition.builder("customers")
+                                             .addColumn(DynamicField.of("customerId", "BIGINT").column())
+                                             .addColumn(DynamicField.of("CustomerId", "BIGINT").column())
                                              .build();
         DynamicForm target = DynamicForm.builder("target", "customers")
                                         .addField(DynamicField.of("lowerCustomerId", "BIGINT"))
@@ -161,35 +162,30 @@ class SchemaPhysicalIdentifierIdentityTest {
     }
 
     @Test
-    void restoresDroppedCaseDistinctPhysicalColumnInRollback() {
-        TableMetadata current = caseDistinctCurrentMetadata();
+    void dropsOnlyTheRequestedCaseDistinctPhysicalColumn() {
+        RelationalTableDefinition current = caseDistinctCurrentMetadata();
         SchemaMigrationPlan plan = renderer().migrateSafelyPlan(
                 current,
                 targetForm(),
                 List.of(),
                 SchemaMigrationOptions.safe().allowDropColumn());
 
-        ReviewedSchemaMigrationPlan reviewed = SchemaMigrationReviewer.create(renderer())
-                .review(current, plan, SchemaMigrationReviewPolicy.allowBlocking());
+        SchemaMigrationPlan reviewed = renderer().renderPlan(current, null, plan, SchemaMigrationOptions.safe());
 
         assertEquals(List.of("alter table \"customers\" drop column \"customerId\""),
                      plan.requests().stream().map(SqlRequest::sql).toList());
-        assertTrue(reviewed.rollback().requests().stream()
-                           .map(SqlRequest::sql)
-                           .anyMatch(sql -> sql.startsWith(
-                                   "alter table \"customers\" add column \"customerId\" ")));
     }
 
     @Test
     void retainsMatchedCaseDistinctIndexAsOnePhysicalObject() {
-        IndexMetadata currentIndex = IndexMetadata.builder("IX_customer")
+        IndexDefinition currentIndex = IndexDefinition.builder("IX_customer")
                                                   .addColumn("customerId")
                                                   .build();
-        IndexMetadata targetIndex = IndexMetadata.builder("ix_CUSTOMER")
+        IndexDefinition targetIndex = IndexDefinition.builder("ix_CUSTOMER")
                                                  .addColumn("customerId")
                                                  .build();
-        TableMetadata current = TableMetadata.builder("customers")
-                                              .addColumn(ColumnMetadata.of("customerId", "BIGINT"))
+        RelationalTableDefinition current = RelationalTableDefinition.builder("customers")
+                                              .addColumn(DynamicField.of("customerId", "BIGINT").column())
                                               .addIndex(currentIndex)
                                               .build();
 
@@ -203,56 +199,54 @@ class SchemaPhysicalIdentifierIdentityTest {
 
     @Test
     void treatsCaseDistinctTargetIndexesAsSeparatePhysicalObjects() {
-        IndexMetadata currentIndex = IndexMetadata.builder("ix_customer")
+        IndexDefinition currentIndex = IndexDefinition.builder("ix_customer")
                                                   .addColumn("customerId")
                                                   .build();
-        IndexMetadata additionalIndex = IndexMetadata.builder("IX_CUSTOMER")
+        IndexDefinition additionalIndex = IndexDefinition.builder("IX_CUSTOMER")
                                                      .addColumn("customerId")
                                                      .build();
-        TableMetadata current = TableMetadata.builder("customers")
-                                              .addColumn(ColumnMetadata.of("customerId", "BIGINT"))
+        RelationalTableDefinition current = RelationalTableDefinition.builder("customers")
+                                              .addColumn(DynamicField.of("customerId", "BIGINT").column())
                                               .addIndex(currentIndex)
                                               .build();
 
         SchemaMigrationPlan plan = renderer().migrateSafelyPlan(
                 current, sameCaseTargetForm(), List.of(currentIndex, additionalIndex));
-        ReviewedSchemaMigrationPlan reviewed = SchemaMigrationReviewer.create(renderer())
-                .review(current, plan, SchemaMigrationReviewPolicy.allowBlocking());
+        SchemaMigrationPlan reviewed = renderer().renderPlan(current, null, plan, SchemaMigrationOptions.safe());
 
         assertEquals(1, plan.requests().size());
         assertTrue(plan.requests().getFirst().sql().contains("\"IX_CUSTOMER\""));
         assertTrue(plan.skippedChanges().isEmpty());
-        assertEquals(1, reviewed.rollback().requests().size());
-        assertTrue(reviewed.rollback().requests().getFirst().sql().contains("\"IX_CUSTOMER\""));
     }
 
     @Test
     void retainsMatchedCaseDistinctForeignKeyAsOnePhysicalObject() {
-        ForeignKeyMetadata currentForeignKey = new ForeignKeyMetadata(
-                "fk_customer", List.of("customerId"), "accounts", List.of("id"));
-        ForeignKeyMetadata targetForeignKey = new ForeignKeyMetadata(
-                "FK_CUSTOMER", List.of("customerId"), "accounts", List.of("id"));
-        TableMetadata current = TableMetadata.builder("customers")
-                                              .addColumn(ColumnMetadata.of("customerId", "BIGINT"))
+        ForeignKeyDefinition currentForeignKey = ForeignKeyDefinition.builder("fk_customer").addColumn("customerId")
+                .reference(RelationIdentity.table("accounts")).addReferenceColumn("id").build();
+        ForeignKeyDefinition targetForeignKey = ForeignKeyDefinition.builder("FK_CUSTOMER").addColumn("customerId")
+                .reference(RelationIdentity.table("accounts")).addReferenceColumn("id").build();
+        RelationalTableDefinition current = RelationalTableDefinition.builder("customers")
+                                              .addColumn(DynamicField.of("customerId", "BIGINT").column())
                                               .addForeignKey(currentForeignKey)
                                               .build();
 
         SchemaMigrationPlan plan = renderer().migrateSafelyPlan(
                 current, sameCaseTargetForm(), List.of(), List.of(targetForeignKey), SchemaMigrationOptions.safe());
 
-        assertTrue(plan.requests().isEmpty());
-        assertEquals(List.of(SkippedSchemaChange.Kind.CHANGE_FOREIGN_KEY),
-                     plan.skippedChanges().stream().map(SkippedSchemaChange::kind).toList());
+        assertEquals(List.of("alter table \"customers\" drop constraint \"fk_customer\", "
+                + "add constraint \"FK_CUSTOMER\" foreign key (\"customerId\")"
+                        + " references \"accounts\" (\"id\")"), plan.sqlTexts());
+        assertTrue(plan.skippedChanges().isEmpty());
     }
 
     @Test
     void treatsCaseDistinctTargetForeignKeysAsSeparatePhysicalObjects() {
-        ForeignKeyMetadata currentForeignKey = new ForeignKeyMetadata(
-                "fk_customer", List.of("customerId"), "accounts", List.of("id"));
-        ForeignKeyMetadata additionalForeignKey = new ForeignKeyMetadata(
-                "FK_CUSTOMER", List.of("customerId"), "accounts", List.of("id"));
-        TableMetadata current = TableMetadata.builder("customers")
-                                              .addColumn(ColumnMetadata.of("customerId", "BIGINT"))
+        ForeignKeyDefinition currentForeignKey = ForeignKeyDefinition.builder("fk_customer").addColumn("customerId")
+                .reference(RelationIdentity.table("accounts")).addReferenceColumn("id").build();
+        ForeignKeyDefinition additionalForeignKey = ForeignKeyDefinition.builder("FK_CUSTOMER").addColumn("customerId")
+                .reference(RelationIdentity.table("accounts")).addReferenceColumn("id").build();
+        RelationalTableDefinition current = RelationalTableDefinition.builder("customers")
+                                              .addColumn(DynamicField.of("customerId", "BIGINT").column())
                                               .addForeignKey(currentForeignKey)
                                               .build();
 
@@ -263,25 +257,25 @@ class SchemaPhysicalIdentifierIdentityTest {
                 List.of(currentForeignKey, additionalForeignKey),
                 SchemaMigrationOptions.safe());
 
-        assertEquals(List.of(SkippedSchemaChange.Kind.ADD_FOREIGN_KEY),
-                     plan.skippedChanges().stream().map(SkippedSchemaChange::kind).toList());
-        assertEquals("FK_CUSTOMER", plan.skippedChanges().getFirst().name());
+        assertEquals(List.of("alter table \"customers\" add constraint \"FK_CUSTOMER\" foreign key (\"customerId\")"
+                + " references \"accounts\" (\"id\")"), plan.sqlTexts());
+        assertTrue(plan.skippedChanges().isEmpty());
     }
 
     private static FormSchemaSqlRenderer renderer() {
         return FormSchemaSqlRenderer.create(RdbDialect.postgresql());
     }
 
-    private static TableMetadata currentMetadata() {
-        return TableMetadata.builder("customers")
-                            .addColumn(ColumnMetadata.of("customerId", "BIGINT"))
+    private static RelationalTableDefinition currentMetadata() {
+        return RelationalTableDefinition.builder("customers")
+                            .addColumn(DynamicField.of("customerId", "BIGINT").column())
                             .build();
     }
 
-    private static TableMetadata caseDistinctCurrentMetadata() {
-        return TableMetadata.builder("customers")
-                            .addColumn(ColumnMetadata.of("customerId", "BIGINT"))
-                            .addColumn(ColumnMetadata.of("CustomerId", "BIGINT"))
+    private static RelationalTableDefinition caseDistinctCurrentMetadata() {
+        return RelationalTableDefinition.builder("customers")
+                            .addColumn(DynamicField.of("customerId", "BIGINT").column())
+                            .addColumn(DynamicField.of("CustomerId", "BIGINT").column())
                             .build();
     }
 

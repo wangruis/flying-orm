@@ -3,13 +3,10 @@ package com.flying.orm.rdb.schema;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.form.DynamicFormChangeSet;
-import com.flying.orm.core.form.FieldChange;
 import com.flying.orm.core.metadata.ColumnDefault;
 import com.flying.orm.core.metadata.ColumnDefinition;
-import com.flying.orm.core.metadata.ColumnMetadata;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
-import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import org.junit.jupiter.api.Test;
 
@@ -92,9 +89,9 @@ class SchemaDialectTemporalPrecisionTest {
         assertTrue(oracle.sameDataType("NUMBER(19)", "NUMBER(19,0)"));
         assertFalse(oracle.sameDataType("NUMBER(10)", "NUMBER(10,1)"));
 
-        TableMetadata current = TableMetadata.builder("devices")
-                .addColumn(ColumnMetadata.of("retry_count", "DECIMAL").withPrecision(10, 0))
-                .addColumn(ColumnMetadata.of("event_count", "DECIMAL").withPrecision(19, 0))
+        RelationalTableDefinition current = RelationalTableDefinition.builder("devices")
+                .addColumn(DynamicField.of("retry_count", "DECIMAL").withPrecision(10, 0).column())
+                .addColumn(DynamicField.of("event_count", "DECIMAL").withPrecision(19, 0).column())
                 .build();
         DynamicForm target = DynamicForm.builder("devices", "devices")
                 .addField(DynamicField.of("retry_count", "INTEGER"))
@@ -104,7 +101,7 @@ class SchemaDialectTemporalPrecisionTest {
         SchemaMigrationPlan plan = FormSchemaSqlRenderer.create(oracle)
                 .migrateSafelyPlan(current, target, List.of());
         assertFalse(plan.hasExecutableSql());
-        assertFalse(plan.requiresManualReview());
+        assertFalse(plan.hasSkippedChanges());
     }
 
     @Test
@@ -113,13 +110,13 @@ class SchemaDialectTemporalPrecisionTest {
                                       .addField(DynamicField.of("session_at", "TIMESTAMP WITH LOCAL TIME ZONE")
                                                             .withPrecision(4, null))
                                       .build();
-        ColumnMetadata current = form.toTableMetadata().column("session_at");
+        DynamicField current = new DynamicField(form.toTableDefinition().column("session_at"), false, false);
         DynamicField target = DynamicField.of("session_at", "TIMESTAMPTZ").withPrecision(4, null);
-        SchemaTableSqlRenderer renderer = new SchemaTableSqlRenderer(RdbDialect.oracle().schema());
+        RelationalSchemaSqlRenderer renderer = RelationalSchemaSqlRenderer.create(RdbDialect.oracle().schema());
 
-        assertEquals("TIMESTAMP(4) WITH LOCAL TIME ZONE", renderer.dataType(current));
-        assertEquals("TIMESTAMP(4) WITH TIME ZONE", renderer.dataType(target));
-        assertFalse(renderer.sameDataType(renderer.dataType(current), renderer.dataType(target)));
+        assertEquals("TIMESTAMP(4) WITH LOCAL TIME ZONE", renderer.dataType(current.column()));
+        assertEquals("TIMESTAMP(4) WITH TIME ZONE", renderer.dataType(target.column()));
+        assertFalse(renderer.sameDataType(renderer.dataType(current.column()), renderer.dataType(target.column())));
     }
 
     @Test
@@ -283,9 +280,9 @@ class SchemaDialectTemporalPrecisionTest {
                                       .addField(offsetTime)
                                       .addField(ordinaryText)
                                       .build();
-        SchemaTableSqlRenderer renderer = new SchemaTableSqlRenderer(RdbDialect.oracle().schema());
+        RelationalSchemaSqlRenderer renderer = RelationalSchemaSqlRenderer.create(RdbDialect.oracle().schema());
 
-        var createRequests = renderer.createTable(form);
+        var createRequests = FormSchemaSqlRenderer.create(RdbDialect.oracle()).createTable(form);
 
         assertTrue(createRequests.stream().anyMatch(request -> request.sql().contains(
                 timeMarker + timeMarker + "opening hours")));
@@ -294,11 +291,13 @@ class SchemaDialectTemporalPrecisionTest {
         assertTrue(createRequests.stream().anyMatch(request -> request.sql().contains(
                 commentEscape + timeMarker + "ordinary text")));
 
-        var migrationRequests = new ArrayList<com.flying.orm.core.sql.render.SqlRequest>();
-        ColumnMetadata physicalColumn = ColumnMetadata.of("business_time", "VARCHAR")
+        DynamicField physicalColumn = DynamicField.of("business_time", "VARCHAR")
                                                         .withLength(18)
                                                         .withComment(timeMarker + "opening hours");
-        renderer.addMissingComment(migrationRequests, "events", physicalColumn, localTime, null);
+        List<com.flying.orm.core.sql.render.SqlRequest> migrationRequests = FormSchemaSqlRenderer.create(RdbDialect.oracle())
+                .migrateSafelyPlan(RelationalTableDefinition.builder("events").addColumn(physicalColumn.column()).build(),
+                        DynamicForm.builder("events", "events").addField(localTime).build(), List.of(),
+                        SchemaMigrationOptions.safe().allowColumnChange()).requests();
 
         assertEquals(1, migrationRequests.size());
         assertTrue(migrationRequests.getFirst().sql().contains(timeMarker + timeMarker + "opening hours"));
@@ -337,9 +336,9 @@ class SchemaDialectTemporalPrecisionTest {
 
     @Test
     void doesNotAdvanceOracleTimeMarkerWhenSafeModeSkipsNarrowing() {
-        ColumnMetadata currentColumn = ColumnMetadata.of("event_time", "OFFSET_TIME")
+        DynamicField currentColumn = DynamicField.of("event_time", "OFFSET_TIME")
                                                      .withComment("event clock");
-        TableMetadata current = TableMetadata.builder("events").addColumn(currentColumn).build();
+        RelationalTableDefinition current = RelationalTableDefinition.builder("events").addColumn(currentColumn.column()).build();
         DynamicForm target = DynamicForm.builder("events", "events")
                                         .addField(DynamicField.of("event_time", "TIME")
                                                               .withComment("event clock"))
@@ -352,8 +351,8 @@ class SchemaDialectTemporalPrecisionTest {
         assertFalse(plan.requests().stream().anyMatch(request -> request.sql().contains(
                 "[[flying-orm:v1:TIME]]")));
 
-        ColumnMetadata localColumn = ColumnMetadata.of("event_time", "TIME").withComment("event clock");
-        TableMetadata localCurrent = TableMetadata.builder("events").addColumn(localColumn).build();
+        DynamicField localColumn = DynamicField.of("event_time", "TIME").withComment("event clock");
+        RelationalTableDefinition localCurrent = RelationalTableDefinition.builder("events").addColumn(localColumn.column()).build();
         DynamicForm offsetTarget = DynamicForm.builder("events", "events")
                                               .addField(DynamicField.of("event_time", "OFFSET_TIME")
                                                                     .withComment("event clock"))
@@ -364,8 +363,8 @@ class SchemaDialectTemporalPrecisionTest {
         assertFalse(wideningPlan.requests().stream().anyMatch(request -> request.sql().contains(
                 "[[flying-orm:v1:OFFSET_TIME]]")));
 
-        ColumnMetadata textColumn = ColumnMetadata.of("event_time", "VARCHAR").withLength(18);
-        TableMetadata textCurrent = TableMetadata.builder("events").addColumn(textColumn).build();
+        DynamicField textColumn = DynamicField.of("event_time", "VARCHAR").withLength(18);
+        RelationalTableDefinition textCurrent = RelationalTableDefinition.builder("events").addColumn(textColumn.column()).build();
         SchemaMigrationPlan reinterpretPlan = renderer.migrateSafelyPlan(textCurrent, target, List.of());
 
         assertTrue(reinterpretPlan.skippedChanges().stream().anyMatch(change -> change.name().equals("event_time")));
@@ -373,99 +372,17 @@ class SchemaDialectTemporalPrecisionTest {
                 "[[flying-orm:v1:TIME]]")));
     }
 
-    @Test
-    void restoresOracleTimeMarkersInReviewedRollback() {
-        ColumnMetadata offsetColumn = ColumnMetadata.of("event_time", "OFFSET_TIME")
-                                                    .withComment("event clock");
-        TableMetadata offsetCurrent = TableMetadata.builder("events").addColumn(offsetColumn).build();
-        DynamicForm timeTarget = DynamicForm.builder("events", "events")
-                                            .addField(DynamicField.of("event_time", "TIME")
-                                                                  .withComment("event clock"))
-                                            .build();
-        FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.oracle());
-        SchemaMigrationPlan typePlan = renderer.migrateSafelyPlan(
-                offsetCurrent, timeTarget, List.of(), SchemaMigrationOptions.safe().allowColumnChange());
-        ReviewedSchemaMigrationPlan reviewedTypePlan = SchemaMigrationReviewer.create(renderer).review(
-                offsetCurrent, typePlan, SchemaMigrationReviewPolicy.allowBlocking());
 
-        assertTrue(reviewedTypePlan.rollback().requests().stream().anyMatch(request -> request.sql().contains(
-                "[[flying-orm:v1:OFFSET_TIME]]event clock")));
 
-        ColumnMetadata varcharColumn = ColumnMetadata.of("business_time", "VARCHAR")
-                                                     .withLength(18)
-                                                     .withComment("opening hours");
-        TableMetadata varcharCurrent = TableMetadata.builder("events").addColumn(varcharColumn).build();
-        DynamicForm markerTarget = DynamicForm.builder("events", "events")
-                                              .addField(DynamicField.of("business_time", "TIME")
-                                                                    .withComment("opening hours"))
-                                              .build();
-        SchemaMigrationPlan markerPlan = renderer.migrateSafelyPlan(
-                varcharCurrent, markerTarget, List.of(), SchemaMigrationOptions.safe().allowColumnChange());
-        ReviewedSchemaMigrationPlan reviewedMarkerPlan = SchemaMigrationReviewer.create(renderer).review(
-                varcharCurrent, markerPlan, SchemaMigrationReviewPolicy.allowBlocking());
 
-        assertTrue(reviewedMarkerPlan.rollback().requests().stream().anyMatch(request ->
-                request.sql().contains("comment on column") && request.sql().endsWith(" is 'opening hours'")));
-    }
+
+
 
     @Test
-    void usesTheCurrentColumnNameUntilReviewedTemporalRenameRollbackCompletes() {
-        ColumnMetadata sourceColumn = ColumnMetadata.of("old_name", "OFFSET_TIME")
-                                                    .withComment("source clock");
-        TableMetadata current = TableMetadata.builder("events").addColumn(sourceColumn).build();
-        DynamicForm target = DynamicForm.builder("events", "events")
-                                        .addField(DynamicField.of("new_name", "TIME")
-                                                              .withComment("target clock"))
-                                        .build();
-        FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.oracle());
-        SchemaMigrationOptions options = SchemaMigrationOptions.safe()
-                                                                 .allowColumnChange()
-                                                                 .renameColumn("old_name", "new_name");
-        SchemaMigrationPlan plan = renderer.migrateSafelyPlan(current, target, List.of(), options);
-
-        ReviewedSchemaMigrationPlan reviewed = SchemaMigrationReviewer.create(renderer).review(
-                current,
-                plan,
-                SchemaMigrationReviewPolicy.allowBlocking().withColumnRenames(options.columnRenames()));
-        List<String> rollback = reviewed.rollback().requests().stream().map(request -> request.sql()).toList();
-
-        assertTrue(rollback.get(0).contains("\"new_name\""), rollback.toString());
-        assertFalse(rollback.get(0).contains("\"old_name\""), rollback.toString());
-        assertTrue(rollback.get(1).contains("\"new_name\""), rollback.toString());
-        assertFalse(rollback.get(1).contains("\"old_name\""), rollback.toString());
-        assertTrue(rollback.getLast().contains("rename column \"new_name\" to \"old_name\""), rollback.toString());
-    }
-
-    @Test
-    void usesTheCurrentColumnNameForReviewedTemporalNullabilityRollback() {
-        ColumnMetadata sourceColumn = ColumnMetadata.of("old_name", "OFFSET_TIME");
-        TableMetadata current = TableMetadata.builder("events").addColumn(sourceColumn).build();
-        DynamicForm target = DynamicForm.builder("events", "events")
-                                        .addField(DynamicField.of("new_name", "OFFSET_TIME")
-                                                              .withNullable(false))
-                                        .build();
-        FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.oracle());
-        SchemaMigrationOptions options = SchemaMigrationOptions.safe()
-                                                                 .allowColumnChange()
-                                                                 .renameColumn("old_name", "new_name");
-        SchemaMigrationPlan plan = renderer.migrateSafelyPlan(current, target, List.of(), options);
-
-        ReviewedSchemaMigrationPlan reviewed = SchemaMigrationReviewer.create(renderer).review(
-                current,
-                plan,
-                SchemaMigrationReviewPolicy.allowBlocking().withColumnRenames(options.columnRenames()));
-        List<String> rollback = reviewed.rollback().requests().stream().map(request -> request.sql()).toList();
-
-        assertTrue(rollback.getFirst().contains("\"new_name\" null"), rollback.toString());
-        assertFalse(rollback.getFirst().contains("\"old_name\""), rollback.toString());
-        assertTrue(rollback.getLast().contains("rename column \"new_name\" to \"old_name\""), rollback.toString());
-    }
-
-    @Test
-    void restoresSqlServerTemporalColumnCommentsInReviewedRollback() {
-        ColumnMetadata sourceColumn = ColumnMetadata.of("scheduled_at", "TIMESTAMP")
+    void changesSqlServerTemporalColumnComments() {
+        DynamicField sourceColumn = DynamicField.of("scheduled_at", "TIMESTAMP")
                                                     .withComment("source schedule");
-        TableMetadata current = TableMetadata.builder("dbo.events").addColumn(sourceColumn).build();
+        RelationalTableDefinition current = RelationalTableDefinition.builder("dbo.events").addColumn(sourceColumn.column()).build();
         DynamicForm target = DynamicForm.builder("events", "dbo.events")
                                         .addField(DynamicField.of("scheduled_at", "TIMESTAMP")
                                                               .withComment("target schedule"))
@@ -473,20 +390,17 @@ class SchemaDialectTemporalPrecisionTest {
         FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.sqlServer());
         SchemaMigrationPlan plan = renderer.migrateSafelyPlan(current, target, List.of());
 
-        ReviewedSchemaMigrationPlan reviewed = SchemaMigrationReviewer.create(renderer).review(
-                current, plan, SchemaMigrationReviewPolicy.allowBlocking());
+        SchemaMigrationPlan reviewed = renderer.renderPlan(current, null, plan, SchemaMigrationOptions.safe());
 
         assertTrue(plan.requests().stream().anyMatch(request -> request.sql().contains(
                 "sp_updateextendedproperty") && request.sql().contains("target schedule")));
-        assertTrue(reviewed.rollback().requests().stream().anyMatch(request -> request.sql().contains(
-                "sp_updateextendedproperty") && request.sql().contains("source schedule")));
     }
 
     @Test
     void rejectsMysqlTemporalCommentRewriteWithoutCompletePhysicalMetadata() {
-        ColumnMetadata sourceColumn = ColumnMetadata.of("scheduled_at", "TIMESTAMP")
+        DynamicField sourceColumn = DynamicField.of("scheduled_at", "TIMESTAMP")
                                                     .withComment("source schedule");
-        TableMetadata current = TableMetadata.builder("events").addColumn(sourceColumn).build();
+        RelationalTableDefinition current = RelationalTableDefinition.builder("events").addColumn(sourceColumn.column()).build();
         DynamicForm target = DynamicForm.builder("events", "events")
                                         .addField(DynamicField.of("scheduled_at", "TIMESTAMP")
                                                               .withComment("target schedule"))
@@ -501,10 +415,10 @@ class SchemaDialectTemporalPrecisionTest {
     }
 
     @Test
-    void appliesAndRestoresMysqlTemporalCommentWithCompletePhysicalMetadata() {
-        ColumnMetadata sourceColumn = ColumnMetadata.of("scheduled_at", "TIMESTAMP")
+    void appliesMysqlTemporalCommentWithCompletePhysicalMetadata() {
+        DynamicField sourceColumn = DynamicField.of("scheduled_at", "TIMESTAMP")
                 .withPrecision(6, null).withNullable(false).withComment("source schedule");
-        TableMetadata current = TableMetadata.builder("events").addColumn(sourceColumn).build();
+        RelationalTableDefinition current = RelationalTableDefinition.builder("events").addColumn(sourceColumn.column()).build();
         DynamicForm target = DynamicForm.builder("events", "events")
                 .addField(DynamicField.of("scheduled_at", "TIMESTAMP")
                         .withPrecision(6, null).withNullable(false).withComment("target schedule"))
@@ -519,26 +433,22 @@ class SchemaDialectTemporalPrecisionTest {
         SchemaMigrationPlan plan = renderer.migrationPlanner().migrateSafelyPlan(
                 current, target, List.of(), List.of(), SchemaMigrationOptions.safe(), snapshot);
 
-        ReviewedSchemaMigrationPlan reviewed = SchemaMigrationReviewer.create(renderer).review(
-                current, plan, SchemaMigrationReviewPolicy.allowBlocking(), snapshot);
+        SchemaMigrationPlan reviewed = renderer.renderPlan(current, snapshot, plan, SchemaMigrationOptions.safe());
 
         assertEquals(1, plan.requests().size());
-        assertEquals(1, reviewed.rollback().requests().size());
         String forward = plan.requests().getFirst().sql().toLowerCase(Locale.ROOT);
-        String rollback = reviewed.rollback().requests().getFirst().sql().toLowerCase(Locale.ROOT);
-        for (String sql : List.of(forward, rollback)) {
+        for (String sql : List.of(forward)) {
             assertTrue(sql.contains("modify column"), sql);
             assertTrue(sql.contains("datetime(6) not null default current_timestamp(6)"), sql);
         }
         assertTrue(forward.contains("comment 'target schedule'"), forward);
-        assertTrue(rollback.contains("comment 'source schedule'"), rollback);
     }
 
     @Test
     void appliesAndRestoresH2TemporalCommentOnlyChanges() {
-        ColumnMetadata sourceColumn = ColumnMetadata.of("scheduled_at", "TIMESTAMP")
+        DynamicField sourceColumn = DynamicField.of("scheduled_at", "TIMESTAMP")
                                                     .withComment("source schedule");
-        TableMetadata current = TableMetadata.builder("events").addColumn(sourceColumn).build();
+        RelationalTableDefinition current = RelationalTableDefinition.builder("events").addColumn(sourceColumn.column()).build();
         DynamicForm target = DynamicForm.builder("events", "events")
                                         .addField(DynamicField.of("scheduled_at", "TIMESTAMP")
                                                               .withComment("target schedule"))
@@ -546,21 +456,18 @@ class SchemaDialectTemporalPrecisionTest {
         FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.h2());
         SchemaMigrationPlan plan = renderer.migrateSafelyPlan(current, target, List.of());
 
-        ReviewedSchemaMigrationPlan reviewed = SchemaMigrationReviewer.create(renderer).review(
-                current, plan, SchemaMigrationReviewPolicy.allowBlocking());
+        SchemaMigrationPlan reviewed = renderer.renderPlan(current, null, plan, SchemaMigrationOptions.safe());
 
         assertTrue(plan.requests().stream().anyMatch(request -> request.sql().contains("comment on column")
                 && request.sql().contains("target schedule")));
-        assertTrue(reviewed.rollback().requests().stream().anyMatch(request ->
-                request.sql().contains("comment on column") && request.sql().contains("source schedule")));
     }
 
     @Test
     void rejectsUnsupportedTemporalShapeAndCommentChangesBeforeExecution() {
-        ColumnMetadata sourceColumn = ColumnMetadata.of("scheduled_at", "TIMESTAMP")
+        DynamicField sourceColumn = DynamicField.of("scheduled_at", "TIMESTAMP")
                                                     .withPrecision(0, null)
                                                     .withComment("source schedule");
-        TableMetadata current = TableMetadata.builder("events").addColumn(sourceColumn).build();
+        RelationalTableDefinition current = RelationalTableDefinition.builder("events").addColumn(sourceColumn.column()).build();
         DynamicForm target = DynamicForm.builder("events", "events")
                                         .addField(DynamicField.of("scheduled_at", "TIMESTAMP")
                                                               .withPrecision(6, null)
@@ -568,16 +475,16 @@ class SchemaDialectTemporalPrecisionTest {
                                         .build();
         FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(SchemaDialect.builder().build());
 
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(UnsupportedOperationException.class,
                      () -> renderer.migrateSafelyPlan(current, target, List.of()));
     }
 
     @Test
-    void rejectsUnsupportedCommentBeforeSkippedShapeAndRenamePlanning() {
-        ColumnMetadata sourceColumn = ColumnMetadata.of("old_name", "TIMESTAMP")
+    void skippedColumnChangeDoesNotRenderItsCommentOrPreventExplicitRename() {
+        DynamicField sourceColumn = DynamicField.of("old_name", "TIMESTAMP")
                                                     .withPrecision(6, null)
                                                     .withComment("source schedule");
-        TableMetadata current = TableMetadata.builder("events").addColumn(sourceColumn).build();
+        RelationalTableDefinition current = RelationalTableDefinition.builder("events").addColumn(sourceColumn.column()).build();
         DynamicForm target = DynamicForm.builder("events", "events")
                                         .addField(DynamicField.of("new_name", "TIMESTAMP")
                                                               .withPrecision(0, null)
@@ -586,14 +493,17 @@ class SchemaDialectTemporalPrecisionTest {
         FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(SchemaDialect.builder().build());
         SchemaMigrationOptions options = SchemaMigrationOptions.safe().renameColumn("old_name", "new_name");
 
-        assertThrows(IllegalArgumentException.class,
-                     () -> renderer.migrateSafelyPlan(current, target, List.of(), options));
+        SchemaMigrationPlan plan = renderer.migrateSafelyPlan(current, target, List.of(), options);
+        assertEquals(1, plan.requests().size());
+        assertTrue(plan.requests().getFirst().sql().contains("rename column old_name to new_name"));
+        assertEquals(1, plan.skippedChanges().size());
+        assertEquals(SkippedSchemaChange.Kind.CHANGE_COLUMN, plan.skippedChanges().getFirst().kind());
     }
 
     @Test
     void rejectsUnsupportedNewTemporalCommentBeforeRenamePlanning() {
-        ColumnMetadata sourceColumn = ColumnMetadata.of("old_name", "VARCHAR");
-        TableMetadata current = TableMetadata.builder("events").addColumn(sourceColumn).build();
+        DynamicField sourceColumn = DynamicField.of("old_name", "VARCHAR");
+        RelationalTableDefinition current = RelationalTableDefinition.builder("events").addColumn(sourceColumn.column()).build();
         DynamicForm target = DynamicForm.builder("events", "events")
                                         .addField(DynamicField.of("new_name", "VARCHAR"))
                                         .addField(DynamicField.of("scheduled_at", "TIMESTAMP")
@@ -602,7 +512,7 @@ class SchemaDialectTemporalPrecisionTest {
         FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(SchemaDialect.builder().build());
         SchemaMigrationOptions options = SchemaMigrationOptions.safe().renameColumn("old_name", "new_name");
 
-        assertThrows(IllegalArgumentException.class,
+        assertThrows(UnsupportedOperationException.class,
                      () -> renderer.migrateSafelyPlan(current, target, List.of(), options));
     }
 
@@ -613,16 +523,15 @@ class SchemaDialectTemporalPrecisionTest {
         DynamicField targetField = sourceField.withComment("target schedule");
         DynamicForm source = DynamicForm.builder("events", "events").addField(sourceField).build();
         DynamicForm target = DynamicForm.builder("events", "events").addField(targetField).build();
-        DynamicFormChangeSet changes = new DynamicFormChangeSet(source,
-                                                                 target,
-                                                                 List.of(),
-                                                                 List.of(),
-                                                                 List.of(new FieldChange(sourceField, targetField)));
+        DynamicFormChangeSet changes = source.diffTo(target);
         SchemaDialect dialect = SchemaDialect.builder()
                                              .generatedValues(SchemaDialect.GeneratedValueStyle.MYSQL)
                                              .build();
 
-        assertThrows(IllegalArgumentException.class,
-                     () -> FormSchemaSqlRenderer.create(dialect).migrate(changes));
+        FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(dialect);
+        assertThrows(IllegalStateException.class, () -> renderer.migrate(changes));
+        SchemaSnapshot snapshot = SchemaSnapshot.builder(RelationIdentity.table("events"))
+                .tablePresent().physicalColumns(List.of(sourceField.column())).build();
+        assertThrows(UnsupportedOperationException.class, () -> renderer.migrate(changes, snapshot));
     }
 }

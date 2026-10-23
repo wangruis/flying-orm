@@ -44,6 +44,22 @@ public final class RelationIdentity {
         return new RelationIdentity(null, null, table);
     }
 
+    /** 解析未加引号的 table、schema.table 或 catalog.schema.table 简写；字面点号使用 of/table。 */
+    public static RelationIdentity parse(String qualifiedName) {
+        String[] parts = Names.requireText(qualifiedName, "relation name").split("\\.", -1);
+        return switch (parts.length) {
+            case 1 -> table(parts[0]);
+            case 2 -> of(null, parts[0], parts[1]);
+            case 3 -> of(parts[0], parts[1], parts[2]);
+            default -> throw new IllegalArgumentException("relation name must be table, schema.table or catalog.schema.table");
+        };
+    }
+
+    /** 未加引号的展示名；SQL 必须由方言逐段引用，不能直接拼接本值。 */
+    public String qualifiedName() {
+        return (catalog == null ? "" : catalog + ".") + (schema == null ? "" : schema + ".") + table;
+    }
+
     public Optional<String> catalog() {
         return catalogView;
     }

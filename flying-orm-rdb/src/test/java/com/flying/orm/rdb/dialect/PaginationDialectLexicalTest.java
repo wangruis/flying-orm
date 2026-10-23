@@ -15,6 +15,20 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class PaginationDialectLexicalTest {
 
     @Test
+    void firstSelectComposesRenderedProjectionAndRelationWithoutRewritingSql() {
+        PaginationDialect dialect = PaginationDialect.sqlServerOffsetFetch();
+        for (String relation : List.of("from users where id > ?",
+                "from (select distinct name from users where id > ?) u",
+                "from (select name from users where id > ? union select name from archived_users) u")) {
+            assertEquals("select top (?) [name] " + relation,
+                    dialect.firstSelectSql("[name]", relation, List.of(7L)));
+            assertEquals(List.of(1, 7L), dialect.firstSelectParameters(List.of(7L)));
+        }
+        assertEquals("select top (?) [name] from users order by [name]",
+                dialect.firstSelectSql("[name]", "from users order by [name]", List.of()));
+    }
+
+    @Test
     void builtInSqlOnlyRenderingNeverReadsOrCopiesParameters() {
         List<Object> unreadable = new AbstractList<>() {
             @Override

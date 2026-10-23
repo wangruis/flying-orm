@@ -1,15 +1,15 @@
 package com.flying.orm.rdb.operator;
 
+import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.rdb.metadata.JdbcFormMetadataReader;
 import com.flying.orm.rdb.schema.JdbcSchemaClient;
-import com.flying.orm.rdb.schema.ReviewedSchemaMigrationPlan;
-import com.flying.orm.rdb.schema.SchemaMigrationExecutionOptions;
-import com.flying.orm.rdb.schema.SchemaMigrationOptions;
 import com.flying.orm.rdb.schema.SchemaMigrationPlan;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.schema.SchemaMigrationOptions;
 import com.flying.orm.rdb.schema.SchemaMigrationResult;
-import com.flying.orm.rdb.schema.SchemaMigrationReviewPolicy;
 
 import java.util.Objects;
+import java.util.function.Consumer;
 
 /**
  * 同步 create-or-alter 链式 builder。
@@ -36,18 +36,37 @@ public final class SyncCreateOrAlterTableBuilder {
     }
 
     /** 开始描述一列；必须调用列 builder 的 commit 才会加入目标表。 */
-    public SyncColumnBuilder addColumn() {
-        return new SyncColumnBuilder(this);
+    public ColumnBuilder<SyncCreateOrAlterTableBuilder> addColumn() {
+        return new ColumnBuilder<>(this, draft);
+    }
+
+    /** 开始描述具名列，等价于 addColumn().name(name)。 */
+    public ColumnBuilder<SyncCreateOrAlterTableBuilder> addColumn(String name) {
+        return addColumn().name(name);
+    }
+
+    /** 配置并添加一列，回调中无需 commit；返回时冻结列定义，不触发数据库操作。 */
+    public SyncCreateOrAlterTableBuilder addColumn(
+            String name, Consumer<? super ColumnBuilder<SyncCreateOrAlterTableBuilder>> definition) {
+        ColumnBuilder<SyncCreateOrAlterTableBuilder> column = addColumn(name);
+        Objects.requireNonNull(definition, "column configuration must not be null").accept(column);
+        return column.commit();
+    }
+
+    /** 直接复用完整动态字段，包括类型、精度、可空性、唯一性和生成策略。 */
+    public SyncCreateOrAlterTableBuilder addColumn(DynamicField field) {
+        draft.addColumn(field);
+        return this;
     }
 
     /** 开始描述一个索引；索引列顺序按调用顺序保留。 */
-    public SyncIndexBuilder addIndex(String name) {
-        return new SyncIndexBuilder(this, name);
+    public IndexBuilder<SyncCreateOrAlterTableBuilder> addIndex(String name) {
+        return new IndexBuilder<>(this, draft, name);
     }
 
-    /** 开始描述一个外键；危险关系变化仍由迁移计划和审核策略决定是否执行。 */
-    public SyncForeignKeyBuilder addForeignKey(String name) {
-        return new SyncForeignKeyBuilder(this, name);
+    /** 开始描述一个外键；结构变化按显式迁移选项规划。 */
+    public ForeignKeyBuilder<SyncCreateOrAlterTableBuilder> addForeignKey(String name) {
+        return new ForeignKeyBuilder<>(this, draft, name);
     }
 
     /** 设置本次迁移允许执行的变化范围，默认使用安全策略。 */
@@ -69,30 +88,19 @@ public final class SyncCreateOrAlterTableBuilder {
 
     /** 只生成结构化计划，不执行 DDL，也不会失效元数据缓存。 */
     public SchemaMigrationPlan plan() {
-        if (!draft.hasForeignKeys()) {
-            return schemaClient.planCreateOrAlter(
-                    draft.form(), draft.indexes(), metadataReader, draft.options());
-        }
-        // JdbcSchemaClient 还没有带外键参数的 plan 重载。审核入口使用同一份 JDBC 规划器，
-        // 只额外生成审核信息，不会执行 SQL；取回 migration 能避免同步路径悄悄丢掉外键。
-        return review(SchemaMigrationReviewPolicy.allowBlocking()).migration();
+        return schemaClient.planCreateOrAlter(
+                draft.form(), draft.indexes(), draft.foreignKeys(), metadataReader, draft.options());
     }
 
-    /** 生成可展示、可审批的审核计划，不会执行 DDL。 */
-    public ReviewedSchemaMigrationPlan review(SchemaMigrationReviewPolicy policy) {
-        return schemaClient.reviewCreateOrAlter(
-                draft.form(), draft.indexes(), draft.foreignKeys(), metadataReader, draft.options(), policy);
+    /** 执行冻结的结构计划，并以显式 SQL 选项覆盖客户端默认值。 */
+    public SchemaMigrationResult execute(SchemaMigrationPlan plan,
+                                                 SqlExecutionOptions executionOptions) {
+        return schemaClient.execute(plan, metadataReader, executionOptions);
     }
 
-    /** 执行已审核的确定计划，并以本次显式保护参数覆盖客户端默认值。 */
-    public SchemaMigrationResult executeReviewed(ReviewedSchemaMigrationPlan reviewedPlan,
-                                                 SchemaMigrationExecutionOptions executionOptions) {
-        return schemaClient.executeReviewed(reviewedPlan, executionOptions);
-    }
-
-    /** 使用 Schema 客户端配置的默认执行保护执行已审核计划。 */
-    public SchemaMigrationResult executeReviewed(ReviewedSchemaMigrationPlan reviewedPlan) {
-        return schemaClient.executeReviewed(reviewedPlan);
+    /** 使用 Schema 客户端配置的默认 SQL 选项执行计划。 */
+    public SchemaMigrationResult execute(SchemaMigrationPlan plan) {
+        return schemaClient.execute(plan, metadataReader);
     }
 
     DdlStructureDraft draft() {

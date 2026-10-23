@@ -22,8 +22,60 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 
 class UpsertProtectedStageLayoutTest {
+
+    @Test
+    void equalInsertAndParameterLayoutsShareOneImmutableSnapshot() {
+        DynamicForm form = DynamicForm.builder("t", "t")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("name", "VARCHAR")).build();
+        List<DynamicField> inserts = new java.util.ArrayList<>(form.fields());
+        List<DynamicField> parameters = new java.util.ArrayList<>(form.fields());
+        UpsertFieldPlan plan = new UpsertFieldPlan(inserts, List.of(form.field("id")), List.of(form.field("name")), parameters);
+        assertSame(plan.insertFields(), plan.parameterFields());
+        inserts.clear();
+        parameters.clear();
+        assertEquals(form.fields(), plan.parameterFields());
+        assertThrows(UnsupportedOperationException.class, () -> plan.parameterFields().clear());
+        UpsertFieldPlan reordered = new UpsertFieldPlan(form.fields(), plan.conflictFields(), plan.updateFields(),
+                List.of(form.field("name"), form.field("id")));
+        assertNotSame(reordered.insertFields(), reordered.parameterFields());
+        assertEquals(List.of("name", "id"), names(reordered.parameterFields()));
+    }
+
+    @Test
+    void perCallExclusionRetainsEncryptedInsertAndAllSearchColumnsButNotTheirUpdates() {
+        DynamicForm logical = DynamicForm.builder("t", "t")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("secret", "VARCHAR"))
+                .addField(DynamicField.of("name", "VARCHAR"))
+                .encrypted("secret", EncryptedFieldDefinition.builder()
+                        .searchModes(EncryptedSearchMode.EXACT, EncryptedSearchMode.SUFFIX).suffixLengths(3).build()).build();
+        DynamicForm physical = ProtectedFormLayout.physical(logical);
+        RepositoryUpsertValues values = (RepositoryUpsertValues) RepositoryUpsertValues.prepareInsert(
+                logical, Map.of("id", 1L, "secret", "private", "name", "new"), false, java.util.Set.of("secret"));
+        UpsertFieldPlan plan = UpsertFieldPlan.create(logical, values, physical, physical.fields(), values, false, List.of());
+        assertEquals(physical.fields(), plan.insertFields());
+        assertEquals(List.of("name"), names(plan.updateFields()));
+        assertEquals(physical.fields(), plan.parameterFields());
+        assertSame(plan.insertFields(), plan.parameterFields());
+    }
+
+    @Test
+    void perCallExclusionCannotDesynchronizeContainsSideIndex() {
+        DynamicForm logical = DynamicForm.builder("t", "t")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("secret", "VARCHAR"))
+                .encrypted("secret", EncryptedFieldDefinition.builder().searchModes(EncryptedSearchMode.CONTAINS).build()).build();
+        DynamicForm physical = ProtectedFormLayout.physical(logical);
+        RepositoryUpsertValues values = (RepositoryUpsertValues) RepositoryUpsertValues.prepareInsert(
+                logical, Map.of("id", 1L, "secret", "private"), false, java.util.Set.of("secret"));
+        assertTrue(assertThrows(IllegalArgumentException.class, () -> UpsertFieldPlan.create(
+                logical, values, physical, physical.fields(), values, false, List.of())).getMessage().contains("CONTAINS protected field"));
+    }
 
     @Test
     void keepsUpdateOnlyEncryptedPhysicalColumnsOutOfInsertStage() {
@@ -38,7 +90,7 @@ class UpsertProtectedStageLayoutTest {
                                                             new ProtectedStageEntity(7L, "rotate me"));
 
         UpsertFieldPlan plan = UpsertFieldPlan.create(
-                logicalForm, values, physicalForm, physicalForm.fields(), values);
+                logicalForm, values, physicalForm, physicalForm.fields(), values, false, List.of());
 
         List<String> encryptedColumns = physicalForm.fields().stream()
                                                     .filter(field -> !field.primaryKey())
@@ -46,6 +98,7 @@ class UpsertProtectedStageLayoutTest {
                                                     .toList();
         assertEquals(List.of("id"), names(plan.insertFields()));
         assertEquals(encryptedColumns, names(plan.updateFields()));
+        assertEquals(physicalForm.fields(), plan.parameterFields());
     }
 
     @Test
@@ -63,10 +116,11 @@ class UpsertProtectedStageLayoutTest {
         prepared.put("tenant_id", "tenant-a");
 
         UpsertFieldPlan plan = UpsertFieldPlan.create(
-                form, prepared, form, form.fields(), values);
+                form, prepared, form, form.fields(), values, false, List.of());
 
         assertEquals(List.of("id", "tenant_id"), names(plan.insertFields()));
         assertEquals(List.of("secret"), names(plan.updateFields()));
+        assertEquals(List.of("id", "tenant_id", "secret"), names(plan.parameterFields()));
     }
 
     @Test
@@ -87,7 +141,7 @@ class UpsertProtectedStageLayoutTest {
         IllegalArgumentException error = assertThrows(
                 IllegalArgumentException.class,
                 () -> UpsertFieldPlan.create(
-                        logicalForm, values, physicalForm, physicalForm.fields(), values));
+                        logicalForm, values, physicalForm, physicalForm.fields(), values, false, List.of()));
 
         assertTrue(error.getMessage().contains("CONTAINS protected field"));
     }

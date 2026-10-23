@@ -4,6 +4,7 @@ import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.rdb.type.DatabaseTypes;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -18,6 +19,8 @@ final class PostgreSqlMetadataQueries {
 
     private static final String BASE_COLUMNS_SQL = """
             select c.column_name as COLUMN_NAME,
+                   c.table_name as METADATA_TABLE,
+                   pg_catalog.obj_description(column_table.oid, 'pg_class') as TABLE_COMMENT,
                    c.table_schema as RESOLUTION_SCHEMA,
                    case when c.data_type in ('ARRAY', 'USER-DEFINED', 'bit', 'bit varying')
                         then pg_catalog.format_type(column_attribute.atttypid,
@@ -157,6 +160,8 @@ final class PostgreSqlMetadataQueries {
              and default_dependency.objid = column_default.oid
              and default_dependency.refclassid = 'pg_catalog.pg_class'::pg_catalog.regclass
              and default_dependency.deptype = 'n'
+             and c.column_default = 'nextval(' ||
+                 pg_catalog.quote_literal(default_dependency.refobjid::pg_catalog.regclass::text) || '::regclass)'
             left join pg_catalog.pg_class default_sequence
               on default_sequence.oid = default_dependency.refobjid
              and default_sequence.relkind = 'S'
@@ -183,11 +188,12 @@ final class PostgreSqlMetadataQueries {
               on pk.table_schema = c.table_schema
              and pk.table_name = c.table_name
              and pk.column_name = c.column_name
-            where c.table_name = ?
+            where ${TABLE_FILTER}
             """;
 
     private static final String BASE_INDEXES_SQL = """
             select ci.relname as INDEX_NAME,
+                   t.relname as METADATA_TABLE,
                    a.attname as COLUMN_NAME,
                    ix.indisunique as UNIQUE_INDEX,
                    (ix.indisvalid and ix.indisready and ix.indislive
@@ -236,7 +242,7 @@ final class PostgreSqlMetadataQueries {
              and a.attnum = ix.indkey[ord.position]
             left join pg_catalog.pg_opclass opc
               on opc.oid = ix.indclass[ord.position]
-            where t.relname = ?
+            where ${TABLE_FILTER}
               and not ix.indisprimary
               and not exists (
                   select 1 from pg_catalog.pg_constraint owned_constraint
@@ -247,6 +253,7 @@ final class PostgreSqlMetadataQueries {
 
     private static final String BASE_FOREIGN_KEYS_SQL = """
             select n.nspname as TABLE_SCHEMA,
+                   t.relname as METADATA_TABLE,
                    con.conname as FOREIGN_KEY_NAME,
                    a.attname as COLUMN_NAME,
                    rn.nspname as REFERENCED_TABLE_SCHEMA,
@@ -282,7 +289,7 @@ final class PostgreSqlMetadataQueries {
               on ra.attrelid = rt.oid
              and ra.attnum = con.confkey[ord.position]
             where con.contype = 'f'
-              and t.relname = ?
+              and ${TABLE_FILTER}
             """;
 
     private static final String BASE_TABLE_SQL = """
@@ -372,43 +379,20 @@ final class PostgreSqlMetadataQueries {
                on partition_opclass.oid = partitioning.partclass[0]
              left join pg_catalog.pg_am partition_access_method
                on partition_access_method.oid = partition_opclass.opcmethod
-             where t.relname = ? and t.relkind in ('r', 'p')
+             where ${TABLE_FILTER} and t.relkind in ('r', 'p')
              """;
 
-    private static final String BASE_PRIMARY_KEY_SQL = """
-            select con.conname as CONSTRAINT_NAME,
-                   a.attname as COLUMN_NAME,
-                   (not con.condeferrable and con.convalidated
-                       and ix.indisvalid and ix.indisready and ix.indislive
-                       and ix.indisunique and ix.indisprimary and ix.indimmediate
-                       and ix.indpred is null and ix.indexprs is null
-                       and ix.indnatts = ix.indnkeyatts
-                       and ix.indnkeyatts = pg_catalog.cardinality(con.conkey)
-                       and ix.indkey[ord.position - 1] = con.conkey[ord.position]
-                       and am.amname = 'btree' and opc.opcdefault
-                       and ix.indoption[ord.position - 1] = 0
-                       and ix.indcollation[ord.position - 1] = a.attcollation
-                       and index_relation.reloptions is null
-                       and index_relation.reltablespace = 0) as CONSTRAINT_REPRESENTABLE
-            from pg_catalog.pg_constraint con
-            join pg_catalog.pg_class t on t.oid = con.conrelid
-            join pg_catalog.pg_namespace n on n.oid = t.relnamespace
-            join pg_catalog.pg_index ix on ix.indexrelid = con.conindid
-            join pg_catalog.pg_class index_relation on index_relation.oid = ix.indexrelid
-            join pg_catalog.pg_am am on am.oid = index_relation.relam
-            join pg_catalog.generate_subscripts(con.conkey, 1) as ord(position) on true
-            join pg_catalog.pg_attribute a
-              on a.attrelid = t.oid and a.attnum = con.conkey[ord.position]
-            join pg_catalog.pg_opclass opc on opc.oid = ix.indclass[ord.position - 1]
-            where con.contype = 'p' and t.relname = ?
-            """;
+    private static final String BASE_PRIMARY_KEY_SQL = constraintColumnsSql("p");
+    private static final String BASE_UNIQUE_SQL = constraintColumnsSql("u");
 
-    private static final String BASE_UNIQUE_SQL = """
+    private static String constraintColumnsSql(String type) {
+        return """
             select con.conname as CONSTRAINT_NAME,
+                   t.relname as METADATA_TABLE,
                    a.attname as COLUMN_NAME,
                    (not con.condeferrable and con.convalidated
                        and ix.indisvalid and ix.indisready and ix.indislive
-                       and ix.indisunique and not ix.indisprimary and ix.indimmediate
+                       and ix.indisunique and ${PRIMARY_FLAG} and ix.indimmediate
                        and ix.indpred is null and ix.indexprs is null
                        and ix.indnatts = ix.indnkeyatts
                        and ix.indnkeyatts = pg_catalog.cardinality(con.conkey)
@@ -417,9 +401,7 @@ final class PostgreSqlMetadataQueries {
                        and ix.indoption[ord.position - 1] = 0
                        and ix.indcollation[ord.position - 1] = a.attcollation
                        and index_relation.reloptions is null
-                       and index_relation.reltablespace = 0
-                       and not coalesce((to_jsonb(ix)->>'indnullsnotdistinct')::boolean, false))
-                       as CONSTRAINT_REPRESENTABLE
+                       and index_relation.reltablespace = 0${NULL_POLICY}) as CONSTRAINT_REPRESENTABLE
             from pg_catalog.pg_constraint con
             join pg_catalog.pg_class t on t.oid = con.conrelid
             join pg_catalog.pg_namespace n on n.oid = t.relnamespace
@@ -430,24 +412,29 @@ final class PostgreSqlMetadataQueries {
             join pg_catalog.pg_attribute a
               on a.attrelid = t.oid and a.attnum = con.conkey[ord.position]
             join pg_catalog.pg_opclass opc on opc.oid = ix.indclass[ord.position - 1]
-            where con.contype = 'u' and t.relname = ?
-            """;
+            where con.contype = '${CONSTRAINT_TYPE}' and ${TABLE_FILTER}
+            """.replace("${CONSTRAINT_TYPE}", type)
+               .replace("${PRIMARY_FLAG}", "p".equals(type) ? "ix.indisprimary" : "not ix.indisprimary")
+               .replace("${NULL_POLICY}", "p".equals(type) ? ""
+                       : " and not coalesce((to_jsonb(ix)->>'indnullsnotdistinct')::boolean, false)");
+    }
 
     private static final String BASE_CHECKS_SQL = """
             select con.conname as CONSTRAINT_NAME,
+                   t.relname as METADATA_TABLE,
                    pg_catalog.pg_get_expr(con.conbin, con.conrelid, false) as CHECK_EXPRESSION,
                    (con.convalidated and not con.connoinherit) as CHECK_REPRESENTABLE
             from pg_catalog.pg_constraint con
             join pg_catalog.pg_class t on t.oid = con.conrelid
             join pg_catalog.pg_namespace n on n.oid = t.relnamespace
-            where con.contype = 'c' and t.relname = ?
+            where con.contype = 'c' and ${TABLE_FILTER}
             """;
 
     private PostgreSqlMetadataQueries() {
     }
 
-    static InformationSchemaFormMetadataReader.Queries queries() {
-        return InformationSchemaFormMetadataReader.Queries.complete(
+    static MetadataQueryProfile.Queries queries() {
+        return MetadataQueryProfile.Queries.complete(
                 PostgreSqlMetadataQueries::columnQuery,
                 PostgreSqlMetadataQueries::indexQuery,
                 PostgreSqlMetadataQueries::foreignKeyQuery,
@@ -457,82 +444,79 @@ final class PostgreSqlMetadataQueries {
                 PostgreSqlMetadataQueries::primaryKeyQuery,
                 PostgreSqlMetadataQueries::uniqueConstraintQuery,
                 PostgreSqlMetadataQueries::checkConstraintQuery,
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL);
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL);
     }
 
     private static SqlRequest columnQuery(String schema, String table) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            String sql = BASE_COLUMNS_SQL + """
-                     and exists (
-                         select 1
-                         from pg_catalog.pg_class visible_table
-                         join pg_catalog.pg_namespace visible_schema
-                           on visible_schema.oid = visible_table.relnamespace
-                         where visible_schema.nspname = c.table_schema
-                           and visible_table.relname = c.table_name
-                           and pg_catalog.pg_table_is_visible(visible_table.oid)
-                     )
-                     order by c.ordinal_position
-                    """;
-            return new SqlRequest(sql, List.of(safeTable));
-        }
-        String sql = BASE_COLUMNS_SQL + " and c.table_schema = ? order by c.ordinal_position";
-        return new SqlRequest(sql, List.of(safeTable, schema.trim()));
+        return scopedQuery(BASE_COLUMNS_SQL, schema, table, "c.table_name", "c.table_schema",
+                "column_table", " order by c.ordinal_position");
+    }
+
+    /** 只补回确实没有有效列的可见关系，不能把缺少列权限当作零列表。 */
+    static SqlRequest emptyTableQuery(String schema) {
+        String sql = """
+                select t.table_name as TABLE_NAME, pg_catalog.obj_description(c.oid, 'pg_class') as TABLE_COMMENT
+                from information_schema.tables t
+                join pg_catalog.pg_namespace n on n.nspname = t.table_schema
+                join pg_catalog.pg_class c on c.relnamespace = n.oid and c.relname = t.table_name
+                where not exists (
+                    select 1 from pg_catalog.pg_attribute a
+                    where a.attrelid = c.oid and a.attnum > 0 and not a.attisdropped
+                ) and t.table_schema =
+                """;
+        boolean current = schema == null || schema.isBlank();
+        return new SqlRequest(sql + (current ? "current_schema()" : "?") + " order by t.table_name",
+                current ? List.of() : List.of(schema.trim()));
     }
 
     private static SqlRequest indexQuery(String schema, String table) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            String sql = BASE_INDEXES_SQL
-                    + " and pg_catalog.pg_table_is_visible(t.oid) order by ci.relname, ord.position";
-            return new SqlRequest(sql, List.of(safeTable));
-        }
-        String sql = BASE_INDEXES_SQL + " and n.nspname = ? order by ci.relname, ord.position";
-        return new SqlRequest(sql, List.of(safeTable, schema.trim()));
+        return tableScopedQuery(BASE_INDEXES_SQL, schema, table, " order by ci.relname, ord.position");
     }
 
     private static SqlRequest foreignKeyQuery(String schema, String table) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            String sql = BASE_FOREIGN_KEYS_SQL
-                    + " and pg_catalog.pg_table_is_visible(t.oid) order by con.conname, ord.position";
-            return new SqlRequest(sql, List.of(safeTable));
-        }
-        String sql = BASE_FOREIGN_KEYS_SQL + " and n.nspname = ? order by con.conname, ord.position";
-        return new SqlRequest(sql, List.of(safeTable, schema.trim()));
+        return tableScopedQuery(BASE_FOREIGN_KEYS_SQL, schema, table, " order by con.conname, ord.position");
     }
 
     private static SqlRequest tableQuery(String schema, String table) {
-        return scopedQuery(BASE_TABLE_SQL, schema, table, "t", "n", "");
+        return tableScopedQuery(BASE_TABLE_SQL, schema, table, "");
     }
 
     private static SqlRequest primaryKeyQuery(String schema, String table) {
-        return scopedQuery(BASE_PRIMARY_KEY_SQL, schema, table, "t", "n", " order by ord.position");
+        return tableScopedQuery(BASE_PRIMARY_KEY_SQL, schema, table, " order by ord.position");
     }
 
     private static SqlRequest uniqueConstraintQuery(String schema, String table) {
-        return scopedQuery(BASE_UNIQUE_SQL, schema, table, "t", "n",
-                           " order by con.conname, ord.position");
+        return tableScopedQuery(BASE_UNIQUE_SQL, schema, table, " order by con.conname, ord.position");
     }
 
     private static SqlRequest checkConstraintQuery(String schema, String table) {
-        return scopedQuery(BASE_CHECKS_SQL, schema, table, "t", "n", " order by con.conname");
+        return tableScopedQuery(BASE_CHECKS_SQL, schema, table, " order by con.conname");
     }
 
-    private static SqlRequest scopedQuery(String base,
-                                          String schema,
-                                          String table,
-                                          String tableAlias,
-                                          String schemaAlias,
-                                          String orderBy) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            return new SqlRequest(base + " and pg_catalog.pg_table_is_visible(" + tableAlias + ".oid)" + orderBy,
-                                  List.of(safeTable));
+    private static SqlRequest tableScopedQuery(String base, String schema, String table, String orderBy) {
+        return scopedQuery(base, schema, table, "t.relname", "n.nspname", "t", orderBy);
+    }
+
+    private static SqlRequest scopedQuery(String base, String schema, String table,
+                                          String tableColumn, String schemaColumn,
+                                          String relationAlias, String orderBy) {
+        List<Object> parameters = new ArrayList<>(2);
+        String filter = "1 = 1";
+        if (table != null) {
+            filter = tableColumn + " = ?";
+            parameters.add(MetadataQueryProfile.requireText(table, "table"));
         }
-        return new SqlRequest(base + " and " + schemaAlias + ".nspname = ?" + orderBy,
-                              List.of(safeTable, schema.trim()));
+        String schemaFilter;
+        if (schema != null && !schema.isBlank()) {
+            schemaFilter = schemaColumn + " = ?";
+            parameters.add(schema.trim());
+        } else if (table == null) {
+            schemaFilter = schemaColumn + " = current_schema()";
+        } else {
+            schemaFilter = "pg_catalog.pg_table_is_visible(" + relationAlias + ".oid)";
+        }
+        return new SqlRequest(base.replace("${TABLE_FILTER}", filter)
+                + " and " + schemaFilter + orderBy, parameters);
     }
 
     private static String logicalType(String dataType) {

@@ -3,8 +3,7 @@ package com.flying.orm.rdb.schema;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.form.DynamicFormChangeSet;
-import com.flying.orm.core.metadata.ColumnMetadata;
-import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.RdbDialect;
@@ -18,25 +17,19 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SchemaSequenceCaseSensitiveIdentityTest {
 
-    private final SchemaTableSqlRenderer renderer =
-            new SchemaTableSqlRenderer(RdbDialect.postgresql().schema());
+    private final RelationalSchemaSqlRenderer renderer =
+            RelationalSchemaSqlRenderer.create(RdbDialect.postgresql().schema());
 
     @Test
     void createsCaseDistinctPhysicalSequencesSeparately() {
-        List<SqlRequest> requests = renderer.createTable(form());
+        List<SqlRequest> requests = FormSchemaSqlRenderer.create(RdbDialect.postgresql()).createTable(form());
 
         assertEquals(3, requests.size());
         assertTrue(requests.stream().anyMatch(request -> request.sql().contains("\"OrderSeq\"")));
         assertTrue(requests.stream().anyMatch(request -> request.sql().contains("\"orderseq\"")));
     }
 
-    @Test
-    void dropsCaseDistinctPhysicalSequencesSeparately() {
-        List<SqlRequest> requests = renderer.dropSequences(form().fields(), List.of());
 
-        assertEquals(List.of("drop sequence \"OrderSeq\"", "drop sequence \"orderseq\""),
-                     requests.stream().map(SqlRequest::sql).toList());
-    }
 
     @Test
     void createsOneSharedSequenceWhenAddingMultipleColumns() {
@@ -52,11 +45,10 @@ class SchemaSequenceCaseSensitiveIdentityTest {
                                         .addField(first)
                                         .addField(second)
                                         .build();
-        DynamicFormChangeSet changes = new DynamicFormChangeSet(
-                source, target, List.of(first, second), List.of(), List.of());
+        DynamicFormChangeSet changes = source.diffTo(target);
         FormSchemaSqlRenderer formRenderer = FormSchemaSqlRenderer.create(RdbDialect.postgresql());
-        TableMetadata current = TableMetadata.builder("events")
-                                             .addColumn(ColumnMetadata.of("id", "BIGINT"))
+        RelationalTableDefinition current = RelationalTableDefinition.builder("events")
+                                             .addColumn(DynamicField.of("id", "BIGINT").column())
                                              .build();
 
         assertEquals(1, sequenceCreates(formRenderer.migrate(changes)));
@@ -64,31 +56,30 @@ class SchemaSequenceCaseSensitiveIdentityTest {
     }
 
     @Test
-    void reviewedRollbackDropsASequenceCreatedForAnAddedColumn() {
+    void unquotedSequenceNamesUseTheSamePhysicalIdentityInOrdinaryMigration() {
+        SchemaDialect dialect = SchemaDialect.builder()
+                .generatedValues(SchemaDialect.GeneratedValueStyle.POSTGRESQL).build();
+        DynamicForm source = DynamicForm.builder("events", "events")
+                .addField(DynamicField.of("id", "BIGINT")).build();
         DynamicForm target = DynamicForm.builder("events", "events")
-                                        .addField(DynamicField.of("id", "BIGINT"))
-                                        .addField(DynamicField.of("generated_value", "BIGINT")
-                                                              .generatedBySequence("added_seq"))
-                                        .build();
-        TableMetadata current = TableMetadata.builder("events")
-                                             .addColumn(ColumnMetadata.of("id", "BIGINT"))
-                                             .build();
-        FormSchemaSqlRenderer formRenderer = FormSchemaSqlRenderer.create(RdbDialect.postgresql());
-        SchemaMigrationPlan migration = formRenderer.migrateSafelyPlan(current, target, List.of());
+                .addField(DynamicField.of("id", "BIGINT"))
+                .addField(DynamicField.of("first_value", "BIGINT").generatedBySequence("SharedSeq"))
+                .addField(DynamicField.of("second_value", "BIGINT").generatedBySequence("sharedseq")).build();
+        assertEquals(1, sequenceCreates(FormSchemaSqlRenderer.create(dialect).migrate(source.diffTo(target))));
+        assertEquals(1, sequenceCreates(FormSchemaSqlRenderer.create(dialect)
+                .migrateSafelyPlan(source.toTableDefinition(), target, List.of()).requests()));
+    }
 
-        List<String> rollback = SchemaMigrationReviewer.create(formRenderer)
-                                                       .review(current,
-                                                               migration,
-                                                               SchemaMigrationReviewPolicy.allowBlocking())
-                                                       .rollback()
-                                                       .requests()
-                                                       .stream()
-                                                       .map(SqlRequest::sql)
-                                                       .toList();
-
-        assertEquals(List.of("alter table \"events\" drop column \"generated_value\"",
-                             "drop sequence \"added_seq\""),
-                     rollback);
+    @Test
+    void ordinaryQualifiedTableKeepsExplicitBareSequenceNames() {
+        DynamicForm source = DynamicForm.builder("events", "tenant.events")
+                .addField(DynamicField.of("id", "BIGINT")).build();
+        DynamicForm target = DynamicForm.builder("events", "tenant.events")
+                .addField(DynamicField.of("id", "BIGINT"))
+                .addField(DynamicField.of("new_value", "BIGINT").generatedBySequence("event_seq")).build();
+        List<SqlRequest> requests = FormSchemaSqlRenderer.create(RdbDialect.postgresql()).migrate(source.diffTo(target));
+        assertEquals(1, sequenceCreates(requests));
+        assertTrue(requests.getFirst().sql().startsWith("create sequence \"event_seq\""));
     }
 
     @Test
@@ -106,11 +97,10 @@ class SchemaSequenceCaseSensitiveIdentityTest {
                                         .addField(existing)
                                         .addField(added)
                                         .build();
-        DynamicFormChangeSet changes = new DynamicFormChangeSet(
-                source, target, List.of(added), List.of(), List.of());
-        TableMetadata current = TableMetadata.builder("events")
-                                             .addColumn(ColumnMetadata.of("id", "BIGINT"))
-                                             .addColumn(ColumnMetadata.of("existing_value", "BIGINT"))
+        DynamicFormChangeSet changes = source.diffTo(target);
+        RelationalTableDefinition current = RelationalTableDefinition.builder("events")
+                                             .addColumn(DynamicField.of("id", "BIGINT").column())
+                                             .addColumn(DynamicField.of("existing_value", "BIGINT").column())
                                              .build();
         FormSchemaSqlRenderer formRenderer = FormSchemaSqlRenderer.create(RdbDialect.postgresql());
 
@@ -129,42 +119,10 @@ class SchemaSequenceCaseSensitiveIdentityTest {
                                         .addField(existing)
                                         .addField(added)
                                         .build();
-        DynamicFormChangeSet changes = new DynamicFormChangeSet(
-                source, target, List.of(added), List.of(), List.of());
+        DynamicFormChangeSet changes = source.diffTo(target);
 
         assertThrows(IllegalArgumentException.class,
                      () -> FormSchemaSqlRenderer.create(RdbDialect.postgresql()).migrate(changes));
-    }
-
-    @Test
-    void reviewedRollbackKeepsASequenceUsedByAnExistingColumn() {
-        DynamicField existing = DynamicField.of("existing_value", "BIGINT")
-                                            .generatedBySequence("shared_seq");
-        DynamicField added = DynamicField.of("added_value", "BIGINT")
-                                         .generatedBySequence("shared_seq");
-        DynamicForm target = DynamicForm.builder("events", "events")
-                                        .addField(DynamicField.of("id", "BIGINT"))
-                                        .addField(existing)
-                                        .addField(added)
-                                        .build();
-        TableMetadata current = TableMetadata.builder("events")
-                                             .addColumn(ColumnMetadata.of("id", "BIGINT"))
-                                             .addColumn(ColumnMetadata.of("existing_value", "BIGINT"))
-                                             .build();
-        FormSchemaSqlRenderer formRenderer = FormSchemaSqlRenderer.create(RdbDialect.postgresql());
-        SchemaMigrationPlan migration = formRenderer.migrateSafelyPlan(current, target, List.of());
-
-        List<String> rollback = SchemaMigrationReviewer.create(formRenderer)
-                                                       .review(current,
-                                                               migration,
-                                                               SchemaMigrationReviewPolicy.allowBlocking())
-                                                       .rollback()
-                                                       .requests()
-                                                       .stream()
-                                                       .map(SqlRequest::sql)
-                                                       .toList();
-
-        assertEquals(List.of("alter table \"events\" drop column \"added_value\""), rollback);
     }
 
     @Test
@@ -180,29 +138,6 @@ class SchemaSequenceCaseSensitiveIdentityTest {
         assertEquals(0, sequenceCreates(migration.requests()));
     }
 
-    @Test
-    void reviewedRollbackKeepsSequenceNeededByTheRestoredSourceColumn() {
-        FormSchemaSqlRenderer formRenderer = FormSchemaSqlRenderer.create(RdbDialect.postgresql());
-        TableMetadata current = sourceWithSequence("old_value");
-        SchemaMigrationPlan migration = formRenderer.migrateSafelyPlan(
-                current,
-                targetWithSequence("new_value"),
-                List.of(),
-                SchemaMigrationOptions.safe().allowDropColumn());
-
-        List<String> rollback = SchemaMigrationReviewer.create(formRenderer)
-                                                       .review(current,
-                                                               migration,
-                                                               SchemaMigrationReviewPolicy.allowBlocking())
-                                                       .rollback()
-                                                       .requests()
-                                                       .stream()
-                                                       .map(SqlRequest::sql)
-                                                       .toList();
-
-        assertTrue(rollback.stream().noneMatch(sql -> sql.equals("drop sequence \"shared_seq\"")));
-    }
-
     private static long sequenceCreates(List<SqlRequest> requests) {
         return requests.stream()
                        .map(SqlRequest::sql)
@@ -210,11 +145,11 @@ class SchemaSequenceCaseSensitiveIdentityTest {
                        .count();
     }
 
-    private static TableMetadata sourceWithSequence(String field) {
-        return TableMetadata.builder("events")
-                            .addColumn(ColumnMetadata.of("id", "BIGINT"))
-                            .addColumn(ColumnMetadata.of(field, "BIGINT")
-                                                     .withGeneration(ValueGeneration.sequence("shared_seq")))
+    private static RelationalTableDefinition sourceWithSequence(String field) {
+        return RelationalTableDefinition.builder("events")
+                            .addColumn(DynamicField.of("id", "BIGINT").column())
+                            .addColumn(DynamicField.of(field, "BIGINT")
+                                                     .withGeneration(ValueGeneration.sequence("shared_seq")).column())
                             .build();
     }
 

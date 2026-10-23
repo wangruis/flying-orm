@@ -4,14 +4,12 @@ import com.flying.orm.core.condition.ConditionValueException;
 import com.flying.orm.core.condition.ConditionValueShape;
 
 import java.lang.reflect.Array;
-import java.time.OffsetDateTime;
-import java.time.OffsetTime;
 import java.util.AbstractList;
-import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.stream.Stream;
 
 /**
  * 集中整理条件值，让所有查询入口使用同一套空值、集合、区间和标量规则。
@@ -25,6 +23,16 @@ import java.util.Objects;
  * @version v1.0
  */
 public final class ConditionValueNormalizer {
+    /** 类型形状与具体值无关；随 Class 卸载，避免集合热路径重复执行接口类型检查。 */
+    private static final ClassValue<ValueType> VALUE_TYPES = new ClassValue<>() {
+        @Override
+        protected ValueType computeValue(Class<?> type) {
+            return new ValueType(CharSequence.class.isAssignableFrom(type),
+                    Iterable.class.isAssignableFrom(type) || Map.class.isAssignableFrom(type),
+                    type.isArray() && !type.getComponentType().isPrimitive());
+        }
+    };
+
     private ConditionValueNormalizer() {
     }
 
@@ -88,11 +96,11 @@ public final class ConditionValueNormalizer {
                                                ConditionValuePolicy policy,
                                                ScalarConverter converter,
                                                int maxStringLength) {
-        Scalar scalar = normalizeScalar(value, converter, -1, maxStringLength, true);
-        if (scalar.empty()) {
-            return handleEmpty(policy, scalar.error());
+        Object scalar = normalizeScalar(value, converter, -1, maxStringLength, true);
+        if (scalar instanceof Empty empty) {
+            return handleEmpty(policy, empty.error());
         }
-        return Result.of(scalar.value());
+        return Result.of(scalar);
     }
 
     private static Result normalizeCollection(Object value,
@@ -104,31 +112,38 @@ public final class ConditionValueNormalizer {
             return handleEmpty(policy, ConditionValueException.Error.NULL_VALUE);
         }
         Iterable<?> source = collectionValues(value, maxCollectionSize);
-        List<Object> cleaned = new ArrayList<>();
+        Stream.Builder<Object> cleaned = Stream.builder();
+        Class<?> previousClass = null;
+        ValueType previousType = null;
         int index = 0;
         for (Object item : source) {
             if (index >= maxCollectionSize) {
                 throw error(ConditionValueException.Error.COLLECTION_TOO_LARGE,
                             "condition collection exceeds limit: " + maxCollectionSize);
             }
-            Scalar scalar = normalizeScalar(item, converter, index, maxStringLength, false);
-            if (scalar.empty()) {
+            if (item != null && item.getClass() != previousClass) {
+                previousClass = item.getClass();
+                previousType = VALUE_TYPES.get(previousClass);
+            }
+            Object scalar = normalizeScalar(item, converter, index, maxStringLength, false, previousType);
+            if (scalar instanceof Empty empty) {
                 if (policy == ConditionValuePolicy.REJECT_EMPTY) {
-                    return handleEmpty(policy, scalar.error());
+                    return handleEmpty(policy, empty.error());
                 }
                 index++;
                 continue;
             }
-            cleaned.add(scalar.value());
+            cleaned.add(scalar);
             index++;
         }
-        if (cleaned.isEmpty()) {
+        List<Object> values = cleaned.build().toList();
+        if (values.isEmpty()) {
             return handleEmpty(policy, ConditionValueException.Error.COLLECTION_EMPTY);
         }
-        return Result.of(List.copyOf(cleaned));
+        return Result.of(values);
     }
 
-    /** 区间要求两个同类型、可比较的非空值，并在这里检查起点不能大于终点。 */
+    /** 区间保留两个非空端点及其输入顺序；比较规则由数据库决定，不使用 Java 排序预判。 */
     private static Result normalizeRange(Object value,
                                          ConditionValuePolicy policy,
                                          ScalarConverter converter,
@@ -157,41 +172,15 @@ public final class ConditionValueNormalizer {
             throw error(ConditionValueException.Error.RANGE_SIZE_INVALID,
                         "range condition needs exactly two values");
         }
-        Scalar start = normalizeScalar(sourceStart, converter, 0, maxStringLength, false);
-        Scalar end = normalizeScalar(sourceEnd, converter, 1, maxStringLength, false);
-        if (start.empty() || end.empty()) {
-            ConditionValueException.Error emptyError = start.empty() ? start.error() : end.error();
-            return handleEmpty(policy, emptyError);
+        Object startValue = normalizeScalar(sourceStart, converter, 0, maxStringLength, false);
+        Object endValue = normalizeScalar(sourceEnd, converter, 1, maxStringLength, false);
+        if (startValue instanceof Empty empty) {
+            return handleEmpty(policy, empty.error());
         }
-        Object startValue = start.value();
-        Object endValue = end.value();
-        if (compareRangeValues(startValue, endValue) > 0) {
-            throw error(ConditionValueException.Error.RANGE_ORDER_INVALID,
-                        "range start must not be greater than range end");
+        if (endValue instanceof Empty empty) {
+            return handleEmpty(policy, empty.error());
         }
         return Result.of(List.of(startValue, endValue));
-    }
-
-    /** 带偏移时间按数据库时间线语义比较；Comparable 在绝对时间相等后还会比较本地表示。 */
-    @SuppressWarnings("unchecked")
-    private static int compareRangeValues(Object start, Object end) {
-        // 文本仍按原有去空白后的字符顺序比较，比较视图不能覆盖交给 codec 的领域值。
-        if (start instanceof CharSequence && end instanceof CharSequence) {
-            return start.toString().strip().compareTo(end.toString().strip());
-        }
-        if (!start.getClass().equals(end.getClass()) || !(start instanceof Comparable<?> comparable)) {
-            throw error(ConditionValueException.Error.RANGE_TYPE_MISMATCH,
-                        "range values must use the same comparable type");
-        }
-        if (start instanceof OffsetDateTime startTime) {
-            OffsetDateTime endTime = (OffsetDateTime) end;
-            return startTime.isBefore(endTime) ? -1 : startTime.isAfter(endTime) ? 1 : 0;
-        }
-        if (start instanceof OffsetTime startTime) {
-            OffsetTime endTime = (OffsetTime) end;
-            return startTime.isBefore(endTime) ? -1 : startTime.isAfter(endTime) ? 1 : 0;
-        }
-        return ((Comparable<Object>) comparable).compareTo(end);
     }
 
     /** 只有明确声明该形状的 term 才能同时接收单值和集合。 */
@@ -206,56 +195,53 @@ public final class ConditionValueNormalizer {
         return normalizeScalarValue(value, policy, converter, maxStringLength);
     }
 
-    private static Scalar normalizeScalar(Object value,
+    private static Object normalizeScalar(Object value,
                                           ScalarConverter converter,
                                           int index,
                                           int maxStringLength,
                                           boolean allowsArray) {
+        return normalizeScalar(value, converter, index, maxStringLength, allowsArray,
+                               value == null ? null : VALUE_TYPES.get(value.getClass()));
+    }
+
+    private static Object normalizeScalar(Object value,
+                                          ScalarConverter converter,
+                                          int index,
+                                          int maxStringLength,
+                                          boolean allowsArray,
+                                          ValueType inputType) {
         if (value == null) {
-            return Scalar.empty(ConditionValueException.Error.NULL_VALUE);
+            return Empty.NULL;
         }
-        Object cleaned = value;
-        if (value instanceof CharSequence text) {
-            String stripped = text.toString().strip();
-            if (stripped.isEmpty()) {
-                return Scalar.empty(ConditionValueException.Error.BLANK_VALUE);
+        if (inputType.text()) {
+            String text = value.toString();
+            if (text.isBlank()) {
+                return Empty.BLANK;
             }
-            requireStringLength(stripped, maxStringLength);
-            cleaned = normalizedText(text, stripped);
+            requireStringLength(text, maxStringLength);
         }
-        if (isNonScalarContainer(value, allowsArray)) {
+        if (inputType.isNonScalarContainer(allowsArray)) {
             throw error(ConditionValueException.Error.SHAPE_NOT_ALLOWED,
                         "scalar condition does not accept a collection or object value");
         }
-        Object converted = converter.convert(cleaned, index);
+        Object converted = converter.convert(value, index);
         if (converted == null) {
-            return Scalar.empty(ConditionValueException.Error.NULL_VALUE);
+            return Empty.NULL;
         }
-        if (converted instanceof CharSequence text) {
-            String stripped = text.toString().strip();
-            if (stripped.isEmpty()) {
-                return Scalar.empty(ConditionValueException.Error.BLANK_VALUE);
+        ValueType convertedType = converted == value ? inputType : VALUE_TYPES.get(converted.getClass());
+        if (convertedType.text()) {
+            String text = converted.toString();
+            if (text.isBlank()) {
+                return Empty.BLANK;
             }
-            requireStringLength(stripped, maxStringLength);
-            return Scalar.of(normalizedText(text, stripped));
+            requireStringLength(text, maxStringLength);
+            return converted;
         }
-        if (isNonScalarContainer(converted, allowsArray)) {
+        if (convertedType.isNonScalarContainer(allowsArray)) {
             throw error(ConditionValueException.Error.SHAPE_NOT_ALLOWED,
                         "condition value converter must return a scalar value");
         }
-        return Scalar.of(converted);
-    }
-
-    /** 普通文本仍去掉首尾空白；领域文本的 Java 类型必须留给随后选择的 codec。 */
-    private static Object normalizedText(CharSequence value, String stripped) {
-        if (value instanceof String) return stripped;
-        if (stripped.length() == value.length()) return value;
-        if (value instanceof StringBuilder) return new StringBuilder(stripped);
-        if (value instanceof StringBuffer) return new StringBuffer(stripped);
-        if (value instanceof java.nio.CharBuffer) {
-            return java.nio.CharBuffer.wrap(stripped).asReadOnlyBuffer();
-        }
-        return value;
+        return converted;
     }
 
     private static void requireStringLength(String value, int maxStringLength) {
@@ -266,11 +252,10 @@ public final class ConditionValueNormalizer {
     }
 
     /** 标量 term 可以绑定任意 Java 数组；集合中的 primitive array 是二进制/驱动数组标量。 */
-    private static boolean isNonScalarContainer(Object value, boolean allowsArray) {
-        return value instanceof Iterable<?>
-                || value instanceof Map<?, ?>
-                || !allowsArray && value.getClass().isArray()
-                && !value.getClass().getComponentType().isPrimitive();
+    private record ValueType(boolean text, boolean container, boolean referenceArray) {
+        private boolean isNonScalarContainer(boolean allowsArray) {
+            return container || !allowsArray && referenceArray;
+        }
     }
 
     private static Iterable<?> collectionValues(Object value, int maxCollectionSize) {
@@ -321,20 +306,17 @@ public final class ConditionValueNormalizer {
          * 把单个输入转成字段真正需要的类型。单值的 index 是 -1，集合和区间从 0 开始。
          * 转换结果仍必须是标量，集合和 Map 会被 normalizer 拒绝。
          *
-         * @param value 已去掉字符串首尾空白的标量
+         * @param value 保留原始文本和领域类型的标量
          * @param index 标量在集合中的位置，单值为 -1
          * @return 转换后的标量
          */
         Object convert(Object value, int index);
     }
 
-    private record Scalar(boolean empty, Object value, ConditionValueException.Error error) {
-        private static Scalar of(Object value) {
-            return new Scalar(false, value, null);
-        }
-        private static Scalar empty(ConditionValueException.Error error) {
-            return new Scalar(true, null, error);
-        }
+    /** 空值使用私有标记；有效元素直接传递，不为集合中的每个值创建临时包装。 */
+    private record Empty(ConditionValueException.Error error) {
+        private static final Empty NULL = new Empty(ConditionValueException.Error.NULL_VALUE);
+        private static final Empty BLANK = new Empty(ConditionValueException.Error.BLANK_VALUE);
     }
 
     private static final class ArrayValues extends AbstractList<Object> {

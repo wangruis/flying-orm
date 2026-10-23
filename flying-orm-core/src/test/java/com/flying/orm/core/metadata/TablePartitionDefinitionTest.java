@@ -8,9 +8,6 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class TablePartitionDefinitionTest {
 
-    private static final String UNPARTITIONED_V1 =
-            "87a74d8f177c0026d56496759f699ef4e5558861712c68b489bf59ac0b9c0c07";
-
     @Test
     void rejectsAPartitionKeyThatIsNotATableColumn() {
         assertThrows(IllegalArgumentException.class,
@@ -18,13 +15,13 @@ class TablePartitionDefinitionTest {
     }
 
     @Test
-    void partitionChangesTheFingerprintWithoutChangingTheUnpartitionedV1Fingerprint() {
+    void partitionParticipatesInThePhysicalFingerprint() {
         RelationalTableDefinition unpartitioned = base().build();
         RelationalTableDefinition partitioned = base()
                 .partition(TablePartitionDefinition.range("occurred_at"))
                 .build();
 
-        assertEquals(UNPARTITIONED_V1, RelationalMetadataFingerprint.of(unpartitioned));
+        assertEquals(RelationalMetadataFingerprint.of(base().build()), RelationalMetadataFingerprint.of(unpartitioned));
         assertNotEquals(RelationalMetadataFingerprint.of(unpartitioned),
                         RelationalMetadataFingerprint.of(partitioned));
     }

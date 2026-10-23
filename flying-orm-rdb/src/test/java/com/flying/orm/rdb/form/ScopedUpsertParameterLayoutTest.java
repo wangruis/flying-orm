@@ -35,6 +35,79 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 class ScopedUpsertParameterLayoutTest {
 
     @Test
+    void scopedStagedExpressionsKeepInsertAndUpdateOnlyBindingsInSqlOrder() {
+        DynamicForm form = DynamicForm.builder("staged", "staged")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("insert_only", "VARCHAR"))
+                .addField(DynamicField.of("update_only", "VARCHAR")).build();
+        RepositoryUpsertValues source = EntityValues.createUncached(StagedEntity.class)
+                .repositoryUpsertValues(new StagedEntity(7L, "insert", "update"));
+        Map<String, Object> values = new LinkedHashMap<>();
+        values.put("update_only", com.flying.orm.core.expression.ValueExpression.value("update")
+                .coalesce(com.flying.orm.core.expression.ValueExpression.value("u")));
+        values.put("id", 7L);
+        values.put("insert_only", com.flying.orm.core.expression.ValueExpression.value("insert")
+                .coalesce(com.flying.orm.core.expression.ValueExpression.value("i")));
+        for (RdbDialect dialect : dialects()) {
+            BatchInsertPlan plan = renderer(dialect).upsertPlan(form, source, form, values, source,
+                    ConditionGroup.and().where("id", ">", 2L).build(), List.of(), null);
+            Object[] expected = dialect.name().equals("mysql")
+                    ? new Object[]{7L, "insert", "i", 2L, "update", "u"}
+                    : new Object[]{7L, "insert", "i", "update", "u", 2L};
+            assertArrayEquals(expected, plan.firstParameters(), dialect.name());
+            assertArrayEquals(expected, plan.parameters(values, 1), dialect.name());
+        }
+    }
+
+    @Test
+    void conditionalUpsertAppendsScopeAndBusinessBindsAfterUpdateOnlyValues() {
+        DynamicForm form = DynamicForm.builder("staged", "staged")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("insert_only", "VARCHAR"))
+                .addField(DynamicField.of("update_only", "VARCHAR")).build();
+        RepositoryUpsertValues source = EntityValues.createUncached(StagedEntity.class)
+                .repositoryUpsertValues(new StagedEntity(7L, "insert", "update"));
+        ConditionGroup scope = ConditionGroup.and().where("id", ">", 2L).build();
+        ConditionGroup condition = ConditionGroup.and().where("update_only", "=", "old").build();
+        for (RdbDialect dialect : dialects()) {
+            if (dialect.name().equals("mysql")) continue;
+            BatchInsertPlan plan = renderer(dialect).upsertPlan(form, source, form, source, source,
+                    scope, List.of(), condition);
+            assertEquals(List.of(7L, "insert", "update", 2L, "old"), Arrays.asList(plan.firstParameters()));
+            assertEquals(List.of(8L, "next-insert", "next-update", 2L, "old"), Arrays.asList(plan.parameters(
+                    Map.of("update_only", "next-update", "id", 8L, "insert_only", "next-insert"), 1)));
+            assertEquals(List.of(Long.class, String.class, String.class, Long.class, String.class), plan.parameterTypes());
+        }
+    }
+
+    @Test
+    void firstRowUsesStagedColumnOrderWithNullAndReorderedInput() {
+        DynamicForm form = DynamicForm.builder("staged", "staged")
+                .addField(DynamicField.primaryKey("id", "BIGINT"))
+                .addField(DynamicField.of("insert_only", "VARCHAR"))
+                .addField(DynamicField.of("update_only", "VARCHAR"))
+                .addField(DynamicField.of("org_id", "BIGINT")).build();
+        RepositoryUpsertValues source = EntityValues.createUncached(StagedEntity.class)
+                .repositoryUpsertValues(new StagedEntity(7L, "insert", null));
+        Map<String, Object> reversed = new LinkedHashMap<>();
+        reversed.put("UPDATE_ONLY", null);
+        reversed.put("ID", 7L);
+        reversed.put("INSERT_ONLY", "insert");
+        ConditionGroup scope = ConditionGroup.and().where("org_id", "=", 42L).build();
+        for (RdbDialect dialect : dialects()) {
+            BatchInsertPlan plan = renderer(dialect).upsertPlan(form, source, form, reversed, source, scope, List.of(), null);
+            Object[] expected = dialect.name().equals("mysql")
+                    ? new Object[]{7L, "insert", 42L, null}
+                    : new Object[]{7L, "insert", null, 42L};
+            assertArrayEquals(expected, plan.firstParameters(), dialect.name());
+            assertArrayEquals(expected, plan.parameters(reversed, 1), dialect.name());
+            assertEquals(dialect.name().equals("mysql")
+                    ? List.of(Long.class, String.class, Long.class, String.class)
+                    : List.of(Long.class, String.class, String.class, Long.class), plan.parameterTypes());
+        }
+    }
+
+    @Test
     void placesScopeBetweenInsertAndUpdateOnlyParametersOnlyOnMysql() {
         DynamicForm form = DynamicForm.builder("staged", "staged")
                 .addField(DynamicField.primaryKey("id", "BIGINT"))
@@ -46,7 +119,7 @@ class ScopedUpsertParameterLayoutTest {
         ConditionGroup scope = ConditionGroup.and().where("org_id", "=", "A").build();
         for (RdbDialect dialect : dialects()) {
             FormBatchSqlRenderer renderer = renderer(dialect);
-            BatchInsertPlan plan = renderer.upsertPlan(form, first, form, first, first, scope);
+            BatchInsertPlan plan = renderer.upsertPlan(form, first, form, first, first, scope, List.of(), null);
             List<Object> expected = dialect.name().equals("mysql")
                     ? List.of(7L, "insert-1", "A", "update-1")
                     : List.of(7L, "insert-1", "update-1", "A");
@@ -75,7 +148,7 @@ class ScopedUpsertParameterLayoutTest {
         for (RdbDialect dialect : dialects()) {
             FormBatchSqlRenderer renderer = renderer(dialect);
             BatchInsertPlan scoped = renderer.upsertPlan(form, row, form, row, row,
-                    ConditionGroup.and().where("org_id", "=", "A").build());
+                    ConditionGroup.and().where("org_id", "=", "A").build(), List.of(), null);
             BatchInsertPlan plain = renderer.upsertPlan(form, row);
             assertEquals(plain.sql(), scoped.sql(), dialect.name());
             assertEquals(List.of(9L), Arrays.asList(scoped.firstParameters()));
@@ -109,7 +182,7 @@ class ScopedUpsertParameterLayoutTest {
                 FormPreparedWrite write = renderer.protection().writeOperation(form, physical, scope, null)
                         .prepare(logical);
                 BatchInsertPlan plan = renderer.batchRenderer.upsertPlan(form, logical, physical, write.values(),
-                        logical, scopes.prepareBatchScope(form, physical, scope).where());
+                        logical, scopes.prepareBatchScope(form, physical, scope).where(), List.of(), null);
                 assertFalse(plan.sql().contains("old-phone"), plan.sql());
                 assertFalse(plan.sql().contains(ProtectedConditions.EXACT), plan.sql());
                 String target = dialect.name().equals("mysql")
@@ -150,7 +223,7 @@ class ScopedUpsertParameterLayoutTest {
         Map<String, Object> row = Map.of("id", 2L, "name", "changed");
         BatchInsertPlan plan = FormDataSqlRenderer.create(conditions, RdbDialect.postgresql()).batchRenderer
                 .upsertPlan(form, row, form, row, row,
-                        ConditionGroup.and(conditions.terms()).where("id", "member-of", 11L).build());
+                        ConditionGroup.and(conditions.terms()).where("id", "member-of", 11L).build(), List.of(), null);
         // 执行的是 PostgreSQL 计划里的原样目标谓词，不用 H2 的不引用标识符模式冒充该别名边界。
         String predicate = plan.sql().substring(plan.sql().indexOf(" where ") + 7);
         try (var c = java.sql.DriverManager.getConnection(

@@ -32,7 +32,7 @@ class R2dbcFatalRecoveryTest {
                             SqlRequest cleanup = new SqlRequest("update sample set value = 2", List.of());
                             Throwable actual = failure(() -> h.executor().executeInConnection(
                                     new SqlExecutionSequence(List.of(), List.of(work), List.of(cleanup)),
-                                    SqlExecutionOptions.safeDefaults()));
+                                    SqlExecutionOptions.unlimited()));
                             assertEquals(2, h.executions);
                             assertEquals(List.of(workFails || !releaseFails
                                     ? SignalType.ON_ERROR : SignalType.ON_COMPLETE), h.releases);
@@ -81,7 +81,7 @@ class R2dbcFatalRecoveryTest {
                             "delete from tokens where id = ? and tag = ?",
                             "insert into tokens(id, tag, token) values (?, ?, ?)",
                             List.of(new ProtectedWriteWork.FieldTokens("phone", List.of(new byte[]{1}))));
-                    assertSame(fatal, failure(() -> h.executor().protectedWrite(work, SqlExecutionOptions.safeDefaults())));
+                    assertSame(fatal, failure(() -> h.executor().protectedWrite(work, SqlExecutionOptions.unlimited())));
                     assertEquals(1, h.executions);
                     assertEquals(List.of(SignalType.ON_ERROR), h.releases);
                 }));

@@ -28,20 +28,6 @@ public record SqlExecutionLogOptions(boolean includeSql,
                                            SqlParameterRedactionRule.none());
     }
 
-    /**
-     * 保留原来的四参数构造方式。没有额外规则时，直接使用这个构造器即可。
-     */
-    public SqlExecutionLogOptions(boolean includeSql,
-                                  boolean includeParameters,
-                                  int maxSingleValueLength,
-                                  int maxMessageLength) {
-        this(includeSql,
-             includeParameters,
-             maxSingleValueLength,
-             maxMessageLength,
-             SqlParameterRedactionRule.none());
-    }
-
     public SqlExecutionLogOptions {
         if (maxSingleValueLength <= 0) {
             throw new IllegalArgumentException("max single value length must be positive");

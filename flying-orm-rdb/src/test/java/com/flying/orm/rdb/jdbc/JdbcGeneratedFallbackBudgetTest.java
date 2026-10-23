@@ -73,7 +73,7 @@ class JdbcGeneratedFallbackBudgetTest {
         ProtectedBatchRows.RowView row = ProtectedBatchRows.admit(
                 ProtectedBatchRows.extend(new Object[]{"value"}, work), 1, Long.MAX_VALUE, "test bytes");
 
-        new JdbcBatchChunkExecutor().execute(connection, request, 0L, List.of(row),
+        new JdbcBatchChunkExecutor("postgresql").execute(connection, request, 0L, List.of(row),
                 new JdbcBatchEvidenceSupport.Counts(0L, 1, BatchRowCountPolicy.ANY));
     }
 

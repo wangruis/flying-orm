@@ -13,11 +13,7 @@ class SchemaEngineVisibilityConvergenceTest {
     private static final List<String> INTERNAL_SCHEMA_ENGINES = List.of(
             "com.flying.orm.rdb.schema.SchemaDependencyGraph",
             "com.flying.orm.rdb.schema.SchemaStronglyConnectedComponents",
-            "com.flying.orm.rdb.schema.SchemaRiskClassifier",
-            "com.flying.orm.rdb.schema.SchemaSnapshotFingerprint",
-            "com.flying.orm.rdb.schema.RelationalSchemaPlanReviewer",
-            "com.flying.orm.rdb.schema.SchemaMigrationReviewer",
-            "com.flying.orm.rdb.schema.VerifiedSchemaPlanExecutor");
+            "com.flying.orm.rdb.schema.RelationalSchemaPlanReviewer");
 
     @Test
     void schemaImplementationEnginesAreNotPublicApi() throws ClassNotFoundException {

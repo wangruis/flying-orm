@@ -55,7 +55,7 @@ class BatchEvidenceTimeoutCancellationTest {
         };
         R2dbcSqlExecutor executor = executor(stalledExternalConnection(executionStarted), observer);
 
-        Disposable subscription = executor.writeBatchEvidence(request())
+        Disposable subscription = executor.writeBatch(request())
                 .subscribe(ignored -> {
                 }, downstreamError::set);
         assertTrue(await(executionStarted));

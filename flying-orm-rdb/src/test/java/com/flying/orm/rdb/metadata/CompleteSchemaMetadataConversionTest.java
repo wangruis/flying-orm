@@ -31,8 +31,65 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CompleteSchemaMetadataConversionTest {
 
     @Test
+    void legacyMetadataPreservesCompositeKeyPairingAndIndependentReads() {
+        List<Map<String, Object>> columnRows = List.of(
+                row("COLUMN_NAME", "tenant_id", "DATA_TYPE", "BIGINT"),
+                row("COLUMN_NAME", "user_id", "DATA_TYPE", "BIGINT"));
+        List<Map<String, Object>> indexes = List.of(
+                row("INDEX_NAME", "ix_user", "COLUMN_NAME", "tenant_id", "UNIQUE_INDEX", true),
+                row("INDEX_NAME", "ix_user", "COLUMN_NAME", "user_id", "UNIQUE_INDEX", true,
+                        "INDEX_DIRECTION", "DESC"));
+        List<Map<String, Object>> foreignKeys = List.of(
+                row("FOREIGN_KEY_NAME", "fk_user", "COLUMN_NAME", "tenant_id", "REFERENCED_COLUMN_NAME", "tenant",
+                        "TABLE_SCHEMA", "app", "REFERENCED_TABLE_SCHEMA", "auth", "REFERENCED_TABLE_NAME", "users"),
+                row("FOREIGN_KEY_NAME", "fk_user", "COLUMN_NAME", "user_id", "REFERENCED_COLUMN_NAME", "id",
+                        "TABLE_SCHEMA", "app", "REFERENCED_TABLE_SCHEMA", "auth", "REFERENCED_TABLE_NAME", "users"));
+        for (int read = 0; read < 2; read++) {
+            RelationalTableDefinition table = FormMetadataRowConverter.toTableDefinition(RelationIdentity.table("orders"),
+                    FormMetadataRowConverter.tableBuilder(RelationIdentity.table("orders"), columnRows, value -> value),
+                    indexes, foreignKeys, List.of(), MetadataQueryProfile.SnapshotDialect.PARTIAL);
+            assertEquals(1, table.indexes().size());
+            assertTrue(table.indexes().getFirst().unique());
+            assertEquals(List.of(IndexKeyPart.asc("tenant_id"), IndexKeyPart.desc("user_id")),
+                    table.indexes().getFirst().keys());
+            ForeignKeyDefinition expected = ForeignKeyDefinition.builder("fk_user")
+                    .addColumn("tenant_id").addColumn("user_id")
+                    .reference(RelationIdentity.of(null, "auth", "users"))
+                    .addReferenceColumn("tenant").addReferenceColumn("id").build();
+            assertEquals(List.of(expected), table.foreignKeys());
+            assertThrows(UnsupportedOperationException.class, () -> table.indexes().getFirst().keys().clear());
+            assertThrows(UnsupportedOperationException.class, () -> table.foreignKeys().getFirst().columns().clear());
+        }
+    }
+
+    @Test
+    void legacyTableReadPreservesMixedIndexDirections() {
+        var columns = FormMetadataRowConverter.tableBuilder(RelationIdentity.table("orders"), List.of(
+                row("COLUMN_NAME", "id", "DATA_TYPE", "BIGINT"),
+                row("COLUMN_NAME", "created_at", "DATA_TYPE", "TIMESTAMP")), value -> value);
+        var table = FormMetadataRowConverter.toTableDefinition(RelationIdentity.table("orders"), columns, List.of(
+                row("INDEX_NAME", "ix_orders", "COLUMN_NAME", "id", "UNIQUE_INDEX", false, "INDEX_DIRECTION", "ASC"),
+                row("INDEX_NAME", "ix_orders", "COLUMN_NAME", "created_at", "UNIQUE_INDEX", false, "INDEX_DIRECTION", "DESC")),
+                List.of(), List.of(), MetadataQueryProfile.SnapshotDialect.PARTIAL);
+        assertEquals(List.of(IndexKeyPart.asc("id"), IndexKeyPart.desc("created_at")),
+                table.indexes().getFirst().keys());
+    }
+
+    @Test
+    void legacyMysqlUniqueReadPreservesDescendingKeys() {
+        var columns = FormMetadataRowConverter.tableBuilder(RelationIdentity.table("accounts"), List.of(
+                row("COLUMN_NAME", "login", "DATA_TYPE", "VARCHAR")), value -> value);
+        var table = FormMetadataRowConverter.toTableDefinition(RelationIdentity.table("accounts"), columns, List.of(), List.of(),
+                List.of(row("CONSTRAINT_NAME", "uk_login", "COLUMN_NAME", "login",
+                        "INDEX_DIRECTION", "DESC", "CONSTRAINT_REPRESENTABLE", true)),
+                MetadataQueryProfile.SnapshotDialect.MYSQL);
+        assertTrue(table.indexes().getFirst().unique());
+        assertEquals(List.of(IndexKeyPart.desc("login")), table.indexes().getFirst().keys());
+    }
+
+    @Test
     void mysqlTimestampLiteralsRetainDictionaryLocalTimeWithoutInventingAnOffset() {
-        InformationSchemaFormMetadataReader.Queries queries = MySqlMetadataQueries.queries();
+        MetadataQueryProfile.Queries queries = MySqlMetadataQueries.queries();
         java.time.LocalDateTime literal = java.time.LocalDateTime.parse("2026-09-24T10:15:30.123456");
         SchemaSnapshot snapshot = FormMetadataRowConverter.toCompleteSchemaSnapshot(
                 RelationIdentity.table("events"),
@@ -43,7 +100,7 @@ class CompleteSchemaMetadataConversionTest {
                 List.of(row("CONSTRAINT_NAME", "ck_created_at", "CHECK_REPRESENTABLE", true,
                         "CHECK_EXPRESSION", "(`created_at` >= '2026-09-24 10:15:30.123456')")),
                 queries.typeMapper(), queries.snapshotTypeMapper(),
-                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL);
+                MetadataQueryProfile.SnapshotDialect.MYSQL);
 
         RelationalTableDefinition table = snapshot.completeTable().orElseThrow();
         assertEquals(ColumnDefault.literal(literal), table.columns().getFirst().defaultValue());
@@ -54,8 +111,35 @@ class CompleteSchemaMetadataConversionTest {
     }
 
     @Test
+    void mysqlLiteralTypeMembersRetainCaseAndWhitespaceInCompleteSnapshots() {
+        MetadataQueryProfile.Queries queries = MySqlMetadataQueries.queries();
+        String columnSql = queries.columnQuery().create("app", "accounts").sql();
+        assertTrue(columnSql.contains("when lower(c.DATA_TYPE) in ('enum', 'set')"));
+        assertTrue(columnSql.indexOf("in ('enum', 'set')") < columnSql.indexOf("when binary left"));
+        for (String declaration : List.of("enum('Active','disabled')", "set('Read  Write','A , B')")) {
+            List<Map<String, Object>> columns = List.of(row("COLUMN_NAME", "status", "DATA_TYPE", declaration,
+                    "PHYSICAL_DATA_TYPE", declaration, "NULLABLE", true,
+                    "CHARACTER_MAXIMUM_LENGTH", 32L, "COLUMN_DEFAULT", "Active"));
+            SchemaSnapshot snapshot = FormMetadataRowConverter.toCompleteSchemaSnapshot(
+                    RelationIdentity.table("accounts"),
+                    columns,
+                    List.of(row("TABLE_COMMENT", null)), List.of(), List.of(), List.of(), List.of(), List.of(),
+                    queries.typeMapper(), queries.snapshotTypeMapper(),
+                    MetadataQueryProfile.SnapshotDialect.MYSQL);
+            ColumnDefinition column = snapshot.completeTable().orElseThrow().columns().getFirst();
+            assertEquals(declaration, column.databaseType().declaration());
+            assertEquals(declaration, column.databaseType().canonical());
+            assertTrue(column.databaseType().requireSafe("column type").isTextual());
+            assertNull(column.length());
+            assertEquals(ColumnDefault.literal("Active"), column.defaultValue());
+            assertEquals(declaration, FormMetadataRowConverter.toDynamicForm("accounts", com.flying.orm.core.metadata.RelationIdentity.parse("accounts"), columns,
+                    queries.typeMapper()).field("status").dataType());
+        }
+    }
+
+    @Test
     void doesNotTreatFixedWidthCheckOperandsAsVariableWidthText() {
-        InformationSchemaFormMetadataReader.Queries queries = PostgreSqlMetadataQueries.queries();
+        MetadataQueryProfile.Queries queries = PostgreSqlMetadataQueries.queries();
         assertThrows(IllegalStateException.class, () -> FormMetadataRowConverter.toCompleteSchemaSnapshot(
                 RelationIdentity.table("fixed_text"),
                 List.of(row("COLUMN_NAME", "value", "DATA_TYPE", "character", "LOGICAL_DATA_TYPE", "character",
@@ -65,7 +149,7 @@ class CompleteSchemaMetadataConversionTest {
                 List.of(row("CONSTRAINT_NAME", "ck_value", "CHECK_EXPRESSION", "value::text = 'a '::text",
                         "CHECK_REPRESENTABLE", true)),
                 queries.typeMapper(), queries.snapshotTypeMapper(),
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL));
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL));
     }
 
     @org.junit.jupiter.api.TestFactory
@@ -76,7 +160,7 @@ class CompleteSchemaMetadataConversionTest {
                 List.of("bytea", "bytea", "bytea", "\\x12"),
                 List.of("interval day to second", "interval", "interval", "1 day"))
                 .map(type -> org.junit.jupiter.api.DynamicTest.dynamicTest(type.getFirst(), () -> {
-                    InformationSchemaFormMetadataReader.Queries queries = PostgreSqlMetadataQueries.queries();
+                    MetadataQueryProfile.Queries queries = PostgreSqlMetadataQueries.queries();
                     SchemaSnapshot snapshot = FormMetadataRowConverter.toCompleteSchemaSnapshot(
                             RelationIdentity.of(null, "public", "defaults"),
                             List.of(row("COLUMN_NAME", "value", "DATA_TYPE", type.get(1),
@@ -90,7 +174,7 @@ class CompleteSchemaMetadataConversionTest {
                             type.get(1).equals("character") ? List.of(row("CONSTRAINT_NAME", "ck_value",
                                     "CHECK_EXPRESSION", "value = 'a'::bpchar", "CHECK_REPRESENTABLE", true)) : List.of(),
                             queries.typeMapper(), queries.snapshotTypeMapper(),
-                            InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL);
+                            MetadataQueryProfile.SnapshotDialect.POSTGRESQL);
                     assertEquals(ColumnDefault.literal(type.get(3)),
                             snapshot.completeTable().orElseThrow().columns().getFirst().defaultValue());
                 }));
@@ -108,7 +192,7 @@ class CompleteSchemaMetadataConversionTest {
                 List.of(row("TABLE_COMMENT", null)),
                 List.of(), List.of(), List.of(), List.of(), List.of(),
                 PostgreSqlMetadataQueries.queries().typeMapper(),
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL);
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL);
 
         RelationalTableDefinition table = snapshot.completeTable().orElseThrow();
         ColumnDefinition businessDate = table.columns().getFirst();
@@ -141,7 +225,7 @@ class CompleteSchemaMetadataConversionTest {
                             "CHECK_EXPRESSION", "(\"total\" >= 0::numeric)",
                             "CHECK_REPRESENTABLE", true)),
                 value -> value,
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL);
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL);
 
         assertTrue(snapshot.completeTable().isPresent());
         assertEquals(RelationalMetadataFingerprint.of(expected(identity)),
@@ -150,7 +234,7 @@ class CompleteSchemaMetadataConversionTest {
 
     @Test
     void parsesPostgresqlDefaultsAndChecksFromSemanticTypesWhileKeepingPhysicalIdentity() {
-        InformationSchemaFormMetadataReader.Queries queries = PostgreSqlMetadataQueries.queries();
+        MetadataQueryProfile.Queries queries = PostgreSqlMetadataQueries.queries();
         SchemaSnapshot snapshot = FormMetadataRowConverter.toCompleteSchemaSnapshot(
                 RelationIdentity.of(null, "app", "payments"),
                 List.of(
@@ -175,7 +259,7 @@ class CompleteSchemaMetadataConversionTest {
                             "CHECK_EXPRESSION", "(\"amount\" >= 0::numeric)",
                             "CHECK_REPRESENTABLE", true)),
                 queries.typeMapper(), queries.snapshotTypeMapper(),
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL);
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL);
 
         RelationalTableDefinition table = snapshot.completeTable().orElseThrow();
         assertEquals("app.positive_amount", table.columns().getFirst().databaseType().declaration());
@@ -193,7 +277,7 @@ class CompleteSchemaMetadataConversionTest {
         CheckPredicate predicate = RelationalMetadataValueParser.checkPredicate(
                 "(\"status\" = ANY (ARRAY['NEW'::character varying, 'DONE'::character varying]))",
                 Map.of("status", com.flying.orm.core.type.DatabaseType.of("VARCHAR")),
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL);
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL);
 
         assertEquals(CheckPredicate.in("status", List.of("NEW", "DONE")), predicate);
     }
@@ -203,7 +287,7 @@ class CompleteSchemaMetadataConversionTest {
         CheckPredicate predicate = RelationalMetadataValueParser.checkPredicate(
                 "(\"total\" >= (0)::numeric)",
                 Map.of("total", com.flying.orm.core.type.DatabaseType.of("DECIMAL")),
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL);
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL);
 
         assertEquals(CheckPredicate.compare(
                 "total", CheckPredicate.ComparisonOperator.GREATER_THAN_OR_EQUAL, BigDecimal.ZERO), predicate);
@@ -214,18 +298,18 @@ class CompleteSchemaMetadataConversionTest {
         CheckPredicate predicate = RelationalMetadataValueParser.checkPredicate(
                 "\"TOTAL\" >= CAST(0 AS NUMERIC(1))",
                 Map.of("total", com.flying.orm.core.type.DatabaseType.of("DECIMAL")),
-                InformationSchemaFormMetadataReader.SnapshotDialect.H2);
+                MetadataQueryProfile.SnapshotDialect.H2);
 
         assertEquals(CheckPredicate.compare(
                 "total", CheckPredicate.ComparisonOperator.GREATER_THAN_OR_EQUAL, BigDecimal.ZERO), predicate);
     }
 
     @Test
-    void rejectsPostgresqlCompositeDefaultInsteadOfTruncatingTheFirstLiteral() {
-        assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.columnDefault(
+    void preservesPostgresqlCompositeDefaultInsteadOfTruncatingTheFirstLiteral() {
+        assertEquals(ColumnDefault.nativeExpression("'x'::text || 'y'::text"), RelationalMetadataValueParser.columnDefault(
                 "('x'::text || 'y'::text)",
                 com.flying.orm.core.type.DatabaseType.of("VARCHAR"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL));
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL));
     }
 
     @Test
@@ -238,7 +322,7 @@ class CompleteSchemaMetadataConversionTest {
                 List.of(row("TABLE_COMMENT", null)),
                 List.of(), List.of(), List.of(), List.of(), List.of(),
                 value -> value,
-                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL);
+                MetadataQueryProfile.SnapshotDialect.MYSQL);
 
         assertEquals(ColumnDefault.literal(""),
                      snapshot.completeTable().orElseThrow().columns().getFirst().defaultValue());
@@ -262,7 +346,7 @@ class CompleteSchemaMetadataConversionTest {
                             "INDEX_DIRECTION", "DESC", "CONSTRAINT_REPRESENTABLE", true)),
                 List.of(), List.of(), List.of(),
                 value -> value,
-                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL);
+                MetadataQueryProfile.SnapshotDialect.MYSQL);
 
         RelationalTableDefinition table = snapshot.completeTable().orElseThrow();
         assertTrue(table.uniqueConstraints().isEmpty());
@@ -277,7 +361,7 @@ class CompleteSchemaMetadataConversionTest {
         for (String literal : List.of("  padded  ", " ", "(literal)", "'literal'", "O'Brien")) {
             assertEquals(ColumnDefault.literal(literal), RelationalMetadataValueParser.columnDefault(
                     literal, com.flying.orm.core.type.DatabaseType.of("VARCHAR"),
-                    InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL));
+                    MetadataQueryProfile.SnapshotDialect.MYSQL));
         }
     }
 
@@ -286,7 +370,7 @@ class CompleteSchemaMetadataConversionTest {
         assertEquals(ColumnDefault.currentTimestamp(), RelationalMetadataValueParser.columnDefault(
                 "CURRENT_TIMESTAMP(6)",
                 com.flying.orm.core.type.DatabaseType.of("TIMESTAMP"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL));
+                MetadataQueryProfile.SnapshotDialect.MYSQL));
     }
 
     @Test
@@ -294,7 +378,7 @@ class CompleteSchemaMetadataConversionTest {
         assertEquals(ColumnDefault.currentTimestamp(), RelationalMetadataValueParser.columnDefault(
                 "(getdate())",
                 com.flying.orm.core.type.DatabaseType.of("TIMESTAMP"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER));
+                MetadataQueryProfile.SnapshotDialect.SQL_SERVER));
     }
 
     @Test
@@ -302,7 +386,7 @@ class CompleteSchemaMetadataConversionTest {
         assertEquals(ColumnDefault.literal(""), RelationalMetadataValueParser.columnDefault(
                 "('')",
                 com.flying.orm.core.type.DatabaseType.of("VARCHAR"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER));
+                MetadataQueryProfile.SnapshotDialect.SQL_SERVER));
     }
 
     @Test
@@ -310,7 +394,7 @@ class CompleteSchemaMetadataConversionTest {
         assertEquals(ColumnDefault.literal("O'Brien"), RelationalMetadataValueParser.columnDefault(
                 "('O''Brien')",
                 com.flying.orm.core.type.DatabaseType.of("VARCHAR"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER));
+                MetadataQueryProfile.SnapshotDialect.SQL_SERVER));
     }
 
     @Test
@@ -322,7 +406,7 @@ class CompleteSchemaMetadataConversionTest {
                          RelationalMetadataValueParser.columnDefault(
                                  keyword,
                                  com.flying.orm.core.type.DatabaseType.of("VARCHAR"),
-                                 InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL));
+                                 MetadataQueryProfile.SnapshotDialect.MYSQL));
         }
     }
 
@@ -330,20 +414,20 @@ class CompleteSchemaMetadataConversionTest {
     void restoresMysqlTemporalKeywordsForTheirTemporalColumnTypes() {
         assertEquals(ColumnDefault.currentDate(), RelationalMetadataValueParser.columnDefault(
                 "CURRENT_DATE", com.flying.orm.core.type.DatabaseType.of("DATE"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL));
+                MetadataQueryProfile.SnapshotDialect.MYSQL));
         assertEquals(ColumnDefault.currentTime(), RelationalMetadataValueParser.columnDefault(
                 "CURRENT_TIME", com.flying.orm.core.type.DatabaseType.of("TIME"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL));
+                MetadataQueryProfile.SnapshotDialect.MYSQL));
         assertEquals(ColumnDefault.currentTimestamp(), RelationalMetadataValueParser.columnDefault(
                 "CURRENT_TIMESTAMP", com.flying.orm.core.type.DatabaseType.of("TIMESTAMP"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL));
+                MetadataQueryProfile.SnapshotDialect.MYSQL));
     }
 
     @Test
     void restoresNumericBooleanCheckLiteralsUsedBySqlServerAndOracle() {
-        for (InformationSchemaFormMetadataReader.SnapshotDialect dialect : List.of(
-                InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER,
-                InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE)) {
+        for (MetadataQueryProfile.SnapshotDialect dialect : List.of(
+                MetadataQueryProfile.SnapshotDialect.SQL_SERVER,
+                MetadataQueryProfile.SnapshotDialect.ORACLE)) {
             assertEquals(CheckPredicate.compare(
                             "enabled", CheckPredicate.ComparisonOperator.EQUAL, true),
                          RelationalMetadataValueParser.checkPredicate(
@@ -361,9 +445,9 @@ class CompleteSchemaMetadataConversionTest {
 
     @Test
     void rejectsNumericBooleanCheckLiteralsOtherThanZeroAndOne() {
-        for (InformationSchemaFormMetadataReader.SnapshotDialect dialect : List.of(
-                InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER,
-                InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE)) {
+        for (MetadataQueryProfile.SnapshotDialect dialect : List.of(
+                MetadataQueryProfile.SnapshotDialect.SQL_SERVER,
+                MetadataQueryProfile.SnapshotDialect.ORACLE)) {
             assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.checkPredicate(
                     "(\"enabled\"=(2))",
                     Map.of("enabled", com.flying.orm.core.type.DatabaseType.of("BOOLEAN")),
@@ -376,7 +460,7 @@ class CompleteSchemaMetadataConversionTest {
         CheckPredicate predicate = RelationalMetadataValueParser.checkPredicate(
                 "(\"score\" > 1 and \"score\" <= 10)",
                 Map.of("score", com.flying.orm.core.type.DatabaseType.of("INTEGER")),
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL);
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL);
 
         assertEquals(CheckPredicate.range("score", 1, false, 10, true), predicate);
     }
@@ -392,7 +476,7 @@ class CompleteSchemaMetadataConversionTest {
                             "CHECK_EXPRESSION", "custom_function(total)",
                             "CHECK_REPRESENTABLE", true)),
                 value -> value,
-                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL));
+                MetadataQueryProfile.SnapshotDialect.MYSQL));
     }
 
     @Test
@@ -409,7 +493,7 @@ class CompleteSchemaMetadataConversionTest {
                 List.of(row("TABLE_COMMENT", null)),
                 List.of(), List.of(), List.of(), List.of(), List.of(),
                 value -> value,
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL));
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL));
     }
 
     @Test
@@ -424,7 +508,7 @@ class CompleteSchemaMetadataConversionTest {
                 List.of(row("TABLE_COMMENT", null)),
                 primaryKey, List.of(), List.of(), List.of(), List.of(),
                 value -> value,
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL));
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL));
     }
 
     @Test
@@ -441,7 +525,7 @@ class CompleteSchemaMetadataConversionTest {
                 List.of(row("TABLE_COMMENT", null)),
                 List.of(), List.of(), List.of(), List.of(), List.of(),
                 value -> value,
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL);
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL);
 
         assertEquals(ValueGeneration.identity(7L, 3L, 32),
                      snapshot.completeTable().orElseThrow().columns().getFirst().generation());
@@ -455,7 +539,7 @@ class CompleteSchemaMetadataConversionTest {
                 List.of(row("TABLE_COMMENT", null, "TABLE_REPRESENTABLE", false)),
                 List.of(), List.of(), List.of(), List.of(), List.of(),
                 value -> value,
-                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL));
+                MetadataQueryProfile.SnapshotDialect.MYSQL));
     }
 
     @Test
@@ -483,7 +567,7 @@ class CompleteSchemaMetadataConversionTest {
                 List.of(row("TABLE_COMMENT", null)),
                 List.of(), List.of(), List.of(index), List.of(), List.of(),
                 value -> value,
-                InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE);
+                MetadataQueryProfile.SnapshotDialect.ORACLE);
     }
 
     private static List<Map<String, Object>> columns() {

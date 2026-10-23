@@ -7,8 +7,8 @@ import java.util.Set;
 /**
  * 锁定读取在一个已确认数据库版本上的受控 SQL 形状。
  *
- * <p>这里不接受 hint 或 SQL 字符串。后缀型数据库只发布固定 {@code FOR UPDATE} 组合；SQL Server
- * 只发布固定表 hint。自定义旧方言默认 unsupported，能力未知时在 SQL 执行和连接获取前失败。</p>
+ * <p>锁选项不接受任意 hint。后缀型数据库发布固定 {@code FOR UPDATE} 组合，目标标识符由查询渲染器转义；
+ * SQL Server 使用固定表 hint。自定义旧方言默认 unsupported，能力未知时在 SQL 执行前失败。</p>
  *
  * @author wangr
  * @version v3.2
@@ -71,14 +71,19 @@ public final class LockingReadDialect {
      * 返回 SELECT 尾部后缀。表 hint 型方言返回空串；unsupported 会直接失败。
      */
     public String suffix(ReadLock lock) {
+        return suffix(lock, null);
+    }
+
+    /** 锁定渲染器提供的已转义目标；null 沿用不限定目标的普通单表语法。 */
+    public String suffix(ReadLock lock, String quotedTarget) {
         ReadLock safeLock = requireSupported(lock);
         if (placement == Placement.TABLE_HINT) {
             return "";
         }
-        return switch (safeLock.waitMode()) {
-            case WAIT -> " FOR UPDATE";
-            case NOWAIT -> " FOR UPDATE NOWAIT";
-            case SKIP_LOCKED -> " FOR UPDATE SKIP LOCKED";
+        return " FOR UPDATE" + (quotedTarget == null ? "" : " OF " + quotedTarget) + switch (safeLock.waitMode()) {
+            case WAIT -> "";
+            case NOWAIT -> " NOWAIT";
+            case SKIP_LOCKED -> " SKIP LOCKED";
         };
     }
 

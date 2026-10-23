@@ -23,7 +23,7 @@ class JdbcBatchEvidenceErrorTest {
 
                     Error thrown = assertThrows(Error.class, () -> state.writer()
 
-                            .writeBatchEvidence(JdbcBatchEvidenceTestSupport.request(afterOneRow(error), 1)));
+                            .writeBatch(JdbcBatchEvidenceTestSupport.request(afterOneRow(error), 1)));
 
                     assertAll(
                             () -> assertSame(error, thrown),
@@ -41,7 +41,7 @@ class JdbcBatchEvidenceErrorTest {
 
         assertSame(error, assertThrows(AssertionError.class, () -> state.writer()
 
-                .writeBatchEvidence(JdbcBatchEvidenceTestSupport.request(Flux.<Object[]>just(new Object[]{1}), 1))));
+                .writeBatch(JdbcBatchEvidenceTestSupport.request(Flux.<Object[]>just(new Object[]{1}), 1))));
 
         assertEquals(1, state.executions.get());
         assertEquals(0, state.commits.get());
@@ -59,7 +59,7 @@ class JdbcBatchEvidenceErrorTest {
                 ;
 
         assertSame(error, assertThrows(AssertionError.class,
-                () -> writer.writeBatchEvidence(JdbcBatchEvidenceTestSupport.request(afterOneRow(error), 1))));
+                () -> writer.writeBatch(JdbcBatchEvidenceTestSupport.request(afterOneRow(error), 1))));
 
         assertAll(
                 () -> assertEquals(1, state.executions.get()),

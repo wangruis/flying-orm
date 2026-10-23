@@ -248,7 +248,7 @@ class GovernedJoinSourceIsolationTest {
 
     private static SyncSqlExecutor syncExecutor(AtomicInteger executions, DynamicRow result) {
         return (SyncSqlExecutor) Proxy.newProxyInstance(
-                SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{SyncSqlExecutor.class},
+                SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{com.flying.orm.rdb.support.ListQueryFixture.class},
                 (proxy, method, arguments) -> {
                     if (method.getName().equals("queryMapped")) {
                         executions.incrementAndGet();

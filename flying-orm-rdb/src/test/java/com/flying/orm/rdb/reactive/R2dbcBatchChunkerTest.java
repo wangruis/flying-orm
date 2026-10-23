@@ -27,11 +27,30 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class R2dbcBatchChunkerTest {
 
     @Test
+    void estimatesValuesOnlyWhenAByteBudgetIsConfigured() {
+        AtomicInteger estimates = new AtomicInteger();
+        java.math.BigDecimal value = new java.math.BigDecimal("123") {
+            @Override
+            public int precision() { estimates.incrementAndGet(); return super.precision(); }
+        };
+        BatchWriteRequest unlimited = request(
+                Flux.range(0, 3).map(ignored -> new Object[]{value}), BatchWriteOptions.of(2));
+        assertEquals(List.of(2, 1), R2dbcBatchChunker.chunks(unlimited, ignored -> { })
+                .map(chunk -> chunk.rows().size()).collectList().block());
+        assertEquals(0, estimates.get());
+        BatchWriteRequest limited = request(Flux.<Object[]>just(new Object[]{value}),
+                BatchWriteOptions.of(2).withMaxRowBytes(1));
+        assertThrows(BatchMemoryLimitExceededException.class,
+                () -> R2dbcBatchChunker.chunks(limited, ignored -> { }).blockLast());
+        assertEquals(1, estimates.get());
+    }
+
+    @Test
     void defaultBatchCanStreamBeyondFormerTotalRowLimit() {
         BatchWriteRequest request = request(
                 Flux.range(0, 100_001).map(value -> new Object[]{value}),
                 BatchWriteOptions.defaults());
-        assertEquals(201L, R2dbcBatchChunker.chunks(request).count().block());
+        assertEquals(201L, R2dbcBatchChunker.chunks(request, ignored -> { }).count().block());
     }
 
     @Test
@@ -45,18 +64,16 @@ class R2dbcBatchChunkerTest {
                 Flux.just(first, new Object[]{"two"}, new Object[]{"three"}),
                 BatchWriteOptions.of(2));
 
-        List<R2dbcBatchWriterChunks.BatchChunk> chunks = R2dbcBatchChunker.chunks(request)
+        List<R2dbcBatchWriterChunks.BatchChunk> chunks = R2dbcBatchChunker.chunks(request, ignored -> { })
                 .collectList()
                 .block();
 
         assertNotNull(chunks);
         assertEquals(2, chunks.size());
-        assertEquals(0, chunks.getFirst().chunkIndex());
         assertEquals(0L, chunks.getFirst().startOffset());
         assertEquals(2, chunks.getFirst().rows().size());
         assertSame(first, chunks.getFirst().rows().getFirst().row());
         assertEquals("one", chunks.getFirst().rows().getFirst().row()[0]);
-        assertEquals(1, chunks.getLast().chunkIndex());
         assertEquals(2L, chunks.getLast().startOffset());
         assertEquals(1, chunks.getLast().rows().size());
         assertThrows(UnsupportedOperationException.class, () -> chunks.getFirst().rows().clear());
@@ -79,7 +96,7 @@ class R2dbcBatchChunkerTest {
                 BatchWriteOptions.of(2).withMemoryLimits(2, oneRowBytes)
                         .withMaxRowBytes(oneRowBytes));
 
-        List<R2dbcBatchWriterChunks.BatchChunk> chunks = R2dbcBatchChunker.chunks(request)
+        List<R2dbcBatchWriterChunks.BatchChunk> chunks = R2dbcBatchChunker.chunks(request, ignored -> { })
                 .collectList()
                 .block();
 
@@ -87,7 +104,7 @@ class R2dbcBatchChunkerTest {
         assertEquals(List.of(1, 1), chunks.stream().map(chunk -> chunk.rows().size()).toList());
         assertSame(first, chunks.getFirst().rows().getFirst().row());
         assertSame(second, chunks.getLast().rows().getFirst().row());
-        assertTrue(chunks.stream().allMatch(chunk -> chunk.estimatedBytes() <= oneRowBytes));
+        assertTrue(chunks.stream().allMatch(chunk -> estimatedBytes(chunk) <= oneRowBytes));
     }
 
     @Test
@@ -96,7 +113,7 @@ class R2dbcBatchChunkerTest {
                 Flux.range(0, 5).map(value -> new Object[]{value}),
                 BatchWriteOptions.of(2).withMaxRows(0));
 
-        List<R2dbcBatchWriterChunks.BatchChunk> chunks = R2dbcBatchChunker.chunks(request)
+        List<R2dbcBatchWriterChunks.BatchChunk> chunks = R2dbcBatchChunker.chunks(request, ignored -> { })
                 .collectList()
                 .block();
 
@@ -113,7 +130,7 @@ class R2dbcBatchChunkerTest {
                 BatchWriteOptions.of(2).withMaxRows(2));
 
         assertThrows(R2dbcBatchRowLimitExceededException.class,
-                     () -> R2dbcBatchChunker.chunks(request).collectList().block());
+                     () -> R2dbcBatchChunker.chunks(request, ignored -> { }).collectList().block());
     }
 
     @Test
@@ -124,11 +141,11 @@ class R2dbcBatchChunkerTest {
                         .doOnNext(ignored -> accepted.incrementAndGet()),
                 BatchWriteOptions.of(8).withMemoryLimits(3, 1024).withMaxRowBytes(1024));
 
-        R2dbcBatchWriterChunks.BatchChunk first = R2dbcBatchChunker.chunks(request)
+        R2dbcBatchWriterChunks.BatchChunk first = R2dbcBatchChunker.chunks(request, ignored -> { })
                 .next().block(Duration.ofSeconds(2));
 
         assertNotNull(first);
-        assertEquals(998, first.estimatedBytes());
+        assertEquals(998, estimatedBytes(first));
         assertEquals(1, accepted.get());
         assertEquals(1, first.rows().size());
     }
@@ -143,14 +160,14 @@ class R2dbcBatchChunkerTest {
                 Flux.just(small, maximum).doOnNext(ignored -> accepted.incrementAndGet()),
                 BatchWriteOptions.of(8).withMemoryLimits(2, 1024).withMaxRowBytes(1024));
 
-        List<R2dbcBatchWriterChunks.BatchChunk> chunks = R2dbcBatchChunker.chunks(request)
+        List<R2dbcBatchWriterChunks.BatchChunk> chunks = R2dbcBatchChunker.chunks(request, ignored -> { })
                 .doOnNext(ignored -> acceptedAtEmission.add(accepted.get()))
                 .collectList().block(Duration.ofSeconds(2));
 
         assertNotNull(chunks);
         assertEquals(List.of(1, 2), acceptedAtEmission);
         assertEquals(List.of(48L, 1024L), chunks.stream().map(
-                R2dbcBatchWriterChunks.BatchChunk::estimatedBytes).toList());
+                R2dbcBatchChunkerTest::estimatedBytes).toList());
         assertEquals(List.of(0L, 1L), chunks.stream().map(
                 R2dbcBatchWriterChunks.BatchChunk::startOffset).toList());
         assertSame(small, chunks.getFirst().rows().getFirst().row());
@@ -163,13 +180,13 @@ class R2dbcBatchChunkerTest {
                 Flux.just(new Object[]{new byte[464]}, new Object[]{new byte[464]}),
                 BatchWriteOptions.of(8).withMemoryLimits(2, 1024).withMaxRowBytes(512));
 
-        List<R2dbcBatchWriterChunks.BatchChunk> chunks = R2dbcBatchChunker.chunks(request)
+        List<R2dbcBatchWriterChunks.BatchChunk> chunks = R2dbcBatchChunker.chunks(request, ignored -> { })
                 .collectList().block(Duration.ofSeconds(2));
 
         assertNotNull(chunks);
         assertEquals(1, chunks.size());
         assertEquals(2, chunks.getFirst().rows().size());
-        assertEquals(1024L, chunks.getFirst().estimatedBytes());
+        assertEquals(1024L, estimatedBytes(chunks.getFirst()));
     }
 
     @Test
@@ -179,7 +196,7 @@ class R2dbcBatchChunkerTest {
                 BatchWriteOptions.of(8).withMemoryLimits(1, 1024).withMaxRowBytes(512));
 
         assertThrows(BatchMemoryLimitExceededException.class,
-                () -> R2dbcBatchChunker.chunks(request).collectList().block(Duration.ofSeconds(2)));
+                () -> R2dbcBatchChunker.chunks(request, ignored -> { }).collectList().block(Duration.ofSeconds(2)));
     }
 
     @Test
@@ -187,7 +204,7 @@ class R2dbcBatchChunkerTest {
         BatchWriteRequest request = request(
                 Flux.range(0, 4097).map(value -> new Object[]{value}), BatchWriteOptions.defaults());
 
-        List<R2dbcBatchWriterChunks.BatchChunk> chunks = R2dbcBatchChunker.chunks(request)
+        List<R2dbcBatchWriterChunks.BatchChunk> chunks = R2dbcBatchChunker.chunks(request, ignored -> { })
                 .collectList().block(Duration.ofSeconds(2));
 
         assertNotNull(chunks);
@@ -218,7 +235,7 @@ class R2dbcBatchChunkerTest {
                 Flux.<Object[]>just(protectedRow),
                 BatchWriteOptions.of(1));
 
-        R2dbcBatchWriterChunks.BatchChunk chunk = R2dbcBatchChunker.chunks(request).blockFirst();
+        R2dbcBatchWriterChunks.BatchChunk chunk = R2dbcBatchChunker.chunks(request, ignored -> { }).blockFirst();
 
         assertNotNull(chunk);
         ProtectedBatchRows.RowView rowView = chunk.rows().getFirst();
@@ -246,7 +263,7 @@ class R2dbcBatchChunkerTest {
                 SqlBindMarkerStyle.CANONICAL, Flux.<Object[]>just(new Object[]{callerParameter}),
                 BatchWriteOptions.of(1));
 
-        R2dbcBatchWriterChunks.BatchChunk chunk = R2dbcBatchChunker.chunks(request).blockFirst();
+        R2dbcBatchWriterChunks.BatchChunk chunk = R2dbcBatchChunker.chunks(request, ignored -> { }).blockFirst();
 
         assertNotNull(chunk);
         Object stable = chunk.rows().getFirst().row()[0];
@@ -254,6 +271,10 @@ class R2dbcBatchChunkerTest {
         assertTrue(R2dbcParameterValues.isLargeObject(stable));
         assertNotNull(R2dbcParameterValues.forOwnedBinding(stable));
         assertEquals(1, valueReads.get());
+    }
+
+    private static long estimatedBytes(R2dbcBatchWriterChunks.BatchChunk chunk) {
+        return chunk.rows().stream().mapToLong(ProtectedBatchRows.RowView::estimatedBytes).sum();
     }
 
     private static BatchWriteRequest request(Flux<Object[]> rows, BatchWriteOptions options) {

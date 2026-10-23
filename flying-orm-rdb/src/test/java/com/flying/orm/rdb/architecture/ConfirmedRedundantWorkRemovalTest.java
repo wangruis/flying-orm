@@ -13,15 +13,27 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ConfirmedRedundantWorkRemovalTest {
 
     @Test
+    void scopePlanningUsesOneStateOwnerWithoutCopyingReadContexts() throws IOException {
+        String scopes = compact(source("form", "FormScopeSupport.java"));
+        assertFalse(scopes.contains("FormScopeGuard"), "Scope must not pass through a second state owner");
+        assertTrue(scopes.contains("newGovernedRead(buildScopedRead(spec.form(),business,effective),business)"));
+        assertFalse(scopes.contains("renderBatchUpdate("));
+        assertFalse(scopes.contains("parameterCompiler("));
+        assertFalse(scopes.contains("batchUpdateWhere("));
+        assertTrue(compact(source("form", "SyncFormClient.java"))
+                .contains("newNativeSyncFormBatchOperations(this.batchExecutor,configuration.renderer(),operations.scopes,"));
+        assertFalse(compact(source("form", "NativeSyncFormBatchOperations.java")).contains("newFormScopeSupport("));
+    }
+
+    @Test
     void writePlanningMergesScopeOnceAndGovernanceReusesIt() throws IOException {
         String planner = compact(source("form", "FormOperationPlanner.java"));
-        String guard = compact(source("form", "FormScopeGuard.java"));
+        String guard = compact(source("form", "FormScopeSupport.java"));
 
-        assertEquals(1, occurrences(planner, "scopes.effectiveScope(safeSpec.scope())"));
-        assertEquals(3, occurrences(planner, "scopes.writeScope(safeSpec.where(),safeSpec.scope())"));
-        assertEquals(4, occurrences(planner, "FieldUseGuard.write(plan,renderer,safeSpec,plan.scope()"));
-        assertTrue(guard.contains("requireBusinessWhere(where);returneffectiveScope(scope);"));
-        assertFalse(guard.contains("ConditionGroupbusinessWhere=requireBusinessWhere(where);DataScopeeffectiveScope=effectiveScope(scope);"));
+        assertEquals(3, occurrences(planner, "scopes.effectiveScope(safeSpec.scope())"));
+        assertFalse(planner.contains("scopes.writeScope("));
+        assertEquals(1, occurrences(planner, "FieldUseGuard.write(plan,renderer,spec,plan.scope()"));
+        assertFalse(guard.contains("requireBusinessWhere("));
     }
 
     @Test
@@ -39,8 +51,8 @@ class ConfirmedRedundantWorkRemovalTest {
         assertTrue(occurrences(source, "FormProtectionSqlSupport.WriteOperationprotection=") >= 2);
         assertFalse(source.contains("renderer.protection().protectedWrite("));
         assertTrue(source.contains("protection.prepare(values)"));
-        assertTrue(source.contains("protection.protectedWrite(values,request,null,ProtectedWriteWork.Kind.INSERT,protection.insertOwner(write,request))"));
-        assertTrue(source.contains("protection.protectedWrite(values,request,ownerQuery,ProtectedWriteWork.Kind.UPDATE,Map.of())"));
+        assertTrue(source.contains("protection.protectedWrite(write,request,null,ProtectedWriteWork.Kind.INSERT,protection.insertOwner(insert,insert.firstParameters()))"));
+        assertTrue(source.contains("protection.protectedWrite(write,request,ownerQuery,ProtectedWriteWork.Kind.UPDATE,Map.of())"));
     }
 
     @Test
@@ -48,8 +60,9 @@ class ConfirmedRedundantWorkRemovalTest {
         String source = compact(source("form", "JoinQueryPlanner.java"));
 
         assertTrue(source.contains("DynamicFormphysicalForm=renderer.protection().physicalForm(source.form())"));
-        assertEquals(2, occurrences(source,
+        assertEquals(1, occurrences(source,
                 "renderer.protection().prepareQuery(source.form(),physicalForm,"));
+        assertTrue(source.contains("key.source().form(),physicalForms.get(key.source()),key.condition()"));
     }
 
     @Test

@@ -5,7 +5,6 @@ import com.flying.orm.core.internal.Names;
 import java.lang.reflect.Array;
 import java.util.ArrayDeque;
 import java.util.Collection;
-import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -16,7 +15,9 @@ final class StructuredConditionStructureValidator {
 
     /** 正式内置的结构化集合 operator 在原始值图校验阶段共用集合容量预算。 */
     private static final Set<String> COLLECTION_VALUE_OPERATORS = Set.of(
-            "array-contains", "array-contained-by", "array-overlaps", "json-contains");
+            "array-contains", "array-contained-by", "array-overlaps", "json-contains",
+            "array-not-contains", "array-not-contained-by", "array-not-overlaps",
+            "json-not-contains", "json-contained-by", "json-not-contained-by");
 
     private StructuredConditionStructureValidator() {
     }
@@ -76,12 +77,13 @@ final class StructuredConditionStructureValidator {
         }
         ConditionCompilationBudget.Path valuePath = path.property("value");
         try {
-            validateRawValue(input.stableValue(),
-                             policy,
-                             valuePath,
-                             isStandardScalarArray(input, policy),
-                             usesStandardValueSemantics(input, policy)
-                                     || usesCollectionValueOperator(input));
+            Object value = input.stableValue();
+            String operator = input.operator() == null ? null : policy.resolveOperator(input.operator()).orElse(null);
+            boolean fieldValue = operator != null && policy.usesFieldValue(operator);
+            validateRawValue(value, policy, valuePath,
+                    fieldValue && value != null && value.getClass().isArray()
+                            && policy.valueShape(operator) == ConditionValueShape.SCALAR,
+                    fieldValue || usesCollectionValueOperator(input));
         } catch (StructuredConditionException error) {
             throw error;
         } catch (RuntimeException failure) {
@@ -117,26 +119,27 @@ final class StructuredConditionStructureValidator {
 
     /**
      * 只遍历前端常见的数组、Collection 和 Map；一次性 Iterable 留给值归一化器消费一次。
-     * 使用对象身份维护当前活动路径，既拒绝循环容器，又允许共享但无环的普通值图。
+     * 输入快照已经拒绝循环容器；这里只检查调用方预算，不重复维护循环检测状态。
      */
     private static void validateRawValue(Object value,
                                          StructuredConditionPolicy policy,
                                          ConditionCompilationBudget.Path path,
                                          boolean preserveScalarArray,
                                          boolean enforceCollectionSize) {
+        if (policy.maxDepth() == Integer.MAX_VALUE
+                && policy.maxNodes() == Integer.MAX_VALUE
+                && policy.maxCollectionSize() == Integer.MAX_VALUE
+                && policy.maxStringLength() == Integer.MAX_VALUE) {
+            return;
+        }
         ArrayDeque<ValueNode> pending = new ArrayDeque<>();
-        IdentityHashMap<Object, Boolean> active = new IdentityHashMap<>();
         int nodes = 0;
         if (value != null) {
-            pending.addLast(new ValueNode(value, path, 1, false));
+            pending.addLast(new ValueNode(value, path, 1));
         }
         while (!pending.isEmpty()) {
             ValueNode node = pending.removeLast();
             Object current = node.value();
-            if (node.exit()) {
-                active.remove(current);
-                continue;
-            }
             if (current instanceof CharSequence text) {
                 if (text.length() > policy.maxStringLength()) {
                     throw valueLimit(StructuredConditionErrorCode.VALUE_TOO_LONG,
@@ -152,11 +155,6 @@ final class StructuredConditionStructureValidator {
             if (!isContainer(current)) {
                 continue;
             }
-            if (active.put(current, Boolean.TRUE) != null) {
-                throw valueLimit(StructuredConditionErrorCode.VALUE_SHAPE_NOT_ALLOWED,
-                                 node.path(),
-                                 "structured condition value graph must not contain a cycle at ");
-            }
             if (node.depth() > policy.maxDepth()) {
                 throw valueLimit(StructuredConditionErrorCode.DEPTH_EXCEEDED,
                                  node.path(),
@@ -168,7 +166,6 @@ final class StructuredConditionStructureValidator {
                                  "structured condition value node count exceeds limit at ");
             }
             nodes++;
-            pending.addLast(new ValueNode(current, node.path(), node.depth(), true));
             if (current.getClass().isArray()) {
                 int length = Array.getLength(current);
                 if (enforceCollectionSize) {
@@ -222,26 +219,6 @@ final class StructuredConditionStructureValidator {
         }
     }
 
-    private static boolean isStandardScalarArray(StructuredConditionInput input,
-                                                 StructuredConditionPolicy policy) {
-        Object value = input.stableValue();
-        if (value == null || !value.getClass().isArray() || input.operator() == null) {
-            return false;
-        }
-        return policy.resolveOperator(input.operator())
-                     .filter(policy::usesFieldValue)
-                     .filter(operator -> policy.valueShape(operator) == ConditionValueShape.SCALAR)
-                     .isPresent();
-    }
-
-    private static boolean usesStandardValueSemantics(StructuredConditionInput input,
-                                                       StructuredConditionPolicy policy) {
-        if (input.operator() == null) {
-            return false;
-        }
-        return policy.resolveOperator(input.operator()).filter(policy::usesFieldValue).isPresent();
-    }
-
     private static boolean usesCollectionValueOperator(StructuredConditionInput input) {
         return input.operator() != null
                 && COLLECTION_VALUE_OPERATORS.contains(Names.key(input.operator(), "condition operator"));
@@ -254,7 +231,7 @@ final class StructuredConditionStructureValidator {
     private static void addValue(ArrayDeque<ValueNode> pending, Object value,
                                  ConditionCompilationBudget.Path path, int depth) {
         if (value != null) {
-            pending.addLast(new ValueNode(value, path, depth, false));
+            pending.addLast(new ValueNode(value, path, depth));
         }
     }
 
@@ -274,6 +251,6 @@ final class StructuredConditionStructureValidator {
         return StructuredConditionException.of(code, location, message + location);
     }
 
-    private record ValueNode(Object value, ConditionCompilationBudget.Path path, int depth, boolean exit) {
+    private record ValueNode(Object value, ConditionCompilationBudget.Path path, int depth) {
     }
 }

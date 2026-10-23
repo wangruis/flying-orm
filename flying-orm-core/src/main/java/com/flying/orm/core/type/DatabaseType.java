@@ -55,6 +55,8 @@ public final class DatabaseType {
     private static final Pattern COMMA_SPACE = Pattern.compile("\\s*,\\s*");
     private static final Pattern ARRAY_SPACE = Pattern.compile("\\s*\\[\\s*\\]");
     private static final Pattern ARGUMENT_GROUP = Pattern.compile("\\(([^()]*)\\)");
+    private static final Pattern LITERAL_MEMBER = Pattern.compile(
+            "\\s*('(?:[^'\\\\\\x00]++|'')*+'|[xX]'(?:[0-9a-fA-F]{2})*+')\\s*([,)])");
 
     private final String declaration;
     private final String canonical;
@@ -68,8 +70,11 @@ public final class DatabaseType {
 
     private DatabaseType(String declaration) {
         this.declaration = Names.requireText(declaration, "database type");
-        this.canonical = canonicalize(this.declaration);
-        this.safeDeclaration = SAFE_DECLARATION.matcher(canonical).matches();
+        Parsed literal = parseLiteralMembers(this.declaration);
+        this.canonical = literal == null ? canonicalize(this.declaration)
+                : literal.baseName().toLowerCase(Locale.ROOT) + "(" + String.join(",", literal.arguments()) + ")";
+        this.safeDeclaration = literal != null || SAFE_DECLARATION.matcher(canonical).matches()
+                && !canonical.startsWith("enum(") && !canonical.startsWith("set(");
         if (!safeDeclaration) {
             this.baseName = canonical.toUpperCase(Locale.ROOT);
             this.arguments = List.of();
@@ -80,7 +85,7 @@ public final class DatabaseType {
             return;
         }
 
-        Parsed parsed = parse(canonical);
+        Parsed parsed = literal == null ? parse(canonical) : literal;
         this.baseName = parsed.baseName();
         this.arguments = parsed.arguments();
         this.arrayDimensions = parsed.arrayDimensions();
@@ -99,7 +104,7 @@ public final class DatabaseType {
         return declaration;
     }
 
-    /** @return lower-case declaration with non-semantic whitespace removed */
+    /** @return normalized type syntax; unsupported quoted declarations remain verbatim */
     public String canonical() {
         return canonical;
     }
@@ -109,7 +114,7 @@ public final class DatabaseType {
         return baseName;
     }
 
-    /** @return immutable argument values from the declaration, without parentheses */
+    /** @return immutable argument tokens without parentheses; ENUM/SET members retain their literal quotes */
     public List<String> arguments() {
         return arguments;
     }
@@ -134,7 +139,7 @@ public final class DatabaseType {
         return zerofill;
     }
 
-    /** @return whether the whole declaration matches the supported safe SQL type grammar */
+    /** @return whether the whole declaration matches the safe type grammar, including unambiguous ENUM/SET literals */
     public boolean safeDeclaration() {
         return safeDeclaration;
     }
@@ -155,7 +160,7 @@ public final class DatabaseType {
 
     /** @return canonical declaration with numeric argument groups removed, preserving modifiers and arrays */
     public String comparisonShape() {
-        if (!safeDeclaration) {
+        if (!safeDeclaration || "ENUM".equals(baseName) || "SET".equals(baseName)) {
             return canonical;
         }
         return WHITESPACE.matcher(ARGUMENT_GROUP.matcher(canonical).replaceAll("").trim()).replaceAll(" ");
@@ -203,11 +208,36 @@ public final class DatabaseType {
     }
 
     private static String canonicalize(String value) {
+        // Quoted vendor syntax is not parsed here; its case and whitespace may be data.
+        if (value.indexOf('\'') >= 0 || value.indexOf('"') >= 0 || value.indexOf('`') >= 0) {
+            return value.trim();
+        }
         String normalized = WHITESPACE.matcher(value.trim().toLowerCase(Locale.ROOT)).replaceAll(" ");
         normalized = OPEN_PARENTHESIS_SPACE.matcher(normalized).replaceAll("(");
         normalized = CLOSE_PARENTHESIS_SPACE.matcher(normalized).replaceAll(")");
         normalized = COMMA_SPACE.matcher(normalized).replaceAll(",");
         return ARRAY_SPACE.matcher(normalized).replaceAll("[]");
+    }
+
+    private static Parsed parseLiteralMembers(String value) {
+        int open = value.indexOf('(');
+        if (open < 0) return null;
+        String name = value.substring(0, open).trim();
+        if (!"enum".equalsIgnoreCase(name) && !"set".equalsIgnoreCase(name)) return null;
+        List<String> members = new ArrayList<>();
+        Matcher matcher = LITERAL_MEMBER.matcher(value);
+        int offset = open + 1;
+        while (matcher.region(offset, value.length()).lookingAt()) {
+            String member = matcher.group(1);
+            members.add(member.charAt(0) == '\'' ? member : member.toLowerCase(Locale.ROOT));
+            offset = matcher.end();
+            if (")".equals(matcher.group(2))) {
+                return offset == value.length()
+                        ? new Parsed(name.toUpperCase(Locale.ROOT), members, 0, false, false) : null;
+            }
+        }
+        // Backslash quoting depends on session SQL mode; hexadecimal members are unambiguous.
+        return null;
     }
 
     private static Parsed parse(String canonical) {
@@ -257,7 +287,8 @@ public final class DatabaseType {
             case "BOOL", "BOOLEAN" -> LogicalType.BOOLEAN;
             case "CHAR", "CHARACTER", "CHARACTER VARYING", "NATIONAL CHARACTER VARYING", "VARCHAR",
                     "VARCHAR2", "NCHAR", "NVARCHAR", "NVARCHAR2", "TEXT", "TINYTEXT", "MEDIUMTEXT",
-                    "LONGTEXT", "CLOB", "NCLOB", "BPCHAR", "NTEXT", "CHARACTER LARGE OBJECT" -> LogicalType.TEXT;
+                    "LONGTEXT", "CLOB", "NCLOB", "BPCHAR", "NTEXT", "CHARACTER LARGE OBJECT",
+                    "ENUM", "SET" -> LogicalType.TEXT;
             case "BINARY", "VARBINARY", "LONGVARBINARY", "BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB",
                     "MYSQL_BINARY", "MYSQL_BLOB", "BYTEA", "RAW", "LONG RAW", "IMAGE",
                     "PROTECTED_BINARY", "PROTECTED_HASH", "BINARY VARYING", "BINARY LARGE OBJECT" ->

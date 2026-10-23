@@ -92,7 +92,7 @@ public final class FieldUsePolicy {
     /**
      * 用每项要求所属数据源自己的 FieldScope 审批 governed JOIN。
      *
-     * <p>多源 JOIN 只读取来源限定授权；单源 JOIN 兼容已有裸字段策略，但发布的决定仍带来源身份。</p>
+     * <p>JOIN 始终使用来源限定授权，不因当前来源数量变化而改变字段身份。</p>
      */
     public FieldUseSnapshot approveJoin(FieldUseRequirements requirements,
                                         Map<JoinSource, FieldScope> scopes) {
@@ -122,12 +122,10 @@ public final class FieldUsePolicy {
         if (unrestricted && allScopesUnrestricted) {
             return FieldUseSnapshot.unrestricted();
         }
-        boolean allowBareCompatibility = safeScopes.size() == 1;
         List<JoinFieldDecision> decisions = new ArrayList<>(required.joinRequirements().size());
         for (FieldUseRequirements.JoinRequirement requirement : required.joinRequirements()) {
             FieldScope scope = safeScopes.get(requirement.field().source());
-            decisions.add(decideJoin(requirement.field(), requirement.use(), requirement.origin(),
-                                     scope, allowBareCompatibility));
+            decisions.add(decideJoin(requirement.field(), requirement.use(), requirement.origin(), scope));
         }
         return FieldUseSnapshot.ofJoin(decisions);
     }
@@ -137,28 +135,18 @@ public final class FieldUsePolicy {
                                         FieldUse use,
                                         FieldUseOrigin origin,
                                         FieldScope scope) {
-        return decideJoin(field, use, origin, scope, false);
-    }
-
-    private JoinFieldDecision decideJoin(JoinFieldRef field,
-                                         FieldUse use,
-                                         FieldUseOrigin origin,
-                                         FieldScope scope,
-                                         boolean allowBareCompatibility) {
         JoinFieldRef safeField = Objects.requireNonNull(field, "join field reference must not be null");
         FieldUse safeUse = Objects.requireNonNull(use, "field use must not be null");
         FieldUseOrigin safeOrigin = Objects.requireNonNull(origin, "field use origin must not be null");
         FieldScope safeScope = Objects.requireNonNull(scope, "field scope must not be null");
-        boolean policyAllows = unrestricted
-                || allowsJoin(safeField, safeOrigin, safeUse)
-                || (allowBareCompatibility && allows(safeField.field(), safeOrigin, safeUse));
+        boolean policyAllows = unrestricted || allowsJoin(safeField, safeOrigin, safeUse);
         boolean scopeAllows = safeOrigin.internal()
                 || (safeUse.write()
                         ? safeScope.canWrite(safeField.field())
                         : safeScope.canRead(safeField.field()));
         boolean allowed = policyAllows && scopeAllows;
         FieldVisibility visibility = allowed
-                ? joinVisibility(safeField, safeOrigin, allowBareCompatibility)
+                ? joinVisibility(safeField, safeOrigin)
                 : FieldVisibility.HIDDEN;
         return new JoinFieldDecision(
                 safeField, safeUse, safeOrigin, allowed, visibility);
@@ -181,31 +169,17 @@ public final class FieldUsePolicy {
         if (unrestricted) {
             return FieldVisibility.FULL;
         }
-        Set<FieldUse> uses = grants.get(new GrantKey(field, FieldUseOrigin.CALLER));
-        if (uses == null || !uses.contains(FieldUse.PROJECT)) {
-            return FieldVisibility.HIDDEN;
-        }
-        if (uses.contains(FieldUse.FULL_VALUE)) {
-            return FieldVisibility.FULL;
-        }
-        return uses.contains(FieldUse.MASKED_VALUE)
-                ? FieldVisibility.MASKED : FieldVisibility.HIDDEN;
+        return visibility(grants.get(new GrantKey(field, FieldUseOrigin.CALLER)));
     }
 
-    private FieldVisibility joinVisibility(JoinFieldRef field,
-                                           FieldUseOrigin origin,
-                                           boolean allowBareCompatibility) {
+    private FieldVisibility joinVisibility(JoinFieldRef field, FieldUseOrigin origin) {
         if (origin.internal()) {
             return FieldVisibility.HIDDEN;
         }
         if (unrestricted) {
             return FieldVisibility.FULL;
         }
-        Set<FieldUse> uses = joinGrants.get(new JoinGrantKey(field, FieldUseOrigin.CALLER));
-        if (uses == null && allowBareCompatibility) {
-            uses = grants.get(new GrantKey(field.field(), FieldUseOrigin.CALLER));
-        }
-        return visibility(uses);
+        return visibility(joinGrants.get(new JoinGrantKey(field, FieldUseOrigin.CALLER)));
     }
 
     private static FieldVisibility visibility(Set<FieldUse> uses) {
@@ -305,17 +279,7 @@ public final class FieldUsePolicy {
             GrantKey key = new GrantKey(field, FieldUseOrigin.CALLER);
             EnumSet<FieldUse> uses = grants.computeIfAbsent(
                     key, ignored -> EnumSet.noneOf(FieldUse.class));
-            uses.remove(FieldUse.PROJECT);
-            uses.remove(FieldUse.FULL_VALUE);
-            uses.remove(FieldUse.MASKED_VALUE);
-            switch (Objects.requireNonNull(visibility, "field visibility must not be null")) {
-                case FULL -> uses.addAll(EnumSet.of(
-                        FieldUse.PROJECT, FieldUse.FULL_VALUE, FieldUse.MASKED_VALUE));
-                case MASKED -> uses.addAll(EnumSet.of(FieldUse.PROJECT, FieldUse.MASKED_VALUE));
-                case HIDDEN -> {
-                    // 显示用途已经移除，其他用途保持原样。
-                }
-            }
+            setVisibility(uses, visibility);
             return this;
         }
 
@@ -327,6 +291,11 @@ public final class FieldUsePolicy {
             }
             EnumSet<FieldUse> uses = joinGrants.computeIfAbsent(
                     key, ignored -> EnumSet.noneOf(FieldUse.class));
+            setVisibility(uses, visibility);
+            return this;
+        }
+
+        private static void setVisibility(EnumSet<FieldUse> uses, FieldVisibility visibility) {
             uses.remove(FieldUse.PROJECT);
             uses.remove(FieldUse.FULL_VALUE);
             uses.remove(FieldUse.MASKED_VALUE);
@@ -338,7 +307,6 @@ public final class FieldUsePolicy {
                     // 显示用途已经移除，其他用途保持原样。
                 }
             }
-            return this;
         }
 
         public FieldUsePolicy build() {

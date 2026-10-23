@@ -1,7 +1,5 @@
 package com.flying.orm.rdb.metadata;
 
-import com.github.benmanes.caffeine.cache.stats.CacheStats;
-
 import java.util.concurrent.atomic.LongAdder;
 
 /**
@@ -69,13 +67,4 @@ final class MetadataCacheRegionStats {
                                                 evictionWeight.sum());
     }
 
-    CacheStats caffeineStats() {
-        return CacheStats.of(hitCount.sum(),
-                             missCount.sum(),
-                             successCount.sum(),
-                             failureCount.sum(),
-                             totalLoadTimeNanos.sum(),
-                             evictionCount.sum(),
-                             evictionWeight.sum());
-    }
 }

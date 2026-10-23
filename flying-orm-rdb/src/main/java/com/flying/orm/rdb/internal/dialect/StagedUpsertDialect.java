@@ -12,6 +12,9 @@ import java.util.List;
  */
 public interface StagedUpsertDialect extends UpsertDialect {
 
+    /** 渲染器是否生成可附加 PostgreSQL RETURNING 输入序号的单行 UPSERT。 */
+    default boolean supportsBatchRowIndex() { return false; }
+
     String renderStaged(String table,
                         List<String> insertColumns,
                         List<String> conflictColumns,
@@ -28,6 +31,13 @@ public interface StagedUpsertDialect extends UpsertDialect {
                                 List<String> valueExpressions,
                                 String targetPredicate) {
         throw new UnsupportedOperationException("upsert dialect does not support row-level scope");
+    }
+
+    /** 普通业务条件不满足时跳过冲突 UPDATE，Scope 仍保持独立的范围约束。 */
+    default String renderConditional(String table, List<String> insertColumns, List<String> conflictColumns,
+                                     List<String> updateColumns, List<String> parameterColumns,
+                                     List<String> valueExpressions, String scopePredicate, String updatePredicate) {
+        throw new UnsupportedOperationException("upsert dialect does not support conditional updates");
     }
 
     /** Scope 参数在已有阶段参数中的插入位置。 */

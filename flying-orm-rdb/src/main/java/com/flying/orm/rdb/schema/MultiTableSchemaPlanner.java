@@ -56,14 +56,7 @@ public final class MultiTableSchemaPlanner {
         List<SchemaOperation> firstPhase = new ArrayList<>(graph.tables().size());
         for (RelationalTableDefinition table : components.dependencyOrder()) {
             RelationalTableDefinition baseTable = baseTable(table);
-            firstPhase.add(SchemaOperation.of(
-                    SchemaOperation.Kind.CREATE_TABLE,
-                    table.identity(),
-                    table.identity().table(),
-                    null,
-                    baseTable,
-                    SchemaRiskClassifier.creationCompatibility(
-                            baseTable, database.capabilities())));
+            firstPhase.add(SchemaDiffer.createTable(baseTable, database.capabilities()));
         }
 
         List<SchemaOperation> secondPhase = new ArrayList<>();
@@ -76,7 +69,7 @@ public final class MultiTableSchemaPlanner {
             secondPhase.addAll(SchemaForeignKeyPlanner.addOperations(
                     table,
                     foreignKey -> manualCycleForeignKeys.contains(foreignKey)
-                            || !managedRelations.contains(foreignKey.referencedTable())));
+                            || !managedRelations.contains(foreignKey.reference())));
         }
         return new Plan(database, cycleSupport, firstPhase, secondPhase);
     }
@@ -150,14 +143,14 @@ public final class MultiTableSchemaPlanner {
             Set<RelationIdentity> identities = new HashSet<>();
             component.forEach(table -> identities.add(table.identity()));
             boolean cyclic = component.size() > 1 || component.getFirst().foreignKeys().stream()
-                    .anyMatch(foreignKey -> foreignKey.referencedTable().equals(
+                    .anyMatch(foreignKey -> foreignKey.reference().equals(
                             component.getFirst().identity()));
             if (!cyclic) {
                 continue;
             }
             for (RelationalTableDefinition table : component) {
                 table.foreignKeys().stream()
-                        .filter(foreignKey -> identities.contains(foreignKey.referencedTable()))
+                        .filter(foreignKey -> identities.contains(foreignKey.reference()))
                         .forEach(manual::add);
             }
         }

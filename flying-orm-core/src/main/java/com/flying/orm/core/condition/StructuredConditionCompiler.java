@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.function.Function;
 
 /**
  * 前端结构化条件进入 ORM 的唯一编译入口。
@@ -63,6 +64,20 @@ public final class StructuredConditionCompiler {
      */
     public ConditionGroup compile(DynamicForm form, StructuredConditionInput input, StructuredConditionPolicy policy) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        return compile(safeForm, null, input, policy);
+    }
+
+    /**
+     * 使用查询已绑定的字段来源编译整棵条件树；保留输入字段路径，值按来源字段类型转换。
+     * resolver 返回 null 表示未知字段；授权先于字段解析，不为关联构造临时表单。
+     */
+    public ConditionGroup compileFields(Function<String, DynamicField> fields,
+                                        StructuredConditionInput input, StructuredConditionPolicy policy) {
+        return compile(null, Objects.requireNonNull(fields, "condition field resolver must not be null"), input, policy);
+    }
+
+    private ConditionGroup compile(DynamicForm form, Function<String, DynamicField> fields,
+                                    StructuredConditionInput input, StructuredConditionPolicy policy) {
         StructuredConditionInput safeInput = Objects.requireNonNull(
                 input, "structured condition input must not be null");
         StructuredConditionPolicy safePolicy = Objects.requireNonNull(policy,
@@ -83,7 +98,7 @@ public final class StructuredConditionCompiler {
                             path, "structured condition node must be either term or group at " + path);
                 }
                 if (hasTermShape) {
-                    completed = compileTerm(safeForm, frame.input, safePolicy, budget, frame.path);
+                    completed = compileTerm(form, fields, frame.input, safePolicy, budget, frame.path);
                 } else {
                     frame.operator = parseLogic(frame.input.logic(), frame.path, safePolicy.maxStringLength());
                     if (frame.input.terms().isEmpty()) {
@@ -117,7 +132,7 @@ public final class StructuredConditionCompiler {
         }
     }
 
-    private TermCondition compileTerm(DynamicForm form,
+    private TermCondition compileTerm(DynamicForm form, Function<String, DynamicField> fields,
                                       StructuredConditionInput input,
                                       StructuredConditionPolicy policy,
                                       ConditionCompilationBudget budget,
@@ -144,12 +159,12 @@ public final class StructuredConditionCompiler {
                     externalOperator,
                     "structured condition operator is not allowed for field at " + path.text());
         }
-        DynamicField field = form.findField(externalField)
-                .orElseThrow(() -> StructuredConditionException.field(
-                        StructuredConditionErrorCode.FIELD_NOT_ALLOWED,
-                        path.property("field").text(),
-                        externalField,
-                        "structured condition field does not exist at " + path.text()));
+        DynamicField field = fields == null ? form.findField(externalField).orElse(null) : fields.apply(externalField);
+        if (field == null) {
+            throw StructuredConditionException.field(StructuredConditionErrorCode.FIELD_NOT_ALLOWED,
+                    path.property("field").text(), externalField,
+                    "structured condition field does not exist at " + path.text());
+        }
         String operator = policy.resolveOperator(externalOperator)
                 .orElseThrow(() -> StructuredConditionException.term(
                         StructuredConditionErrorCode.OPERATOR_NOT_ALLOWED,
@@ -163,7 +178,7 @@ public final class StructuredConditionCompiler {
                 policy,
                 path.property("value"),
                 operator);
-        return TermCondition.owned(field.identity(), operator, value);
+        return TermCondition.owned(fields == null ? field.identity() : externalIdentity, operator, value);
     }
 
     private LogicalOperator parseLogic(String logic, ConditionCompilationBudget.Path path, int maxStringLength) {

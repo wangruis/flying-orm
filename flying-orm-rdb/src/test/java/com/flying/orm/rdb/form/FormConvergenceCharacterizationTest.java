@@ -8,8 +8,8 @@ import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageResult;
-import com.flying.orm.core.page.CursorPageQuery;
-import com.flying.orm.core.page.CursorSort;
+import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetSort;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.core.protection.MaskedFieldDefinition;
@@ -49,6 +49,27 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.*;
 
 class FormConvergenceCharacterizationTest {
+
+    @Test
+    void plainAndMaskedWritesDoNotAllocateEncryptionPlans() throws Exception {
+        for (boolean masked : List.of(false, true)) {
+            DynamicForm.Builder builder = DynamicForm.builder("plain", "plain")
+                    .addField(DynamicField.of("name", "VARCHAR"));
+            if (masked) builder.masked("name", MaskedFieldDefinition.builder("full").build());
+            DynamicForm form = builder.build();
+            FormDataSqlRenderer renderer = renderer(ValueCodecRegistry.standard());
+            FormProtectionSqlSupport.WriteOperation operation = renderer.protection()
+                    .writeOperation(form, renderer.protection().physicalForm(form), DataScope.none());
+            java.lang.reflect.Field values = operation.getClass().getDeclaredField("values");
+            values.setAccessible(true);
+            assertNull(values.get(operation), "no encryption plan is needed for plain or masked-only writes");
+            Map<String, Object> input = Collections.singletonMap("name", null);
+            FormPreparedWrite prepared = operation.prepare(input);
+            assertSame(input, prepared.values());
+            assertSame(form, prepared.physicalForm());
+            assertTrue(prepared.containsTokens().isEmpty());
+        }
+    }
 
     @Test
     void bothClientsDecodeArrayAndCollectionCarriersIntoNullCapableImmutableLists() {
@@ -131,7 +152,7 @@ class FormConvergenceCharacterizationTest {
             DynamicForm form = builder.build();
             FormOperationPlanner.PlannedWrite plan = new FormOperationPlanner.PlannedWrite(form,
                     new SqlRequest("insert into keys(label) values (?)", List.of("row")),
-                    SqlExecutionOptions.safeDefaults(), null, null, DataScope.none());
+                    SqlExecutionOptions.unlimited(), null, null, DataScope.none());
             assertEquals(expected.get(index), plan.generatedKeyColumn());
             for (boolean reactive : List.of(false, true)) {
                 Fixture fixture = new Fixture(renderer(ValueCodecRegistry.standard()), List.of());
@@ -237,14 +258,14 @@ class FormConvergenceCharacterizationTest {
             SyncFormClient sync = fixture.syncClient();
             ReactiveFormClient reactive = ReactiveFormClient.create(fixture.reactive, renderer);
             PageQuery page = PageQuery.of(2, 1000);
-            CursorPageQuery cursor = CursorPageQuery.first(1001, CursorSort.asc("id"));
+            KeysetPageQuery cursor = KeysetPageQuery.first(1001, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST));
             try {
                 for (PageResult<DynamicRow> result : List.of(sync.page(query, page), reactive.page(query, page).block())) {
                     assertEquals(1002, result.total());
                     assertEquals(2, result.rows().size());
                 }
                 assertFalse(fixture.lastRequest.sql().contains(" limit "), fixture.lastRequest.sql());
-                for (var result : List.of(sync.cursorPage(query, cursor), reactive.cursorPage(query, cursor).block())) {
+                for (var result : List.of(sync.keysetPage(query, cursor), reactive.keysetPage(query, cursor).block())) {
                     assertEquals(1001, result.rows().size());
                     assertTrue(result.hasMore());
                 }
@@ -296,15 +317,12 @@ class FormConvergenceCharacterizationTest {
             this.renderer = renderer;
             this.rows = rows;
         }
-        private final SyncSqlExecutor sync = new SyncSqlExecutor() {
+        private final SyncSqlExecutor sync = new com.flying.orm.rdb.support.ListQueryFixture() {
             public List<DynamicRow> query(SqlRequest request) { queries++; lastRequest = request; return rows; }
             public long rowsUpdated(SqlRequest request) { throw new AssertionError("unexpected write"); }
-            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
-                writes++; return new SqlWriteResult(1, List.of());
-            }
             public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String column) {
                 generatedColumn = column;
-                return rowsUpdatedReturningKeys(request, options);
+                writes++; return new SqlWriteResult(1, List.of());
             }
         };
         private final ReactiveSqlExecutor reactive = new ReactiveSqlExecutor() {
@@ -312,13 +330,10 @@ class FormConvergenceCharacterizationTest {
                 return Flux.defer(() -> { queries++; lastRequest = request; return Flux.fromIterable(rows); });
             }
             public Mono<Long> rowsUpdated(SqlRequest request) { return Mono.error(new AssertionError("unexpected write")); }
-            public Mono<SqlWriteResult> rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
-                return Mono.fromSupplier(() -> { writes++; return new SqlWriteResult(1, List.of()); });
-            }
             public Mono<SqlWriteResult> rowsUpdatedReturningKeys(
                     SqlRequest request, SqlExecutionOptions options, String column) {
                 generatedColumn = column;
-                return rowsUpdatedReturningKeys(request, options);
+                return Mono.fromSupplier(() -> { writes++; return new SqlWriteResult(1, List.of()); });
             }
         };
         private SyncFormClient syncClient() {

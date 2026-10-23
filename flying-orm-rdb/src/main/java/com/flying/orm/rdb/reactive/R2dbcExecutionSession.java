@@ -1,6 +1,5 @@
 package com.flying.orm.rdb.reactive;
 
-import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.core.internal.value.OwnedBindableValues;
 import com.flying.orm.rdb.batch.BatchMemoryBudget;
@@ -56,7 +55,7 @@ final class R2dbcExecutionSession {
         return Mono.defer(() -> boundConnection == null
                 ? Mono.from(Objects.requireNonNull(access.getConnection(request),
                         "connection publisher must not be null"))
-                    .switchIfEmpty(Mono.error(new IllegalStateException("connection publisher completed empty")))
+                    .switchIfEmpty(Mono.error(() -> new IllegalStateException("connection publisher completed empty")))
                     .map(connection -> new Resources(connection, request))
                 : Mono.just(new Resources(boundConnection, request)));
     }
@@ -74,31 +73,35 @@ final class R2dbcExecutionSession {
     /** Dispose statement-owned LOBs before invoking the upper release port, once per acquisition. */
     Mono<Void> release(Resources resource, SqlExecutionOperation operation,
                        SignalType signal, Throwable primary) {
+        Mono<Void> released = boundConnection == null
+                ? Mono.defer(() -> Mono.from(Objects.requireNonNull(
+                        access.releaseConnection(signal, resource.connection, resource.request),
+                        "release publisher must not be null")))
+                : Mono.empty();
+        // 标量成功路径没有 LOB 或失败事实需要合并，直接保留上层释放的终态。
+        if (primary == null && signal == SignalType.ON_COMPLETE && resource.largeObjectsIfCreated() == null) {
+            return observer == SqlExecutionObserver.noop() ? released
+                    : released.onErrorResume(error -> cleanupResult(operation, signal, null, null, error));
+        }
         return resource.cleanupLargeObjects(signal, primary)
-                .materialize().flatMap(cleanup -> {
-                    Throwable lobError = cleanup.getThrowable();
-                    Mono<Void> released = boundConnection == null
-                            ? Mono.defer(() -> Mono.from(Objects.requireNonNull(
-                                    access.releaseConnection(signal, resource.connection, resource.request),
-                                    "release publisher must not be null")))
-                            : Mono.empty();
-                    return released.materialize().flatMap(release -> {
-                        Throwable releaseError = release.getThrowable();
-                        Throwable error = primary;
-                        if (lobError != null) error = merge(error, lobError);
-                        if (releaseError != null) error = merge(error, releaseError);
-                        try {
-                            if (lobError != null) observeCleanup(operation,
-                                    ResourceCleanupObservation.Phase.LOB_CLEANUP, signal, lobError);
-                            if (releaseError != null) observeCleanup(operation,
-                                    ResourceCleanupObservation.Phase.CONNECTION_RELEASE, signal, releaseError);
-                        } catch (Throwable observationFailure) {
-                            error = merge(error, observationFailure);
-                        }
-                        return error == null || error == primary
-                                ? Mono.empty() : Mono.error(error);
-                    });
-                });
+                .materialize().flatMap(cleanup -> released.materialize().flatMap(release ->
+                        cleanupResult(operation, signal, primary, cleanup.getThrowable(), release.getThrowable())));
+    }
+
+    private Mono<Void> cleanupResult(SqlExecutionOperation operation, SignalType signal,
+                                     Throwable primary, Throwable lobError, Throwable releaseError) {
+        Throwable error = primary;
+        if (lobError != null) error = merge(error, lobError);
+        if (releaseError != null) error = merge(error, releaseError);
+        try {
+            if (lobError != null) observeCleanup(operation,
+                    ResourceCleanupObservation.Phase.LOB_CLEANUP, signal, lobError);
+            if (releaseError != null) observeCleanup(operation,
+                    ResourceCleanupObservation.Phase.CONNECTION_RELEASE, signal, releaseError);
+        } catch (Throwable observationFailure) {
+            error = merge(error, observationFailure);
+        }
+        return error == null || error == primary ? Mono.empty() : Mono.error(error);
     }
 
     static Mono<Void> cleanupLargeObjects(R2dbcLargeObjectScope scope,
@@ -129,21 +132,6 @@ final class R2dbcExecutionSession {
         return error.getClass() == RuntimeException.class
                 && error.getMessage() != null && error.getMessage().startsWith("Async resource cleanup failed")
                 && error.getCause() != null ? error.getCause() : error;
-    }
-
-    <T> Flux<T> withStatement(SqlRequest request,
-                              SqlExecutionOptions options,
-                              SqlExecutionOperation operationType,
-                              java.util.function.BiFunction<Statement,
-                                      Supplier<R2dbcLargeObjectScope>, Publisher<T>> operation,
-                              Function<Flux<T>, Flux<T>> operationProtection) {
-        SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
-        return withPreparedStatement(safeRequest,
-                                     snapshotExecutionParameters(safeRequest),
-                                     options,
-                                     operationType,
-                                     operation,
-                                     operationProtection);
     }
 
     <T> Flux<T> withPreparedStatement(SqlRequest request,
@@ -235,26 +223,6 @@ final class R2dbcExecutionSession {
         return bind(statement, parameters);
     }
 
-    Statement prepareStatement(Connection connection,
-                             String sql,
-                             int parameterCount,
-                             SqlBindMarkerStyle bindMarkerStyle,
-                             List<Object> parameters) {
-        return prepareStatement(connection, sql, parameterCount, bindMarkerStyle, parameters, 0);
-    }
-    private Statement prepareStatement(Connection connection,
-                                       String sql,
-                                       int parameterCount,
-                                       SqlBindMarkerStyle bindMarkerStyle,
-                                       List<Object> parameters,
-                                       int fetchSize) {
-        Statement statement = connection.createStatement(sqlForDriver(sql, parameterCount, bindMarkerStyle));
-        if (fetchSize > 0) {
-            statement.fetchSize(fetchSize);
-        }
-        return bind(statement, parameters);
-    }
-
     static Publisher<DynamicRow> mapRows(Result result,
                                          SqlExecutionOptions options,
                                          R2dbcLargeObjectScope cleanupScope) {
@@ -267,29 +235,14 @@ final class R2dbcExecutionSession {
         return R2dbcLargeObjectRows.map(result, options, cleanupScope);
     }
 
-    String sqlForDriver(String sql, int parameterCount, SqlBindMarkerStyle bindMarkerStyle) {
-        return bindMarkers.adapt(sql, parameterCount, bindMarkerStyle);
-    }
-
     private Statement bind(Statement statement,
                           List<Object> parameters) {
-        return bind(statement, parameters, null);
-    }
-
-    private Statement bind(Statement statement,
-                          List<Object> parameters,
-                          List<Class<?>> parameterTypes) {
         for (int i = 0; i < parameters.size(); i++) {
             Object value = parameters.get(i);
             if (value instanceof SqlNullParameter typedNull) {
                 statement.bindNull(i, typedNull.javaType());
             } else if (value == null) {
-                Class<?> parameterType = parameterTypes == null ? Object.class : parameterTypes.get(i);
-                if (parameterType == Object.class) {
-                    statement.bind(i, Parameters.in(Object.class));
-                } else {
-                    statement.bindNull(i, parameterType);
-                }
+                statement.bind(i, Parameters.in(Object.class));
             } else {
                 statement.bind(i, R2dbcParameterValues.forBinding(value));
             }

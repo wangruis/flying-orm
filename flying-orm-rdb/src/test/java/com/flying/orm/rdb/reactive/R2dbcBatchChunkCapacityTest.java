@@ -36,7 +36,7 @@ class R2dbcBatchChunkCapacityTest {
 
     @Test
     void fullLogicalChunkRetainsItsSingleChunkShape() {
-        List<R2dbcBatchWriterChunks.BatchChunk> chunks = R2dbcBatchChunker.chunks(request(500, regularOptions(500)))
+        List<R2dbcBatchWriterChunks.BatchChunk> chunks = R2dbcBatchChunker.chunks(request(500, regularOptions(500)), ignored -> { })
                 .collectList().block();
 
         assertEquals(1, chunks.size());
@@ -46,12 +46,12 @@ class R2dbcBatchChunkCapacityTest {
 
     @Test
     void emptyInputRetainsItsEofShape() {
-        assertTrue(R2dbcBatchChunker.chunks(request(0, regularOptions(500))).collectList().block().isEmpty());
+        assertTrue(R2dbcBatchChunker.chunks(request(0, regularOptions(500)), ignored -> { }).collectList().block().isEmpty());
     }
 
     @Test
     void singleRowInputRetainsItsEofShape() {
-        List<R2dbcBatchWriterChunks.BatchChunk> chunks = R2dbcBatchChunker.chunks(request(1, regularOptions(500)))
+        List<R2dbcBatchWriterChunks.BatchChunk> chunks = R2dbcBatchChunker.chunks(request(1, regularOptions(500)), ignored -> { })
                 .collectList().block();
 
         assertEquals(1, chunks.size());
@@ -63,7 +63,7 @@ class R2dbcBatchChunkCapacityTest {
         long threadId = Thread.currentThread().threadId();
         long before = ALLOCATIONS.getThreadAllocatedBytes(threadId);
         List<R2dbcBatchWriterChunks.BatchChunk> chunks = R2dbcBatchChunker.chunks(
-                request(rowCount, byteLimitedOptions(rowCount, chunkSize))).collectList().block();
+                request(rowCount, byteLimitedOptions(rowCount, chunkSize)), ignored -> { }).collectList().block();
 
         assertEquals(rowCount, chunks.size());
         assertTrue(chunks.stream().allMatch(chunk -> chunk.rows().size() == 1));

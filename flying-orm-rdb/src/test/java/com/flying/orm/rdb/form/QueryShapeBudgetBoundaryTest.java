@@ -11,7 +11,7 @@ class QueryShapeBudgetBoundaryTest {
     @Test
     void acceptsTheExactLimitAndRejectsTheNextItem() {
         QueryShapeBudget budget = new QueryShapeBudget(
-                QueryShapeLimits.existingDefaults()
+                QueryShapeLimits.defaults()
                                 .withMaxProjectionCount(2)
                                 .withMaxJoinCount(1)
                                 .withMaxGroupCount(1)
@@ -44,7 +44,7 @@ class QueryShapeBudgetBoundaryTest {
 
     @Test
     void defaultsDoNotNarrowLegacyQueries() {
-        QueryShapeBudget budget = new QueryShapeBudget(QueryShapeLimits.existingDefaults());
+        QueryShapeBudget budget = new QueryShapeBudget(QueryShapeLimits.defaults());
 
         assertDoesNotThrow(() -> {
             budget.addProjections(100_000);
@@ -61,7 +61,7 @@ class QueryShapeBudgetBoundaryTest {
     @Test
     void zeroCanExplicitlyProhibitAnOptionalQueryShape() {
         QueryShapeBudget budget = new QueryShapeBudget(
-                QueryShapeLimits.existingDefaults().withMaxJoinCount(0));
+                QueryShapeLimits.defaults().withMaxJoinCount(0));
 
         assertDoesNotThrow(() -> budget.addJoins(0));
         assertThrows(IllegalArgumentException.class, () -> budget.addJoins(1));

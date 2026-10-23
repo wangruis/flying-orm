@@ -66,7 +66,7 @@ class FullAuditJdbcBatchRegressionTest {
         JdbcBatchWriter writer = externalWriter(state);
 
         BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
-                () -> writer.writeBatchEvidence(exactlyOneRequest()));
+                () -> writer.writeBatch(exactlyOneRequest()));
 
         BatchOptimisticLockException conflict =
                 assertInstanceOf(BatchOptimisticLockException.class, failure.getCause());
@@ -84,7 +84,7 @@ class FullAuditJdbcBatchRegressionTest {
                 failingStatementConnection(state, closeFailure, null));
 
         BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
-                () -> writer.writeBatchEvidence(rows(2, 2)));
+                () -> writer.writeBatch(rows(2, 2)));
 
         assertSame(closeFailure, failure.getCause());
         assertPendingKnown(failure, 2L, List.of(0L, 1L));
@@ -102,7 +102,7 @@ class FullAuditJdbcBatchRegressionTest {
                 base.rowCountPolicy(), BatchGeneratedKeys.required("id", (offset, key) -> { }));
 
         BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
-                () -> writer.writeBatchEvidence(request));
+                () -> writer.writeBatch(request));
 
         assertSame(keyFailure, failure.getCause());
         assertPendingKnown(failure, 1L, List.of(0L));
@@ -116,7 +116,7 @@ class FullAuditJdbcBatchRegressionTest {
         JdbcBatchWriter writer = externalWriter(state);
 
         BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
-                () -> writer.writeProtectedBatchEvidence(protectedInsertRequest()));
+                () -> writer.writeProtectedBatch(protectedInsertRequest()));
 
         assertSame(tokenFailure, failure.getCause());
         assertPendingKnown(failure, 1L, List.of(0L));
@@ -128,7 +128,7 @@ class FullAuditJdbcBatchRegressionTest {
         JdbcBatchWriter writer = externalWriter(state);
 
         BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
-                () -> writer.writeBatchEvidence(rows(2, 2)));
+                () -> writer.writeBatch(rows(2, 2)));
 
         assertInstanceOf(SQLException.class, failure.getCause());
         assertPendingUnknown(failure);
@@ -142,7 +142,7 @@ class FullAuditJdbcBatchRegressionTest {
         JdbcBatchWriter writer = externalWriter(state);
 
         BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
-                () -> writer.writeBatchEvidence(rows(2, 2)));
+                () -> writer.writeBatch(rows(2, 2)));
 
         assertSame(partial, failure.getCause());
         assertPendingUnknown(failure);
@@ -158,7 +158,7 @@ class FullAuditJdbcBatchRegressionTest {
                 failingStatementConnection(state, closeFailure, null));
 
         BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
-                () -> writer.writeBatchEvidence(rows(2, 2)));
+                () -> writer.writeBatch(rows(2, 2)));
 
         assertSame(closeFailure, failure.getCause());
         assertPendingUnknown(failure);
@@ -172,7 +172,7 @@ class FullAuditJdbcBatchRegressionTest {
         JdbcBatchWriter writer = externalWriter(state);
 
         BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
-                () -> writer.writeBatchEvidence(rows(2, 2)));
+                () -> writer.writeBatch(rows(2, 2)));
 
         assertPendingUnknown(failure);
         BatchExecutionEvidence chunk = failure.evidence();
@@ -188,7 +188,7 @@ class FullAuditJdbcBatchRegressionTest {
         JdbcBatchWriter writer = externalWriter(state);
 
         BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
-                () -> writer.writeBatchEvidence(rows(2, 2)));
+                () -> writer.writeBatch(rows(2, 2)));
 
         RdbException overflow = assertInstanceOf(RdbException.class, failure.getCause());
         assertInstanceOf(ArithmeticException.class, overflow.getCause());

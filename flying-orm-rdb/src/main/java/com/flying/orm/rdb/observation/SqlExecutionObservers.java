@@ -26,7 +26,7 @@ public final class SqlExecutionObservers {
 
     /** 返回完全无开销行为的空 observer，适合作为默认值。 */
     public static SqlExecutionObserver noop() {
-        return SqlExecutionObserver.noop();
+        return Noop.INSTANCE;
     }
 
     /**
@@ -44,7 +44,7 @@ public final class SqlExecutionObservers {
         }
         try {
             if (!safeObserver.enabled()) {
-                return safeObserver;
+                return noop();
             }
         } catch (RuntimeException failure) {
             return noop();
@@ -53,6 +53,16 @@ public final class SqlExecutionObservers {
     }
 
     interface Isolated {
+    }
+
+    private enum Noop implements SqlExecutionObserver, Isolated {
+        INSTANCE;
+
+        @Override
+        public boolean enabled() { return false; }
+
+        @Override
+        public void onExecution(SqlExecutionObservation observation) { }
     }
 
     private static final class SafeSqlExecutionObserver implements SqlExecutionObserver, Isolated {
@@ -136,7 +146,7 @@ public final class SqlExecutionObservers {
             anyParameters |= details;
         }
         boolean parametersRequired = anyParameters;
-        return new SqlExecutionObserver() {
+        final class Composite implements SqlExecutionObserver, Isolated {
             @Override
             public boolean requiresParameterValues() {
                 return parametersRequired;
@@ -164,7 +174,8 @@ public final class SqlExecutionObservers {
             public void onResourceCleanup(ResourceCleanupObservation observation) {
                 delegates.forEach(observer -> observer.onResourceCleanup(observation));
             }
-        };
+        }
+        return new Composite();
     }
 
     /** 创建按条件过滤的 observer，适合把慢 SQL、错误和成功指标分流。 */

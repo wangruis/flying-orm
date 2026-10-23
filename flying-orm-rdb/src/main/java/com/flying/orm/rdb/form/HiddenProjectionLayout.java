@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.field.FieldIdentity;
+import com.flying.orm.core.internal.Names;
 import com.flying.orm.core.page.CursorPosition;
 import com.flying.orm.core.page.KeysetPageResult;
 import com.flying.orm.core.page.KeysetSort;
@@ -15,6 +16,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.function.UnaryOperator;
+import java.util.function.Function;
 
 /**
  * keyset 物理投影与业务可见投影之间的固定布局。
@@ -65,6 +67,12 @@ final class HiddenProjectionLayout {
     static HiddenProjectionLayout of(
             List<String> visibleFields,
             KeysetPageNormalizer.NormalizedKeysetPage page) {
+        return of(visibleFields, page, false);
+    }
+
+    /** JOIN 已按来源分配唯一结果别名，隐藏列保持同一标签和解码身份。 */
+    static HiddenProjectionLayout of(List<String> visibleFields,
+            KeysetPageNormalizer.NormalizedKeysetPage page, boolean aliased) {
         List<String> safeVisible = Objects.requireNonNull(
                 visibleFields, "visible keyset fields must not be null");
         KeysetPageNormalizer.NormalizedKeysetPage safePage = Objects.requireNonNull(
@@ -90,10 +98,12 @@ final class HiddenProjectionLayout {
             if (visibleByKey.containsKey(key) || hiddenLabels.containsKey(key)) {
                 continue;
             }
-            String alias;
-            do {
-                alias = HIDDEN_ALIAS_PREFIX + aliasIndex++;
-            } while (!usedLabels.add(FieldIdentity.of(alias).key()));
+            String alias = sort.field();
+            if (!aliased) {
+                do {
+                    alias = HIDDEN_ALIAS_PREFIX + aliasIndex++;
+                } while (!usedLabels.add(FieldIdentity.of(alias).key()));
+            }
             hiddenLabels.put(key, alias);
             selections.add(new Projection(sort.field(), alias, true));
         }
@@ -196,26 +206,26 @@ final class HiddenProjectionLayout {
         return DynamicRow.copyOf(visible);
     }
 
-    KeysetPageResult<DynamicRow> finish(
+    <T> KeysetPageResult<T> finish(
             List<DynamicRow> physicalRows,
             int pageSize,
-            UnaryOperator<DynamicRow> publisher) {
+            Function<DynamicRow, T> publisher) {
         List<DynamicRow> safeRows = Objects.requireNonNull(
                 physicalRows, "physical keyset rows must not be null");
         if (pageSize < 1) {
             throw new IllegalArgumentException("keyset page size must be positive");
         }
-        UnaryOperator<DynamicRow> safePublisher = Objects.requireNonNull(
+        Function<DynamicRow, T> safePublisher = Objects.requireNonNull(
                 publisher, "keyset row publisher must not be null");
         int resultSize = Math.min(pageSize, safeRows.size());
         boolean hasMore = safeRows.size() > pageSize;
-        List<DynamicRow> visibleRows = new ArrayList<>(resultSize);
-        for (int index = 0; index < resultSize; index++) {
-            visibleRows.add(safePublisher.apply(visibleRow(safeRows.get(index))));
-        }
         CursorPosition next = hasMore && resultSize > 0
                 ? nextPosition(safeRows.get(resultSize - 1))
                 : CursorPosition.first();
+        List<T> visibleRows = new ArrayList<>(resultSize);
+        for (int index = 0; index < resultSize; index++) {
+            visibleRows.add(safePublisher.apply(visibleRow(safeRows.get(index))));
+        }
         return new KeysetPageResult<>(visibleRows, next, hasMore);
     }
 
@@ -223,8 +233,8 @@ final class HiddenProjectionLayout {
     record Projection(String field, String label, boolean hidden) {
 
         Projection {
-            field = FieldIdentity.of(field).name();
-            label = FieldIdentity.of(label).name();
+            field = Names.requireText(field, "field name");
+            label = Names.requireText(label, "field name");
         }
     }
 }

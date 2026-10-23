@@ -39,7 +39,7 @@ class LockingReadScopeAndFieldUseTest {
                         ConditionGroup.and().where("id", "=", 7L).build())
                 .withProjection(List.of("id"), List.of());
 
-        client.lockingRead(LockingReadSpec.of(query, ReadLock.update()));
+        client.lockingRead(query.withLock(ReadLock.update()));
 
         assertEquals(List.of(7L, 9L), request.get().parameters());
         assertTrue(request.get().sql().contains("tenant_id"), request.get().sql());
@@ -50,7 +50,7 @@ class LockingReadScopeAndFieldUseTest {
                 .allow("id", FieldUse.PROJECT)
                 .build());
         assertThrows(ScopeAccessException.class,
-                     () -> denied.lockingRead(LockingReadSpec.of(query, ReadLock.update())));
+                     () -> denied.lockingRead(query.withLock(ReadLock.update())));
         assertEquals(1, queries.get());
     }
 }

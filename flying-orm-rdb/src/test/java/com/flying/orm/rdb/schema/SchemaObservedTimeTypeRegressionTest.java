@@ -29,7 +29,7 @@ class SchemaObservedTimeTypeRegressionTest {
 
     @Test void nullableOnlyUsesObservedLogicalTypeAcrossMarkerDialects() throws Exception {
         for (Case c : CASES) {
-            ReviewedSchemaPlan plan = review(c, observed(c, c.logical(), false, null), column(c.logical(), true, null));
+            SchemaMigrationPlan plan = review(c, observed(c, c.logical(), false, null), column(c.logical(), true, null));
             assertExecutable(plan, c);
             if (c == MYSQL) assertTrue(sql(plan).contains("[[flying-orm:v1:OFFSET_TIME]]"));
         }
@@ -49,7 +49,7 @@ class SchemaObservedTimeTypeRegressionTest {
         for (Case c : CASES) {
             for (String[] change : List.of(new String[] {null, "note"},
                     new String[] {"note", "new"}, new String[] {"note", null})) {
-                ReviewedSchemaPlan plan = review(c, observed(c, c.logical(), true, change[0]),
+                SchemaMigrationPlan plan = review(c, observed(c, c.logical(), true, change[0]),
                         column(c.logical(), true, change[1]));
                 assertExecutable(plan, c);
                 assertTrue(sql(plan).contains("[[flying-orm:v1:" + c.logical() + "]]"));
@@ -68,36 +68,39 @@ class SchemaObservedTimeTypeRegressionTest {
     }
 
     @Test void samePhysicalUnmarkedToMarkedTypeIsNotAnEmptyPlan() throws Exception {
-        assertManual(review(MYSQL, observed(MYSQL, "VARCHAR(32)", true, null),
+        assertUnsupported(() -> review(MYSQL, observed(MYSQL, "VARCHAR(32)", true, null),
                 column("OFFSET_TIME", true, null)));
     }
 
     @Test void samePhysicalMarkedToUnmarkedTypeIsNotAnEmptyPlan() throws Exception {
-        assertManual(review(MYSQL, observed(MYSQL, "OFFSET_TIME", true, null),
+        assertUnsupported(() -> review(MYSQL, observed(MYSQL, "OFFSET_TIME", true, null),
                 column("VARCHAR(32)", true, null)));
     }
 
     @Test void wideningMustNotSilentlyRemoveTimeSemantics() throws Exception {
-        assertManual(review(MYSQL, observed(MYSQL, "OFFSET_TIME", true, null),
+        assertUnsupported(() -> review(MYSQL, observed(MYSQL, "OFFSET_TIME", true, null),
                 column("VARCHAR(64)", true, null)));
-        assertManual(review(ORACLE_TIME, observed(ORACLE_TIME, "TIME", true, null),
+        assertUnsupported(() -> review(ORACLE_TIME, observed(ORACLE_TIME, "TIME", true, null),
                 column("VARCHAR2(32)", true, null)));
     }
 
-    @Test void changingTimeMarkerKindRemainsManual() throws Exception {
-        assertManual(review(ORACLE_TIME, observed(ORACLE_TIME, "TIME", true, null),
+    @Test void changingTimeMarkerKindIsUnsupported() throws Exception {
+        assertUnsupported(() -> review(ORACLE_TIME, observed(ORACLE_TIME, "TIME", true, null),
                 column("OFFSET_TIME", true, null)));
     }
 
-    @Test void realMultipleAttributeChangeRemainsManual() throws Exception {
+    @Test void multipleAttributeChangePreservesTheObservedTimeMarker() throws Exception {
         ColumnDefinition desired = ColumnDefinition.builder("n", "OFFSET_TIME").nullable(true)
                 .defaultValue(ColumnDefault.literal(OffsetTime.parse("12:34:56+08:00"))).build();
-        assertManual(review(MYSQL, observed(MYSQL, "OFFSET_TIME", false, null), desired));
+        SchemaMigrationPlan plan = review(MYSQL, observed(MYSQL, "OFFSET_TIME", false, null), desired);
+        assertExecutable(plan, MYSQL);
+        assertEquals(List.of("alter table `t` modify column `n` VARCHAR(32) default '12:34:56+08:00' "
+                + "comment '[[flying-orm:v1:OFFSET_TIME]]'"), plan.requests().stream().map(r -> r.sql()).toList());
     }
 
     @Test void oldPhysicalSnapshotDoesNotGuessDesiredMarker() {
         SchemaSnapshot snapshot = builder(MYSQL).physicalColumns(List.of(column("VARCHAR(32)", true, null))).build();
-        assertManual(review(MYSQL, snapshot, column("OFFSET_TIME", true, null)));
+        assertUnsupported(() -> review(MYSQL, snapshot, column("OFFSET_TIME", true, null)));
     }
 
     @Test void logicalSnapshotAlreadyKnowsItsActualType() {
@@ -110,13 +113,13 @@ class SchemaObservedTimeTypeRegressionTest {
                 column("VARCHAR(64)", true, null)), MYSQL);
     }
 
-    @Test void observedMarkerFactChangesFingerprintWithoutChangingPhysicalColumns() throws Exception {
+    @Test void observedMarkerFactsRemainDistinctFromPhysicalColumns() throws Exception {
         SchemaSnapshot marked = observed(MYSQL, "OFFSET_TIME", true, null);
         SchemaSnapshot plain = observed(MYSQL, "VARCHAR(32)", true, null);
         SchemaSnapshot unknown = builder(MYSQL).physicalColumns(plain.columns().value()).build();
-        assertNotEquals(SchemaSnapshotFingerprint.of(marked), SchemaSnapshotFingerprint.of(plain));
-        assertNotEquals(SchemaSnapshotFingerprint.of(marked), SchemaSnapshotFingerprint.of(unknown));
-        assertNotEquals(SchemaSnapshotFingerprint.of(plain), SchemaSnapshotFingerprint.of(unknown));
+        assertNotEquals(marked.observedLogicalTypes(), plain.observedLogicalTypes());
+        assertNotEquals(marked.observedLogicalTypes(), unknown.observedLogicalTypes());
+        assertNotEquals(plain.observedLogicalTypes(), unknown.observedLogicalTypes());
     }
 
     @Test void compatibleOverloadSnapshotsInputAndClearsFactsOnBuilderReuse() throws Exception {
@@ -125,54 +128,53 @@ class SchemaObservedTimeTypeRegressionTest {
         types.put("n", DatabaseType.of("OFFSET_TIME"));
         SchemaSnapshot.Builder builder = withTypes(builder(MYSQL), columns, types);
         SchemaSnapshot marked = builder.build();
-        String fingerprint = SchemaSnapshotFingerprint.of(marked);
+        Map<String, DatabaseType> logicalTypes = marked.observedLogicalTypes();
         types.put("n", DatabaseType.of("VARCHAR(32)"));
-        assertEquals(fingerprint, SchemaSnapshotFingerprint.of(builder.build()));
-        assertNotEquals(fingerprint, SchemaSnapshotFingerprint.of(withTypes(builder(MYSQL), columns, types).build()));
+        assertEquals(logicalTypes, builder.build().observedLogicalTypes());
+        assertNotEquals(logicalTypes, withTypes(builder(MYSQL), columns, types).build().observedLogicalTypes());
         SchemaSnapshot reset = builder.physicalColumns(columns).build();
-        assertEquals(SchemaSnapshotFingerprint.of(builder(MYSQL).physicalColumns(columns).build()),
-                SchemaSnapshotFingerprint.of(reset));
+        assertEquals(builder(MYSQL).physicalColumns(columns).build().observedLogicalTypes(),
+                reset.observedLogicalTypes());
         withTypes(builder, columns, Map.of("n", DatabaseType.of("OFFSET_TIME")));
-        assertEquals(SchemaSnapshotFingerprint.of(builder(MYSQL).columns(columns).build()),
-                SchemaSnapshotFingerprint.of(builder.columns(columns).build()));
+        assertEquals(builder(MYSQL).columns(columns).build().observedLogicalTypes(),
+                builder.columns(columns).build().observedLogicalTypes());
     }
 
-    @Test void observedTypeMapOrderDoesNotChangeFingerprint() throws Exception {
+    @Test void observedTypeMapOrderDoesNotChangeFacts() throws Exception {
         List<ColumnDefinition> columns = List.of(column("VARCHAR(32)", true, null),
                 ColumnDefinition.builder("m", "INTEGER").build());
         Map<String, DatabaseType> first = new LinkedHashMap<>();
         first.put("n", DatabaseType.of("OFFSET_TIME")); first.put("m", DatabaseType.of("INTEGER"));
         Map<String, DatabaseType> second = new LinkedHashMap<>();
         second.put("m", DatabaseType.of("INTEGER")); second.put("n", DatabaseType.of("OFFSET_TIME"));
-        assertEquals(SchemaSnapshotFingerprint.of(withTypes(builder(MYSQL), columns, first).build()),
-                SchemaSnapshotFingerprint.of(withTypes(builder(MYSQL), columns, second).build()));
+        assertEquals(withTypes(builder(MYSQL), columns, first).build().observedLogicalTypes(),
+                withTypes(builder(MYSQL), columns, second).build().observedLogicalTypes());
     }
-
 
     @Test void unknownStorageMarkerDoesNotBecomeAnAbsentComment() {
         for (Case c : CASES) {
             SchemaSnapshot actual = builder(c).physicalColumns(List.of(column(c.physical(), true, null))).build();
-            assertManual(review(c, actual, column(c.physical(), true, "note")));
+            assertUnsupported(() -> review(c, actual, column(c.physical(), true, "note")));
         }
     }
 
     @Test void unknownStorageMarkerIsNotRemovedWhenReplacingUserComment() {
         for (Case c : CASES) {
             SchemaSnapshot actual = builder(c).physicalColumns(List.of(column(c.physical(), true, "old"))).build();
-            assertManual(review(c, actual, column(c.physical(), true, "new")));
+            assertUnsupported(() -> review(c, actual, column(c.physical(), true, "new")));
         }
     }
 
     @Test void mysqlFullColumnRewriteCannotDiscardAnUnknownMarker() {
         SchemaSnapshot actual = builder(MYSQL).physicalColumns(List.of(column("VARCHAR(32)", false, null))).build();
-        assertManual(review(MYSQL, actual, column("VARCHAR(32)", true, null)));
+        assertUnsupported(() -> review(MYSQL, actual, column("VARCHAR(32)", true, null)));
     }
 
     @Test void wideningCannotDiscardUnknownMarkerReadbackSemantics() {
         for (Case c : CASES) {
             SchemaSnapshot actual = builder(c).physicalColumns(List.of(column(c.physical(), true, null))).build();
             String target = c == ORACLE_TIME || c == ORACLE_OFFSET ? "VARCHAR2(64)" : "VARCHAR(64)";
-            assertManual(review(c, actual, column(target, true, null)));
+            assertUnsupported(() -> review(c, actual, column(target, true, null)));
         }
     }
 
@@ -197,14 +199,13 @@ class SchemaObservedTimeTypeRegressionTest {
     @Test void missingObservedColumnEntryKeepsStorageMarkerUnknown() throws Exception {
         SchemaSnapshot actual = withTypes(builder(SQL_SERVER),
                 List.of(column("VARCHAR(32)", true, null)), Map.of()).build();
-        assertManual(review(SQL_SERVER, actual, column("VARCHAR(32)", true, "note")));
+        assertUnsupported(() -> review(SQL_SERVER, actual, column("VARCHAR(32)", true, "note")));
     }
-
 
     @Test void unknownMarkerIdentityCannotBeCertifiedAsZeroDifference() {
         for (Case c : CASES) {
             SchemaSnapshot actual = builder(c).physicalColumns(List.of(column(c.physical(), true, null))).build();
-            assertManual(review(c, actual, column(c.physical(), true, null)));
+            assertUnsupported(() -> review(c, actual, column(c.physical(), true, null)));
         }
     }
 
@@ -245,22 +246,20 @@ class SchemaObservedTimeTypeRegressionTest {
         return (SchemaSnapshot) method.invoke(null, identity(c), List.of(row), List.of(Map.of()),
                 List.of(), List.of(), List.of(), List.of(), List.of(), Function.identity(), dialect);
     }
-    private static ReviewedSchemaPlan review(Case c, SchemaSnapshot actual, ColumnDefinition desired) {
+    private static SchemaMigrationPlan review(Case c, SchemaSnapshot actual, ColumnDefinition desired) {
         return RelationalSchemaPlanReviewer.create(c.dialect()).review(
                 DatabaseDescriptor.of(c.dialect().name(), c.version(), c.dialect()),
                 RelationalTableDefinition.builder(identity(c)).addColumn(desired).build(), actual,
                 SchemaSnapshotCoverage.complete(), SchemaCompatibilityMode.EXACT);
     }
-    private static String sql(ReviewedSchemaPlan plan) {
+    private static String sql(SchemaMigrationPlan plan) {
         return plan.requests().stream().map(r -> r.sql()).reduce("", (a, b) -> a + "\n" + b);
     }
-    private static void assertExecutable(ReviewedSchemaPlan plan, Case c) {
-        assertFalse(plan.requiresManualAction(), c.metadataDialect() + "/" + c.logical() + ": " + plan.operations());
+    private static void assertExecutable(SchemaMigrationPlan plan, Case c) {
         assertFalse(plan.requests().isEmpty());
     }
-    private static void assertManual(ReviewedSchemaPlan plan) {
-        assertFalse(plan.operations().isEmpty(), "marker change must not disappear from diff");
-        assertTrue(plan.requiresManualAction(), sql(plan));
-        assertTrue(plan.requests().isEmpty(), sql(plan));
+    private static void assertUnsupported(org.junit.jupiter.api.function.Executable planning) {
+        UnsupportedOperationException failure = assertThrows(UnsupportedOperationException.class, planning);
+        assertTrue(failure.getMessage().contains("CHANGE_COLUMN"), failure.getMessage());
     }
 }

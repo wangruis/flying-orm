@@ -29,10 +29,10 @@ class FluentQueryConditionsTest {
 
     @Test
     void nestedGroupsKeepBusinessPrecedenceAndScopeOutsideOr() {
-        DmlQueryCommand command = command();
-        command.where(where -> where.is("active", true)
+        PlanningDynamicQuery command = command();
+        command.where(command.conditions(where -> where.is("active", true)
                 .or(group -> group.is("name", "Alice")
-                        .and(nested -> nested.where("age", ">=", 18).is("city", "Shanghai"))));
+                        .and(nested -> nested.where("age", ">=", 18).is("city", "Shanghai")))));
         command.where("id", ">", 0);
         command.scope(DataScope.tenant("tenant_id", 9));
 
@@ -56,9 +56,25 @@ class FluentQueryConditionsTest {
     }
 
     @Test
+    void explicitValuesKeepWhitespaceAndRegisteredCollectionsOwnTheirInputs() {
+        SqlRenderer renderer = SqlRenderer.builder().addDefaultTerms()
+                .addTerm(SqlTermHandler.of("any-of", ConditionValueShape.COLLECTION,
+                        SqlTermHandler.in()::render)).build();
+        List<String> values = new ArrayList<>(List.of("", " ", " x "));
+        WhereDsl where = new WhereDsl(renderer);
+        where.is("name", "").is("label", " x ")
+                .or(group -> group.where("name", "any-of", values))
+                .whereIfPresent("unused", " ");
+        values.clear();
+        assertEquals(List.of("", " x ", "", " ", " x "),
+                renderer.renderWhere(where.build()).parameters());
+        assertFalse(renderer.renderWhere(where.build()).sql().contains("unused"));
+    }
+
+    @Test
     void emptyOptionalGroupsDoNotBroadenAnExistingCondition() {
         WhereDsl where = new WhereDsl(RENDERER);
-        where.is("id", 1).or(group -> group.termIfPresent("name", "=", " "));
+        where.is("id", 1).or(group -> group.whereIfPresent("name", "=", " "));
         assertEquals("id = ?", RENDERER.renderWhere(where.build()).sql());
         assertThrows(NullPointerException.class, () -> where.or(null));
         assertThrows(NullPointerException.class, () -> where.and(null));
@@ -66,7 +82,7 @@ class FluentQueryConditionsTest {
 
     @Test
     void directConditionsSnapshotValuesAndPreviouslyBuiltRequests() {
-        DmlQueryCommand command = command();
+        PlanningDynamicQuery command = command();
         List<Integer> ids = new ArrayList<>(List.of(1, 2));
         command.where("id", "in", ids);
         var first = command.toRequest();
@@ -79,22 +95,22 @@ class FluentQueryConditionsTest {
     }
 
     @Test
-    void callbackReplacementKeepsItsExistingSemanticsAndSnapshotsRetainedDsl() {
-        DmlQueryCommand command = command();
+    void callbackAppendSnapshotsRetainedDsl() {
+        PlanningDynamicQuery command = command();
         command.where("id", "=", 1);
         AtomicReference<WhereDsl> retained = new AtomicReference<>();
-        command.where(where -> {
+        command.where(command.conditions(where -> {
             retained.set(where);
             where.is("id", 2);
-        });
+        }));
         retained.get().is("name", "late change");
         command.where("active", "=", true);
-        assertEquals(List.of(2, true), command.toRequest().parameters());
+        assertEquals(List.of(1, 2, true), command.toRequest().parameters());
     }
 
     @Test
     void invalidFieldsAndUnregisteredOperatorsCannotBecomeSql() {
-        DmlQueryCommand command = command();
+        PlanningDynamicQuery command = command();
         assertThrows(IllegalArgumentException.class,
                 () -> command.where("id) or 1=1 --", "=", 1));
         command.where("id", "unregistered", 1);
@@ -121,7 +137,7 @@ class FluentQueryConditionsTest {
             DataScope scope = DataScope.tenant("tenant_id", 9);
             QueryOperator query = clients.operator().withDefaultDataScope(scope).dml().query()
                     .select("id").from("users").where("id", "user-in-org", 7).where("name", value);
-            Flux<DynamicRow> pending = query.fetchMap();
+            Flux<DynamicRow> pending = query.fetch();
             query.where("id", 999);
             try (var insert = keepAlive.prepareStatement("insert into users values (?, ?, ?)")) {
                 for (int id = 1; id <= 2; id++) {
@@ -133,15 +149,15 @@ class FluentQueryConditionsTest {
             }
             List<DynamicRow> reactive = pending.collectList().block(Duration.ofSeconds(10));
             List<DynamicRow> sync = clients.syncOperator().withDefaultDataScope(scope).dml().query()
-                    .select("id").from("users").where("id", "user-in-org", 7).where("name", value).fetchMap();
+                    .select("id").from("users").where("id", "user-in-org", 7).where("name", value).fetch();
             assertEquals(1, sync.size());
             assertEquals(1, sync.getFirst().get("id"));
             assertEquals(sync, reactive);
         }
     }
 
-    private static DmlQueryCommand command() {
-        DmlQueryCommand command = new DmlQueryCommand(RENDERER, DataScope.none());
+    private static PlanningDynamicQuery command() {
+        PlanningDynamicQuery command = new PlanningDynamicQuery(RENDERER, DataScope.none());
         command.from("users");
         return command;
     }

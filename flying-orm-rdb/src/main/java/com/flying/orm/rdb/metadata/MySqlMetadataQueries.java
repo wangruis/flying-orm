@@ -3,6 +3,7 @@ package com.flying.orm.rdb.metadata;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.type.DatabaseTypes;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -29,8 +30,12 @@ final class MySqlMetadataQueries {
 
     private static final String BASE_COLUMNS_SQL = """
             select c.COLUMN_NAME,
+                   c.TABLE_NAME as METADATA_TABLE,
+                   case when table_info.TABLE_TYPE = 'BASE TABLE'
+                        then nullif(table_info.TABLE_COMMENT, '') end as TABLE_COMMENT,
                    c.TABLE_SCHEMA as RESOLUTION_SCHEMA,
                    case
+                       when lower(c.DATA_TYPE) in ('enum', 'set') then c.COLUMN_TYPE
                        when binary left(c.COLUMN_COMMENT, char_length('${COMMENT_ESCAPE}'))
                                 = binary '${COMMENT_ESCAPE}'
                            then c.DATA_TYPE
@@ -66,9 +71,6 @@ final class MySqlMetadataQueries {
                                   and lower(c.EXTRA) not like '%invisible%'
                                   and lower(c.EXTRA) not like '%storage%'
                                   and lower(c.EXTRA) not like '%column_format%'
-                                  and (c.COLUMN_DEFAULT is null
-                                       or lower(c.EXTRA) not like '%default_generated%'
-                                       or ${SUPPORTED_DEFAULT_EXPRESSION})
                         then true else false end as COLUMN_REPRESENTABLE,
                    case
                        when lower(c.EXTRA) like '%virtual generated%'
@@ -78,17 +80,20 @@ final class MySqlMetadataQueries {
                        when lower(c.EXTRA) like '%invisible%' then 'invisible column'
                        when lower(c.EXTRA) like '%storage%' then 'column storage option'
                        when lower(c.EXTRA) like '%column_format%' then 'column format option'
-                       when lower(c.EXTRA) like '%default_generated%'
-                            and not ${SUPPORTED_DEFAULT_EXPRESSION} then 'default expression'
                        else null
                    end as UNSUPPORTED_COLUMN_REASON,
                    c.COLUMN_DEFAULT as COLUMN_DEFAULT,
+                   case when lower(c.EXTRA) like '%default_generated%'
+                             and not ${SUPPORTED_DEFAULT_EXPRESSION}
+                        then true else false end as NATIVE_DEFAULT_EXPRESSION,
                    null as GENERATION_EXPRESSION,
                    c.CHARACTER_SET_NAME as COLUMN_CHARSET,
                    c.COLLATION_NAME as COLUMN_COLLATION,
                    case when lower(c.EXTRA) like '%auto_increment%' then true else false end as IS_IDENTITY,
                    case when pk.CONSTRAINT_NAME is null then false else true end as PRIMARY_KEY
             from information_schema.COLUMNS c
+            left join information_schema.TABLES table_info
+              on table_info.TABLE_SCHEMA = c.TABLE_SCHEMA and table_info.TABLE_NAME = c.TABLE_NAME
             left join (
                 select pk_kcu.TABLE_SCHEMA,
                        pk_kcu.TABLE_NAME,
@@ -105,7 +110,7 @@ final class MySqlMetadataQueries {
               on pk.TABLE_SCHEMA = c.TABLE_SCHEMA
              and pk.TABLE_NAME = c.TABLE_NAME
              and pk.COLUMN_NAME = c.COLUMN_NAME
-            where c.TABLE_NAME = ?
+            where ${TABLE_FILTER}
             """.replace("${OFFSET_TIME_MARKER}", OFFSET_TIME_MARKER)
                .replace("${COMMENT_ESCAPE}", COMMENT_ESCAPE)
                .replace("${SUPPORTED_DEFAULT_EXPRESSION}", SUPPORTED_DEFAULT_EXPRESSION);
@@ -114,6 +119,7 @@ final class MySqlMetadataQueries {
     // PRIMARY/UNIQUE 的同名索引是约束自身的实现细节，继续由约束查询统一表达，避免重复建模。
     private static final String BASE_INDEXES_SQL = """
             select s.INDEX_NAME,
+                   s.TABLE_NAME as METADATA_TABLE,
                    s.COLUMN_NAME,
                    case when s.NON_UNIQUE = 0 then true else false end as UNIQUE_INDEX,
                    case when s.COLLATION = 'D' then 'DESC' else 'ASC' end as INDEX_DIRECTION,
@@ -134,7 +140,7 @@ final class MySqlMetadataQueries {
                        else null
                    end as UNSUPPORTED_INDEX_REASON
             from information_schema.STATISTICS s
-            where s.TABLE_NAME = ?
+            where ${TABLE_FILTER}
               and s.INDEX_NAME <> 'PRIMARY'
               and not exists (
                   select 1
@@ -148,6 +154,7 @@ final class MySqlMetadataQueries {
 
     private static final String BASE_FOREIGN_KEYS_SQL = """
             select kcu.TABLE_SCHEMA as TABLE_SCHEMA,
+                   kcu.TABLE_NAME as METADATA_TABLE,
                    kcu.CONSTRAINT_NAME as FOREIGN_KEY_NAME,
                    kcu.COLUMN_NAME,
                    kcu.REFERENCED_TABLE_SCHEMA as REFERENCED_TABLE_SCHEMA,
@@ -162,7 +169,7 @@ final class MySqlMetadataQueries {
               on rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
              and rc.TABLE_NAME = kcu.TABLE_NAME
              and rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
-            where kcu.TABLE_NAME = ?
+            where ${TABLE_FILTER}
               and kcu.REFERENCED_TABLE_NAME is not null
             """;
 
@@ -175,40 +182,21 @@ final class MySqlMetadataQueries {
                          and partition_options.PARTITION_NAME is not null
                    ) then true else false end as TABLE_REPRESENTABLE
             from information_schema.TABLES t
-            where t.TABLE_NAME = ? and t.TABLE_TYPE = 'BASE TABLE'
+            where ${TABLE_FILTER} and t.TABLE_TYPE = 'BASE TABLE'
             """;
 
-    private static final String BASE_PRIMARY_KEY_SQL = """
-            select tc.CONSTRAINT_NAME,
-                   kcu.COLUMN_NAME,
-                   case when s.COLUMN_NAME = kcu.COLUMN_NAME
-                                  and s.SUB_PART is null
-                                  and s.COLLATION = 'A'
-                                  and s.INDEX_TYPE = 'BTREE'
-                                  and s.IS_VISIBLE = 'YES'
-                                  and coalesce(s.INDEX_COMMENT, '') = ''
-                        then true else false end as CONSTRAINT_REPRESENTABLE
-            from information_schema.TABLE_CONSTRAINTS tc
-            join information_schema.KEY_COLUMN_USAGE kcu
-              on kcu.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
-             and kcu.TABLE_SCHEMA = tc.TABLE_SCHEMA
-             and kcu.TABLE_NAME = tc.TABLE_NAME
-             and kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
-            join information_schema.STATISTICS s
-              on s.TABLE_SCHEMA = tc.TABLE_SCHEMA
-             and s.TABLE_NAME = tc.TABLE_NAME
-             and s.INDEX_NAME = tc.CONSTRAINT_NAME
-             and s.SEQ_IN_INDEX = kcu.ORDINAL_POSITION
-            where tc.CONSTRAINT_TYPE = 'PRIMARY KEY' and tc.TABLE_NAME = ?
-            """;
+    private static final String BASE_PRIMARY_KEY_SQL = constraintColumnsSql("PRIMARY KEY");
+    private static final String BASE_UNIQUE_SQL = constraintColumnsSql("UNIQUE");
 
-    private static final String BASE_UNIQUE_SQL = """
+    private static String constraintColumnsSql(String type) {
+        return """
             select tc.CONSTRAINT_NAME,
+                   tc.TABLE_NAME as METADATA_TABLE,
                    kcu.COLUMN_NAME,
                    case when s.COLLATION = 'D' then 'DESC' else 'ASC' end as INDEX_DIRECTION,
                    case when s.COLUMN_NAME = kcu.COLUMN_NAME
                                   and s.SUB_PART is null
-                                  and s.COLLATION in ('A', 'D')
+                                  and ${KEY_DIRECTION}
                                   and s.INDEX_TYPE = 'BTREE'
                                   and s.IS_VISIBLE = 'YES'
                                   and coalesce(s.INDEX_COMMENT, '') = ''
@@ -224,25 +212,29 @@ final class MySqlMetadataQueries {
              and s.TABLE_NAME = tc.TABLE_NAME
              and s.INDEX_NAME = tc.CONSTRAINT_NAME
              and s.SEQ_IN_INDEX = kcu.ORDINAL_POSITION
-            where tc.CONSTRAINT_TYPE = 'UNIQUE' and tc.TABLE_NAME = ?
-            """;
+            where tc.CONSTRAINT_TYPE = '${CONSTRAINT_TYPE}' and ${TABLE_FILTER}
+            """.replace("${CONSTRAINT_TYPE}", type)
+               .replace("${KEY_DIRECTION}", "UNIQUE".equals(type)
+                       ? "s.COLLATION in ('A', 'D')" : "s.COLLATION = 'A'");
+    }
 
     private static final String BASE_CHECKS_SQL = """
             select tc.CONSTRAINT_NAME,
+                   tc.TABLE_NAME as METADATA_TABLE,
                    cc.CHECK_CLAUSE as CHECK_EXPRESSION,
                    case when tc.ENFORCED = 'YES' then true else false end as CHECK_REPRESENTABLE
             from information_schema.TABLE_CONSTRAINTS tc
             join information_schema.CHECK_CONSTRAINTS cc
               on cc.CONSTRAINT_SCHEMA = tc.CONSTRAINT_SCHEMA
              and cc.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
-            where tc.CONSTRAINT_TYPE = 'CHECK' and tc.TABLE_NAME = ?
+            where tc.CONSTRAINT_TYPE = 'CHECK' and ${TABLE_FILTER}
             """;
 
     private MySqlMetadataQueries() {
     }
 
-    static InformationSchemaFormMetadataReader.Queries queries() {
-        return InformationSchemaFormMetadataReader.Queries.complete(
+    static MetadataQueryProfile.Queries queries() {
+        return MetadataQueryProfile.Queries.complete(
                 MySqlMetadataQueries::columnQuery,
                 MySqlMetadataQueries::indexQuery,
                 MySqlMetadataQueries::foreignKeyQuery,
@@ -251,7 +243,7 @@ final class MySqlMetadataQueries {
                 MySqlMetadataQueries::primaryKeyQuery,
                 MySqlMetadataQueries::uniqueConstraintQuery,
                 MySqlMetadataQueries::checkConstraintQuery,
-                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL);
+                MetadataQueryProfile.SnapshotDialect.MYSQL);
     }
 
     private static SqlRequest columnQuery(String schema, String table) {
@@ -290,13 +282,21 @@ final class MySqlMetadataQueries {
                                           String table,
                                           String tableAlias,
                                           String orderBy) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            return new SqlRequest(base + " and " + tableAlias + ".TABLE_SCHEMA = DATABASE()" + orderBy,
-                                  List.of(safeTable));
+        List<Object> parameters = new ArrayList<>(2);
+        String filter = "1 = 1";
+        if (table != null) {
+            String safeTable = MetadataQueryProfile.requireText(table, "table");
+            filter = tableAlias + ".TABLE_NAME = ?";
+            parameters.add(safeTable);
         }
-        return new SqlRequest(base + " and " + tableAlias + ".TABLE_SCHEMA = ?" + orderBy,
-                              List.of(safeTable, schema.trim()));
+        String schemaFilter = "DATABASE()";
+        if (schema != null && !schema.isBlank()) {
+            schemaFilter = "?";
+            String safeSchema = schema.trim();
+            parameters.add(safeSchema);
+        }
+        return new SqlRequest(base.replace("${TABLE_FILTER}", filter)
+                + " and " + tableAlias + ".TABLE_SCHEMA = " + schemaFilter + orderBy, parameters);
     }
 
     private static String logicalType(String dataType) {

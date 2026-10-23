@@ -11,6 +11,13 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class SchemaMigrationObserversTest {
 
     @Test
+    void disabledObserverIsSharedWithoutAnIsolationWrapper() {
+        SchemaMigrationObserver noop = SchemaMigrationObserver.noop();
+        assertSame(noop, SchemaMigrationObservers.noop());
+        assertSame(noop, SchemaMigrationObservers.safe(noop));
+    }
+
+    @Test
     void safeIsIdempotent() {
         SchemaMigrationObserver safe = SchemaMigrationObservers.safe(ignored -> {
         });

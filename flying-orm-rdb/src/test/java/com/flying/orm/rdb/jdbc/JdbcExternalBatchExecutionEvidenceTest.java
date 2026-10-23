@@ -44,7 +44,7 @@ class JdbcExternalBatchExecutionEvidenceTest {
 
         BatchExecutionEvidenceException failure = assertThrows(
                 BatchExecutionEvidenceException.class,
-                () -> writer.writeBatchEvidence(JdbcBatchEvidenceTestSupport.request(
+                () -> writer.writeBatch(JdbcBatchEvidenceTestSupport.request(
                         Flux.error(new IllegalStateException("input failed")), 2)));
 
         assertEquals(0, state.executions.get());
@@ -58,7 +58,7 @@ class JdbcExternalBatchExecutionEvidenceTest {
 
         BatchExecutionEvidenceException failure = assertThrows(
                 BatchExecutionEvidenceException.class,
-                () -> writer.writeBatchEvidence(JdbcBatchEvidenceTestSupport.request(
+                () -> writer.writeBatch(JdbcBatchEvidenceTestSupport.request(
                         Flux.error(cancelled), 2)));
 
         assertAll(
@@ -82,15 +82,31 @@ class JdbcExternalBatchExecutionEvidenceTest {
 
         BatchExecutionEvidenceException failure = assertThrows(
                 BatchExecutionEvidenceException.class,
-                () -> writer.writeBatchEvidence(JdbcBatchEvidenceTestSupport.request(
+                () -> writer.writeBatch(JdbcBatchEvidenceTestSupport.request(
                         Flux.concat(Flux.<Object[]>just(new Object[]{1}), Flux.error(cancelled)), 1)));
 
         assertAll(
                 () -> assertSame(cancelled, failure.getCause()),
                 () -> assertEquals(1, state.executions.get()),
-                () -> assertEquals(BatchExecutionState.PARTIAL, failure.evidence().state()),
+                () -> assertEquals(BatchExecutionState.CANCELLED, failure.evidence().state()),
                 () -> assertEquals(1, failure.evidence().successfulCount()),
                 () -> assertEquals(1, failure.evidence().inputCount()));
+    }
+
+    @Test
+    void keepsCompletedRowsAndTimeoutClassificationWhenLaterInputTimesOut() {
+        JdbcBatchEvidenceTestSupport.State state = new JdbcBatchEvidenceTestSupport.State().outcome(1);
+        TimeoutException timedOut = new TimeoutException("input timed out");
+        BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
+                () -> state.writer().writeBatch(JdbcBatchEvidenceTestSupport.request(
+                        Flux.concat(Flux.<Object[]>just(new Object[]{1}), Flux.error(timedOut)), 1)));
+
+        assertAll(
+                () -> assertSame(timedOut, failure.getCause()),
+                () -> assertEquals(BatchExecutionState.TIMED_OUT, failure.evidence().state()),
+                () -> assertEquals(List.of(0L), failure.evidence().successfulOffsets().boxed().toList()),
+                () -> assertEquals(1L, failure.evidence().affectedRows().value()),
+                () -> assertEquals(1, state.executions.get()));
     }
 
     @Test
@@ -101,7 +117,7 @@ class JdbcExternalBatchExecutionEvidenceTest {
 
         BatchExecutionEvidenceException failure = assertThrows(
                 BatchExecutionEvidenceException.class,
-                () -> writer.writeBatchEvidence(JdbcBatchEvidenceTestSupport.request(
+                () -> writer.writeBatch(JdbcBatchEvidenceTestSupport.request(
                         Flux.error(timedOut), 2)));
 
         assertAll(
@@ -125,7 +141,7 @@ class JdbcExternalBatchExecutionEvidenceTest {
 
         BatchExecutionEvidenceException failure = assertThrows(
                 BatchExecutionEvidenceException.class,
-                () -> writer.writeBatchEvidence(JdbcBatchEvidenceTestSupport.request(
+                () -> writer.writeBatch(JdbcBatchEvidenceTestSupport.request(
                         Flux.<Object[]>just(new Object[]{1}), 1)));
 
         assertAll(
@@ -147,7 +163,7 @@ class JdbcExternalBatchExecutionEvidenceTest {
 
         BatchExecutionEvidenceException failure = assertThrows(
                 BatchExecutionEvidenceException.class,
-                () -> writer.writeBatchEvidence(JdbcBatchEvidenceTestSupport.request(
+                () -> writer.writeBatch(JdbcBatchEvidenceTestSupport.request(
                         Flux.concat(
                                 Flux.<Object[]>just(new Object[]{1}),
                                 Flux.error(new IllegalStateException("input failed"))),
@@ -167,7 +183,7 @@ class JdbcExternalBatchExecutionEvidenceTest {
         JdbcBatchWriter writer = state.writer()
                 ;
 
-        BatchExecutionEvidence evidence = writer.writeBatchEvidence(JdbcBatchEvidenceTestSupport.request(
+        BatchExecutionEvidence evidence = writer.writeBatch(JdbcBatchEvidenceTestSupport.request(
                 Flux.range(0, 3).map(value -> new Object[]{value}), 2));
 
         assertEquals(BatchExecutionState.SUCCESS, evidence.state());
@@ -200,7 +216,7 @@ class JdbcExternalBatchExecutionEvidenceTest {
                 ;
         JdbcBatchWriter executor = writer;
         BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
-                () -> executor.writeProtectedBatchEvidence(protectedInsertRequest()));
+                () -> executor.writeProtectedBatch(protectedInsertRequest()));
         BatchExecutionEvidence evidence = failure.evidence();
 
         assertAll(

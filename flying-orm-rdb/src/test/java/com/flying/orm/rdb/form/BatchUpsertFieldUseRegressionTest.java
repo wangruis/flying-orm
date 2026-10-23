@@ -34,7 +34,7 @@ class BatchUpsertFieldUseRegressionTest {
     void primaryKeyOnlyNoOpRequiresInsertButNotUpdate() {
         Map<String, Object> row = Map.of("id", 1L);
         UpsertFieldPlan plan = UpsertFieldPlan.create(
-                FORM, row, FORM, List.of(FORM.field("id")), null);
+                FORM, row, FORM, List.of(FORM.field("id")), null, false, List.of());
         assertEquals(List.of(), plan.updateFields());
         assertDoesNotThrow(() -> approve(row, true, FieldUsePolicy.builder()
                 .allow("id", FieldUse.INSERT).build()));
@@ -65,7 +65,7 @@ class BatchUpsertFieldUseRegressionTest {
     @Test
     void repositoryStagesUseTheirActualIndependentFieldPermissions() {
         RepositoryUpsertValues row = staged();
-        UpsertFieldPlan plan = UpsertFieldPlan.create(FORM, row, FORM, FORM.fields(), row);
+        UpsertFieldPlan plan = UpsertFieldPlan.create(FORM, row, FORM, FORM.fields(), row, false, List.of());
         assertEquals(List.of("id", "name", "created"),
                 plan.insertFields().stream().map(DynamicField::name).toList());
         assertEquals(List.of("name", "changed"),
@@ -96,7 +96,7 @@ class BatchUpsertFieldUseRegressionTest {
     }
 
     private static void approve(Map<String, Object> row, boolean upsert, FieldUsePolicy policy) {
-        FieldUseGuard.approveBatchInsert(FORM, row, DataScope.none(), upsert, policy);
+        FieldUseGuard.approveBatchInsert(FORM, row, DataScope.none(), upsert, policy, List.of());
     }
 
     private static RepositoryUpsertValues staged() {

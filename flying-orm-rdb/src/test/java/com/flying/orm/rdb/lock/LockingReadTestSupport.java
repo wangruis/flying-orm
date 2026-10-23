@@ -44,7 +44,7 @@ final class LockingReadTestSupport {
     static SyncFormClient syncClient(RdbDialect dialect,
                                      AtomicInteger queries,
                                      AtomicReference<SqlRequest> request) {
-        SyncSqlExecutor executor = new SyncSqlExecutor() {
+        SyncSqlExecutor executor = new com.flying.orm.rdb.support.ListQueryFixture() {
             @Override
             public List<DynamicRow> query(SqlRequest sql) {
                 request.set(sql);
@@ -60,7 +60,7 @@ final class LockingReadTestSupport {
             @Override
             public SqlWriteResult rowsUpdatedReturningKeys(
                     SqlRequest sql,
-                    com.flying.orm.rdb.execution.SqlExecutionOptions options) {
+                    com.flying.orm.rdb.execution.SqlExecutionOptions options, String generatedKeyColumn) {
                 throw new UnsupportedOperationException("test executor does not write");
             }
         };

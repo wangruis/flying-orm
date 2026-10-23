@@ -20,17 +20,19 @@ public final class SchemaMetadata {
 
     private final String normalizedName;
 
-    private final List<TableMetadata> tables;
+    private final List<RelationalTableDefinition> tables;
 
-    private final MetadataNameIndex<TableMetadata> tablesByName;
+    private final MetadataNameIndex<RelationalTableDefinition> tablesByName;
+    private final FeatureRegistry features;
 
-    private SchemaMetadata(FieldIdentity identity, List<TableMetadata> tables) {
+    private SchemaMetadata(FieldIdentity identity, List<RelationalTableDefinition> tables, FeatureRegistry features) {
         this.name = identity.name();
         this.normalizedName = identity.key();
+        this.features = features;
         this.tables = List.copyOf(tables);
         this.tablesByName = MetadataNameIndex.ofOwned(this.tables,
-                                                      TableMetadata::name,
-                                                      TableMetadata::normalizedName,
+                                                      RelationalTableDefinition::name,
+                                                      RelationalTableDefinition::normalizedName,
                                                       "table");
     }
 
@@ -67,8 +69,13 @@ public final class SchemaMetadata {
      *
      * @return 只读表集合
      */
-    public List<TableMetadata> tables() {
+    public List<RelationalTableDefinition> tables() {
         return tables;
+    }
+
+    /** Schema 共享扩展；表级注册表可通过 parent 继承，物理表事实不携带运行时行为。 */
+    public FeatureRegistry features() {
+        return features;
     }
 
     /**
@@ -77,8 +84,8 @@ public final class SchemaMetadata {
      * @param name 调用方传入的表名
      * @return 匹配表；不存在时返回空
      */
-    public Optional<TableMetadata> findTable(String name) {
-        return tablesByName.find(name, "table name");
+    public Optional<RelationalTableDefinition> findTable(String name) {
+        return tablesByName.find(name);
     }
 
     /**
@@ -88,7 +95,7 @@ public final class SchemaMetadata {
      * @return 匹配表
      * @throws IllegalArgumentException 表不存在时抛出
      */
-    public TableMetadata table(String name) {
+    public RelationalTableDefinition table(String name) {
         return findTable(name).orElseThrow(() -> new IllegalArgumentException(
                 "table does not exist"));
     }
@@ -104,7 +111,8 @@ public final class SchemaMetadata {
 
         private final FieldIdentity identity;
 
-        private final List<TableMetadata> tables = new ArrayList<>();
+        private final List<RelationalTableDefinition> tables = new ArrayList<>();
+        private FeatureRegistry features = FeatureRegistry.empty();
 
         private Builder(String name) {
             this.identity = FieldIdentity.of(name);
@@ -116,8 +124,13 @@ public final class SchemaMetadata {
          * @param table 表元数据
          * @return 当前构建器
          */
-        public Builder addTable(TableMetadata table) {
+        public Builder addTable(RelationalTableDefinition table) {
             tables.add(Objects.requireNonNull(table, "table must not be null"));
+            return this;
+        }
+
+        public Builder features(FeatureRegistry features) {
+            this.features = Objects.requireNonNull(features, "schema features");
             return this;
         }
 
@@ -127,7 +140,7 @@ public final class SchemaMetadata {
          * @return Schema 元数据
          */
         public SchemaMetadata build() {
-            return new SchemaMetadata(identity, tables);
+            return new SchemaMetadata(identity, tables, features);
         }
     }
 }

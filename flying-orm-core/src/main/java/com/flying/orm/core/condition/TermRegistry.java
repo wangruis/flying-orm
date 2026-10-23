@@ -174,23 +174,17 @@ public final class TermRegistry {
     }
 
     /**
-     * 标准 term 固定消耗一个节点；受治理扩展使用描述器声明的复杂度。
-     * 缺失或仍是 legacy handler 的扩展不能进入外部结构化查询。
+     * 普通 term 消耗一个节点；显式描述的扩展使用其声明的复杂度。
+     * 是否允许外部调用由结构化条件策略决定，不由可选描述器决定。
      */
-    int governedComplexityCost(String internalOperator) {
+    int complexityCost(String internalOperator) {
         String operator = Names.key(internalOperator, "condition operator");
         if (STANDARD.handlersById.containsKey(operator)) {
             return 1;
         }
         TermHandler handler = handlersById.get(operator);
-        if (handler == null) {
-            throw new IllegalArgumentException(
-                    "governed term [" + operator + "] requires an explicit extension descriptor");
-        }
-        return safeDescriptor(handler).orElseThrow(() ->
-                new IllegalArgumentException(
-                        "governed term [" + operator + "] requires an explicit extension descriptor"))
-                                      .complexityCost();
+        return handler == null ? 1 : safeDescriptor(handler)
+                .map(TermExtensionDescriptor::complexityCost).orElse(1);
     }
 
     /**

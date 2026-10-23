@@ -6,13 +6,11 @@ import com.flying.orm.core.scope.FieldScope;
 import com.flying.orm.core.scope.FieldUse;
 import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.core.scope.FieldUseRequirements;
-import com.flying.orm.core.scope.FieldUseSnapshot;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.execution.ProtectedBatchRows;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
-import com.flying.orm.rdb.form.FormAggregateReadSupport;
 import com.flying.orm.rdb.form.FormDataSqlRenderer;
 import com.flying.orm.rdb.form.ReactiveFormClient;
 import com.flying.orm.rdb.form.SyncFormClient;
@@ -80,7 +78,7 @@ class FormInternalOwnerSurfaceConvergenceTest {
 
     @Test
     void typeWideInternalBoundariesDoNotRepeatMarkersOnTheirMembers() {
-        for (Class<?> type : List.of(FormAggregateReadSupport.class, ProtectedBatchRows.class,
+        for (Class<?> type : List.of(ProtectedBatchRows.class,
                 ProtectedWriteWork.class, ProtectedFieldRuntime.class, ProtectedRelationalSchemaProjector.class)) {
             assertTrue(type.isAnnotationPresent(InternalApi.class), type.getName());
             assertNoRepeatedInternalMarkers(type);
@@ -156,24 +154,13 @@ class FormInternalOwnerSurfaceConvergenceTest {
     }
 
     @Test
-    void aggregateReadSupportOwnsTheEquivalentCrossPackageApprovalBridge() throws Exception {
-        Method bridge = FormAggregateReadSupport.class.getMethod(
-                "approveAggregate",
-                String.class,
-                FieldUseRequirements.class,
-                FieldScope.class,
-                SqlRequest.class,
-                FieldUsePolicy.class,
-                QueryShapeLimits.class,
-                int.class,
-                int.class,
-                int.class,
-                int.class,
-                int.class);
-
-        assertAll(
-                () -> assertEquals(FieldUseSnapshot.class, bridge.getReturnType()),
-                () -> assertTrue(Modifier.isPublic(bridge.getModifiers())),
-                () -> assertTrue(bridge.getDeclaringClass().isAnnotationPresent(InternalApi.class)));
+    void aggregatePreparationDoesNotPublishCrossPackageForwarders() throws Exception {
+        Class<?> support = Class.forName("com.flying.orm.rdb.form.FormAggregateReadSupport");
+        assertFalse(Modifier.isPublic(support.getModifiers()));
+        for (Method method : support.getDeclaredMethods()) {
+            assertFalse(List.of("identifier", "compileRequest", "paginate", "renderWhere",
+                    "approveAggregate", "approveTermExtension", "compileExpression", "expressionField")
+                    .contains(method.getName()), method.toGenericString());
+        }
     }
 }

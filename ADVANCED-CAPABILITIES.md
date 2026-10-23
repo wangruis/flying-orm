@@ -45,23 +45,24 @@ SQL 文本只来自可信后端代码。模板与原生 SQL **不自动注入 Sc
 | 加密密钥、规范化与脱敏策略 | `protectedFields`、`protectedFieldPolicies` |
 | 读取保护与批量预算 | `executionOptions`、`batchWriteOptions`、`batchMemoryLimits` |
 | SQL、批量观测与安全日志 | `observers`、`sqlExecutionLog` |
+| 表级单条、批量写入前后处理 | `DynamicForm.features` → `SyncWriteInterceptor` / `ReactiveWriteInterceptor`，见[示例](EXAMPLES.md#表级写入扩展) |
 | 缓存和迁移观测 | `cachePolicy`、`migrationObserver`、`migrationExecutionOptions` |
 
-默认配置可直接使用，高级配置按需启用。读取/批量预算是资源边界，不是连接或事务超时策略。
+默认不附加条件规模、LOB 或批量字节容量上限；批量仍按 `bufferSize` 分块。应用按需设置预算，ORM 执行显式限制，不管理连接或事务超时。
 
 ```java
-SqlExecutionOptions limits = SqlExecutionOptions.safeDefaults()
+SqlExecutionOptions limits = SqlExecutionOptions.unlimited()
     .withMaxRows(1000)
     .withMaxResultBytes(8L * 1024 * 1024)
     .withFetchSize(128);
-Flux<DynamicRow> rows = clients.operator().dml().query(users).fetchMap(limits);
+Flux<DynamicRow> rows = clients.operator().dml().query(users).fetch(limits);
 ```
 
-超出保护预算会报错，不是静默截断；业务分页使用 `page / cursorPage / keysetPage`。
+超出保护预算会报错，不是静默截断；业务分页使用 `page / keysetPage`。
 
 ## Schema 与元数据
 
-`ddl().createOrAlter` 用于普通安全结构调整；`plan / review / executeReviewed` 保留完整审核流程。实体关系同步使用 `entitySchemas().synchronizeRelational...`，显式表达外键、CHECK、分区等关系事实。
+`ddl().createOrAlter` 用于增量结构调整，`plan / execute` 支持先查看 SQL 再执行，不提供上线审核流程。实体同步统一使用 `entitySchemas().synchronize(databaseDescriptor, mode, entityTypes)`；响应式使用 `synchronizeReactive`，普通字段与外键、CHECK、分区等关系事实共用规划。
 
 Schema 规划直接读取数据库结构，不复用普通 CRUD 的元数据缓存。自带缓存的自定义 reader 必须为 `readTableForSchema` / 关系快照提供真实无缓存读取；内建实现已处理此边界。
 

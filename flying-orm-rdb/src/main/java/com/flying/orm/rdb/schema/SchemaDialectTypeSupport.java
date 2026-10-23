@@ -4,10 +4,10 @@ import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.sql.render.SqlIdentifiers;
 import com.flying.orm.core.type.DatabaseType;
 
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.StringJoiner;
+import java.util.function.Function;
 import java.util.HexFormat;
 import java.nio.charset.StandardCharsets;
 
@@ -25,27 +25,34 @@ final class SchemaDialectTypeSupport {
     SchemaDialectTypeSupport(String quoteOpen,
                              String quoteClose,
                              Map<String, String> typeMappings,
+                             Map<String, Function<DatabaseType, String>> typeRenderers,
                              SchemaDialect.GeneratedValueStyle databaseStyle) {
         this.quoteOpen = quoteOpen;
         this.quoteClose = quoteClose;
-        Map<String, String> mappings = Map.copyOf(typeMappings);
         SchemaDialect.GeneratedValueStyle style = Objects.requireNonNull(
                 databaseStyle, "database style must not be null");
         this.databaseStyle = style;
-        this.mapping = new SchemaTypeMapping(mappings, style);
+        this.mapping = new SchemaTypeMapping(typeMappings, typeRenderers, style);
         this.comparison = new SchemaTypeComparison(style);
     }
 
     String identifier(String value) {
-        String text = SqlIdentifiers.requireIdentifier(value, "identifier");
+        String text = SqlIdentifiers.requireIdentifier(value);
         if (quoteOpen == null) {
             return text;
         }
-        StringJoiner quoted = new StringJoiner(".");
-        for (String part : text.split("\\.")) {
-            quoted.add(quoteOpen + part + quoteClose);
+        int dot = text.indexOf('.');
+        if (dot < 0) {
+            return quoteOpen + text + quoteClose;
         }
-        return quoted.toString();
+        StringBuilder quoted = new StringBuilder(text.length()).append(quoteOpen);
+        int start = 0;
+        do {
+            quoted.append(text, start, dot).append(quoteClose).append('.').append(quoteOpen);
+            start = dot + 1;
+            dot = text.indexOf('.', start);
+        } while (dot >= 0);
+        return quoted.append(text, start, text.length()).append(quoteClose).toString();
     }
 
     String identifier(RelationIdentity value) {
@@ -85,7 +92,7 @@ final class SchemaDialectTypeSupport {
     }
 
     private String identifierSegment(String value) {
-        String text = SqlIdentifiers.requireIdentifier(value, "identifier segment");
+        String text = SqlIdentifiers.requireIdentifier(value);
         return quoteOpen == null ? text : quoteOpen + text + quoteClose;
     }
 
@@ -99,6 +106,10 @@ final class SchemaDialectTypeSupport {
 
     String physicalDataType(String value, Integer length, Integer precision, Integer scale) {
         return mapping.renderPhysical(value, length, precision, scale);
+    }
+
+    String metadataDataType(String value, Integer length, Integer precision, Integer scale) {
+        return mapping.renderMetadata(value, length, precision, scale);
     }
 
     boolean sameDataType(String left, String right) {
@@ -127,11 +138,18 @@ final class SchemaDialectTypeSupport {
     }
 
     static String sqlServerCollation(String value) {
-        String name = SqlIdentifiers.requireIdentifier(value, "collation name");
+        String name = SqlIdentifiers.requireIdentifier(value);
         if (name.indexOf('.') >= 0) {
             throw new IllegalArgumentException("collation name must be a plain identifier");
         }
         return name;
+    }
+
+    static boolean sqlServerCharacterType(String type) {
+        return switch (DatabaseType.of(type).baseName()) {
+            case "CHAR", "VARCHAR", "NCHAR", "NVARCHAR", "TEXT", "NTEXT" -> true;
+            default -> false;
+        };
     }
 
     static String requireText(String value, String fieldName) {
@@ -143,10 +161,6 @@ final class SchemaDialectTypeSupport {
 
     static String requireDataType(String value, String fieldName) {
         return DatabaseType.of(value).requireSafe(fieldName).declaration();
-    }
-
-    static String normalize(String value) {
-        return value.trim().toLowerCase(Locale.ROOT);
     }
 
     static String canonicalDataType(String value) {

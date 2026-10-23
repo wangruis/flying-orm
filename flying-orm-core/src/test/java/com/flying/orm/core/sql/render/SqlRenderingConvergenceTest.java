@@ -5,6 +5,7 @@ import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.ConditionValueShape;
 import com.flying.orm.core.condition.TermCondition;
+import com.flying.orm.core.condition.TermExtensionDescriptor;
 import com.flying.orm.core.scope.FieldUse;
 import com.flying.orm.core.internal.condition.ConditionValueNormalizer;
 import com.flying.orm.core.internal.value.OwnedBindableValues;
@@ -15,6 +16,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -31,6 +33,46 @@ class SqlRenderingConvergenceTest {
     private static final int LARGE_BINARY_BYTES = 64 * 1_024;
 
     private static final long MAX_SINGLE_RENDER_ALLOCATION = 100_000L;
+
+    @Test
+    void sqlRegistrySharesItsPublishedConditionDescriptorIdentity() {
+        SqlTermHandler member = SqlTermHandler.relationExists(
+                "member-of", "membership", "m", "member_id", "group_id");
+        SqlTermHandler excluded = SqlTermHandler.relationNotExists(
+                "not-member-of", "membership", "m", "member_id", "group_id");
+        SqlTermRegistry empty = SqlTermRegistry.builder().build();
+        SqlTermRegistry forward = SqlTermRegistry.builder().add(member).add(excluded).build();
+        SqlTermRegistry reverse = SqlTermRegistry.builder().add(excluded).add(member).build();
+
+        assertFalse(empty.hasDescriptors());
+        assertEquals(empty.conditionTerms().descriptorFingerprint(), empty.descriptorFingerprint());
+        assertTrue(forward.hasDescriptors());
+        assertEquals(forward.conditionTerms().descriptorFingerprint(), forward.descriptorFingerprint());
+        assertEquals(forward.descriptorFingerprint(), reverse.descriptorFingerprint());
+        assertNotEquals(empty.descriptorFingerprint(), forward.descriptorFingerprint());
+        assertEquals(member.descriptor(), forward.descriptor("MEMBER-OF"));
+    }
+
+    @Test
+    void sqlDescriptorLookupReusesTheDeclarationReadAtAssembly() {
+        AtomicInteger calls = new AtomicInteger();
+        TermExtensionDescriptor declaration = TermExtensionDescriptor.filter("custom", Set.of(), 1, 1);
+        SqlTermRegistry registry = SqlTermRegistry.builder().add(new SqlTermHandler() {
+            @Override public String id() { return "custom"; }
+            @Override public Optional<TermExtensionDescriptor> descriptor() {
+                calls.incrementAndGet();
+                return Optional.of(declaration);
+            }
+            @Override public SqlFragment render(TermCondition term, SqlRenderContext context) {
+                return new SqlFragment("custom = ?", List.of(term.value()));
+            }
+        }).build();
+
+        assertEquals(1, calls.get());
+        assertSame(declaration, registry.descriptor("custom").orElseThrow());
+        assertSame(declaration, registry.conditionTerms().descriptor("custom").orElseThrow());
+        assertEquals(1, calls.get());
+    }
 
     @Test
     void validatesIdentifiersBeforeInvokingTheConfiguredRenderer() {

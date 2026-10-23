@@ -93,16 +93,18 @@ class ConditionScaleConfigurationTest {
     @Test
     void explicitLimitsAndPositiveConfigurationContractsRemainEnforced() {
         StructuredConditionPolicy defaults = StructuredConditionPolicy.defaults();
-        assertEquals(8, defaults.maxDepth());
-        assertEquals(100, defaults.maxNodes());
-        assertEquals(1_000, defaults.maxCollectionSize());
-        assertEquals(4_096, defaults.maxStringLength());
+        assertEquals(Integer.MAX_VALUE, defaults.maxDepth());
+        assertEquals(Integer.MAX_VALUE, defaults.maxNodes());
+        assertEquals(Integer.MAX_VALUE, defaults.maxCollectionSize());
+        assertEquals(Integer.MAX_VALUE, defaults.maxStringLength());
         assertThrows(IllegalArgumentException.class, () -> defaults.withMaxDepth(0));
         assertThrows(IllegalArgumentException.class, () -> defaults.withMaxNodes(0));
         assertThrows(IllegalArgumentException.class, () -> defaults.withMaxCollectionSize(0));
         assertThrows(IllegalArgumentException.class, () -> ParameterConditionCompiler.builder().maxCollectionSize(0));
         StructuredConditionInput input = StructuredConditionInput.term("id", "in", Collections.nCopies(1_001, 1));
-        assertThrows(StructuredConditionException.class, () -> StructuredConditionCompiler.create().compile(form, input));
+        assertEquals(1_001, renderer.renderWhere(StructuredConditionCompiler.create().compile(form, input)).parameters().size());
+        assertThrows(StructuredConditionException.class, () -> StructuredConditionCompiler.create()
+                .compile(form, input, defaults.withMaxCollectionSize(1_000)));
     }
 
     @Test

@@ -29,7 +29,7 @@ class ScopedUpsertDialectTest {
                 "insert into items as target (id, name) values (cast(? as bigint), lower(?)) "
                         + "on conflict (id) do update set name = excluded.name, updated = upper(?) where " + assertion,
                 "insert into items (id, name) values (cast(? as bigint), lower(?)) on duplicate key update "
-                        + "id = if(id <=> values(id) and (items.tenant_id = ?), id, "
+                        + "id = if(id = values(id) and (items.tenant_id = ?), id, "
                         + "(select null union all select null)), name = values(name), updated = upper(?)",
                 "merge into items target using (select cast(? as bigint) as id, lower(?) as name, "
                         + "upper(?) as updated from dual) source on (target.id = source.id) "
@@ -37,7 +37,8 @@ class ScopedUpsertDialectTest {
                         + "where " + assertion + " "
                         + "when not matched then insert (id, name) values (source.id, source.name)",
                 "merge into items with (holdlock) as target using (values (cast(? as bigint), lower(?), upper(?))) "
-                        + "as source (id, name, updated) on target.id = source.id when matched and " + assertion
+                        + "as source (id, name, updated) on (target.id = source.id or (target.id is null and source.id is null)) "
+                        + "when matched and " + assertion
                         + " then update set target.name = source.name, target.updated = source.updated "
                         + "when not matched then insert (id, name) values (source.id, source.name);",
                 "merge into items target using (values (cast(? as bigint), lower(?), upper(?))) "
@@ -82,6 +83,9 @@ class ScopedUpsertDialectTest {
         };
         assertThrows(UnsupportedOperationException.class, () -> scoped(custom, List.of("id", "name"),
                 List.of("name"), List.of("id", "name"), List.of("?", "?"), "target.tenant_id = ?"));
+        assertThrows(UnsupportedOperationException.class, () -> custom.renderConditional("items",
+                List.of("id", "name"), List.of("id"), List.of("name"), List.of("id", "name"),
+                List.of("?", "?"), null, "target.name = ?"));
         assertEquals(3, custom.scopeParameterIndex(2, 3));
         assertEquals("target", qualifier(custom));
     }

@@ -6,10 +6,13 @@ import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.exception.RdbErrorKind;
 import com.flying.orm.rdb.exception.RdbException;
 import com.flying.orm.rdb.execution.ProtectedBatchRows;
+import com.flying.orm.rdb.internal.protection.ProtectedReplacementBatchPlan.Prepared;
+import com.flying.orm.rdb.internal.protection.ProtectedReplacementBatchPlan.Row;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.result.JdbcDynamicRowFactory;
+import com.flying.orm.rdb.internal.plan.SqlExecutionStatements;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
@@ -31,6 +34,11 @@ final class JdbcBatchChunkExecutor {
 
 
     private final JdbcProtectedBatchSideIndex protectedSideIndex = new JdbcProtectedBatchSideIndex();
+    private final String databaseProductName;
+
+    JdbcBatchChunkExecutor(String databaseProductName) {
+        this.databaseProductName = databaseProductName;
+    }
 
     void execute(Connection connection, BatchWriteRequest request, long startOffset,
                  List<ProtectedBatchRows.RowView> rows, JdbcBatchEvidenceSupport.Counts evidence)
@@ -43,28 +51,51 @@ final class JdbcBatchChunkExecutor {
         if (safeRows.isEmpty()) {
             throw new IllegalArgumentException("jdbc batch chunk must not be empty");
         }
-        JdbcProtectedBatchSideIndex.Prepared protectedRows = protectedSideIndex.prepare(
+        Prepared protectedRows = protectedSideIndex.prepare(
                 safeConnection, safeRequest, safeRows);
         if (safeRequest.generatedKeys().required()) {
             executeReturningGeneratedKeys(safeConnection, safeRequest, startOffset,
                                                  safeRows, protectedRows, evidence);
             return;
         }
-        if (hasOwnerRestrictedUpdates(protectedRows)) {
+        if (protectedRows.hasOwnerRestrictedUpdates()) {
             executeOwnerRestrictedUpdates(safeConnection, safeRequest, startOffset, safeRows, protectedRows, evidence);
             protectedSideIndex.complete(safeConnection, protectedRows);
             return;
         }
-        PreparedStatement statement = safeConnection.prepareStatement(safeRequest.sql());
+        // 单行窗口的计数已能唯一对应输入，不需要再返回序号。
+        String returningSql = safeRows.size() == 1 || protectedRows.rows().isEmpty() ? null
+                : SqlExecutionStatements.jdbcUpsertBatch(safeRequest.statement(), databaseProductName);
+        // PostgreSQL 协议最多 65535 个参数；无序号位置时逐行读取计数，不限制调用方输入大小。
+        boolean rowwise = returningSql != null && safeRequest.parameterCount() >= 65_535
+                || returningSql == null && !protectedRows.rows().isEmpty()
+                        && SqlExecutionStatements.ignoresConflicts(safeRequest.statement());
+        PreparedStatement statement = returningSql != null && !rowwise
+                ? safeConnection.prepareStatement(returningSql, java.sql.Statement.RETURN_GENERATED_KEYS)
+                : safeConnection.prepareStatement(safeRequest.sql());
         Throwable executionFailure = null;
+        int[] updateCounts;
         try {
-            for (ProtectedBatchRows.RowView rowView : safeRows) {
-                JdbcStatementBinder.bindOwned(statement, rowView);
-                statement.addBatch();
+            if (rowwise) {
+                updateCounts = new int[safeRows.size()];
+                for (int index = 0; index < safeRows.size(); index++) {
+                    JdbcStatementBinder.bindOwned(statement, safeRows.get(index));
+                    JdbcStatementControl.requireNotInterrupted(statement);
+                    evidence.startBusinessExecution(1);
+                    updateCounts[index] = Math.toIntExact(executeUpdate(statement));
+                    evidence.record(startOffset + index, updateCounts[index]);
+                }
+            } else {
+                for (int index = 0; index < safeRows.size(); index++) {
+                    JdbcStatementBinder.bindOwned(statement, safeRows.get(index));
+                    if (returningSql != null) statement.setInt(safeRequest.parameterCount() + 1, index);
+                    statement.addBatch();
+                }
+                JdbcStatementControl.requireNotInterrupted(statement);
+                updateCounts = returningSql == null
+                        ? JdbcBatchEvidenceSupport.executeBusinessBatch(statement, evidence, startOffset, safeRows.size())
+                        : executeReturningBatch(statement, evidence, startOffset, safeRows.size());
             }
-            JdbcStatementControl.requireNotInterrupted(statement);
-            JdbcBatchEvidenceSupport.executeBusinessBatch(
-                    statement, evidence, startOffset, safeRows.size());
             evidence.requireSuccessful();
         } catch (SQLException | RuntimeException | Error failure) {
             executionFailure = failure;
@@ -81,7 +112,46 @@ final class JdbcBatchChunkExecutor {
             // SQL 计数与 POST 资格分离：Statement 已关闭，且该行没有待完成的保护辅助工作。
             if (closed) evidence.completedPlainRows(safeRows);
         }
-        protectedSideIndex.complete(safeConnection, protectedRows);
+        protectedSideIndex.complete(safeConnection, protectedRows, updateCounts);
+    }
+
+    private static int[] executeReturningBatch(PreparedStatement statement, JdbcBatchEvidenceSupport.Counts evidence,
+                                               long offset, int size) throws SQLException {
+        evidence.startBusinessExecution(size);
+        int[] nativeCounts;
+        try {
+            nativeCounts = statement.executeBatch();
+        } catch (java.sql.BatchUpdateException failure) {
+            evidence.record(failure, offset, size);
+            throw failure;
+        }
+        try {
+            int[] counts = new int[size];
+            try (ResultSet result = statement.getGeneratedKeys()) {
+                if (result == null) throw new SQLException("upsert did not return batch input indexes", "HY000");
+                while (result.next()) {
+                    JdbcStatementControl.requireNotInterrupted(statement);
+                    int index = result.getInt(1);
+                    if (result.wasNull() || index < 0 || index >= size || counts[index] != 0) {
+                        throw new SQLException("upsert returned an invalid batch input index", "HY000");
+                    }
+                    counts[index] = 1;
+                }
+            }
+            if (nativeCounts == null || nativeCounts.length != size) {
+                throw new SQLException("jdbc driver returned incomplete batch update counts", "HY000");
+            }
+            for (int index = 0; index < size; index++) {
+                if (nativeCounts[index] != java.sql.Statement.SUCCESS_NO_INFO && nativeCounts[index] != counts[index]) {
+                    throw new SQLException("upsert returned inconsistent batch input indexes and counts", "HY000");
+                }
+            }
+            evidence.record(counts, offset, size);
+            return counts;
+        } catch (SQLException | RuntimeException | Error failure) {
+            evidence.record(nativeCounts, offset, size);
+            throw failure;
+        }
     }
 
     /**
@@ -94,7 +164,7 @@ final class JdbcBatchChunkExecutor {
 
                                                                     long startOffset,
                                                                      List<ProtectedBatchRows.RowView> rows,
-                                                                     JdbcProtectedBatchSideIndex.Prepared protectedRows,
+                                                                     Prepared protectedRows,
                                                                      JdbcBatchEvidenceSupport.Counts evidence)
             throws SQLException {
         JdbcProtectedBatchSideIndex.GeneratedTokenBatch generatedTokens =
@@ -112,10 +182,10 @@ final class JdbcBatchChunkExecutor {
                 JdbcStatementControl.requireNotInterrupted(statement);
                 evidence.startBusinessExecution(1);
                 long count = executeUpdate(statement);
-                record(evidence, startOffset + index, count);
+                evidence.record(startOffset + index, count);
                 JdbcStatementControl.requireNotInterrupted(statement);
                 DynamicRow generatedKey = readGeneratedKey(
-                        statement.getGeneratedKeys(), request.generatedKeys().columnName(), SqlExecutionOptions.safeDefaults());
+                        statement.getGeneratedKeys(), request.generatedKeys().columnName(), SqlExecutionOptions.unlimited());
                 // 生成键立即应用；后续错误不会恢复已经交给调用方的键。
                 request.generatedKeys().accept(startOffset + index, generatedKey);
                 if (generatedTokens != null) {
@@ -210,11 +280,11 @@ final class JdbcBatchChunkExecutor {
 
             long startOffset,
             List<ProtectedBatchRows.RowView> rows,
-            JdbcProtectedBatchSideIndex.Prepared protectedRows,
+            Prepared protectedRows,
             JdbcBatchEvidenceSupport.Counts evidence) throws SQLException {
         SqlRequest[] updates = new SqlRequest[rows.size()];
         for (int index = 0; index < rows.size(); index++) {
-            JdbcProtectedBatchSideIndex.RowState state = protectedRows.rows().get(index);
+            Row state = protectedRows.rows().get(index);
             ProtectedWriteWork work = state.work();
             if (work == null) {
                 ProtectedBatchRows.RowView rowView = rows.get(index);
@@ -235,7 +305,7 @@ final class JdbcBatchChunkExecutor {
         while (index < updates.length) {
             SqlRequest update = updates[index];
             if (update == null) {
-                record(evidence, startOffset + index, 0L);
+                evidence.record(startOffset + index, 0L);
                 index++;
                 continue;
             }
@@ -243,7 +313,7 @@ final class JdbcBatchChunkExecutor {
             while (limit < updates.length && sameBatchShape(update, updates[limit])) {
                 limit++;
             }
-            executeOwnerRestrictedBatch(connection, request, startOffset, updates, index, limit, evidence);
+            executeOwnerRestrictedBatch(connection, protectedRows, startOffset, updates, index, limit, evidence);
             index = limit;
         }
 
@@ -252,7 +322,7 @@ final class JdbcBatchChunkExecutor {
 
     private static void executeOwnerRestrictedBatch(
             Connection connection,
-            BatchWriteRequest request,
+            Prepared protectedRows,
             long startOffset,
             SqlRequest[] updates,
             int offset,
@@ -272,6 +342,12 @@ final class JdbcBatchChunkExecutor {
                 throw new SQLException("jdbc driver returned incomplete batch update counts", "HY000");
             }
             evidence.requireNoFailures();
+            for (int index = offset; index < limit; index++) {
+                Row state = protectedRows.rows().get(index);
+                if (state.work() != null) {
+                    state.work().requireStableOwnerSet(state.owners(), counts[index - offset]);
+                }
+            }
         }
     }
 
@@ -282,11 +358,6 @@ final class JdbcBatchChunkExecutor {
                 && expected.parameters().size() == candidate.parameters().size();
     }
 
-    private static boolean hasOwnerRestrictedUpdates(JdbcProtectedBatchSideIndex.Prepared prepared) {
-        return prepared.rows().stream().map(JdbcProtectedBatchSideIndex.RowState::work)
-                .filter(Objects::nonNull)
-                .anyMatch(work -> work.kind() == ProtectedWriteWork.Kind.UPDATE);
-    }
 
     private static long executeUpdate(PreparedStatement statement) throws SQLException {
         try {
@@ -305,12 +376,6 @@ final class JdbcBatchChunkExecutor {
                                    null,
                                    null,
                                    overflow);
-        }
-    }
-
-    private static void record(JdbcBatchEvidenceSupport.Counts evidence, long inputOffset, long count) {
-        if (evidence != null) {
-            evidence.record(inputOffset, count);
         }
     }
 

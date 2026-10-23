@@ -47,17 +47,7 @@ final class DefaultOptionsReactiveSqlExecutor extends ForwardingReactiveSqlExecu
     }
 
     @Override
-    public Flux<DynamicRow> query(SqlRequest request, SqlExecutionOptions options) {
-        return delegate().query(request, options);
-    }
-
-    @Override
     public Mono<Long> rowsUpdated(SqlRequest request) {
-        return delegate().rowsUpdated(request, options);
-    }
-
-    @Override
-    public Mono<Long> rowsUpdated(SqlRequest request, SqlExecutionOptions options) {
         return delegate().rowsUpdated(request, options);
     }
 

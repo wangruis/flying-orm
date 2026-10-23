@@ -2,7 +2,6 @@ package com.flying.orm.rdb.jdbc;
 
 import com.flying.orm.rdb.batch.BatchAffectedRows;
 import com.flying.orm.rdb.batch.BatchExecutionEvidence;
-import com.flying.orm.rdb.batch.BatchExecutionState;
 import com.flying.orm.rdb.batch.BatchOptimisticLockException;
 import com.flying.orm.rdb.batch.BatchRowConflict;
 import com.flying.orm.rdb.batch.BatchRowCountPolicy;
@@ -18,16 +17,6 @@ import java.util.List;
 /** 单个有界执行窗口的驱动计数；结束后立即归入唯一事实累计器。 */
 final class JdbcBatchEvidenceSupport {
     private JdbcBatchEvidenceSupport() {}
-
-    static BatchExecutionState failureState(Throwable failure, boolean hasSuccess, boolean unconfirmedExecution) {
-        if (hasSuccess) return BatchExecutionState.PARTIAL;
-        return switch (BatchExecutionEvidence.Failure.from(failure).kind()) {
-            case TIMEOUT, LOCK_TIMEOUT -> BatchExecutionState.TIMED_OUT;
-            case CANCELLED -> BatchExecutionState.CANCELLED;
-            case CONNECTION, UNKNOWN -> unconfirmedExecution ? BatchExecutionState.UNKNOWN : BatchExecutionState.FAILED;
-            default -> BatchExecutionState.FAILED;
-        };
-    }
 
     static int[] executeBusinessBatch(PreparedStatement statement, Counts evidence,
                                      long offset, int size) throws SQLException {

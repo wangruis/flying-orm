@@ -37,6 +37,31 @@ public final class UpperServiceConsumer {
     private UpperServiceConsumer() {
     }
 
+    public static void compileDocumentedLockingReads(
+            ReactiveFormClient forms, DynamicForm users, DynamicForm sales,
+            com.flying.orm.core.expression.ValueExpression subtotal) {
+        QuerySpec query = QuerySpec.builder(users)
+                .where(ConditionGroup.and().where("id", "=", 1L).build())
+                .lock(com.flying.orm.rdb.lock.ReadLock.updateNowait()).build();
+        reactor.core.publisher.Flux<com.flying.orm.rdb.result.DynamicRow> locked = forms.lockingRead(query);
+        QuerySpec amounts = QuerySpec.builder(sales)
+                .where(ConditionGroup.and().where("id", "=", 1L).build())
+                .expression("subtotal", subtotal)
+                .lock(com.flying.orm.rdb.lock.ReadLock.update()).build();
+        reactor.core.publisher.Flux<com.flying.orm.rdb.result.DynamicRow> lockedAmounts = forms.lockingRead(amounts);
+    }
+
+    public static com.flying.orm.rdb.schema.SchemaDialect compileSchemaRendererSurface() {
+        com.flying.orm.rdb.schema.SchemaOperationRenderer renderer = (operation, fallback) -> fallback.get();
+        return com.flying.orm.rdb.schema.SchemaDialect.builder().operationRenderer(renderer).build();
+    }
+
+    public static com.flying.orm.rdb.dialect.RdbDialect compileDialectExtensionSurface() {
+        com.flying.orm.rdb.dialect.RdbDialect base = com.flying.orm.rdb.dialect.RdbDialect.postgresql();
+        return base.withSchema(base.schema().withOperationRenderer((operation, fallback) -> fallback.get())
+                .withFormRenderer((current, snapshot, plan) -> plan.requests()));
+    }
+
     public static void compilePublicSurface(DynamicForm form,
                                             ConditionGroup where,
                                             Publisher<CompatibilityEntity> entities,

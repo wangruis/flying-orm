@@ -1,22 +1,18 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.core.metadata.RelationalTableDefinition;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.ColumnDefinition;
-import com.flying.orm.core.metadata.ColumnMetadata;
-import com.flying.orm.core.metadata.RelationIdentity;
-import com.flying.orm.core.metadata.RelationalTableDefinition;
-import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.dialect.DatabaseDescriptor;
 import com.flying.orm.rdb.metadata.ReactiveFormMetadataReader;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
-
 import java.util.List;
 import java.util.Locale;
-
 import static org.junit.jupiter.api.Assertions.*;
 
 class OracleCharacterLengthSemanticsTest {
@@ -63,8 +59,8 @@ class OracleCharacterLengthSemanticsTest {
     void legacyTypeChangesAndRollbackRetainObservedUnits() {
         FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.oracle());
         for (String unit : List.of("CHAR", "BYTE")) {
-            TableMetadata current = TableMetadata.builder("items")
-                    .addColumn(ColumnMetadata.of("code", "VARCHAR2").withLength(10)).build();
+            RelationalTableDefinition current = RelationalTableDefinition.builder("items")
+                    .addColumn(DynamicField.of("code", "VARCHAR2").withLength(10).column()).build();
             DynamicForm target = DynamicForm.builder("items", "items")
                     .addField(DynamicField.of("code", "VARCHAR").withLength(20)).build();
             SchemaSnapshot snapshot = SchemaSnapshot.builder(RelationIdentity.table("items")).tablePresent()
@@ -72,10 +68,8 @@ class OracleCharacterLengthSemanticsTest {
                     .build();
             SchemaMigrationPlan migration = renderer.migrationPlanner().migrateSafelyPlan(
                     current, target, List.of(), List.of(), SchemaMigrationOptions.safe().allowColumnChange(), snapshot);
-            ReviewedSchemaMigrationPlan reviewed = SchemaMigrationReviewer.create(renderer).review(
-                    current, migration, SchemaMigrationReviewPolicy.allowBlocking(), snapshot);
+            SchemaMigrationPlan reviewed = renderer.renderPlan(current, snapshot, migration, SchemaMigrationOptions.safe());
             assertTrue(migration.requests().getFirst().sql().toUpperCase(Locale.ROOT).contains("VARCHAR2(20 " + unit + ")"));
-            assertTrue(reviewed.rollback().requests().getFirst().sql().toUpperCase(Locale.ROOT).contains("VARCHAR2(10 " + unit + ")"));
         }
     }
 
@@ -87,15 +81,14 @@ class OracleCharacterLengthSemanticsTest {
                 .addColumn(ColumnDefinition.builder("code", "VARCHAR2(10 CHAR)").build()).build();
         RelationalTableDefinition target = RelationalTableDefinition.builder(identity)
                 .addColumn(ColumnDefinition.builder("code", "VARCHAR").length(20).build()).build();
-        ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
+        SchemaMigrationPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
                 DatabaseDescriptor.of(dialect.name(), "test", dialect), target,
                 SchemaSnapshot.present(actual), SchemaSnapshotCoverage.complete(), SchemaCompatibilityMode.EXACT);
-        assertFalse(plan.requiresManualAction());
         assertTrue(plan.requests().getFirst().sql().toUpperCase(Locale.ROOT).contains("VARCHAR2(20 CHAR)"));
     }
 
     @Test
-    void dropOnlyReviewReadsPhysicalUnitsWithoutAddingSnapshotReadsToPlainPlans() {
+    void dropOnlyPlansDoNotReadUnusedCharacterLengthUnits() {
         FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.oracle());
         DynamicForm source = DynamicForm.builder("items", "items")
                 .addField(DynamicField.of("id", "BIGINT"))
@@ -108,9 +101,16 @@ class OracleCharacterLengthSemanticsTest {
         java.util.concurrent.atomic.AtomicInteger reads = new java.util.concurrent.atomic.AtomicInteger();
         java.util.concurrent.atomic.AtomicBoolean snapshotAvailable = new java.util.concurrent.atomic.AtomicBoolean(true);
         ReactiveFormMetadataReader reader = new ReactiveFormMetadataReader() {
-            public Mono<DynamicForm> readForm(String id, String table) { return Mono.just(source); }
-            public Mono<DynamicForm> readForm(String id, String schema, String table) { return Mono.just(source); }
-            public Mono<SchemaSnapshot> readSnapshot(String table) {
+            public Mono<DynamicForm> readForm(String id, RelationIdentity relation) {
+                return Mono.just(source);
+            }
+
+            @Override
+            public Mono<RelationalTableDefinition> readTable(RelationIdentity relation) {
+                return readForm(relation.table(), relation).map(form -> form.toTableDefinition(relation));
+            }
+
+            public Mono<SchemaSnapshot> readSnapshot(RelationIdentity relation) {
                 reads.incrementAndGet();
                 return snapshotAvailable.get() ? Mono.just(physical) : Mono.empty();
             }
@@ -118,12 +118,14 @@ class OracleCharacterLengthSemanticsTest {
         SchemaMigrationOptions options = SchemaMigrationOptions.safe().allowDropColumn();
         renderer.migrationPlanner().plan(target, List.of(), List.of(), reader, options).block();
         assertEquals(0, reads.get());
-        ReviewedSchemaMigrationPlan reviewed = renderer.migrationPlanner().review(target, List.of(), List.of(), reader,
-                options, SchemaMigrationReviewPolicy.allowBlocking()).block();
-        assertEquals(1, reads.get());
-        assertTrue(reviewed.rollback().requests().getFirst().sql().toUpperCase(Locale.ROOT).contains("VARCHAR2(10 CHAR)"));
+        SchemaMigrationPlan reviewed = renderer.migrationPlanner().plan(target, List.of(), List.of(), reader,
+                options).block();
+        assertEquals(0, reads.get());
+        assertEquals(List.of("alter table \"items\" drop column \"code\""), reviewed.sqlTexts());
         snapshotAvailable.set(false);
-        assertThrows(IllegalStateException.class, () -> renderer.migrationPlanner().review(
-                target, List.of(), List.of(), reader, options, SchemaMigrationReviewPolicy.allowBlocking()).block());
+        SchemaMigrationPlan withoutSnapshot = renderer.migrationPlanner().plan(
+                target, List.of(), List.of(), reader, options).block();
+        assertEquals(reviewed.requests(), withoutSnapshot.requests());
+        assertEquals(0, reads.get());
     }
 }

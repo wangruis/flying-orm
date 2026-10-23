@@ -20,11 +20,9 @@ import java.util.Set;
  */
 final class SqlTemplateExecutionState {
 
-    private final SqlTemplateEngine engine;
+    private final SqlTemplateEngine.PreparedSql prepared;
 
     private final String templateId;
-
-    private final Set<String> serverParameters;
 
     private final Map<String, Object> values = new LinkedHashMap<>();
 
@@ -32,30 +30,30 @@ final class SqlTemplateExecutionState {
 
     private SqlExecutionOptions options;
 
-    SqlTemplateExecutionState(SqlTemplateEngine engine, String templateId, Set<String> serverParameters) {
-        this.engine = Objects.requireNonNull(engine, "SQL template engine must not be null");
+    SqlTemplateExecutionState(SqlTemplateEngine engine, String templateId) {
         this.templateId = requireName(templateId, "SQL template id");
-        this.serverParameters = Set.copyOf(Objects.requireNonNull(
-                serverParameters, "SQL template server parameters must not be null"));
+        this.prepared = Objects.requireNonNull(engine, "SQL template engine must not be null").prepare(this.templateId);
     }
 
     void bind(String name, Object value) {
         String safeName = requireName(name, "SQL template parameter name");
-        if (serverParameters.contains(safeName)) {
+        if (serverParameters().contains(safeName)) {
             throw new IllegalArgumentException("SQL template server parameter cannot be bound by caller");
         }
-        values.put(safeName, BindableValueSnapshots.logicalValue(value));
+        if (prepared.hasParameter(safeName)) values.put(safeName, BindableValueSnapshots.logicalValue(value));
     }
 
     void bindAll(Map<String, ?> values) {
         Map<String, ?> safeValues = Objects.requireNonNull(values, "SQL template values must not be null");
-        Map<String, Object> prepared = new LinkedHashMap<>(safeValues.size());
+        Map<String, Object> prepared = new LinkedHashMap<>();
         for (Map.Entry<String, ?> entry : safeValues.entrySet()) {
             String safeName = requireName(entry.getKey(), "SQL template parameter name");
-            if (serverParameters.contains(safeName)) {
+            if (serverParameters().contains(safeName)) {
                 throw new IllegalArgumentException("SQL template server parameter cannot be bound by caller");
             }
-            prepared.put(safeName, BindableValueSnapshots.logicalValue(entry.getValue()));
+            if (this.prepared.hasParameter(safeName)) {
+                prepared.put(safeName, BindableValueSnapshots.logicalValue(entry.getValue()));
+            }
         }
         this.values.putAll(prepared);
     }
@@ -81,7 +79,7 @@ final class SqlTemplateExecutionState {
     }
 
     Set<String> serverParameters() {
-        return serverParameters;
+        return prepared.serverParameters();
     }
 
     String templateId() {
@@ -91,14 +89,13 @@ final class SqlTemplateExecutionState {
     SqlRequest render(Snapshot snapshot, Map<String, ?> serverValues) {
         Map<String, ?> safeServerValues = Objects.requireNonNull(
                 serverValues, "SQL template server parameter values must not be null");
-        LinkedHashMap<String, Object> merged = new LinkedHashMap<>(safeServerValues.size() + snapshot.values().size());
-        safeServerValues.forEach((name, value) -> merged.put(
-                name, BindableValueSnapshots.logicalValue(value)));
-        if (!merged.keySet().equals(serverParameters)) {
+        if (!safeServerValues.keySet().equals(serverParameters())) {
             throw new IllegalArgumentException("SQL template server parameters do not match declaration");
         }
-        snapshot.values().forEach(merged::put);
-        return engine.renderOwned(templateId, merged, snapshot.identifiers());
+        if (safeServerValues.isEmpty()) return prepared.renderOwned(snapshot.values(), snapshot.identifiers());
+        LinkedHashMap<String, Object> merged = new LinkedHashMap<>(snapshot.values());
+        safeServerValues.forEach((name, value) -> merged.put(name, BindableValueSnapshots.logicalValue(value)));
+        return prepared.renderOwned(merged, snapshot.identifiers());
     }
 
     private static String requireName(String value, String fieldName) {

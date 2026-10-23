@@ -3,11 +3,13 @@ package com.flying.orm.rdb.dialect;
 import com.flying.orm.rdb.json.JsonDialect;
 import com.flying.orm.rdb.lock.LockingReadDialect;
 import com.flying.orm.rdb.schema.SchemaDialect;
+import com.flying.orm.rdb.exception.RdbException;
+import com.flying.orm.rdb.exception.RdbExceptionTranslator;
 
-import java.util.EnumSet;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 
 /**
  * 聚合一个数据库在 DDL、分页、upsert 和 JSON 上的 SQL 能力。业务渲染器只依赖这个组合对象，
@@ -30,7 +32,7 @@ public final class RdbDialect {
     private final String version;
     private final DialectCapabilities capabilities;
     private final int maxIdentifierLength;
-    private final Set<DialectFeature> features;
+    private final Function<RdbException, RuntimeException> exceptionTranslator;
 
     private RdbDialect(String name,
                        SchemaDialect schema,
@@ -40,7 +42,8 @@ public final class RdbDialect {
                        LockingReadDialect lockingRead,
                        String version,
                        DialectCapabilities capabilities,
-                       int maxIdentifierLength) {
+                       int maxIdentifierLength,
+                       Function<RdbException, RuntimeException> exceptionTranslator) {
         this.name = requireText(name, "dialect name").toLowerCase(Locale.ROOT);
         this.schema = Objects.requireNonNull(schema, "schema dialect must not be null");
         this.pagination = Objects.requireNonNull(pagination, "pagination dialect must not be null");
@@ -53,7 +56,7 @@ public final class RdbDialect {
             throw new IllegalArgumentException("maximum identifier length must not be negative");
         }
         this.maxIdentifierLength = maxIdentifierLength;
-        this.features = legacyFeatures(capabilities);
+        this.exceptionTranslator = exceptionTranslator;
     }
 
     /**
@@ -149,17 +152,15 @@ public final class RdbDialect {
                               LockingReadDialect.unsupported(),
                               "unspecified",
                               DialectCapabilities.empty(),
-                              0);
+                              0, null);
     }
 
     /**
      * 显式组装带能力事实的方言。
      *
-     * <p>这个方法使用独立名称，不与历史 {@code of(..., JsonDialect)} 形成同参数位重载；
-     * 因此旧代码把 {@code null} 传给 JSON 参数时仍能按原签名编译。标识符上限为 0 表示未知，
-     * 调用方必须在需要生成受限对象名的路径上 fail closed。</p>
+     * <p>能力直接使用调用方声明的快照，标识符上限为 0 表示未知。</p>
      */
-    public static RdbDialect ofWithCapabilities(String name,
+    public static RdbDialect of(String name,
                                                 SchemaDialect schema,
                                                 PaginationDialect pagination,
                                                 UpsertDialect upsert,
@@ -175,7 +176,7 @@ public final class RdbDialect {
                               LockingReadDialect.unsupported(),
                               version,
                               capabilities,
-                              maxIdentifierLength);
+                              maxIdentifierLength, null);
     }
 
     static RdbDialect builtIn(String name,
@@ -184,7 +185,7 @@ public final class RdbDialect {
                               UpsertDialect upsert,
                               JsonDialect json,
                               String version,
-                              Set<DialectFeature> features,
+                              Set<DialectCapabilityId> capabilities,
                               int maxIdentifierLength) {
         return new RdbDialect(name,
                               schema,
@@ -193,8 +194,8 @@ public final class RdbDialect {
                               json,
                               builtInLockingRead(name),
                               version,
-                              DialectCapabilities.from(features),
-                              maxIdentifierLength);
+                              DialectCapabilities.copyOf(capabilities),
+                              maxIdentifierLength, null);
     }
 
     /** @return 当前数据库方言名称 */
@@ -205,6 +206,42 @@ public final class RdbDialect {
     /** @return 建表、改表等结构 SQL 方言 */
     public SchemaDialect schema() {
         return schema;
+    }
+
+    /**
+     * 定制当前数据库的 DDL 写法，保留其他渲染器、版本和能力声明，不修改原实例。
+     * 这是同一数据库的扩展入口；切换数据库应使用对应 factory 或显式组装方言。
+     */
+    public RdbDialect withSchema(SchemaDialect schema) {
+        return new RdbDialect(name, schema, pagination, upsert, json, lockingRead,
+                              version, capabilities, maxIdentifierLength, exceptionTranslator);
+    }
+
+    /** 显式转换数据库分类异常；不转换业务异常、生成键结果或批量证据载体，不增加重试。 */
+    public RdbDialect withExceptionTranslator(Function<RdbException, RuntimeException> translator) {
+        return new RdbDialect(name, schema, pagination, upsert, json, lockingRead,
+                version, capabilities, maxIdentifierLength, Objects.requireNonNull(translator, "exception translator"));
+    }
+
+    /** 未配置时执行器不为复合操作增加异常映射节点。 */
+    public boolean hasExceptionTranslator() {
+        return exceptionTranslator != null;
+    }
+
+    /** 保留默认数据库分类与原始 cause，再按应用声明转换；结果事实由执行所有者保留。 */
+    public RuntimeException translateException(Throwable error) {
+        RuntimeException translated = RdbExceptionTranslator.translate(error);
+        return exceptionTranslator != null && translated instanceof RdbException database
+                ? Objects.requireNonNull(exceptionTranslator.apply(database), "translated exception") : translated;
+    }
+
+    /** 批量先记录原始执行事实，再转换对外 cause；未配置或未命中时保持原异常身份。 */
+    public Throwable mapException(Throwable error) {
+        if (exceptionTranslator == null || error instanceof Error) return error;
+        RuntimeException normalized = RdbExceptionTranslator.translate(error);
+        if (!(normalized instanceof RdbException database)) return error;
+        RuntimeException mapped = Objects.requireNonNull(exceptionTranslator.apply(database), "translated exception");
+        return mapped == normalized ? error : mapped;
     }
 
     /** @return 分页 SQL 方言 */
@@ -225,7 +262,7 @@ public final class RdbDialect {
     }
 
     /**
-     * @return 已确认版本的受控锁定读取渲染器；旧自定义方言默认 fail closed
+     * @return 当前方言的锁定读取渲染器；未提供实现时明确报告不支持
      */
     public LockingReadDialect lockingReadDialect() {
         return lockingRead;
@@ -252,18 +289,8 @@ public final class RdbDialect {
      * 判断当前版本配置是否明确支持某项能力。返回 false 表示 flying-orm 不会承诺生成可执行 SQL，
      * 不等于数据库厂商从未提供该功能。
      */
-    public boolean supports(DialectFeature feature) {
-        return features.contains(Objects.requireNonNull(feature, "dialect feature must not be null"));
-    }
-
-    private static Set<DialectFeature> legacyFeatures(DialectCapabilities capabilities) {
-        EnumSet<DialectFeature> features = EnumSet.noneOf(DialectFeature.class);
-        for (DialectFeature feature : DialectFeature.values()) {
-            if (capabilities.supports(DialectCapabilityId.from(feature))) {
-                features.add(feature);
-            }
-        }
-        return Set.copyOf(features);
+    public boolean supports(DialectCapabilityId capability) {
+        return capabilities.supports(capability);
     }
 
     private static LockingReadDialect builtInLockingRead(String name) {

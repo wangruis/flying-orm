@@ -34,17 +34,16 @@ class SchemaReviewedPlanExecutionDialectTest {
 
     @Test
     void jdbcAndReactiveRejectPlansForAnotherConfiguredDialectBeforeMetadataOrSql() {
-        ReviewedSchemaPlan plan = absentPlan(DatabaseDescriptor.of(
+        SchemaMigrationPlan plan = absentPlan(DatabaseDescriptor.of(
                 "PostgreSQL", "17", RdbDialect.postgresql()));
         AtomicInteger jdbcReads = new AtomicInteger();
         AtomicInteger jdbcWrites = new AtomicInteger();
         CountingSyncExecutor jdbcExecutor = new CountingSyncExecutor(jdbcReads, jdbcWrites);
         JdbcSchemaClient jdbc = JdbcSchemaClient.create(jdbcExecutor, RdbDialect.h2());
 
-        assertThrows(IllegalArgumentException.class, () -> jdbc.executeReviewed(
+        assertThrows(IllegalArgumentException.class, () -> jdbc.execute(
                 plan,
-                JdbcFormMetadataReaders.create(jdbcExecutor, RdbDialect.h2()),
-                SchemaMigrationApproval.approve(plan, "test")));
+                JdbcFormMetadataReaders.create(jdbcExecutor, RdbDialect.h2())));
         assertEquals(0, jdbcReads.get());
         assertEquals(0, jdbcWrites.get());
 
@@ -55,43 +54,46 @@ class SchemaReviewedPlanExecutionDialectTest {
         ReactiveSchemaClient reactive = ReactiveSchemaClient.create(
                 reactiveExecutor, RdbDialect.h2());
 
-        assertThrows(IllegalArgumentException.class, () -> reactive.executeReviewed(
+        assertThrows(IllegalArgumentException.class, () -> reactive.execute(
                 plan,
-                ReactiveFormMetadataReaders.create(reactiveExecutor, RdbDialect.h2()),
-                SchemaMigrationApproval.approve(plan, "test")).block());
+                ReactiveFormMetadataReaders.create(reactiveExecutor, RdbDialect.h2())).block());
         assertEquals(0, reactiveReads.get());
         assertEquals(0, reactiveWrites.get());
     }
 
     @Test
-    void customRendererAndCapabilityMismatchCannotClaimPostgreSqlEvolutionSupport() {
-        ReviewedSchemaPlan regular = absentPlan(DatabaseDescriptor.of(
+    void customSchemaKeepsExplicitSqlAndTheConfiguredDialectCapabilities() {
+        SchemaMigrationPlan regular = absentPlan(DatabaseDescriptor.of(
                 "PostgreSQL", "17", RdbDialect.postgresql()));
-        ReviewedSchemaPlan mismatchedCapabilities = absentPlan(DatabaseDescriptor.of(
+        SchemaMigrationPlan mismatchedCapabilities = absentPlan(DatabaseDescriptor.of(
                 "PostgreSQL", "17", "postgresql", DialectCapabilities.empty()));
         AtomicInteger reads = new AtomicInteger();
         AtomicInteger writes = new AtomicInteger();
         CountingSyncExecutor executor = new CountingSyncExecutor(reads, writes);
 
-        JdbcSchemaClient custom = JdbcSchemaClient.create(
-                executor, FormSchemaSqlRenderer.create(SchemaDialect.standard()));
-        assertThrows(IllegalArgumentException.class, () -> custom.executeReviewed(
+        RdbDialect customDialect = RdbDialect.postgresql().withSchema(SchemaDialect.standard());
+        JdbcSchemaClient custom = JdbcSchemaClient.create(executor, customDialect);
+        custom.execute(
                 regular,
-                JdbcFormMetadataReaders.create(executor, RdbDialect.postgresql()),
-                SchemaMigrationApproval.approve(regular, "test")));
-
-        JdbcSchemaClient postgres = JdbcSchemaClient.create(executor, RdbDialect.postgresql());
-        assertThrows(IllegalArgumentException.class, () -> postgres.executeReviewed(
-                mismatchedCapabilities,
-                JdbcFormMetadataReaders.create(executor, RdbDialect.postgresql()),
-                SchemaMigrationApproval.approve(mismatchedCapabilities, "test")));
+                JdbcFormMetadataReaders.create(executor, RdbDialect.postgresql()));
         assertEquals(0, reads.get());
-        assertEquals(0, writes.get());
+        assertEquals(1, writes.get());
+
+        CountingReactiveExecutor reactiveExecutor = new CountingReactiveExecutor(reads, writes);
+        ReactiveSchemaClient.create(reactiveExecutor, customDialect)
+                .execute(regular, ReactiveFormMetadataReaders.create(reactiveExecutor, RdbDialect.postgresql())).block();
+        assertEquals(0, reads.get());
+        assertEquals(2, writes.get());
+
+        assertThrows(IllegalArgumentException.class, () -> custom.execute(
+                mismatchedCapabilities,
+                JdbcFormMetadataReaders.create(executor, RdbDialect.postgresql())));
+        assertEquals(0, reads.get());
+        assertEquals(2, writes.get());
     }
 
-    private static ReviewedSchemaPlan absentPlan(DatabaseDescriptor database) {
+    private static SchemaMigrationPlan absentPlan(DatabaseDescriptor database) {
         SchemaSnapshot actual = SchemaSnapshot.present(PRESENT);
-        String actualFingerprint = SchemaSnapshotFingerprint.of(actual);
         SchemaOperation drop = SchemaOperation.of(
                 SchemaOperation.Kind.DROP_TABLE,
                 ACCOUNTS,
@@ -99,22 +101,15 @@ class SchemaReviewedPlanExecutionDialectTest {
                 PRESENT,
                 null,
                 SchemaOperation.Compatibility.REQUIRES_REVIEW);
-        return ReviewedSchemaPlan.builder(database)
+        return SchemaMigrationPlan.builder(database)
                 .compatibilityMode(SchemaCompatibilityMode.EXACT)
                 .desiredAbsent(ACCOUNTS)
-                .desiredFingerprint(SchemaSnapshotFingerprint.of(SchemaSnapshot.absent(ACCOUNTS)))
-                .actualFingerprint(actualFingerprint)
-                .addStep(SchemaPlanStep.executable(
-                        0,
-                        drop,
-                        new SqlRequest("drop table \"accounts\"", List.of()),
-                        SchemaMigrationRiskLevel.CRITICAL,
-                        List.of(SchemaPlanPrecondition.actualSnapshot(actualFingerprint))))
+                .addStep(new SchemaPlanStep(drop, List.of(new SqlRequest("drop table \"accounts\"", List.of()))))
                 .build();
     }
 
     private record CountingSyncExecutor(AtomicInteger reads, AtomicInteger writes)
-            implements SyncSqlExecutor {
+            implements com.flying.orm.rdb.support.ListQueryFixture {
 
         @Override
         public List<DynamicRow> query(SqlRequest request) {
@@ -130,7 +125,7 @@ class SchemaReviewedPlanExecutionDialectTest {
 
         @Override
         public SqlWriteResult rowsUpdatedReturningKeys(
-                SqlRequest request, SqlExecutionOptions options) {
+                SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
             throw new AssertionError("schema DDL must not request generated keys");
         }
     }

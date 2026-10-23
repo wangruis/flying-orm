@@ -3,7 +3,6 @@ package com.flying.orm.rdb.dialect;
 import com.flying.orm.core.internal.hash.StableDigest;
 import com.flying.orm.core.internal.hash.StableEncoder;
 
-import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
@@ -13,8 +12,7 @@ import java.util.Set;
  * 一份构造后不再变化的方言能力快照。
  *
  * <p>能力判断直接查询构造时冻结的集合；稳定指纹也只计算一次。普通 SQL 渲染不会排序、复制，
- * 也不会根据数据库名称或版本临时推断能力。空快照表示“没有已确认事实”，因此未知数据库版本
- * 和旧自定义方言都会自然地 fail closed。</p>
+ * 也不会根据数据库名称或版本临时推断能力。空快照表示未声明能力；自定义方言应声明实际支持项。</p>
  *
  * @author wangr
  * @date 2026-09-03
@@ -57,18 +55,6 @@ public final class DialectCapabilities {
         Collection<DialectCapabilityId> source = Objects.requireNonNull(
                 ids, "dialect capabilities must not be null");
         return source.isEmpty() ? EMPTY : new DialectCapabilities(source);
-    }
-
-    static DialectCapabilities from(Set<DialectFeature> features) {
-        Set<DialectFeature> source = Objects.requireNonNull(features, "dialect features must not be null");
-        if (source.isEmpty()) {
-            return EMPTY;
-        }
-        List<DialectCapabilityId> ids = new ArrayList<>(source.size());
-        for (DialectFeature feature : source) {
-            ids.add(DialectCapabilityId.from(feature));
-        }
-        return new DialectCapabilities(ids);
     }
 
     /**

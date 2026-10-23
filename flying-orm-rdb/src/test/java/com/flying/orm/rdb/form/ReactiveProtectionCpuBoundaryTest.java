@@ -9,6 +9,9 @@ import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.join.JoinSource;
+import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetSort;
+import com.flying.orm.core.page.NullOrder;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.core.protection.MaskedFieldDefinition;
@@ -24,6 +27,7 @@ import com.flying.orm.rdb.form.spec.BatchSpec;
 import com.flying.orm.rdb.form.spec.QuerySpec;
 import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.lock.OptimisticLockOptions;
+import com.flying.orm.rdb.lock.ReadLock;
 import com.flying.orm.rdb.protection.ProtectedFieldKeyRing;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 import com.flying.orm.rdb.protection.ProtectedFormLayout;
@@ -66,6 +70,91 @@ class ReactiveProtectionCpuBoundaryTest {
     private static final String DRIVER_THREAD = "simulated-r2dbc-driver";
 
     @Test
+    void lockingKeysetSharesProtectedPlanningAndKeepsEachSubscriptionCold() throws Exception {
+        List<String> normalizationThreads = new CopyOnWriteArrayList<>();
+        try (ProtectedFieldRuntime protection = ProtectedFieldRuntime.create(
+                ProtectedFieldKeyRing.single("v1", new byte[32]), recordingNormalizers(normalizationThreads),
+                MaskingPolicyRegistry.standard())) {
+            ReactiveFormClient client = client(new CapturingBatchExecutor(), protection, null);
+            QuerySpec query = QuerySpec.of(protectedSearchForm(), ConditionGroup.and()
+                    .add(ProtectedConditions.exact("secret", "classified")).build()).withLock(ReadLock.update());
+            KeysetPageQuery page = KeysetPageQuery.first(2, KeysetSort.asc("id", NullOrder.LAST));
+            for (ReactiveFormClient configured : List.of(client, client.withFieldUsePolicy(
+                    com.flying.orm.core.scope.FieldUsePolicy.unrestricted()))) {
+                normalizationThreads.clear();
+                Mono<?> pending = configured.lockingRead(query, page);
+                assertTrue(normalizationThreads.isEmpty(), "constructing a query must not encode protected values");
+                executeOnDriver(pending::block);
+                executeOnDriver(pending::block);
+                assertEquals(2, normalizationThreads.size(), "each subscription must prepare its own predicate once");
+                assertTrue(normalizationThreads.stream().noneMatch(thread -> thread.startsWith(DRIVER_THREAD)),
+                        "locking keyset must use the same protected CPU boundary as ordinary keyset");
+            }
+        }
+    }
+
+    @Test
+    void countPlansProtectedPredicatesOnceOffTheDriverThread() throws Exception {
+        List<String> normalizationThreads = new CopyOnWriteArrayList<>();
+        try (ProtectedFieldRuntime protection = ProtectedFieldRuntime.create(
+                ProtectedFieldKeyRing.single("v1", new byte[32]), recordingNormalizers(normalizationThreads),
+                MaskingPolicyRegistry.standard())) {
+            CapturingBatchExecutor executor = new CapturingBatchExecutor();
+            executor.queryRows = Flux.just(DynamicRow.copyOf(Map.of("total", 3_000_000_000L)));
+            ReactiveFormClient client = client(executor, protection, null);
+            QuerySpec spec = QuerySpec.of(protectedSearchForm(), ConditionGroup.and()
+                    .add(ProtectedConditions.exact("secret", "classified")).build());
+            executeOnDriver(() -> assertEquals(3_000_000_000L, client.count(spec).block()));
+            executeOnDriver(() -> assertEquals(3_000_000_000L, client.withFieldUsePolicy(
+                    com.flying.orm.core.scope.FieldUsePolicy.builder()
+                            .allow("secret", com.flying.orm.core.scope.FieldUse.FILTER).build()).count(spec).block()));
+            assertEquals(2, normalizationThreads.size());
+            assertTrue(normalizationThreads.stream().noneMatch(thread -> thread.startsWith(DRIVER_THREAD)));
+        }
+    }
+
+    @Test
+    void firstPlansProtectedPredicatesOffTheDriverThread() throws Exception {
+        List<String> normalizationThreads = new CopyOnWriteArrayList<>();
+        try (ProtectedFieldRuntime protection = ProtectedFieldRuntime.create(
+                ProtectedFieldKeyRing.single("v1", new byte[32]), recordingNormalizers(normalizationThreads),
+                MaskingPolicyRegistry.standard())) {
+            CapturingBatchExecutor executor = new CapturingBatchExecutor();
+            executor.queryRows = Flux.empty();
+            ReactiveFormClient client = client(executor, protection, null);
+            QuerySpec spec = QuerySpec.of(protectedSearchForm(), ConditionGroup.and()
+                    .add(ProtectedConditions.exact("secret", "classified")).build());
+            executeOnDriver(() -> client.first(spec).block());
+            executeOnDriver(() -> client.withFieldUsePolicy(
+                    com.flying.orm.core.scope.FieldUsePolicy.unrestricted()).first(spec).block());
+            assertEquals(2, normalizationThreads.size());
+            assertTrue(normalizationThreads.stream().noneMatch(thread -> thread.startsWith(DRIVER_THREAD)));
+        }
+    }
+
+    @Test
+    void aggregatePagePlansProtectedPredicateOnceOffTheDriverThread() throws Exception {
+        List<String> normalizationThreads = new CopyOnWriteArrayList<>();
+        try (ProtectedFieldRuntime protection = ProtectedFieldRuntime.create(
+                ProtectedFieldKeyRing.single("v1", new byte[32]), recordingNormalizers(normalizationThreads),
+                MaskingPolicyRegistry.standard())) {
+            CapturingBatchExecutor executor = new CapturingBatchExecutor();
+            executor.queryRows = Flux.just(DynamicRow.copyOf(Map.of("total", 0L)));
+            ReactiveFormClient client = client(executor, protection, null);
+            QuerySpec query = QuerySpec.of(protectedSearchForm(), ConditionGroup.and()
+                    .add(ProtectedConditions.exact("secret", "classified")).build());
+            com.flying.orm.rdb.aggregate.AggregateSpec report = com.flying.orm.rdb.aggregate.AggregateSpec.builder(query)
+                    .aggregate(com.flying.orm.rdb.aggregate.AggregateExpression.count("id", "total")).build();
+
+            executeOnDriver(() -> client.aggregatePage(report,
+                    com.flying.orm.core.page.PageQuery.of(1, 20)).block());
+
+            assertEquals(1, normalizationThreads.size(), "count and page must share the protected query plan");
+            assertFalse(normalizationThreads.getFirst().startsWith(DRIVER_THREAD));
+        }
+    }
+
+    @Test
     void enabledProtectionMovesJcaWorkOffTheDriverThread() throws Exception {
         RecordingStringCodec codec = new RecordingStringCodec();
         CapturingBatchExecutor executor = new CapturingBatchExecutor();
@@ -97,19 +186,19 @@ class ReactiveProtectionCpuBoundaryTest {
     }
 
     @Test
-    void protectedListBatchDoesNotSnapshotAnOwnedRowTwice() {
+    void protectedBatchSnapshotsEachEmittedRowOnce() {
         CountingObjectNode payload = new CountingObjectNode();
         CapturingBatchExecutor executor = new CapturingBatchExecutor();
         try (ProtectedFieldRuntime protection = ProtectedFieldRuntime.create(
                 ProtectedFieldKeyRing.single("v1", new byte[32]))) {
             ReactiveFormClient client = client(executor, protection, null);
 
-            client.operations().batchInserts.insertBatch(
-                    protectedJsonForm(), List.of(Map.of("id", 7L, "secret", "classified", "payload", payload)),
-                    BatchWriteOptions.of(2)).block();
+            client.writeBatch(BatchSpec.insert(protectedJsonForm(),
+                    Flux.just(Map.of("id", 7L, "secret", "classified", "payload", payload)))
+                    .withOptions(BatchWriteOptions.of(2))).block();
 
             assertEquals(1, payload.deepCopies(),
-                         "the List boundary owns the row once; protection must not snapshot it again");
+                         "the protected row must be snapshotted once before the CPU boundary");
         }
     }
 
@@ -145,7 +234,7 @@ class ReactiveProtectionCpuBoundaryTest {
 
             executeOnDriver(() -> {
                 if (chunks) {
-                    client.writeBatchEvidence(spec).block();
+                    client.writeBatch(spec).block();
                 } else {
                     client.writeBatch(spec).block();
                 }
@@ -170,6 +259,11 @@ class ReactiveProtectionCpuBoundaryTest {
 
             executeOnDriver(() -> client.writeBatch(BatchSpec.insert(
                     ordinaryForm(), Flux.just(Map.of("id", 7L, "note", "plain")))).block());
+            QuerySpec plainQuery = QuerySpec.of(ordinaryForm(), ConditionGroup.and().build());
+            KeysetPageQuery page = KeysetPageQuery.first(2, KeysetSort.asc("id", NullOrder.LAST));
+            executeOnDriver(() -> client.keysetPage(plainQuery, page).block());
+            executeOnDriver(() -> client.keysetPage(plainQuery, KeysetPageQuery.first(2, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST))).block());
+            executeOnDriver(() -> client.lockingRead(plainQuery.withLock(ReadLock.update()), page).block());
 
             assertEquals(0, scheduledTasks.get(),
                          "plain CRUD must not create a protection scheduler task");
@@ -303,6 +397,9 @@ class ReactiveProtectionCpuBoundaryTest {
             executeOnDriver(() -> {
                 client.insert(WriteSpec.insert(form, Map.of("id", 7L, "note", "plain"))).block();
                 client.select(QuerySpec.of(form, ConditionGroup.and().build())).collectList().block();
+                JoinQuerySpec.Builder query = JoinQuerySpec.builder(form);
+                client.selectJoin(query.where(ConditionGroup.and().where("id", "=", 7L).build())
+                        .select(query.root(), "id").build()).collectList().block();
             });
 
             assertEquals(0, scheduledTasks.get(),
@@ -341,6 +438,124 @@ class ReactiveProtectionCpuBoundaryTest {
     }
 
     @Test
+    void qualifiedWhereAndOnProtectedValuesLeaveTheDriverThread() throws Exception {
+        List<String> threads = new CopyOnWriteArrayList<>();
+        try (ProtectedFieldRuntime protection = ProtectedFieldRuntime.create(
+                ProtectedFieldKeyRing.single("v1", new byte[32]), recordingNormalizers(threads),
+                MaskingPolicyRegistry.standard())) {
+            ReactiveFormClient client = client(new CapturingBatchExecutor(), protection, null);
+            for (boolean on : List.of(false, true)) {
+                JoinQuerySpec.Builder query = JoinQuerySpec.builder(ordinaryForm());
+                query.relation("protected", com.flying.orm.core.join.QueryRelation.of(
+                        protectedSearchForm(), "id", "id"));
+                ConditionGroup condition = ConditionGroup.and().add(ProtectedConditions.exact(
+                        on ? "secret" : "protected.secret", "classified")).build();
+                if (on) {
+                    query.andOn(query.related("protected"),
+                            com.flying.orm.core.join.JoinCondition.where(query.related("protected"), condition));
+                } else {
+                    query.where(condition);
+                }
+                JoinQuerySpec spec = query.select(query.root(), "id").build();
+                executeOnDriver(() -> client.selectJoin(spec).collectList().block());
+                assertEquals(1, threads.size(), "each condition must be normalized once");
+                assertFalse(threads.getFirst().startsWith(DRIVER_THREAD),
+                        on ? "ON protection must leave the driver thread" : "qualified WHERE protection must leave the driver thread");
+                threads.clear();
+            }
+        }
+    }
+
+    @Test
+    void ordinaryAndLockingQueryPlanRelatedProtectedConditionOffDriverThreadOnce() throws Exception {
+        List<String> threads = new CopyOnWriteArrayList<>();
+        try (ProtectedFieldRuntime protection = ProtectedFieldRuntime.create(
+                ProtectedFieldKeyRing.single("v1", new byte[32]), recordingNormalizers(threads),
+                MaskingPolicyRegistry.standard())) {
+            ReactiveFormClient client = client(new CapturingBatchExecutor(), protection, null);
+            DynamicForm form = DynamicForm.builder("ordinary", "ordinary")
+                    .addField(DynamicField.primaryKey("id", "BIGINT"))
+                    .relation("protected", com.flying.orm.core.join.QueryRelation.of(
+                            protectedSearchForm(), "id", "id")).build();
+            QuerySpec query = QuerySpec.of(form, ConditionGroup.and()
+                    .add(ProtectedConditions.exact("protected.secret", "classified")).build());
+            executeOnDriver(() -> client.select(query).collectList().block());
+            assertEquals(1, threads.size());
+            assertFalse(threads.getFirst().startsWith(DRIVER_THREAD));
+            threads.clear();
+            executeOnDriver(() -> client.lockingRead(query.withLock(com.flying.orm.rdb.lock.ReadLock.update()))
+                    .collectList().block());
+            assertEquals(1, threads.size());
+            assertFalse(threads.getFirst().startsWith(DRIVER_THREAD));
+            KeysetPageQuery page = KeysetPageQuery.first(2, KeysetSort.asc("id", NullOrder.LAST));
+            DynamicForm cursorForm = DynamicForm.builder("ordinary", "ordinary")
+                    .addField(DynamicField.primaryKey("rootId", "BIGINT"))
+                    .relation("protected", com.flying.orm.core.join.QueryRelation.of(protectedSearchForm(), "rootId", "id")
+                            .joinType(com.flying.orm.core.join.JoinType.INNER)).build();
+            QuerySpec cursorQuery = QuerySpec.of(cursorForm, query.where())
+                    .withProjection(List.of("rootId", "protected.id"), List.of());
+            for (boolean governed : List.of(false, true)) {
+                ReactiveFormClient configured = governed ? client.withQueryShapeLimits(
+                        com.flying.orm.core.condition.QueryShapeLimits.defaults().withMaxSortCount(4)) : client;
+                threads.clear();
+                Mono<?> cursor = configured.keysetPage(cursorQuery, KeysetPageQuery.first(2, KeysetSort.asc("rootId", com.flying.orm.core.page.NullOrder.LAST)));
+                assertTrue(threads.isEmpty(), "related cursor planning must be cold");
+                executeOnDriver(cursor::block);
+                executeOnDriver(cursor::block);
+                assertEquals(2, threads.size());
+                assertTrue(threads.stream().noneMatch(thread -> thread.startsWith(DRIVER_THREAD)));
+                for (boolean locked : List.of(false, true)) {
+                    threads.clear();
+                    Mono<?> pending = locked ? configured.lockingRead(query.withLock(ReadLock.update()), page)
+                            : configured.keysetPage(query, page);
+                    assertTrue(threads.isEmpty(), "related keyset planning must be cold");
+                    executeOnDriver(pending::block);
+                    executeOnDriver(pending::block);
+                    assertEquals(2, threads.size());
+                    assertTrue(threads.stream().noneMatch(thread -> thread.startsWith(DRIVER_THREAD)));
+                }
+            }
+        }
+    }
+
+    @Test
+    void joinedAggregatePlansNonRootProtectedConditionOffDriverThreadOnce() throws Exception {
+        List<String> threads = new CopyOnWriteArrayList<>();
+        try (ProtectedFieldRuntime protection = ProtectedFieldRuntime.create(
+                ProtectedFieldKeyRing.single("v1", new byte[32]), recordingNormalizers(threads),
+                MaskingPolicyRegistry.standard())) {
+            CapturingBatchExecutor executor = new CapturingBatchExecutor();
+            executor.queryRows = Flux.just(DynamicRow.copyOf(Map.of("total", 0L)));
+            ReactiveFormClient client = client(executor, protection, null);
+            JoinQuerySpec.Builder input = JoinQuerySpec.builder(ordinaryForm());
+            JoinSource secret = input.join(com.flying.orm.core.join.JoinType.LEFT, protectedSearchForm(), input.root(), "id", "id");
+            input.where(secret, ConditionGroup.and().add(ProtectedConditions.exact("secret", "classified")).build());
+            com.flying.orm.rdb.aggregate.AggregateSpec report = com.flying.orm.rdb.aggregate.AggregateSpec.builder(input.buildRelation())
+                    .aggregate(com.flying.orm.rdb.aggregate.AggregateExpression.countRows("rows")).build();
+            executeOnDriver(() -> client.aggregatePage(report, com.flying.orm.core.page.PageQuery.of(1, 20)).block());
+            assertEquals(1, threads.size());
+            assertFalse(threads.getFirst().startsWith(DRIVER_THREAD));
+        }
+    }
+
+    @Test
+    void laterUpdateLayoutRunsProtectedWorkOffTheDriverThread() throws Exception {
+        List<String> threads = new CopyOnWriteArrayList<>();
+        try (ProtectedFieldRuntime protection = ProtectedFieldRuntime.create(
+                ProtectedFieldKeyRing.single("v1", new byte[32]), recordingNormalizers(threads),
+                MaskingPolicyRegistry.standard())) {
+            ReactiveFormClient client = client(new CapturingBatchExecutor(), protection, null);
+            BatchSpec batch = BatchSpec.update(protectedBatchUpdateForm(), Flux.just(
+                    new BatchUpdate(Map.of("note", "ordinary"), ConditionGroup.and().where("id", "=", 1L).build()),
+                    new BatchUpdate(Map.of("secret", "classified"), ConditionGroup.and().where("id", "=", 2L).build())))
+                    .withOptions(BatchWriteOptions.of(2));
+            executeOnDriver(() -> client.writeBatch(batch).block());
+            assertFalse(threads.isEmpty());
+            assertTrue(threads.stream().noneMatch(thread -> thread.startsWith(DRIVER_THREAD)));
+        }
+    }
+
+    @Test
     void protectedBatchUpdateScopeIsPlannedOnceOffTheDriverThread() throws Exception {
         List<String> normalizationThreads = new CopyOnWriteArrayList<>();
         ProtectedValueNormalizerRegistry normalizers = recordingNormalizers(normalizationThreads);
@@ -371,7 +586,7 @@ class ReactiveProtectionCpuBoundaryTest {
             ReactiveFormClient client = client(new CapturingBatchExecutor(), protection, null);
             DynamicForm form = protectedBatchUpdateForm();
 
-            executeOnDriver(() -> client.writeBatchEvidence(
+            executeOnDriver(() -> client.writeBatch(
                     protectedBatchUpdate(form, BatchWriteOptions.of(2))).block());
 
             assertAll(
@@ -421,11 +636,11 @@ class ReactiveProtectionCpuBoundaryTest {
     }
 
     private static BatchSpec protectedBatchUpdate(DynamicForm form, BatchWriteOptions options) {
-        BatchOptimisticUpdate first = new BatchOptimisticUpdate(
+        BatchUpdate first = new BatchUpdate(
                 Map.of("note", "first"),
                 ConditionGroup.and().where("id", "=", 1L).build(),
                 OptimisticLockOptions.increment("version", 0L));
-        BatchOptimisticUpdate second = new BatchOptimisticUpdate(
+        BatchUpdate second = new BatchUpdate(
                 Map.of("note", "second"),
                 ConditionGroup.and().where("id", "=", 2L).build(),
                 OptimisticLockOptions.increment("version", 0L));
@@ -676,6 +891,9 @@ class ReactiveProtectionCpuBoundaryTest {
     }
 
     private static final class CapturingBatchExecutor implements ReactiveSqlExecutor {
+
+        @Override
+        public boolean supportsBatchRowLayouts() { return true; }
 
         private final AtomicReference<String> consumptionThread = new AtomicReference<>();
 

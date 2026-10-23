@@ -18,17 +18,7 @@ public record SqlExecutionOptions(long maxRows,
                                   long maxLargeObjectChars,
                                   int fetchSize) {
 
-    /** 显式安全策略可复用的十万行上限；普通流式默认不自动启用。 */
-    public static final long DEFAULT_MAX_ROWS = 100_000L;
-
-    /** 显式安全策略可复用的 64 MiB 结果预算；普通流式默认不自动启用。 */
-    public static final long DEFAULT_MAX_RESULT_BYTES = 64L * 1024 * 1024;
-
-    /** 单个二进制 LOB 默认最多物化 16 MiB。 */
-    public static final long DEFAULT_MAX_LARGE_OBJECT_BYTES = 16L * 1024 * 1024;
-
-    /** 单个文本 LOB 默认最多物化一千六百万字符。 */
-    public static final long DEFAULT_MAX_LARGE_OBJECT_CHARS = 16_000_000L;
+    private static final SqlExecutionOptions UNLIMITED = new SqlExecutionOptions(0, 0, 0, 0, 0);
 
     /** 未声明 fetchSize 时交给驱动自己决定。 */
     public SqlExecutionOptions(long maxRows,
@@ -38,20 +28,14 @@ public record SqlExecutionOptions(long maxRows,
         this(maxRows, maxResultBytes, maxLargeObjectBytes, maxLargeObjectChars, 0);
     }
 
-    /** 普通结果流保持直通，单个 LOB 物化仍有界。 */
-    public static SqlExecutionOptions safeDefaults() {
-        return new SqlExecutionOptions(0, 0, DEFAULT_MAX_LARGE_OBJECT_BYTES,
-                                       DEFAULT_MAX_LARGE_OBJECT_CHARS, 0);
-    }
-
-    /** 显式解除返回行数、结果内存和 LOB 容量限制，不作为框架默认值。 */
+    /** 不限制返回行数、结果内存和 LOB 容量。 */
     public static SqlExecutionOptions unlimited() {
-        return new SqlExecutionOptions(0, 0, 0, 0, 0);
+        return UNLIMITED;
     }
 
-    /** 以安全默认值替换查询返回行数，0 表示不限制。 */
+    /** 仅设置查询返回行数，0 表示不限制，其余容量仍由调用方决定。 */
     public static SqlExecutionOptions maxRows(long maxRows) {
-        return safeDefaults().withMaxRows(maxRows);
+        return unlimited().withMaxRows(maxRows);
     }
 
     public SqlExecutionOptions {

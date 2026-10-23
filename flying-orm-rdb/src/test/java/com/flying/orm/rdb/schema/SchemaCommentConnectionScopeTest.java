@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.rdb.execution.SqlExecutionSequenceException;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
@@ -18,17 +19,18 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 class SchemaCommentConnectionScopeTest {
     private static final SqlRequest COMMENT = new SqlRequest(
             "alter table events comment /*flying-orm:mysql-comment-no-backslash-escapes*/ 'C:\\data'", List.of());
-    private static final SqlExecutionOptions OPTIONS = SqlExecutionOptions.safeDefaults();
+    private static final SqlExecutionOptions OPTIONS = SqlExecutionOptions.unlimited();
 
     @Test
     void jdbcValidationAndDdlUseSameBoundExecutor() {
         var events = new ArrayList<String>();
-        var executor = new JdbcSchemaMigrationExecutor(jdbc(events, false), SchemaMigrationObserver.noop(), ignored -> { });
+        var executor = new JdbcSchemaMigrationExecutor(jdbc(events, false), SchemaMigrationObserver.noop());
         assertEquals(1L, executor.execute(List.of(COMMENT), OPTIONS));
         assertEquals(List.of("scope", "bound query", "bound ddl"), events);
     }
@@ -36,7 +38,7 @@ class SchemaCommentConnectionScopeTest {
     @Test
     void jdbcInvalidationOccursAfterScopedDdl() {
         var events = new ArrayList<String>();
-        var executor = new JdbcSchemaMigrationExecutor(jdbc(events, false), SchemaMigrationObserver.noop(), ignored -> { });
+        var executor = new JdbcSchemaMigrationExecutor(jdbc(events, false), SchemaMigrationObserver.noop());
         assertEquals(1L, executor.executeWithInvalidation(List.of(COMMENT), List.of("events"),
                                                         ignored -> events.add("invalidate"), OPTIONS));
         assertEquals(List.of("scope", "bound query", "bound ddl", "invalidate"), events);
@@ -64,10 +66,9 @@ class SchemaCommentConnectionScopeTest {
     @Test
     void reviewedJdbcMigrationUsesSameConnection() {
         var events = new ArrayList<String>();
-        var executor = new JdbcSchemaMigrationExecutor(jdbc(events, false), SchemaMigrationObserver.noop(),
-                                                      ignored -> events.add("invalidate"));
-        var result = executor.executeReviewed(reviewedMigration(), List.of("events"),
-                                              SchemaMigrationExecutionOptions.defaults());
+        var executor = new JdbcSchemaMigrationExecutor(jdbc(events, false), SchemaMigrationObserver.noop());
+        var result = executor.execute(reviewedMigration(), List.of("events"), ignored -> events.add("invalidate"),
+                                              SqlExecutionOptions.unlimited());
         assertEquals(1, result.steps().size());
         assertEquals(List.of("scope", "bound query", "bound ddl", "invalidate"), events);
     }
@@ -76,8 +77,8 @@ class SchemaCommentConnectionScopeTest {
     void reviewedReactiveMigrationUsesSameConnection() {
         var events = new ArrayList<String>();
         var executor = new SchemaMigrationExecutor(reactive(events, false), SchemaMigrationObserver.noop());
-        var result = executor.executeReviewed(reviewedMigration(), List.of("events"),
-                ignored -> events.add("invalidate"), SchemaMigrationExecutionOptions.defaults()).block();
+        var result = executor.execute(reviewedMigration(), List.of("events"),
+                ignored -> events.add("invalidate"), SqlExecutionOptions.unlimited()).block();
         assertEquals(1, result.steps().size());
         assertEquals(List.of("scope", "bound query", "bound ddl", "invalidate"), events);
     }
@@ -104,32 +105,29 @@ class SchemaCommentConnectionScopeTest {
 
     private static void assertRelationalScope(boolean reactive, boolean releaseFailure) {
         var events = new ArrayList<String>();
-        var before = SchemaSnapshot.present(VerifiedSchemaPlanFixtures.table(VerifiedSchemaPlanFixtures.ID));
-        var desired = VerifiedSchemaPlanFixtures.table(VerifiedSchemaPlanFixtures.ID, VerifiedSchemaPlanFixtures.NOTE);
-        var plan = VerifiedSchemaPlanFixtures.plan(before, desired, COMMENT);
-        AtomicInteger reads = new AtomicInteger();
-        java.util.function.Supplier<SchemaSnapshot> reader = () -> reads.getAndIncrement() == 0
-                ? before : SchemaSnapshot.present(desired);
-        SchemaExecutionReport result = reactive
+        var before = SchemaSnapshot.present(SchemaExecutionFixtures.table(SchemaExecutionFixtures.ID));
+        var desired = SchemaExecutionFixtures.table(SchemaExecutionFixtures.ID, SchemaExecutionFixtures.NOTE);
+        var plan = SchemaExecutionFixtures.plan(before, desired, COMMENT);
+        java.util.function.Supplier<SchemaMigrationResult> execution = () -> reactive
                 ? new SchemaMigrationExecutor(reactive(events, false, releaseFailure), SchemaMigrationObserver.noop())
-                    .executeReviewed(plan, () -> Mono.fromSupplier(reader), SchemaSnapshotCoverage::complete,
-                                     () -> events.add("invalidate"), SchemaMigrationExecutionOptions.defaults()).block()
+                    .execute(plan, List.of("accounts"), ignored -> events.add("invalidate"), SqlExecutionOptions.unlimited()).block()
                 : new JdbcSchemaMigrationExecutor(jdbc(events, false, releaseFailure),
-                                                  SchemaMigrationObserver.noop(), ignored -> { })
-                    .executeReviewed(plan, reader, SchemaSnapshotCoverage::complete,
-                                     () -> events.add("invalidate"), SchemaMigrationExecutionOptions.defaults());
-        assertEquals(releaseFailure ? SchemaExecutionStatus.UNKNOWN : SchemaExecutionStatus.SUCCESS, result.status());
-        assertEquals(1, result.steps().size());
-        assertEquals(SchemaExecutionStatus.SUCCESS, result.steps().getFirst().status());
+                                                  SchemaMigrationObserver.noop())
+                    .execute(plan, List.of("accounts"), ignored -> events.add("invalidate"), SqlExecutionOptions.unlimited());
+        if (releaseFailure) {
+            SqlExecutionSequenceException failure = assertThrows(SqlExecutionSequenceException.class, execution::get);
+            assertEquals(com.flying.orm.rdb.execution.SqlExecutionPhase.CLEANUP, failure.phase());
+            assertEquals(List.of(COMMENT), failure.completedWorkSteps().stream().map(step -> step.request()).toList());
+        } else {
+            assertEquals(List.of(COMMENT), execution.get().steps().stream().map(step -> step.request()).toList());
+        }
         assertEquals(List.of("scope", "bound query", "bound ddl", "invalidate"), events);
     }
 
-    private static ReviewedSchemaMigrationPlan reviewedMigration() {
+    private static SchemaMigrationPlan reviewedMigration() {
         DynamicForm form = DynamicForm.builder("events", "events")
                 .addField(DynamicField.primaryKey("id", "BIGINT")).build();
-        return new ReviewedSchemaMigrationPlan(
-                new SchemaMigrationPlan(form, List.of(), List.of(), true, List.of(COMMENT), List.of()),
-                new SchemaRollbackPlan(List.of(), List.of()), new OnlineDdlReview(OnlineDdlMode.ALLOW_BLOCKING, List.of()));
+        return new SchemaMigrationPlan(form.toTableDefinition(), true, List.of(COMMENT), List.of());
     }
 
     private static SyncSqlExecutor jdbc(List<String> events, boolean bound) {
@@ -139,7 +137,7 @@ class SchemaCommentConnectionScopeTest {
     @SuppressWarnings("unchecked")
     private static SyncSqlExecutor jdbc(List<String> events, boolean bound, boolean releaseFailure) {
         return (SyncSqlExecutor) Proxy.newProxyInstance(SyncSqlExecutor.class.getClassLoader(),
-                new Class<?>[]{SyncSqlExecutor.class}, (proxy, method, arguments) -> {
+                new Class<?>[]{com.flying.orm.rdb.support.ListQueryFixture.class}, (proxy, method, arguments) -> {
                     switch (method.getName()) {
                         case "withConnection":
                             assertEquals("select @@SESSION.sql_mode as sql_mode", ((SqlRequest) arguments[0]).sql());

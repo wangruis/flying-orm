@@ -20,7 +20,7 @@ class R2dbcFinalBatchCountsBoundaryTest {
     @Test void unexecutedTailDoesNotEraseCompletedBusinessFacts() {
         var counts = new R2dbcBatchEvidenceCounts(2, 0, BatchRowCountPolicy.EXACTLY_ONE, true);
         counts.startBusinessExecution();
-        counts.recordRowCount(1);
+        counts.record(1);
         counts.completeRow(1);
         counts.rowReady();
         var evidence = snapshot(counts, 2);
@@ -34,7 +34,7 @@ class R2dbcFinalBatchCountsBoundaryTest {
         var counts = new R2dbcBatchEvidenceCounts(3, 0, BatchRowCountPolicy.EXACTLY_ONE, true);
         for (long value : new long[]{1, -1, 1}) {
             counts.startBusinessExecution();
-            counts.recordRowCount(value);
+            counts.record(value);
             counts.completeRow(value);
             counts.rowReady();
         }
@@ -50,7 +50,7 @@ class R2dbcFinalBatchCountsBoundaryTest {
         var counts = new R2dbcBatchEvidenceCounts(3, 0, BatchRowCountPolicy.EXACTLY_ONE, false);
         for (long value : new long[]{1, 0, 1}) {
             counts.startBusinessExecution();
-            counts.recordRowCount(value);
+            counts.record(value);
             counts.completeRow(value);
             counts.rowReady();
         }

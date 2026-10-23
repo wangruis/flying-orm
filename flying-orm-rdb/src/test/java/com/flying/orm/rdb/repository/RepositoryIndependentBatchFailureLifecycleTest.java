@@ -31,6 +31,26 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class RepositoryIndependentBatchFailureLifecycleTest {
     @Test
+    void syncUnobservedBatchDoesNotConsumeBeyondExecutorDemand() {
+        List<Long> consumed = new ArrayList<>();
+        java.util.concurrent.atomic.AtomicInteger cancelled = new java.util.concurrent.atomic.AtomicInteger();
+        SyncBatchExecutor executor = (request, rowCompleted) -> {
+            assertNull(rowCompleted);
+            assertFalse(request.generatedKeys().required());
+            assertEquals(1, Flux.from(request.rows()).take(1).collectList().block().size());
+            return BatchEvidenceFixtures.successful(1);
+        };
+        SyncFormClient client = SyncFormClient.create(new NoopSyncSqlExecutor(), executor, renderer());
+        SyncFormRepository<Person> repository = SyncFormRepository.create(client,
+                client.entityModels().metadata(Person.class).toDynamicForm(), Person.class);
+        repository.insertBatch(Flux.just(new Person(1L, "one"), new Person(2L, "two"))
+                .doOnNext(entity -> consumed.add(entity.id))
+                .doOnCancel(cancelled::incrementAndGet), BatchWriteOptions.of(1));
+        assertEquals(List.of(1L), consumed);
+        assertEquals(1, cancelled.get());
+    }
+
+    @Test
     void syncDoesNotReplayPostFromSqlSuccessFactsAfterAuxiliaryFailure() {
         for (boolean callbackCompleted : new boolean[]{false, true}) {
             List<Long> posts = new ArrayList<>();
@@ -50,7 +70,7 @@ class RepositoryIndependentBatchFailureLifecycleTest {
                         return Mono.empty();
                     });
             assertSame(failure, assertThrows(BatchExecutionEvidenceException.class,
-                    () -> RepositoryBatchEvidenceAccess.sync(repository).insertEvidence(Flux.just(new Person(1L, "one"), new Person(2L, "two")),
+                    () -> repository.insertBatch(Flux.just(new Person(1L, "one"), new Person(2L, "two")),
                             BatchWriteOptions.of(2))));
             assertEquals(callbackCompleted ? List.of(1L) : List.of(), posts);
             assertEquals(2, facts.successfulCount(), "SQL evidence alone must not qualify POST");
@@ -81,7 +101,7 @@ class RepositoryIndependentBatchFailureLifecycleTest {
                         return Mono.empty();
                     });
             assertSame(failure, assertThrows(BatchExecutionEvidenceException.class,
-                    () -> RepositoryBatchEvidenceAccess.reactive(repository).insertEvidence(Flux.just(new Person(1L, "one"), new Person(2L, "two")),
+                    () -> repository.insertBatch(Flux.just(new Person(1L, "one"), new Person(2L, "two")),
                             BatchWriteOptions.of(2)).block()));
             assertEquals(callbackCompleted ? List.of(1L) : List.of(), posts);
             assertEquals(2, facts.successfulCount());
@@ -92,7 +112,7 @@ class RepositoryIndependentBatchFailureLifecycleTest {
         return FormDataSqlRenderer.create(SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.h2());
     }
 
-    private static final class NoopSyncSqlExecutor implements SyncSqlExecutor {
+    private static final class NoopSyncSqlExecutor implements com.flying.orm.rdb.support.ListQueryFixture {
 
         @Override
         public List<DynamicRow> query(SqlRequest request) {
@@ -105,7 +125,7 @@ class RepositoryIndependentBatchFailureLifecycleTest {
         }
 
         @Override
-        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
             throw new UnsupportedOperationException();
         }
     }

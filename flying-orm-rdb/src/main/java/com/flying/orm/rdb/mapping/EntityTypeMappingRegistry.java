@@ -18,13 +18,14 @@ import java.time.OffsetDateTime;
 import java.time.OffsetTime;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collection;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 
@@ -46,7 +47,7 @@ public final class EntityTypeMappingRegistry {
     private static final ValueCodec JSON_CODEC = new JsonCodecAdapter();
     private static final List<Mapping> STANDARD_MAPPINGS = standardMappings();
     private static final EntityTypeMappingRegistry STANDARD =
-            new EntityTypeMappingRegistry(STANDARD_MAPPINGS, List.of());
+            new EntityTypeMappingRegistry(STANDARD_MAPPINGS, List.of(), List.of());
 
     private final List<Mapping> mappings;
     private final Map<String, List<Mapping>> mappingsById;
@@ -54,12 +55,19 @@ public final class EntityTypeMappingRegistry {
     private final String fingerprint;
     private final ValueCodecRegistry valueCodecs;
 
-    private EntityTypeMappingRegistry(Collection<Mapping> mappings, List<Mapping> customMappings) {
+    private EntityTypeMappingRegistry(Collection<Mapping> mappings,
+                                      List<Mapping> customMappings,
+                                      List<Mapping> namedMappings) {
         List<Mapping> safeMappings = List.copyOf(mappings);
         this.mappings = safeMappings;
         this.customMappings = List.copyOf(customMappings);
-        this.mappingsById = indexById(safeMappings);
-        this.fingerprint = fingerprint(safeMappings);
+        List<Mapping> allMappings = new ArrayList<>(safeMappings);
+        allMappings.addAll(namedMappings);
+        this.mappingsById = indexById(allMappings);
+        this.fingerprint = namedMappings.isEmpty() ? fingerprint(safeMappings)
+                : StableDigest.sha256(FINGERPRINT_DOMAIN)
+                        .text("DEFAULT_MAPPINGS", fingerprint(safeMappings))
+                        .text("NAMED_MAPPINGS", fingerprint(namedMappings)).finishHex();
         this.valueCodecs = valueCodecs(ValueCodecRegistry.standard());
     }
 
@@ -80,16 +88,22 @@ public final class EntityTypeMappingRegistry {
      * @return 完整类型映射
      */
     public Mapping resolve(Class<?> javaType) {
+        return find(javaType).orElseThrow(() ->
+                new MappingException("no entity type mapping for Java type " + javaType.getTypeName()));
+    }
+
+    /** 查询类型绑定；未注册的业务类型可由 CRUD 使用外部 codec，Schema 则要求显式绑定。 */
+    public Optional<Mapping> find(Class<?> javaType) {
         Class<?> safeType = boxed(Objects.requireNonNull(javaType, "entity Java type must not be null"));
         Mapping registered = EntityTypeMappingResolver.resolveRegistered(
                 mappings, safeType, true, null, STANDARD_MAPPINGS);
         if (registered != null) {
-            return registered;
+            return Optional.of(registered);
         }
         if (safeType.isEnum()) {
-            return new Mapping("VARCHAR", safeType, DatabaseType.of("VARCHAR"), STANDARD_CODEC);
+            return Optional.of(new Mapping("VARCHAR", safeType, DatabaseType.of("VARCHAR"), STANDARD_CODEC));
         }
-        throw new MappingException("no entity type mapping for Java type " + safeType.getTypeName());
+        return Optional.empty();
     }
 
     /**
@@ -131,17 +145,12 @@ public final class EntityTypeMappingRegistry {
     /**
      * 把本注册表的实体 codec 放到现有应用 codec 前面，同时保留调用方已经配置的驱动适配器和其他转换。
      *
-     * <p>这个组合只在客户端启动期执行一次。实体映射仍是类型级的：同一个 Java 类型只允许一份映射，
-     * 因此不会在逐字段绑定时查表或猜测 {@code databaseTypeId}。</p>
+     * <p>这个组合只在客户端启动期执行一次，只包含默认类型映射。具名字段映射由实体描述精确绑定到字段，
+     * 不注入全局类型转换，也不在逐字段绑定时查表或猜测 {@code databaseTypeId}。</p>
      */
     public ValueCodecRegistry valueCodecs(ValueCodecRegistry fallback) {
-        ValueCodecRegistry combined = Objects.requireNonNull(
-                fallback, "fallback value codec registry must not be null");
-        List<ValueCodec> extensions = extensionCodecs(customMappings);
-        for (int index = extensions.size() - 1; index >= 0; index--) {
-            combined = combined.withFirst(extensions.get(index));
-        }
-        return combined;
+        return Objects.requireNonNull(fallback, "fallback value codec registry must not be null")
+                      .withFirst(extensionCodecs(customMappings).toArray(ValueCodec[]::new));
     }
 
     /** 内置映射及 codec 身份只在注册表初始化时创建一次。 */
@@ -180,12 +189,12 @@ public final class EntityTypeMappingRegistry {
     }
 
     private static Map<String, List<Mapping>> indexById(List<Mapping> mappings) {
-        Map<Class<?>, Mapping> mappingsByType = new LinkedHashMap<>();
+        Set<MappingKey> keys = new HashSet<>();
         Map<String, List<Mapping>> byId = new LinkedHashMap<>();
         for (Mapping mapping : mappings) {
-            Mapping previous = mappingsByType.putIfAbsent(mapping.javaType(), mapping);
-            if (previous != null) {
-                throw duplicateMapping(mapping);
+            if (!keys.add(new MappingKey(mapping.id(), mapping.javaType()))) {
+                throw new IllegalArgumentException("entity type mapping id " + mapping.id()
+                        + " already exists for Java type " + mapping.javaType().getTypeName());
             }
             byId.computeIfAbsent(mapping.id(), ignored -> new ArrayList<>()).add(mapping);
         }
@@ -194,6 +203,9 @@ public final class EntityTypeMappingRegistry {
             immutable.put(entry.getKey(), List.copyOf(entry.getValue()));
         }
         return Collections.unmodifiableMap(immutable);
+    }
+
+    private record MappingKey(String id, Class<?> javaType) {
     }
 
     private static IllegalArgumentException duplicateMapping(Mapping mapping) {
@@ -330,6 +342,7 @@ public final class EntityTypeMappingRegistry {
 
         private final Map<Class<?>, Mapping> mappings = new LinkedHashMap<>();
         private final List<Mapping> customMappings = new ArrayList<>();
+        private final List<Mapping> namedMappings = new ArrayList<>();
 
         private Builder() {
             for (Mapping mapping : STANDARD_MAPPINGS) {
@@ -351,7 +364,20 @@ public final class EntityTypeMappingRegistry {
         }
 
         public EntityTypeMappingRegistry build() {
-            return new EntityTypeMappingRegistry(mappings.values(), customMappings);
+            return new EntityTypeMappingRegistry(mappings.values(), customMappings, namedMappings);
+        }
+
+        /**
+         * 注册由 {@code @TableColumn(databaseTypeId=...)} 显式选择的字段映射。
+         * 同一 Java 类型可以有多个不同 ID；不改变该类型的默认映射或应用级 codec。
+         * 字段使用 {@code @EnumValue} 时，映射的 Java 类型是枚举值成员的类型。
+         */
+        public Builder registerNamed(String id,
+                                     Class<?> javaType,
+                                     DatabaseType databaseType,
+                                     ValueCodec codec) {
+            namedMappings.add(new Mapping(id, javaType, databaseType, codec, true));
+            return this;
         }
     }
 

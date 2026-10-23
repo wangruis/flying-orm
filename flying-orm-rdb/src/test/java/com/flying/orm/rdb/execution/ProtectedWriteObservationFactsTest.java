@@ -40,7 +40,7 @@ class ProtectedWriteObservationFactsTest {
                 .withObserver(events::add);
 
         assertThrows(RuntimeException.class, () -> executor.protectedWrite(
-                work(), SqlExecutionOptions.safeDefaults()));
+                work(), SqlExecutionOptions.unlimited()));
 
         fixture.assertStages(1, 1);
         assertErrorFacts(events);
@@ -54,7 +54,7 @@ class ProtectedWriteObservationFactsTest {
                 .withObserver(events::add);
 
         assertThrows(RuntimeException.class, () -> executor.protectedWrite(
-                work(), SqlExecutionOptions.safeDefaults()).block(Duration.ofSeconds(2)));
+                work(), SqlExecutionOptions.unlimited()).block(Duration.ofSeconds(2)));
 
         fixture.assertStages();
         assertErrorFacts(events);
@@ -68,7 +68,7 @@ class ProtectedWriteObservationFactsTest {
                 .withObserver(events::add);
 
         assertThrows(RuntimeException.class, () -> executor.protectedWrite(
-                work(), SqlExecutionOptions.safeDefaults()));
+                work(), SqlExecutionOptions.unlimited()));
 
         fixture.assertStages(1, 1);
         assertErrorFacts(events);

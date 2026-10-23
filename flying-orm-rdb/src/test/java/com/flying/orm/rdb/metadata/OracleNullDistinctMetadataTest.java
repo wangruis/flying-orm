@@ -112,7 +112,7 @@ class OracleNullDistinctMetadataTest {
         return FormMetadataRowConverter.toCompleteSchemaSnapshot(TABLE, columns(),
                 List.of(Map.of("TABLE_REPRESENTABLE", true)), List.of(), List.of(), indexes,
                 List.of(), List.of(), queries.typeMapper(), queries.snapshotTypeMapper(),
-                InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE);
+                MetadataQueryProfile.SnapshotDialect.ORACLE);
     }
 
     private static List<Map<String, Object>> columns() {
@@ -140,7 +140,7 @@ class OracleNullDistinctMetadataTest {
         return row;
     }
 
-    private static final class CatalogExecutor implements SyncSqlExecutor {
+    private static final class CatalogExecutor implements com.flying.orm.rdb.support.ListQueryFixture {
         @Override
         public List<DynamicRow> query(SqlRequest request) {
             List<Map<String, Object>> rows;
@@ -161,7 +161,7 @@ class OracleNullDistinctMetadataTest {
         }
 
         @Override
-        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
             throw new AssertionError("metadata verification must not execute writes");
         }
 

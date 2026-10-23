@@ -19,7 +19,7 @@ import java.util.regex.Pattern;
  */
 public final class MaskingPolicyRegistry {
 
-    private static final Pattern ID = Pattern.compile("[A-Za-z0-9._-]{1,32}");
+    private static final Pattern ID = Pattern.compile("[A-Za-z0-9._-]+");
 
     private final Map<String, MaskingPolicy> policies;
 

@@ -2,8 +2,6 @@ package com.flying.orm.rdb.metadata;
 
 import com.flying.orm.core.metadata.RelationIdentity;
 
-import java.util.Objects;
-
 /**
  * 元数据缓存失效入口。
  *
@@ -30,7 +28,9 @@ public interface MetadataCacheInvalidator {
      *
      * @param table 物理表名，可以是 table 或 schema.table
      */
-    void invalidate(String table);
+    default void invalidate(String table) {
+        invalidate(RelationIdentity.parse(table));
+    }
 
     /**
      * 清掉指定 schema + table 的表单和表元数据缓存。
@@ -39,29 +39,15 @@ public interface MetadataCacheInvalidator {
      * @param table  物理表名
      */
     default void invalidate(String schema, String table) {
-        invalidate(schema + "." + table);
+        invalidate(RelationIdentity.of(null, schema, table));
     }
 
     /**
-     * 按已经分段的关系身份失效。旧实现无法区分限定名与名称中的字面点号；遇到这种歧义时默认
-     * 全量失效，保证不会留下过期结构。内建缓存会覆盖本方法并执行精确失效。
+     * 按分段关系身份失效。实现直接接收 catalog/schema/table，不重新解析展示名。
      *
      * @param relation 已分段的关系身份
      */
-    default void invalidate(RelationIdentity relation) {
-        RelationIdentity target = Objects.requireNonNull(
-                relation, "metadata cache relation must not be null");
-        String schema = target.schema().orElse(null);
-        if (target.catalog().isPresent()
-                || target.table().contains(".")
-                || schema != null && schema.contains(".")) {
-            invalidateAll();
-        } else if (schema == null) {
-            invalidate(target.table());
-        } else {
-            invalidate(schema, target.table());
-        }
-    }
+    void invalidate(RelationIdentity relation);
 
     /**
      * 清空所有元数据缓存。适合批量 DDL、应用发布后统一刷新，或者上层懒得精确定位哪张表变了。
@@ -75,7 +61,7 @@ enum NoopMetadataCacheInvalidator implements MetadataCacheInvalidator {
     INSTANCE;
 
     @Override
-    public void invalidate(String table) {
+    public void invalidate(RelationIdentity relation) {
         // 明确无下游缓存，不需要动作。
     }
 

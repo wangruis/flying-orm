@@ -6,6 +6,8 @@ import com.flying.orm.core.internal.condition.ConditionValueNormalizer;
 import com.flying.orm.core.internal.condition.ConditionValuePolicy;
 import com.flying.orm.core.internal.value.BindableValueSnapshots;
 
+import java.util.Objects;
+
 /**
  * 租户字段范围。上层算出当前租户是谁，flying-orm 只负责把它安全拼进条件里。
  *
@@ -41,6 +43,23 @@ public record TenantScope(String field, Object value) {
     /** 包内范围合并读取构造时已经拥有的值，不触发公共访问器的隔离副本。 */
     Object ownedValue() {
         return value;
+    }
+
+    /** 按租户值语义比较，文本载体按内容匹配，数组按值匹配；不创建本范围值的快照。 */
+    public boolean matches(Object candidate) {
+        String expectedText = text(value);
+        String candidateText = text(candidate);
+        return expectedText != null && candidateText != null
+                ? expectedText.equals(candidateText) : Objects.deepEquals(value, candidate);
+    }
+
+    private static String text(Object value) {
+        return switch (value) {
+            case CharSequence text -> text.toString();
+            case Character character -> character.toString();
+            case char[] characters -> new String(characters);
+            case null, default -> null;
+        };
     }
 
     public ConditionGroup toCondition() {

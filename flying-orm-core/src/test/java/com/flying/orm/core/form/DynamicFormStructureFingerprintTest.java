@@ -13,6 +13,33 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 class DynamicFormStructureFingerprintTest {
 
     @Test
+    void automaticIndexNamesRemainIndependentOfRelationDisplay() {
+        DynamicField field = DynamicField.of("name", "VARCHAR").withUnique(true);
+        DynamicForm text = DynamicForm.builder("f", "app.users").addField(field).build();
+        DynamicForm segmented = DynamicForm.relationalBuilder("f", RelationIdentity.of(null, "app", "users"))
+                .addField(field).build();
+        org.junit.jupiter.api.Assertions.assertEquals(DynamicFormStructure.uniqueIndexName("app.users", "name"),
+                text.toTableDefinition().indexes().getFirst().name());
+        org.junit.jupiter.api.Assertions.assertEquals("uk_users_name", segmented.toTableDefinition().indexes().getFirst().name());
+        org.junit.jupiter.api.Assertions.assertTrue(text.mapsToSameRelation(segmented));
+        assertNotEquals(text.structureFingerprint(), segmented.structureFingerprint());
+    }
+
+    @Test
+    void stringAndSegmentedSourcesShareOnePhysicalIdentity() {
+        DynamicForm text = DynamicForm.builder("text", "app.users")
+                .addField(DynamicField.of("id", "BIGINT")).build();
+        DynamicForm segmented = DynamicForm.relationalBuilder("segmented", RelationIdentity.of(null, "app", "users"))
+                .addField(DynamicField.of("id", "BIGINT")).build();
+        org.junit.jupiter.api.Assertions.assertTrue(text.mapsToSameRelation(segmented));
+        org.junit.jupiter.api.Assertions.assertEquals(text.structureFingerprint(), segmented.structureFingerprint());
+        org.junit.jupiter.api.Assertions.assertDoesNotThrow(() -> text.diffTo(segmented));
+        org.junit.jupiter.api.Assertions.assertEquals(text.toTableDefinition().identity(), segmented.toTableDefinition().identity());
+        DynamicForm literal = DynamicForm.relationalBuilder("literal", RelationIdentity.table("app.users")).build();
+        org.junit.jupiter.api.Assertions.assertFalse(text.mapsToSameRelation(literal));
+    }
+
+    @Test
     void temporaryFormsDoNotComputeFingerprintsUntilRequested() throws ReflectiveOperationException {
         DynamicForm form = DynamicForm.builder("temporary", "audit_rows")
                                       .addField(DynamicField.of("id", "BIGINT"))
@@ -50,8 +77,8 @@ class DynamicFormStructureFingerprintTest {
                                                     .addField(DynamicField.of("b\0c", "TEXT").withUnique(true))
                                                     .build();
 
-        assertNotEquals(separatorInTable.toTableMetadata().indexes().getFirst().name(),
-                        separatorInColumn.toTableMetadata().indexes().getFirst().name());
+        assertNotEquals(separatorInTable.toTableDefinition().indexes().getFirst().name(),
+                        separatorInColumn.toTableDefinition().indexes().getFirst().name());
     }
 
     @Test

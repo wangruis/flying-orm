@@ -16,6 +16,25 @@
     <!-- Complete fluent query terminals stay together; state/planning remain in DmlQueryCommand. -->
     <suppress checks="MethodCount" files="(?:^|[\\/])QueryOperator\.java$"/>
     <suppress checks="MethodCount" files="(?:^|[\\/])SyncQueryOperator\.java$"/>
+    <!-- Entity projections and load callbacks share every terminal in the same fluent facade. -->
+    <suppress checks="MethodCount" files="(?:^|[\\/])EntityDmlQueryOperator\.java$"/>
+    <suppress checks="MethodCount" files="(?:^|[\\/])SyncEntityDmlQueryOperator\.java$"/>
+    <!-- Typed and computed aggregate selectors share one facade; SQL and decoding remain outside. -->
+    <suppress checks="MethodCount" files="(?:^|[\\/])EntityAggregate\.java$"/>
+    <!-- JOIN 薄门面保留同步/响应式、字段/实体对称入口，排序规划仍由既有共享命令负责。 -->
+    <suppress checks="MethodCount" files="(?:^|[\\/])(?:Sync)?(?:Entity)?JoinQueryOperator\.java$"/>
+    <!-- Immutable query transformations share one model; expression compilation stays in the form planner. -->
+    <suppress checks="FileLength|MethodCount" files="(?:^|[\\/])QuerySpec\.java$"/>
+    <!-- 同一 JOIN 状态的显式来源/声明关系入口保持内聚，不为方法数量阈值拆出第二套构建器。 -->
+    <suppress checks="MethodCount" files="(?:^|[\\/])JoinQuerySpec\.java$"/>
+    <!-- 单一查询规划/渲染所有者包含多种读取终端；不拆回重复的分页、聚合和关联实现。 -->
+    <suppress checks="MethodCount" files="(?:^|[\\/])(?:FormReadPlanner|FormQuerySqlRenderer|JoinQuerySqlRenderer|DmlQueryCommand)\.java$"/>
+    <!-- 实体属性适配与 JOIN 状态各由一个命令拥有，不能为方法计数拆回同步/响应式副本。 -->
+    <suppress checks="MethodCount" files="(?:^|[\\/])(?:EntityQueryCommand|JoinQueryCommand)\.java$"/>
+    <!-- 查询、单条及批量写入共享条件编译、字段编码和计划缓存，不拆出转发层。 -->
+    <suppress checks="MethodCount" files="(?:^|[\\/])FormSqlRenderSupport\.java$"/>
+    <!-- 同步、响应式与批量共用 Scope 组合规则，声明关系也沿用同一来源绑定。 -->
+    <suppress checks="FileLength|MethodCount" files="(?:^|[\\/])FormScopeSupport\.java$"/>
 
     <!-- Entity/schema facades keep their complete JDBC/R2DBC contract together. -->
     <suppress checks="FileLength|MethodCount" files="(?:^|[\\/])EntitySchemaSynchronizer\.java$"/>
@@ -23,17 +42,16 @@
     <suppress checks="MethodCount" files="ReactiveSchemaClient\.java"/>
 
     <!-- Named large-owner exceptions: complete schema algorithms stay reviewable in one source. -->
+    <!-- Pure migration rules and metadata target collection are shared by both schema clients. -->
+    <suppress checks="MethodCount" files="(?:^|[\\/])SchemaMigrationSupport\.java$"/>
     <suppress checks="FileLength|MethodCount" files="(?:^|[\\/])SchemaDialect\.java$"/>
     <suppress checks="FileLength|MethodCount" files="(?:^|[\\/])SchemaDialectDdlSupport\.java$"/>
-    <suppress checks="FileLength" files="(?:^|[\\/])SchemaDiffer\.java$"/>
-    <suppress checks="FileLength" files="(?:^|[\\/])VerifiedSchemaPlanExecutor\.java$"/>
+    <suppress checks="FileLength|MethodCount" files="(?:^|[\\/])SchemaDiffer\.java$"/>
 
     <!-- Protected write/query/result conversions share one codec and masking order across all form paths. -->
     <suppress checks="MethodCount" files="(?:^|[\\/])FormProtectionSqlSupport\.java$"/>
     <!-- Relational DDL keeps one column grammar; evolution and sequence planning already have separate owners. -->
-    <suppress checks="MethodCount" files="(?:^|[\\/])RelationalSchemaSqlRenderer\.java$"/>
-    <!-- DynamicForm DDL and physical-column preservation share one renderer; migration planning stays outside. -->
-    <suppress checks="MethodCount" files="(?:^|[\\/])SchemaTableSqlRenderer\.java$"/>
+    <suppress checks="FileLength|MethodCount" files="(?:^|[\\/])RelationalSchemaSqlRenderer\.java$"/>
 
     <!-- Oracle keeps its versioned data-dictionary facts together; the other dialect files remain bounded. -->
     <suppress checks="FileLength" files="(?:^|[\\/])OracleMetadataQueries\.java$"/>

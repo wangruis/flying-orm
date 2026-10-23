@@ -29,6 +29,10 @@ import org.reactivestreams.Publisher;
  */
 public interface ReactiveSqlExecutor {
 
+    /** 是否理解内部逐行 SQL 布局；普通自定义适配器保持固定 SQL 契约。 */
+    @InternalApi
+    default boolean supportsBatchRowLayouts() { return false; }
+
     /** Executes internal multi-statement work on one supplied connection. */
     @InternalApi
     default <T> Mono<T> withConnection(SqlRequest firstRequest,
@@ -143,30 +147,22 @@ public interface ReactiveSqlExecutor {
      * @return 影响行数和数据库生成键
      */
     default Mono<SqlWriteResult> rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
-        Objects.requireNonNull(request, "sql request must not be null");
-        Objects.requireNonNull(options, "sql execution options must not be null");
-        return Mono.error(new UnsupportedOperationException(
-                "reactive sql executor does not support generated keys"));
+        return rowsUpdatedReturningKeys(request, options, null);
     }
 
     /**
-     * ORM 内部按已校验的物理列名读取数据库生成键；不支持列名选择的自定义执行器继续使用原有入口。
+     * 执行写入并读取生成键；所有生成键入口由这一方法实现。
      *
      * @param request SQL 请求
      * @param options 执行保护选项
-     * @param generatedKeyColumn 已校验的生成键物理列名
+     * @param generatedKeyColumn 生成键物理列名；null 表示由驱动返回全部生成键
      * @return 写入结果
      */
-    @InternalApi
     default Mono<SqlWriteResult> rowsUpdatedReturningKeys(SqlRequest request,
                                                           SqlExecutionOptions options,
                                                           String generatedKeyColumn) {
-        String column = Objects.requireNonNull(generatedKeyColumn,
-                                               "generated key column must not be null").trim();
-        if (column.isEmpty()) {
-            return Mono.error(new IllegalArgumentException("generated key column must not be blank"));
-        }
-        return rowsUpdatedReturningKeys(request, options);
+        return Mono.error(new UnsupportedOperationException(
+                "reactive sql executor does not support generated keys"));
     }
 
     /** ORM 内部受保护字段工作单元，使用同一条上层提供的连接。 */
@@ -190,9 +186,6 @@ public interface ReactiveSqlExecutor {
         return Mono.error(new UnsupportedOperationException("reactive executor does not support batch writes"));
     }
 
-    default Mono<BatchExecutionEvidence> writeBatchEvidence(BatchWriteRequest request) {
-        return writeBatch(request);
-    }
 
     default Mono<BatchExecutionEvidence> writeProtectedBatch(BatchWriteRequest request) {
         return writeProtectedBatch(request, null);
@@ -205,9 +198,6 @@ public interface ReactiveSqlExecutor {
         return Mono.error(new UnsupportedOperationException("reactive executor does not support protected batch writes"));
     }
 
-    default Mono<BatchExecutionEvidence> writeProtectedBatchEvidence(BatchWriteRequest request) {
-        return writeProtectedBatch(request);
-    }
 
     private static Flux<DynamicRow> protectRows(Flux<DynamicRow> source,
                                                 String sql,

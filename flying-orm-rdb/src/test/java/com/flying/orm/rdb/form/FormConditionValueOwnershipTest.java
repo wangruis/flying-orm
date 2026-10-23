@@ -5,7 +5,7 @@ import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.cache.OrmCachePolicy;
-import com.flying.orm.rdb.dialect.DialectFeature;
+import com.flying.orm.rdb.dialect.DialectCapabilityId;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.internal.plan.StructuralPlanCaches;
 import org.junit.jupiter.api.Test;
@@ -80,9 +80,10 @@ class FormConditionValueOwnershipTest {
                 conditions,
                 dialect.json(),
                 dialect.name(),
-                dialect.supports(DialectFeature.NATIVE_BOOLEAN),
+                dialect.supports(DialectCapabilityId.NATIVE_BOOLEAN),
                 identifiers,
-                StructuralPlanCaches.create(OrmCachePolicy.safeDefaults()));
+                StructuralPlanCaches.create(OrmCachePolicy.safeDefaults()), java.util.Map.of(),
+                dialect.capabilities(), dialect.schema()::relationIdentifier);
     }
 
     private static final class CountingDate extends Date {

@@ -7,10 +7,15 @@ import com.flying.orm.core.annotation.EnumValue;
 import com.flying.orm.core.annotation.TableColumn;
 import com.flying.orm.core.annotation.TableId;
 import com.flying.orm.core.annotation.TableName;
+import com.flying.orm.core.annotation.TableField;
 import com.flying.orm.core.annotation.Version;
 import com.flying.orm.core.codec.ValueCodec;
 import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.StructuredConditionInput;
+import com.flying.orm.core.join.QueryRelation;
+import com.flying.orm.core.page.PageQuery;
+import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.scope.FieldUse;
@@ -21,7 +26,6 @@ import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.rdb.aggregate.AggregateExpression;
-import com.flying.orm.rdb.aggregate.AggregateHaving;
 import com.flying.orm.rdb.aggregate.AggregateRow;
 import com.flying.orm.rdb.aggregate.AggregateSpec;
 import com.flying.orm.rdb.aggregate.GroupSelection;
@@ -67,8 +71,69 @@ import java.util.stream.Stream;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class EntitySchemaRepositoryContractTest {
+
+    @TestFactory
+    Stream<DynamicTest> registeredRelationsServeEntityDslAndRepositoryWithoutExtraAssembly() {
+        return Stream.of(false, true).map(reactive -> DynamicTest.dynamicTest("relations reactive=" + reactive, () -> {
+            EntitySchemaDescriptor<RelationDepartment> department = EntitySchemaDescriptor.builder(RelationDepartment.class).build();
+            AtomicInteger resolutions = new AtomicInteger();
+            EntitySchemaDescriptor<RelationMember> member = EntitySchemaDescriptor.builder(RelationMember.class)
+                    .relation("department", QueryRelation.of(() -> {
+                        resolutions.incrementAndGet();
+                        return department.form();
+                    }, "department_id", "id")).build();
+            CapturingExecutor executor = new CapturingExecutor(row("id", 1L, "department_id", 2L, "total", 1L));
+            FlyingOrmClientBuilder builder = reactive ? FlyingOrmClientBuilder.reactive(executor, RdbDialect.postgresql())
+                    : FlyingOrmClients.builder(ConnectionAccessTestSupport.borrowed(executor.connection())).configuredDialect("postgresql");
+            try (FlyingOrmClients clients = builder.entitySchema(member).entitySchema(department).build()) {
+                RelationMember expected = new RelationMember(1L, 2L);
+                StructuredConditionInput filter = StructuredConditionInput.term("department.department_name", "eq", "x' OR 1=1 --");
+                if (reactive) {
+                    Flux<RelationMember> selected = clients.repository(RelationMember.class).createQuery().filter(filter).fetch();
+                    assertEquals(0, resolutions.get());
+                    assertEquals(expected, selected.single().block());
+                    assertEquals(expected, selected.single().block());
+                    assertEquals(2, resolutions.get());
+                } else {
+                    assertEquals(expected, clients.syncRepository(RelationMember.class).createQuery().filter(filter).fetch().getFirst());
+                    assertEquals(1, resolutions.get());
+                }
+                assertTrue(executor.lastQuery.sql().contains("left outer join"));
+                assertTrue(executor.lastQuery.sql().contains("\"t1\".\"department_name\""));
+                assertFalse(executor.lastQuery.sql().contains("x' OR 1=1 --"));
+                assertEquals(List.of("x' OR 1=1 --"), executor.lastQuery.parameters());
+                assertSame(member.form(), (reactive ? clients.forms().entityModels() : clients.syncForms().entityModels())
+                        .metadata(RelationMember.class).toDynamicForm());
+
+                int beforePage = resolutions.get();
+                ConditionGroup where = ConditionGroup.and().where("department.department_name", "=", "Sales").build();
+                PageQuery page = PageQuery.of(1, 5, PageSort.asc("department.department_name"));
+                List<RelationMember> paged = reactive
+                        ? clients.repository(RelationMember.class).page(where, page).block().rows()
+                        : clients.syncRepository(RelationMember.class).page(where, page).rows();
+                assertEquals(List.of(expected), paged);
+                assertEquals(beforePage + 1, resolutions.get());
+                assertTrue(executor.lastQuery.sql().contains("\"t1\".\"department_name\" asc"));
+
+                if (reactive) clients.repository(RelationMember.class).createQuery().where(RelationMember::id, 1L).fetch().blockLast();
+                else clients.syncRepository(RelationMember.class).createQuery().where(RelationMember::id, 1L).fetch();
+                assertEquals(beforePage + 1, resolutions.get());
+                assertFalse(executor.lastQuery.sql().contains("join"));
+            }
+        }));
+    }
+
+    @TableName("relation_members")
+    private record RelationMember(@TableId(type = IdType.INPUT) Long id,
+                                  @TableField("department_id") Long departmentId) { }
+
+    @TableName("relation_departments")
+    private record RelationDepartment(@TableId(type = IdType.INPUT) Long id,
+                                      @TableField("department_name") String name) { }
 
     @TestFactory
     Stream<DynamicTest> aggregatesHonorResultBudgetAfterTheExplicitCodec() {
@@ -84,7 +149,7 @@ class EntitySchemaRepositoryContractTest {
                                     DatabaseType.of("VARCHAR"), codec).build()).build();
                     CapturingExecutor executor = new CapturingExecutor(grouped ? row("g", "x", "total", 1L) : row("m", "x"));
                     QuerySpec query = QuerySpec.of(descriptor.form(), ConditionGroup.and().build())
-                            .withExecutionOptions(com.flying.orm.rdb.execution.SqlExecutionOptions.safeDefaults()
+                            .withExecutionOptions(com.flying.orm.rdb.execution.SqlExecutionOptions.unlimited()
                                     .withMaxResultBytes(maxBytes));
                     AggregateSpec spec = grouped ? AggregateSpec.builder(query).group(GroupSelection.of("text", "g"))
                             .aggregate(AggregateExpression.count("text", "total")).build()
@@ -466,10 +531,10 @@ class EntitySchemaRepositoryContractTest {
                             .aggregate(earliest).aggregate(latest).build();
                     AggregateSpec having = AggregateSpec.builder(query).group(group).aggregate(count)
                             .aggregate(earliest).aggregate(latest)
-                            .having(AggregateHaving.of(ConditionGroup.and()
+                            .having(ConditionGroup.and()
                                     .where("clock_group", "=", value)
                                     .where("earliest", ">=", value).where("latest", "<=", value)
-                                    .where("total", ">=", 1L).build())).build();
+                                    .where("total", ">=", 1L).build()).build();
                     FieldUsePolicy policy = governed ? FieldUsePolicy.builder()
                             .allow("clock", FieldUse.FILTER, FieldUse.GROUP, FieldUse.PROJECT, FieldUse.HAVING,
                                     FieldUse.AGGREGATE)

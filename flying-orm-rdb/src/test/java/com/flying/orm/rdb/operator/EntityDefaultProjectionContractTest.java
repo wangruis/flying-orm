@@ -174,7 +174,7 @@ class EntityDefaultProjectionContractTest {
                 DataScope.none().withFields(FieldScope.readable("id")));
 
         assertAll(
-                () -> assertIdOnlyProjection(fixture, client.entity(Account.class).query().execute().getFirst()),
+                () -> assertIdOnlyProjection(fixture, client.entity(Account.class).query().fetch().getFirst()),
                 () -> assertIdOnlyProjection(fixture, client.entity(Account.class).query().one()),
                 () -> assertIdOnlyProjection(fixture, client.entity(Account.class).query()
                         .page(1, 10).rows().getFirst()));
@@ -187,7 +187,7 @@ class EntityDefaultProjectionContractTest {
                 DataScope.none().withFields(FieldScope.readable("id")));
 
         assertAll(
-                () -> assertIdOnlyProjection(fixture, client.entity(Account.class).query().execute().single().block()),
+                () -> assertIdOnlyProjection(fixture, client.entity(Account.class).query().fetch().single().block()),
                 () -> assertIdOnlyProjection(fixture, client.entity(Account.class).query().one().block()),
                 () -> assertIdOnlyProjection(fixture, client.entity(Account.class).query()
                         .page(1, 10).block().rows().getFirst()));
@@ -262,16 +262,16 @@ class EntityDefaultProjectionContractTest {
 
         assertAll(
                 () -> assertThrows(MappingException.class,
-                        () -> fixture.sync.entity(WriteOnlyAccount.class).query().execute()),
+                        () -> fixture.sync.entity(WriteOnlyAccount.class).query().fetch()),
                 () -> assertThrows(MappingException.class,
-                        () -> fixture.reactive.entity(WriteOnlyAccount.class).query().execute().collectList().block()));
+                        () -> fixture.reactive.entity(WriteOnlyAccount.class).query().fetch().collectList().block()));
         assertNull(fixture.dataRequest, "invalid default queries must fail before execution");
     }
 
     private static void assertSyncTerminals(
             Fixture fixture, Supplier<SyncEntityDmlQueryOperator<Account>> query) {
         assertAll(
-                () -> assertDefaultProjection(fixture, query.get().execute().getFirst()),
+                () -> assertDefaultProjection(fixture, query.get().fetch().getFirst()),
                 () -> assertDefaultProjection(fixture, query.get().one()),
                 () -> assertDefaultProjection(fixture, query.get().page(1, 10).rows().getFirst()));
     }
@@ -279,7 +279,7 @@ class EntityDefaultProjectionContractTest {
     private static void assertReactiveTerminals(
             Fixture fixture, Supplier<EntityDmlQueryOperator<Account>> query) {
         assertAll(
-                () -> assertDefaultProjection(fixture, query.get().execute().single().block()),
+                () -> assertDefaultProjection(fixture, query.get().fetch().single().block()),
                 () -> assertDefaultProjection(fixture, query.get().one().block()),
                 () -> assertDefaultProjection(fixture, query.get().page(1, 10).block().rows().getFirst()));
     }
@@ -329,7 +329,7 @@ class EntityDefaultProjectionContractTest {
         private Fixture() {
             FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
                     SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql());
-            sync = SyncFormClient.create(new SyncSqlExecutor() {
+            sync = SyncFormClient.create(new com.flying.orm.rdb.support.ListQueryFixture() {
                 @Override
                 public List<DynamicRow> query(SqlRequest request) {
                     return List.of(row(request));
@@ -341,7 +341,7 @@ class EntityDefaultProjectionContractTest {
                 }
 
                 @Override
-                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                     throw new UnsupportedOperationException();
                 }
             }, new UnusedBatchExecutor(), renderer);

@@ -1,8 +1,5 @@
 package com.flying.orm.rdb.schema;
 
-import com.flying.orm.core.internal.hash.StableDigest;
-import com.flying.orm.core.internal.hash.StableEncoder;
-
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Objects;
@@ -11,17 +8,14 @@ import java.util.Set;
 /**
  * 元数据 reader 能稳定回读的结构事实集合。
  *
- * <p>coverage 描述 reader 的能力，不描述某一次读取结果。它是不可变、可指纹化的执行前置条件：
- * 只有 {@link #complete()} 才足以自动验证完整关系 DDL；部分 coverage 仍可用于读取和展示已观测子集，
+ * <p>coverage 描述 reader 的能力，不描述某一次读取结果。它是不可变的结构读取能力说明：
+ * 只有 {@link #complete()} 才足以比较完整关系 DDL；部分 coverage 仍可用于读取和展示已观测子集，
  * 但不能把未观测事实当成“不存在”。</p>
  *
  * @author wangr
  * @version v3.2
  */
 public final class SchemaSnapshotCoverage {
-
-    private static final StableDigest.Domain FINGERPRINT_DOMAIN =
-            StableDigest.domain("schema-snapshot-coverage/v1");
 
     public enum Fact {
         TABLE_EXISTENCE,
@@ -48,17 +42,11 @@ public final class SchemaSnapshotCoverage {
             new SchemaSnapshotCoverage(EnumSet.allOf(Fact.class));
 
     private final Set<Fact> observed;
-    private final String fingerprint;
 
     private SchemaSnapshotCoverage(Set<Fact> observed) {
         EnumSet<Fact> copy = observed.isEmpty()
                 ? EnumSet.noneOf(Fact.class) : EnumSet.copyOf(observed);
         this.observed = Set.copyOf(copy);
-        StableEncoder encoder = StableDigest.sha256(FINGERPRINT_DOMAIN);
-        for (Fact fact : Fact.values()) {
-            encoder.bool(fact.name(), copy.contains(fact));
-        }
-        fingerprint = encoder.finishHex();
     }
 
     public static SchemaSnapshotCoverage none() {
@@ -95,10 +83,6 @@ public final class SchemaSnapshotCoverage {
 
     public boolean isComplete() {
         return observed.size() == Fact.values().length;
-    }
-
-    public String fingerprint() {
-        return fingerprint;
     }
 
     @Override

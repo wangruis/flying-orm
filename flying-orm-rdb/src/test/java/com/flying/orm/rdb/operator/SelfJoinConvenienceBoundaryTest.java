@@ -22,7 +22,7 @@ class SelfJoinConvenienceBoundaryTest {
     @Test
     void formConvenienceRejectsAmbiguousIdentityBeforeMutatingItsSources() {
         DynamicForm form = form("employees");
-        JoinQueryCommand command = new JoinQueryCommand(form, renderer());
+        PlanningJoin command = new PlanningJoin(form, renderer());
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
                 () -> command.join(JoinType.LEFT, form, "manager_id", "id"));
         assertSourceBasedGuidance(error);
@@ -36,7 +36,7 @@ class SelfJoinConvenienceBoundaryTest {
     void formConvenienceKeepsDistinctViewsOfTheSamePhysicalTableAddressable() {
         DynamicForm employees = form("employees");
         DynamicForm managers = form("managers");
-        JoinQuerySpec spec = new JoinQueryCommand(employees, renderer())
+        JoinQuerySpec spec = new PlanningJoin(employees, renderer())
                 .join(JoinType.LEFT, managers, "manager_id", "id")
                 .select(employees, "id").select(managers, "id").spec();
         assertEquals(List.of(0, 1), spec.projections().stream().map(value -> value.field().source().ordinal()).toList());
@@ -45,20 +45,32 @@ class SelfJoinConvenienceBoundaryTest {
 
     @Test
     void typedConvenienceRejectsRepeatedClassWithAnExecutableSourceBasedAlternative() {
-        var command = new EntityJoinQueryCommand<>(models(), renderer(), Employee.class);
+        var command = new PlanningEntityJoin<>(models(), renderer(), Employee.class);
         IllegalArgumentException error = assertThrows(IllegalArgumentException.class,
                 () -> command.join(JoinType.LEFT, Employee.class, Employee::managerId, Employee::id));
         assertSourceBasedGuidance(error);
-        assertEquals(1, command.select(Employee.class, Employee::id, "employee_id").spec().sources().size());
+        assertEquals(1, command.selectAs(Employee.class, Employee::id, "employee_id").spec().sources().size());
     }
 
     @Test
     void typedConvenienceAllowsDistinctEntityClassesMappedToTheSameTable() {
-        JoinQuerySpec spec = new EntityJoinQueryCommand<>(models(), renderer(), Employee.class)
+        JoinQuerySpec spec = new PlanningEntityJoin<>(models(), renderer(), Employee.class)
                 .join(JoinType.LEFT, Manager.class, Employee::managerId, Manager::id)
-                .select(Employee.class, Employee::id, "employee_id")
-                .select(Manager.class, Manager::id, "manager_id").spec();
+                .selectAs(Employee.class, Employee::id, "employee_id")
+                .selectAs(Manager.class, Manager::id, "manager_id").spec();
         assertEquals(List.of(0, 1), spec.projections().stream().map(value -> value.field().source().ordinal()).toList());
+    }
+
+    private static final class PlanningJoin extends JoinQueryCommand<PlanningJoin> {
+        PlanningJoin(DynamicForm form, SqlRenderer renderer) { super(form, renderer); }
+        @Override protected PlanningJoin self() { return this; }
+    }
+
+    private static final class PlanningEntityJoin<R> extends EntityJoinQueryCommand<R, PlanningEntityJoin<R>> {
+        PlanningEntityJoin(EntityModelRegistry models, SqlRenderer renderer, Class<R> type) {
+            super(models, renderer, type);
+        }
+        @Override protected PlanningEntityJoin<R> self() { return this; }
     }
 
     private static void assertSourceBasedGuidance(IllegalArgumentException error) {

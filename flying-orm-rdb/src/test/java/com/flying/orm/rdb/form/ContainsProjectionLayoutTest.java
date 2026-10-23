@@ -4,6 +4,9 @@ import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.page.PageQuery;
+import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetSort;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.core.protection.MaskedFieldDefinition;
@@ -23,6 +26,8 @@ import com.flying.orm.rdb.protection.ProtectedFormLayout;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.DynamicTest;
+import org.junit.jupiter.api.TestFactory;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -35,7 +40,12 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
@@ -45,6 +55,199 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ContainsProjectionLayoutTest {
+
+    @Test
+    void reactiveContainsPublishesVerifiedRowsWithoutWaitingForQueryCompletion() {
+        try (Fixture fixture = new Fixture()) {
+            ProtectedFieldRuntime.WriteOperation write = fixture.runtime.writeOperation(
+                    fixture.form, ProtectedFormLayout.physical(fixture.form), DataScope.none(), ValueCodecRegistry.standard());
+            DynamicRow miss = DynamicRow.copyOf(write.prepare(
+                    Map.of("id", 1L, "secret", "goodbye", "note", "miss")).ownedValues());
+            DynamicRow match = DynamicRow.copyOf(write.prepare(
+                    Map.of("id", 2L, "secret", "alphabet", "note", "match")).ownedValues());
+            AtomicBoolean cancelled = new AtomicBoolean();
+            ReactiveSqlExecutor executor = new ReactiveSqlExecutor() {
+                public Flux<DynamicRow> query(SqlRequest request) {
+                    return Flux.just(miss, match).concatWith(Flux.never()).doOnCancel(() -> cancelled.set(true));
+                }
+                public Mono<Long> rowsUpdated(SqlRequest request) {
+                    return Mono.error(new AssertionError("read must not write"));
+                }
+            };
+            ReactiveFormClient client = ReactiveFormClient.create(executor, fixture.renderer);
+            try {
+                DynamicRow result = Objects.requireNonNull(client.select(QuerySpec.of(fixture.form, fixture.where)
+                        .withProjection(List.of("note", "id"), List.of())).next().block(Duration.ofSeconds(3)));
+                assertEquals(List.of("note", "id"), new ArrayList<>(result.keySet()));
+                assertEquals(2L, result.get("id"));
+                assertEquals("match", result.get("note"));
+                assertTrue(cancelled.get(), "taking the first verified row must cancel the unfinished query");
+            } finally {
+                client.entityModels().close();
+            }
+        }
+    }
+
+    @Test
+    void reactiveFinalRowsKeepFilteringOrderAndSubscriptionLocalBudget() {
+        try (Fixture fixture = new Fixture()) {
+            List<DynamicRow> candidates = List.of(row(1L, "alphabet", "first"),
+                    row(2L, "goodbye", "miss"), row(3L, "alphabet soup", "third"));
+            long matchedBytes = com.flying.orm.rdb.batch.BatchMemoryBudget.estimateRowBytes(candidates.getFirst())
+                    + com.flying.orm.rdb.batch.BatchMemoryBudget.estimateRowBytes(candidates.getLast());
+            Mono<List<DynamicRow>> result = fixture.support.finish(fixture.form, fixture.query,
+                    Flux.fromIterable(candidates), List.of("note", "id"), SensitiveDisplayMode.FULL,
+                    com.flying.orm.rdb.execution.SqlExecutionOptions.unlimited().withMaxResultBytes(matchedBytes)).collectList();
+            for (int subscription = 0; subscription < 2; subscription++) {
+                List<DynamicRow> rows = Objects.requireNonNull(result.block(Duration.ofSeconds(3)));
+                assertEquals(List.of(1L, 3L), rows.stream().map(value -> value.get("id")).toList());
+                assertEquals(List.of("first", "third"), rows.stream().map(value -> value.get("note")).toList());
+                rows.forEach(value -> assertEquals(List.of("note", "id"), new ArrayList<>(value.keySet())));
+                assertEquals(1, layoutCount(rows));
+            }
+        }
+    }
+
+    @TestFactory
+    Stream<DynamicTest> reactiveContainsFinishesEachCandidateBeforeSourceCompletion() {
+        return Stream.of("select", "page", "cursor").map(shape -> DynamicTest.dynamicTest(shape, () -> {
+            try (Fixture fixture = new Fixture()) {
+                Object encrypted = fixture.runtime.writeOperation(fixture.form, ProtectedFormLayout.physical(fixture.form),
+                        DataScope.none(), ValueCodecRegistry.standard())
+                        .prepare(Map.of("id", 1L, "secret", "alphabet")).ownedValues().get("secret");
+                DynamicRow missingProjection = DynamicRow.copyOf(Map.of("id", 1L, "secret", encrypted));
+                AtomicBoolean cancelled = new AtomicBoolean();
+                ReactiveSqlExecutor executor = new ReactiveSqlExecutor() {
+                    public Flux<DynamicRow> query(SqlRequest request) {
+                        return Flux.just(missingProjection).concatWith(Flux.never())
+                                .doOnCancel(() -> cancelled.set(true));
+                    }
+                    public Mono<Long> rowsUpdated(SqlRequest request) {
+                        return Mono.error(new AssertionError("read must not write"));
+                    }
+                };
+                ReactiveFormClient client = ReactiveFormClient.create(executor, fixture.renderer);
+                try {
+                    QuerySpec spec = QuerySpec.of(fixture.form, fixture.where)
+                            .withProjection(List.of("note", "id"), List.of());
+                    Mono<?> result = switch (shape) {
+                        case "select" -> client.select(spec).collectList();
+                        case "page" -> client.page(spec, PageQuery.of(1, 2));
+                        default -> client.keysetPage(spec, KeysetPageQuery.first(2, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST)));
+                    };
+                    CompletableFuture<?> future = result.toFuture();
+                    try {
+                        ExecutionException failure = assertThrows(ExecutionException.class,
+                                () -> future.get(3, TimeUnit.SECONDS));
+                        assertEquals("protected contains result is missing a projected field",
+                                failure.getCause().getMessage());
+                        assertTrue(cancelled.get());
+                    } finally {
+                        future.cancel(true);
+                    }
+                } finally {
+                    client.entityModels().close();
+                }
+            }
+        }));
+    }
+
+    @TestFactory
+    Stream<DynamicTest> reactiveContainsDecodesWithoutWaitingForAllRawRows() {
+        return Stream.of("select", "page", "cursor").map(shape -> DynamicTest.dynamicTest(shape, () -> {
+            try (Fixture fixture = new Fixture()) {
+                DynamicRow invalid = DynamicRow.copyOf(Map.of("id", 1L, "secret", new byte[0], "note", "invalid"));
+                RuntimeException expected = assertThrows(RuntimeException.class,
+                        () -> fixture.renderer.protection().decryptOperation(fixture.form, DataScope.none()).transform(invalid));
+                AtomicBoolean cancelled = new AtomicBoolean();
+                ReactiveSqlExecutor executor = new ReactiveSqlExecutor() {
+                    public Flux<DynamicRow> query(SqlRequest request) {
+                        return Flux.just(invalid).concatWith(Flux.never()).doOnCancel(() -> cancelled.set(true));
+                    }
+                    public Mono<Long> rowsUpdated(SqlRequest request) {
+                        return Mono.error(new AssertionError("read must not write"));
+                    }
+                };
+                ReactiveFormClient client = ReactiveFormClient.create(executor, fixture.renderer);
+                try {
+                    QuerySpec spec = QuerySpec.of(fixture.form, fixture.where);
+                    Mono<?> result = switch (shape) {
+                        case "select" -> client.select(spec).collectList();
+                        case "page" -> client.page(spec, PageQuery.of(1, 2));
+                        default -> client.keysetPage(spec, KeysetPageQuery.first(2, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST)));
+                    };
+                    CompletableFuture<?> future = result.toFuture();
+                    try {
+                        ExecutionException failure = assertThrows(ExecutionException.class,
+                                () -> future.get(3, TimeUnit.SECONDS));
+                        assertEquals(expected.getClass(), failure.getCause().getClass());
+                        assertTrue(cancelled.get(), "decoding failure must cancel the unfinished source");
+                    } finally {
+                        future.cancel(true);
+                    }
+                } finally {
+                    client.entityModels().close();
+                }
+            }
+        }));
+    }
+
+    @Test
+    void groupedOffsetPageStillRejectsContainsAndEncryptedGroups() {
+        try (Fixture fixture = new Fixture()) {
+            FormOperationPlanner planner = new FormOperationPlanner(fixture.renderer,
+                    new FormScopeSupport(fixture.renderer, StructuredConditionResolver.defaults(), DataScope.none()),
+                    com.flying.orm.rdb.execution.SqlExecutionOptions.unlimited());
+            QuerySpec contains = QuerySpec.of(fixture.form, fixture.where)
+                    .withProjection(List.of("note"), List.of("note"));
+            IllegalArgumentException search = assertThrows(IllegalArgumentException.class,
+                    () -> planner.reads.page(contains, com.flying.orm.core.page.PageQuery.of(1, 2)));
+            assertEquals("protected contains search does not support grouped queries", search.getMessage());
+            QuerySpec encrypted = QuerySpec.of(fixture.form, ConditionGroup.and().build())
+                    .withProjection(List.of("secret"), List.of("secret"));
+            IllegalArgumentException grouping = assertThrows(IllegalArgumentException.class,
+                    () -> planner.reads.page(encrypted, com.flying.orm.core.page.PageQuery.of(1, 2)));
+            assertEquals("encrypted field must not be used for query grouping", grouping.getMessage());
+        }
+    }
+
+    @TestFactory
+    Stream<DynamicTest> reactiveContainsPreservesReadShapePublicationOnTerminalFailure() {
+        return Stream.of("select", "page", "cursor").map(shape -> DynamicTest.dynamicTest(shape, () -> {
+            try (Fixture fixture = new Fixture()) {
+                Object encrypted = fixture.runtime.writeOperation(fixture.form, ProtectedFormLayout.physical(fixture.form),
+                        DataScope.none(), ValueCodecRegistry.standard())
+                        .prepare(Map.of("id", 1L, "secret", "alphabet", "note", "seed")).ownedValues().get("secret");
+                DynamicRow raw = DynamicRow.copyOf(Map.of("id", 1L, "secret", encrypted, "note", "seed"));
+                IllegalStateException failure = new IllegalStateException("source cleanup failed");
+                ReactiveSqlExecutor executor = new ReactiveSqlExecutor() {
+                    public Flux<DynamicRow> query(SqlRequest request) {
+                        return Flux.just(raw).concatWith(Mono.error(failure));
+                    }
+                    public Mono<Long> rowsUpdated(SqlRequest request) {
+                        return Mono.error(new AssertionError("read must not write"));
+                    }
+                };
+                ReactiveFormClient client = ReactiveFormClient.create(executor, fixture.renderer);
+                try {
+                    QuerySpec spec = QuerySpec.of(fixture.form, fixture.where);
+                    AtomicInteger published = new AtomicInteger();
+                    Mono<?> result = switch (shape) {
+                        case "select" -> client.select(spec).doOnNext(row -> published.incrementAndGet()).then();
+                        case "page" -> client.page(spec, PageQuery.of(1, 2)).doOnNext(page -> published.incrementAndGet());
+                        default -> client.keysetPage(spec, KeysetPageQuery.first(2, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST)))
+                                .doOnNext(page -> published.incrementAndGet());
+                    };
+                    assertSame(failure, assertThrows(IllegalStateException.class,
+                            () -> result.block(Duration.ofSeconds(3))));
+                    assertEquals(shape.equals("select") ? 1 : 0, published.get(),
+                            "row streams may emit before failure; a page needs successful completion");
+                } finally {
+                    client.entityModels().close();
+                }
+            }
+        }));
+    }
 
     @Test
     void narrowProjectionReusesOneLayoutAndActualEntityBinding() {
@@ -132,11 +335,12 @@ class ContainsProjectionLayoutTest {
     @Test
     void maskingAndPlaintextVerificationPrecedeTheSharedProjection() {
         try (Fixture fixture = new Fixture()) {
-            List<DynamicRow> result = fixture.support.finish(fixture.form, fixture.query,
-                    List.of(row(1L, "alphabet", "first"), row(2L, "goodbye", "false positive"),
-                            row(3L, "alphabet soup", "third")),
-                    List.of("secret", "id"), SensitiveDisplayMode.MASKED,
-                    com.flying.orm.rdb.execution.SqlExecutionOptions.safeDefaults());
+            List<DynamicRow> result = List.of(row(1L, "alphabet", "first"), row(2L, "goodbye", "false positive"),
+                            row(3L, "alphabet soup", "third")).stream()
+                    .map(fixture.support.rowFinisher(fixture.form, fixture.query,
+                            List.of("secret", "id"), SensitiveDisplayMode.MASKED,
+                            com.flying.orm.rdb.execution.SqlExecutionOptions.unlimited()))
+                    .filter(java.util.Objects::nonNull).toList();
             assertEquals(List.of(1L, 3L), result.stream().map(value -> value.get("id")).toList());
             assertEquals(List.of("********", "*************"),
                     result.stream().map(value -> value.get("secret")).toList());
@@ -251,8 +455,9 @@ class ContainsProjectionLayoutTest {
                 .prepareContainsQuery(form, form, where, DataScope.none()).orElseThrow();
 
         private List<DynamicRow> finish(List<DynamicRow> rows, List<String> fields) {
-            return support.finish(form, query, rows, fields, SensitiveDisplayMode.FULL,
-                    com.flying.orm.rdb.execution.SqlExecutionOptions.safeDefaults());
+            return rows.stream().map(support.rowFinisher(form, query, fields, SensitiveDisplayMode.FULL,
+                    com.flying.orm.rdb.execution.SqlExecutionOptions.unlimited()))
+                    .filter(java.util.Objects::nonNull).toList();
         }
 
         @Override

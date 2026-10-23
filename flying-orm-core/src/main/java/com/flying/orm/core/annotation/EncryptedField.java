@@ -27,8 +27,8 @@ public @interface EncryptedField {
     /** @return 允许的固定后缀 code point 长度 */
     int[] suffixLengths() default {};
 
-    /** @return 规范化结果最大 code point 数 */
-    int maxNormalizedLength() default 4096;
+    /** @return 规范化结果最大 code point 数；默认不额外限制 Java 字符串容量 */
+    int maxNormalizedLength() default Integer.MAX_VALUE;
 
     /** @return contains 查询最小 code point 数 */
     int containsMinLength() default 3;

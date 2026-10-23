@@ -18,10 +18,12 @@ import java.util.function.Consumer;
  * @version v3.1
  */
 public final class SchemaCacheInvalidationCoordinator
-        implements MetadataCacheInvalidator, Consumer<String> {
+        implements MetadataCacheInvalidator, Consumer<RelationIdentity> {
 
     private static final String FAILURE_MESSAGE =
             "schema DDL executed but cache invalidation failed";
+    private static final SchemaCacheInvalidationCoordinator EMPTY =
+            new SchemaCacheInvalidationCoordinator(List.of());
 
     private final List<Target> targets;
 
@@ -31,20 +33,26 @@ public final class SchemaCacheInvalidationCoordinator
 
     public static SchemaCacheInvalidationCoordinator of(MetadataCacheInvalidator... invalidators) {
         Objects.requireNonNull(invalidators, "schema cache invalidators must not be null");
+        if (invalidators.length == 0) return EMPTY;
         List<Target> targets = new ArrayList<>(invalidators.length);
         IdentityHashMap<Object, Boolean> identities = new IdentityHashMap<>();
         for (MetadataCacheInvalidator invalidator : invalidators) {
             MetadataCacheInvalidator safe = Objects.requireNonNull(
                     invalidator, "schema cache invalidator must not be null");
-            if (identities.put(safe, Boolean.TRUE) == null) {
+            if (safe == MetadataCacheInvalidator.none()) continue;
+            if (safe instanceof SchemaCacheInvalidationCoordinator coordinator) {
+                for (Target target : coordinator.targets) {
+                    if (identities.put(target.identity(), Boolean.TRUE) == null) targets.add(target);
+                }
+            } else if (identities.put(safe, Boolean.TRUE) == null) {
                 targets.add(new Target(safe, safe));
             }
         }
-        return new SchemaCacheInvalidationCoordinator(targets);
+        return targets.isEmpty() ? EMPTY : new SchemaCacheInvalidationCoordinator(targets);
     }
 
-    public static SchemaCacheInvalidationCoordinator from(Consumer<String> invalidator) {
-        Consumer<String> safe = Objects.requireNonNull(
+    public static SchemaCacheInvalidationCoordinator from(Consumer<RelationIdentity> invalidator) {
+        Consumer<RelationIdentity> safe = Objects.requireNonNull(
                 invalidator, "schema metadata invalidator must not be null");
         if (safe instanceof SchemaCacheInvalidationCoordinator coordinator) {
             return coordinator;
@@ -53,9 +61,9 @@ public final class SchemaCacheInvalidationCoordinator
     }
 
     /** 为自动迁移加入参与规划的 reader；已属于当前对象图时按身份跳过。 */
-    public SchemaCacheInvalidationCoordinator with(Object identity, Consumer<String> invalidator) {
+    public SchemaCacheInvalidationCoordinator with(Object identity, Consumer<RelationIdentity> invalidator) {
         Object safeIdentity = Objects.requireNonNull(identity, "schema cache identity must not be null");
-        Consumer<String> safeInvalidator = Objects.requireNonNull(
+        Consumer<RelationIdentity> safeInvalidator = Objects.requireNonNull(
                 invalidator, "schema cache invalidator must not be null");
         return withTarget(safeIdentity, consumerTarget(safeInvalidator));
     }
@@ -81,78 +89,48 @@ public final class SchemaCacheInvalidationCoordinator
         return new SchemaCacheInvalidationCoordinator(combined);
     }
 
-    /** 按规范关系身份失效；每个目标自行保留分段身份或执行安全的全量回退。 */
+    /** 按规范关系身份失效；每个目标接收同一份分段身份。 */
     @Override
     public void invalidate(RelationIdentity relation) {
         RelationIdentity target = Objects.requireNonNull(
                 relation, "schema relation identity must not be null");
-        List<Throwable> failures = new ArrayList<>();
-        for (Target registered : targets) {
-            try {
-                registered.invalidator().invalidate(target);
-            } catch (RuntimeException | Error failure) {
-                record(failures, failure);
-            }
-        }
-        throwFailures(failures);
+        notifyAll(registered -> registered.invalidator().invalidate(target), targets);
     }
 
     @Override
-    public void accept(String table) {
+    public void accept(RelationIdentity table) {
         invalidate(table);
     }
 
     @Override
-    public void invalidate(String table) {
-        List<Throwable> failures = new ArrayList<>();
-        for (Target target : targets) {
-            try {
-                target.invalidator().invalidate(table);
-            } catch (RuntimeException | Error failure) {
-                record(failures, failure);
-            }
-        }
-        throwFailures(failures);
-    }
-
-    @Override
-    public void invalidate(String schema, String table) {
-        List<Throwable> failures = new ArrayList<>();
-        for (Target target : targets) {
-            try {
-                target.invalidator().invalidate(schema, table);
-            } catch (RuntimeException | Error failure) {
-                record(failures, failure);
-            }
-        }
-        throwFailures(failures);
-    }
-
-    @Override
     public void invalidateAll() {
-        List<Throwable> failures = new ArrayList<>();
-        for (Target target : targets) {
-            try {
-                target.invalidator().invalidateAll();
-            } catch (RuntimeException | Error failure) {
-                record(failures, failure);
-            }
-        }
-        throwFailures(failures);
+        notifyAll(target -> target.invalidator().invalidateAll(), targets);
     }
 
     /** 所有目标表都必须收到通知；失败只在尝试完成后统一抛出。 */
-    public static void invalidateTables(Consumer<String> invalidator, List<String> tables) {
-        Consumer<String> safeInvalidator = Objects.requireNonNull(
+    public static <T> void invalidateTables(Consumer<T> invalidator, List<T> tables, Throwable primaryFailure) {
+        Consumer<T> safeInvalidator = Objects.requireNonNull(
                 invalidator, "schema metadata invalidator must not be null");
-        List<String> safeTables = Objects.requireNonNull(tables, "schema metadata tables must not be null");
-        for (String table : safeTables) {
+        List<T> safeTables = Objects.requireNonNull(tables, "schema metadata tables must not be null");
+        for (T table : safeTables) {
             Objects.requireNonNull(table, "schema metadata table must not be null");
         }
+        try {
+            notifyAll(safeInvalidator, safeTables);
+        } catch (RuntimeException invalidationFailure) {
+            if (primaryFailure == null) {
+                throw invalidationFailure;
+            }
+            suppress(primaryFailure, invalidationFailure);
+        }
+    }
+
+    private static <T> void notifyAll(Consumer<T> invalidator, List<T> values) {
+        if (values.isEmpty()) return;
         List<Throwable> failures = new ArrayList<>();
-        for (String table : safeTables) {
+        for (T value : values) {
             try {
-                safeInvalidator.accept(table);
+                invalidator.accept(value);
             } catch (RuntimeException | Error failure) {
                 record(failures, failure);
             }
@@ -160,24 +138,16 @@ public final class SchemaCacheInvalidationCoordinator
         throwFailures(failures);
     }
 
-    private static MetadataCacheInvalidator consumerTarget(Consumer<String> consumer) {
+    private static MetadataCacheInvalidator consumerTarget(Consumer<RelationIdentity> consumer) {
         return new MetadataCacheInvalidator() {
             @Override
-            public void invalidate(String table) {
-                consumer.accept(table);
-            }
-
-            @Override
             public void invalidateAll() {
-                // 现有 Consumer<String> 公共契约没有全量失效能力。
+                // 现有 Consumer<RelationIdentity> 公共契约没有全量失效能力。
             }
 
             @Override
             public void invalidate(RelationIdentity relation) {
-                String table = relation.schema()
-                        .map(schema -> schema + "." + relation.table())
-                        .orElseGet(relation::table);
-                consumer.accept(table);
+                consumer.accept(relation);
             }
         };
     }

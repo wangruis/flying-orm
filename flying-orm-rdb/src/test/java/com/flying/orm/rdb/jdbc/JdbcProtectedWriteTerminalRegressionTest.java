@@ -41,7 +41,7 @@ class JdbcProtectedWriteTerminalRegressionTest {
         Driver driver = new Driver();
         driver.keyFailure = driver.fatal;
         Throwable failure = assertThrows(Throwable.class,
-                () -> driver.executor(true).protectedWrite(work(true), SqlExecutionOptions.safeDefaults()));
+                () -> driver.executor(true).protectedWrite(work(true), SqlExecutionOptions.unlimited()));
         assertAll(() -> assertSame(driver.fatal, failure),
                 () -> driver.assertOwnership(0, 0, 0, 0),
                 () -> assertEquals(1, driver.acquisitions),
@@ -52,7 +52,7 @@ class JdbcProtectedWriteTerminalRegressionTest {
     @Test
     void externalProtectedSuccessRetainsExternalSource() {
         Driver driver = new Driver();
-        driver.executor(true).protectedWrite(work(false), SqlExecutionOptions.safeDefaults());
+        driver.executor(true).protectedWrite(work(false), SqlExecutionOptions.unlimited());
         driver.assertOwnership(0, 0, 0, 0);
         assertEquals(List.of(com.flying.orm.rdb.observation.SqlExecutionStatus.SUCCESS), driver.sources);
     }
@@ -62,7 +62,7 @@ class JdbcProtectedWriteTerminalRegressionTest {
         Driver driver = new Driver();
         driver.workFailure = new SQLException("write failed", "23000");
         assertThrows(RuntimeException.class,
-                () -> driver.executor(true).protectedWrite(work(false), SqlExecutionOptions.safeDefaults()));
+                () -> driver.executor(true).protectedWrite(work(false), SqlExecutionOptions.unlimited()));
         driver.assertOwnership(0, 0, 0, 0);
         assertEquals(List.of(com.flying.orm.rdb.observation.SqlExecutionStatus.ERROR), driver.sources);
     }

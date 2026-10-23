@@ -24,7 +24,7 @@ class OracleDefaultNullMetadataTest {
                     List.of(Map.of("TABLE_REPRESENTABLE", true)),
                     List.of(), List.of(), List.of(), List.of(), List.of(),
                     queries.typeMapper(), queries.snapshotTypeMapper(),
-                    InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE);
+                    MetadataQueryProfile.SnapshotDialect.ORACLE);
 
             assertEquals(ColumnDefault.none(), snapshot.completeTable().orElseThrow()
                     .columns().getFirst().defaultValue());
@@ -40,13 +40,13 @@ class OracleDefaultNullMetadataTest {
                         "COLUMN_DEFAULT", "(NULL)", "DEFAULT_CONSTRAINT_NAME", "DF_accounts_code")),
                 List.of(Map.of("TABLE_REPRESENTABLE", true)),
                 List.of(), List.of(), List.of(), List.of(), List.of(),
-                type -> type, InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER);
+                type -> type, MetadataQueryProfile.SnapshotDialect.SQL_SERVER);
         var column = snapshot.completeTable().orElseThrow().columns().getFirst();
 
         assertEquals(ColumnDefault.none(), column.defaultValue());
         assertEquals("DF_accounts_code", column.defaultConstraintName());
         assertEquals(ColumnDefault.literal("NULL"), RelationalMetadataValueParser.columnDefault(
                 "NULL", DatabaseType.of("VARCHAR"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL));
+                MetadataQueryProfile.SnapshotDialect.MYSQL));
     }
 }

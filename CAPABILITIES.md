@@ -6,20 +6,20 @@ Java 模型与条件 → 参数化 SQL → JDBC / R2DBC 执行 → 结果映射�
 
 | 能力 | 直接入口 | 保留的语义 |
 | --- | --- | --- |
-| 动态表单 CRUD | `operator.dml().query(form) / insert / update / delete` | 运行时模型、类型转换、参数快照、非空写条件保护 |
+| 动态表单 CRUD | `operator.dml().query(form) / insert / update / delete` | 运行时模型、类型转换、参数快照；空业务条件写入有效 Scope 内全部行，无 Scope 时为全表 |
 | 实体读写 | `clients.repository(Type.class)` | 注解映射、Lambda 字段、生成键、填充和生命周期 |
-| 投影与结果映射 | `select(...).fetchMap() / fetch(Type.class) / fetch(mapper) / one(Type.class)` | DynamicRow、bean、record、自定义 RowMapper；实体 `fetch()` 支持部分投影 |
+| 投影与结果映射 | `select(...).fetch() / fetch(Type.class) / fetch(mapper) / one(Type.class)` | DynamicRow、bean、record、自定义 RowMapper；实体 `fetch()` 支持部分投影 |
 | 条件 | `where(field, operator, value)`、`filter(input)` | AND/OR、NULL、集合、区间、可选条件、已注册业务语义 |
 | Scope 与字段治理 | `withDefaultDataScope`、`scope`、`from(form, policy, limits)` | 行范围取交集；投影、过滤、排序、分组等用途分别审核 |
-| 分页 | `page / cursorPage / keysetPage` | 页码与总数、稳定游标、复合可空 keyset、明确 NULL 顺序；动态查询可直接传 `Type.class` 映射 DTO |
-| JOIN / 自关联 | `dml().joinQuery`、`JoinQuerySpec` | 多来源、复合 ON、来源限定排序与分页；同表不同角色独立治理 |
-| 报表 | `query(form).aggregate(...)` | 分组、COUNT / COUNT DISTINCT / SUM / AVG / MIN / MAX、HAVING、类型化结果 |
+| 分页 | `page / keysetPage` | 页码与总数、稳定游标、复合可空 keyset、明确 NULL 顺序；动态查询可直接传 `Type.class` 映射 DTO |
+| JOIN / 自关联 | `dml().joinQuery`、`JoinQuerySpec` | INNER / LEFT / RIGHT / FULL、复合 ON、来源限定排序与分页；同表不同角色独立治理，FULL 要求方言声明支持 |
+| 报表 | `query(form).aggregate(...)` | 分组、COUNT / COUNT DISTINCT / SUM / AVG / MIN / MAX、总体/样本标准差与方差、HAVING、类型化结果 |
 | 写入治理 | `update / delete`、`WriteSpec` | 租户、逻辑删除、乐观锁、字段权限、范围内写入 |
-| 批量 | `insertBatch / upsertBatch / updateBatch` | 有界缓冲、逐行乐观锁、范围内冲突更新、生成键、保护字段、执行证据；响应式 Repository 可直接接收实体流并沿用客户端预算 |
+| 批量 | `insertBatch / upsertBatch / updateBatch` | 有界缓冲、逐行乐观锁、范围内冲突更新、显式业务唯一键、生成键、保护字段、执行证据；响应式 Repository 可直接接收实体流并沿用客户端预算 |
 | 多行同值更新 / 删除 | `update / delete + where(..., "in", ids)` | 一条范围操作，继续应用 Scope 与逻辑删除 |
-| 动态结构 | `operator.ddl()`、`clients.schema()` | 建表、加列、索引、差异计划、风险审核、执行前核验与回读 |
-| 读取已有结构 | `operator.metadata().readTable / readForm` | 表、列、索引与外键元数据，动态表单转换、显式缓存失效 |
-| 实体注解结构同步 | `clients.entitySchemas()` | 校验、安全更新、批准后的危险变更；完整关系模型使用 relational 入口 |
+| 动态结构 | `operator.ddl()`、`clients.schema()` | 建表、加列、索引、结构差异、DDL 规划与执行、显式结构读取 |
+| 读取已有结构 | `operator.metadata().readTableNames / readTable / readForm` | 按 Schema 枚举表和视图名称，表、列、索引与外键元数据，动态表单转换、显式缓存失效 |
+| 实体注解结构同步 | `clients.entitySchemas()` | 校验、增量更新、显式完整更新；完整关系模型使用 relational 入口 |
 | 加密、检索、脱敏 | 模型声明 + `ProtectedConditions` | EXACT / SUFFIX / CONTAINS、辅助关系、候选验证、声明/强制脱敏 |
 | 锁定读取 | `forms.lockingRead` | 方言支持的行锁语义，不管理事务 |
 | SQL 模板与原生 SQL | `operator.sqlTemplate / unsafeNativeSql` | 注册模板、标识符槽位、命名参数、映射与执行保护 |

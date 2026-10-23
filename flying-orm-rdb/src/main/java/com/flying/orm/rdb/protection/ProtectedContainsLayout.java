@@ -2,8 +2,11 @@ package com.flying.orm.rdb.protection;
 
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.ForeignKeyMetadata;
-import com.flying.orm.core.metadata.IndexMetadata;
+import com.flying.orm.core.metadata.ColumnDefault;
+import com.flying.orm.core.metadata.ColumnDefinition;
+import com.flying.orm.core.metadata.ForeignKeyDefinition;
+import com.flying.orm.core.metadata.IndexDefinition;
+import com.flying.orm.core.metadata.ReferentialAction;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.rdb.internal.InternalApi;
@@ -27,8 +30,8 @@ import java.util.Optional;
  */
 @InternalApi
 public record ProtectedContainsLayout(DynamicForm table,
-                                      List<IndexMetadata> indexes,
-                                      List<ForeignKeyMetadata> foreignKeys) {
+                                      List<IndexDefinition> indexes,
+                                      List<ForeignKeyDefinition> foreignKeys) {
 
     public ProtectedContainsLayout {
         table = Objects.requireNonNull(table, "protected contains table must not be null");
@@ -45,6 +48,9 @@ public record ProtectedContainsLayout(DynamicForm table,
      */
     public static Optional<ProtectedContainsLayout> resolve(DynamicForm form) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
+        if (safeForm.protections().encryptedFields().isEmpty()) {
+            return Optional.empty();
+        }
         boolean enabled = safeForm.protections().encryptedFields().values().stream()
                                   .anyMatch(definition -> definition.searchModes()
                                                                     .contains(EncryptedSearchMode.CONTAINS));
@@ -58,34 +64,32 @@ public record ProtectedContainsLayout(DynamicForm table,
             throw new IllegalArgumentException("protected contains search requires a primary key");
         }
         String tableName = containsTable(safeForm);
-        DynamicForm.Builder table = safeForm.relationIdentity()
-                .map(identity -> DynamicForm.relationalBuilder(
-                        safeForm.id() + "Contains", identity.withTable(tableName)))
-                .orElseGet(() -> DynamicForm.builder(safeForm.id() + "Contains", tableName));
-        primaryKeys.forEach(field -> table.addField(ownerColumn(field)));
+        DynamicForm.Builder table = DynamicForm.relationalBuilder(
+                safeForm.id() + "Contains", safeForm.relationIdentity().withTable(tableName));
+        primaryKeys.forEach(field -> table.addField(new DynamicField(ownerColumn(field.column()), false, false)));
         List<String> ownerColumns = primaryKeys.stream().map(DynamicField::name).toList();
         String fieldTag = fieldTagColumn(ownerColumns);
         String tokenHash = tokenHashColumn(ownerColumns);
         table.addField(DynamicField.of(fieldTag, "VARCHAR").withLength(30).withNullable(false));
         table.addField(DynamicField.of(tokenHash, ProtectedFormLayout.HASH_TYPE).withNullable(false));
 
-        IndexMetadata.Builder query = IndexMetadata.builder(
-                ProtectedColumnNames.containsQueryIndex(safeForm.id(), safeForm.table()))
+        IndexDefinition.Builder query = IndexDefinition.builder(
+                ProtectedColumnNames.containsQueryIndex(safeForm.id(), safeForm.namingSource()))
                                                    .addColumn(fieldTag)
                                                    .addColumn(tokenHash);
         ownerColumns.forEach(query::addColumn);
-        IndexMetadata.Builder unique = IndexMetadata.builder(
-                ProtectedColumnNames.containsUniqueIndex(safeForm.id(), safeForm.table())).unique();
+        IndexDefinition.Builder unique = IndexDefinition.builder(
+                ProtectedColumnNames.containsUniqueIndex(safeForm.id(), safeForm.namingSource())).unique();
         ownerColumns.forEach(unique::addColumn);
         unique.addColumn(fieldTag).addColumn(tokenHash);
 
-        ForeignKeyMetadata foreignKey = new ForeignKeyMetadata(
-                ProtectedColumnNames.containsForeignKey(safeForm.id(), safeForm.table()),
-                ownerColumns,
-                safeForm.table(),
-                ownerColumns);
+        ForeignKeyDefinition.Builder foreignKey = ForeignKeyDefinition.builder(
+                ProtectedColumnNames.containsForeignKey(safeForm.id(), safeForm.namingSource()))
+                .reference(safeForm.relationIdentity())
+                .onDelete(ReferentialAction.CASCADE);
+        ownerColumns.forEach(column -> foreignKey.addColumn(column).addReferenceColumn(column));
         return Optional.of(new ProtectedContainsLayout(
-                table.build(), List.of(query.build(), unique.build()), List.of(foreignKey)));
+                table.build(), List.of(query.build(), unique.build()), List.of(foreignKey.build())));
     }
 
     /** 返回与 owner 主键不冲突的字段标签列；无冲突时保留既有物理名称。 */
@@ -109,17 +113,13 @@ public record ProtectedContainsLayout(DynamicForm table,
     }
 
     private static String containsTable(DynamicForm form) {
-        String businessTable = form.table();
-        String generatedName = ProtectedColumnNames.containsTable(form.id(), businessTable);
-        if (form.relationIdentity().isPresent()) {
-            return generatedName;
-        }
-        int separator = businessTable.lastIndexOf('.');
-        return separator < 0 ? generatedName : businessTable.substring(0, separator + 1) + generatedName;
+        return ProtectedColumnNames.containsTable(form.id(), form.namingSource());
     }
 
-    private static DynamicField ownerColumn(DynamicField field) {
-        return new DynamicField(field.name(), field.databaseType(), false, false, false,
-                                field.length(), field.precision(), field.scale(), null, ValueGeneration.none());
+    /** 侧表引用已有主键值，保留完整存储类型，不继承主表的生成与默认规则。 */
+    static ColumnDefinition ownerColumn(ColumnDefinition source) {
+        return source.toBuilder().nullable(false).comment(null)
+                .defaultValue(ColumnDefault.none()).defaultConstraintName(null)
+                .generation(ValueGeneration.none()).build();
     }
 }

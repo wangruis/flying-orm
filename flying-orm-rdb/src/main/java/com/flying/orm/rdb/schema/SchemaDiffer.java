@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -45,8 +46,52 @@ public final class SchemaDiffer {
                       .thenComparing(operation -> operation.kind() == SchemaOperation.Kind.ADD_COLUMN
                               ? "" : operation.objectName());
 
-    /** 无状态对象可以安全复用；主要为依赖注入式调用保留。 */
-    public SchemaDiffer() {
+    private SchemaDiffer() {
+    }
+
+    /** 增量声明覆盖同名对象；未声明对象保留，新增列按声明顺序追加。 */
+    static RelationalTableDefinition incrementalTarget(RelationalTableDefinition declared,
+                                                        SchemaSnapshot actual,
+                                                        SchemaDialect dialect) {
+        requireSameRelation(declared.identity(), actual.identity(), dialect);
+        if (actual.tableState() != SchemaSnapshot.State.PRESENT) {
+            return declared;
+        }
+        RelationalTableDefinition current = actual.knownDefinition();
+        RelationalTableDefinition.Builder target = RelationalTableDefinition.builder(declared.identity())
+                .comment(declared.comment() == null ? current.comment() : declared.comment());
+        merge(current.columns(), declared.columns(), ColumnDefinition::name, dialect).forEach(target::addColumn);
+        declared.primaryKey().or(current::primaryKey).ifPresent(target::primaryKey);
+        declared.partition().or(current::partition).ifPresent(target::partition);
+        // MySQL 的 UNIQUE 约束和唯一索引可描述同一物理对象，不能合并成两个同名声明。
+        Set<String> declaredIndexes = names(declared.indexes(), IndexDefinition::name, dialect);
+        Set<String> declaredUniques = names(declared.uniqueConstraints(), UniqueConstraintDefinition::name, dialect);
+        merge(current.uniqueConstraints().stream()
+                        .filter(value -> !declaredIndexes.contains(
+                                SchemaDefinitionEquality.canonicalName(value.name(), dialect))).toList(),
+                declared.uniqueConstraints(), UniqueConstraintDefinition::name, dialect).forEach(target::addUnique);
+        merge(current.indexes().stream()
+                        .filter(value -> !declaredUniques.contains(
+                                SchemaDefinitionEquality.canonicalName(value.name(), dialect))).toList(),
+                declared.indexes(), IndexDefinition::name, dialect).forEach(target::addIndex);
+        merge(current.checks(), declared.checks(), CheckConstraintDefinition::name, dialect).forEach(target::addCheck);
+        merge(current.foreignKeys(), declared.foreignKeys(), ForeignKeyDefinition::name, dialect)
+                .forEach(target::addForeignKey);
+        return target.build();
+    }
+
+    private static <T> java.util.Collection<T> merge(List<T> current, List<T> declared,
+                                                     Function<T, String> name, SchemaDialect dialect) {
+        Map<String, T> merged = new LinkedHashMap<>();
+        for (T value : current) {
+            merged.put(SchemaDefinitionEquality.canonicalName(name.apply(value), dialect), value);
+        }
+        // byName 同时拒绝方言折叠后歧义的目标名称；不能用 put 静默覆盖声明。
+        byName(declared, name, dialect);
+        for (T value : declared) {
+            merged.put(SchemaDefinitionEquality.canonicalName(name.apply(value), dialect), value);
+        }
+        return merged.values();
     }
 
     /**
@@ -130,6 +175,13 @@ public final class SchemaDiffer {
                                           SchemaCompatibilityMode mode,
                                           String dialectId,
                                           SchemaDialect schemaDialect) {
+        return diff(desired, actual, capabilities, mode, dialectId, schemaDialect, null);
+    }
+
+    static SchemaCompatibilityReport diff(RelationalTableDefinition desired, SchemaSnapshot actual,
+                                          DialectCapabilities capabilities, SchemaCompatibilityMode mode,
+                                          String dialectId, SchemaDialect schemaDialect,
+                                          Set<String> declaredColumns) {
         RelationalTableDefinition target = Objects.requireNonNull(
                 desired, "desired relational table must not be null");
         SchemaSnapshot observed = Objects.requireNonNull(actual, "actual schema snapshot must not be null");
@@ -146,30 +198,23 @@ public final class SchemaDiffer {
             case ABSENT -> operations.add(createTable(target, dialectCapabilities));
             case UNKNOWN -> operations.add(manual(target, observed, "table-state"));
             case PRESENT -> diffPresent(
-                    target, observed, operations, mysqlMetadata, schemaDialect);
+                    target, observed, operations, mysqlMetadata, schemaDialect, declaredColumns);
         }
         operations.sort(OPERATION_ORDER);
         return SchemaCompatibilityReport.of(compatibilityMode, operations);
-    }
-
-    /** 实例式别名；行为与 {@link #diff(RelationalTableDefinition, SchemaSnapshot, DialectCapabilities, SchemaCompatibilityMode)} 相同。 */
-    public SchemaCompatibilityReport compare(RelationalTableDefinition desired,
-                                             SchemaSnapshot actual,
-                                             DialectCapabilities capabilities,
-                                             SchemaCompatibilityMode mode) {
-        return diff(desired, actual, capabilities, mode);
     }
 
     private static void diffPresent(RelationalTableDefinition desired,
                                     SchemaSnapshot actual,
                                     List<SchemaOperation> operations,
                                     boolean mysql,
-                                    SchemaDialect schemaDialect) {
+                                    SchemaDialect schemaDialect,
+                                    Set<String> declaredColumns) {
         RelationIdentity relation = desired.identity();
         diffTableComment(desired, actual, operations);
         diffPartition(desired, actual, operations, schemaDialect);
         diffColumns(relation, desired.columns(), actual.columns().value(), operations, schemaDialect,
-                    actual.physicalColumnTypes(), actual.observedLogicalTypes());
+                    actual.physicalColumnTypes(), actual.observedLogicalTypes(), declaredColumns);
         diffColumnOrder(desired, actual, operations, schemaDialect);
         diffPrimaryKey(desired, actual, operations, mysql, schemaDialect);
         UniqueIndexComparison uniqueIndexes = uniqueIndexComparison(
@@ -186,17 +231,7 @@ public final class SchemaDiffer {
                          "unique-constraints",
                          operations,
                          schemaDialect);
-        diffObservedList(relation,
-                         uniqueIndexes.desiredIndexes(),
-                         uniqueIndexes.actualIndexes(),
-                         IndexDefinition::name,
-                         (left, right) -> SchemaDefinitionEquality.sameIndex(left, right, schemaDialect),
-                         SchemaOperation.Kind.ADD_INDEX,
-                         SchemaOperation.Kind.CHANGE_INDEX,
-                         SchemaOperation.Kind.DROP_INDEX,
-                         "indexes",
-                         operations,
-                         schemaDialect);
+        diffIndexes(relation, uniqueIndexes.desiredIndexes(), uniqueIndexes.actualIndexes(), operations, schemaDialect);
         diffObservedList(relation,
                          desired.checks(),
                          actual.checks(),
@@ -293,9 +328,9 @@ public final class SchemaDiffer {
         if (!mysql || actual.state() != SchemaSnapshot.State.PRESENT) {
             return actual;
         }
-        Set<String> declaredIndexNames = names(desired.indexes(), IndexDefinition::name);
+        Set<String> declaredIndexNames = names(desired.indexes(), IndexDefinition::name, null);
         Map<String, ForeignKeyDefinition> foreignKeysByName = byName(
-                desired.foreignKeys(), ForeignKeyDefinition::name);
+                desired.foreignKeys(), ForeignKeyDefinition::name, null);
         List<IndexDefinition> comparable = actual.value().stream()
                 .filter(index -> declaredIndexNames.contains(index.name())
                         || !isMySqlForeignKeySupportIndex(index, foreignKeysByName.get(index.name())))
@@ -349,20 +384,29 @@ public final class SchemaDiffer {
         }
     }
 
-    private static void diffColumns(RelationIdentity relation,
+    /** 完整关系与显式表单变更集共用物理列差异；输入声明与回读类型由调用方明确区分。 */
+    static void diffColumns(RelationIdentity relation,
                                     List<ColumnDefinition> desired,
                                     List<ColumnDefinition> actual,
                                     List<SchemaOperation> operations,
                                     SchemaDialect schemaDialect,
                                     boolean physicalActualTypes,
-                                    Map<String, DatabaseType> observedLogicalTypes) {
+                                    Map<String, DatabaseType> observedLogicalTypes,
+                                    Set<String> declaredColumns) {
         Map<String, ColumnDefinition> desiredByName = byName(
                 desired, ColumnDefinition::name, schemaDialect);
         Map<String, ColumnDefinition> actualByName = byName(
                 actual, ColumnDefinition::name, schemaDialect);
         for (ColumnDefinition target : desired) {
+            if (declaredColumns != null && !declaredColumns.contains(
+                    SchemaDefinitionEquality.canonicalName(target.name(), schemaDialect))) {
+                continue;
+            }
             ColumnDefinition current = actualByName.get(
                     SchemaDefinitionEquality.canonicalName(target.name(), schemaDialect));
+            if (current == target && !physicalActualTypes) {
+                continue;
+            }
             if (current == null) {
                 operations.add(SchemaOperation.of(
                         SchemaOperation.Kind.ADD_COLUMN,
@@ -462,6 +506,25 @@ public final class SchemaDiffer {
         }
     }
 
+    /** 完整关系与显式表单变更集共用索引差异，不为不同入口复制增删改规则。 */
+    static void diffIndexes(RelationIdentity relation, List<IndexDefinition> desired,
+                            SchemaSnapshot.Observed<List<IndexDefinition>> actual,
+                            List<SchemaOperation> operations, SchemaDialect dialect) {
+        diffObservedList(relation, desired, actual, IndexDefinition::name,
+                (left, right) -> SchemaDefinitionEquality.sameIndex(left, right, dialect),
+                SchemaOperation.Kind.ADD_INDEX, SchemaOperation.Kind.CHANGE_INDEX, SchemaOperation.Kind.DROP_INDEX,
+                "indexes", operations, dialect);
+    }
+
+    /** 增量入口提供已适配改名和历史名称的配对事实，仍共用相同的索引差异规则。 */
+    static void diffIndexes(RelationIdentity relation, List<IndexDefinition> desired,
+                            List<IndexDefinition> actual, Function<IndexDefinition, IndexDefinition> match,
+                            BiPredicate<IndexDefinition, IndexDefinition> same, List<SchemaOperation> operations) {
+        diffMatchedList(relation, desired, actual, IndexDefinition::name, match, same,
+                SchemaOperation.Kind.ADD_INDEX, SchemaOperation.Kind.CHANGE_INDEX, SchemaOperation.Kind.DROP_INDEX,
+                operations);
+    }
+
     private static <T> void diffObservedList(RelationIdentity relation,
                                              List<T> desired,
                                              SchemaSnapshot.Observed<List<T>> actual,
@@ -483,22 +546,35 @@ public final class SchemaDiffer {
                     SchemaOperation.Compatibility.REQUIRES_REVIEW));
             return;
         }
-        Map<String, T> desiredByName = byName(desired, name, schemaDialect);
+        byName(desired, name, schemaDialect);
         Map<String, T> actualByName = byName(actual.value(), name, schemaDialect);
+        diffMatchedList(relation, desired, actual.value(), name,
+                target -> actualByName.get(SchemaDefinitionEquality.canonicalName(name.apply(target), schemaDialect)),
+                same, addKind, changeKind, dropKind, operations);
+    }
+
+    /** 配对规则由输入适配提供；只有 removalCandidates 中未配对的对象才生成删除操作。 */
+    static <T> void diffMatchedList(RelationIdentity relation, List<T> desired, List<T> removalCandidates,
+                                            Function<T, String> name, Function<T, T> match,
+                                            BiPredicate<T, T> same, SchemaOperation.Kind addKind,
+                                            SchemaOperation.Kind changeKind, SchemaOperation.Kind dropKind,
+                                            List<SchemaOperation> operations) {
+        Set<String> matched = new HashSet<>();
         for (T target : desired) {
             String objectName = name.apply(target);
-            T current = actualByName.get(
-                    SchemaDefinitionEquality.canonicalName(objectName, schemaDialect));
+            T current = match.apply(target);
             if (current == null) {
                 operations.add(operation(addKind, relation, objectName, null, target));
-            } else if (!same.test(current, target)) {
-                operations.add(operation(changeKind, relation, objectName, current, target));
+            } else {
+                matched.add(name.apply(current));
+                if (!same.test(current, target)) {
+                    operations.add(operation(changeKind, relation, objectName, current, target));
+                }
             }
         }
-        for (T current : actual.value()) {
+        for (T current : removalCandidates) {
             String objectName = name.apply(current);
-            if (!desiredByName.containsKey(
-                    SchemaDefinitionEquality.canonicalName(objectName, schemaDialect))) {
+            if (!matched.contains(objectName)) {
                 SchemaOperation.Compatibility compatibility =
                         dropKind == SchemaOperation.Kind.DROP_INDEX
                                 && !((IndexDefinition) current).unique()
@@ -510,7 +586,7 @@ public final class SchemaDiffer {
         }
     }
 
-    private static SchemaOperation createTable(RelationalTableDefinition desired,
+    static SchemaOperation createTable(RelationalTableDefinition desired,
                                                DialectCapabilities capabilities) {
         return SchemaOperation.of(
                 SchemaOperation.Kind.CREATE_TABLE,
@@ -575,10 +651,6 @@ public final class SchemaDiffer {
                 || column.generation().generated();
     }
 
-    private static <T> Map<String, T> byName(List<T> values, Function<T, String> name) {
-        return byName(values, name, null);
-    }
-
     private static <T> Map<String, T> byName(List<T> values,
                                              Function<T, String> name,
                                              SchemaDialect schemaDialect) {
@@ -591,10 +663,6 @@ public final class SchemaDiffer {
             }
         }
         return indexed;
-    }
-
-    private static <T> Set<String> names(List<T> values, Function<T, String> name) {
-        return names(values, name, null);
     }
 
     private static <T> Set<String> names(List<T> values,

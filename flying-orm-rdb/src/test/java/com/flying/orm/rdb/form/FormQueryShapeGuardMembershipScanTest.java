@@ -1,6 +1,5 @@
 package com.flying.orm.rdb.form;
 
-import com.flying.orm.core.page.CursorSort;
 import com.flying.orm.core.page.PageSort;
 import org.junit.jupiter.api.Test;
 
@@ -35,24 +34,9 @@ class FormQueryShapeGuardMembershipScanTest {
     }
 
     @Test
-    void cursorProjectionMembershipReadsCanonicalProjectionsLinearly() {
-        List<String> fields = fields();
-        CountingList projections = new CountingList(
-                fields.stream().map(field -> field.toUpperCase(Locale.ROOT)).toList());
-        List<CursorSort> sorts = fields.stream().map(CursorSort::asc).toList();
-
-        assertDoesNotThrow(() -> FormQueryShapeGuard.requireCursorProjection(projections, sorts));
-
-        assertLinearReads(projections,
-                "cursor projection membership must not rescan canonical fields for every cursor sort");
-    }
-
-    @Test
-    void preservesCaseInsensitiveMembershipForGroupingAndCursorProjection() {
+    void preservesCaseInsensitiveMembershipForGrouping() {
         assertDoesNotThrow(() -> FormQueryShapeGuard.requireValidGrouping(
                 List.of("ACCOUNT_ID"), List.of("account_id"), List.of(PageSort.asc("AcCoUnT_Id"))));
-        assertDoesNotThrow(() -> FormQueryShapeGuard.requireCursorProjection(
-                List.of("ACCOUNT_ID"), List.of(CursorSort.asc("AcCoUnT_Id"))));
     }
 
     @Test
@@ -62,8 +46,6 @@ class FormQueryShapeGuardMembershipScanTest {
         assertTrue("field".equalsIgnoreCase(alias));
         assertDoesNotThrow(() -> FormQueryShapeGuard.requireValidGrouping(
                 List.of("field"), List.of(alias), List.of(PageSort.asc(alias))));
-        assertDoesNotThrow(() -> FormQueryShapeGuard.requireCursorProjection(
-                List.of("field"), List.of(CursorSort.asc(alias))));
     }
 
     @Test
@@ -79,17 +61,13 @@ class FormQueryShapeGuardMembershipScanTest {
     }
 
     @Test
-    void emptyGroupsAndProjectionsKeepTheirMemberReadFastPaths() {
+    void emptyGroupsKeepTheirMemberReadFastPath() {
         CountingList groups = new CountingList(List.of());
-        CountingList projections = new CountingList(List.of());
 
         assertDoesNotThrow(() -> FormQueryShapeGuard.requireValidGrouping(
                 List.of("not_a_group"), groups, List.of(PageSort.asc("also_not_a_group"))));
-        assertDoesNotThrow(() -> FormQueryShapeGuard.requireCursorProjection(
-                projections, List.of(CursorSort.asc("not_a_projection"))));
 
         assertEquals(0, groups.memberReads(), "empty groups must return before reading members");
-        assertEquals(0, projections.memberReads(), "empty projections must return before reading members");
     }
 
     private static List<String> fields() {

@@ -1,8 +1,6 @@
 package com.flying.orm.core.metadata;
 
 import com.flying.orm.core.internal.Names;
-import com.flying.orm.core.internal.hash.StableDigest;
-import com.flying.orm.core.internal.hash.StableEncoder;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -12,7 +10,7 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * Feature 注册表以只读方式发布扩展能力，支持按规范化 id 和具体类型快速查找。
+ * 只读扩展注册表。本层相同 id 覆盖父层，构建时合并查找表，运行时不逐层遍历。
  *
  * @author wangr
  * @date 2026-07-21
@@ -20,43 +18,27 @@ import java.util.Optional;
  */
 public final class FeatureRegistry {
 
-    private static final StableDigest.Domain FINGERPRINT_DOMAIN =
-            StableDigest.domain("feature-registry/v1");
+    private static final FeatureRegistry EMPTY = new FeatureRegistry(List.of(), null);
 
-    private static final FeatureRegistry EMPTY = new FeatureRegistry(List.of());
-
+    private final List<Feature> localFeatures;
+    private final FeatureRegistry parent;
     private final List<Feature> features;
-
     private final Map<String, Feature> featuresById;
 
-    private final Map<Class<? extends Feature>, Feature> featuresByType;
-
-    private final String fingerprint;
-
-    private FeatureRegistry(List<Feature> features) {
-        List<Feature> copiedFeatures = List.copyOf(features);
-        Map<String, Feature> indexedById = new LinkedHashMap<>(Names.mapCapacity(copiedFeatures.size()));
-        Map<Class<? extends Feature>, Feature> indexedByType = new LinkedHashMap<>(Names.mapCapacity(copiedFeatures.size()));
-
-        for (Feature feature : copiedFeatures) {
+    private FeatureRegistry(List<Feature> localFeatures, FeatureRegistry parent) {
+        this.localFeatures = List.copyOf(localFeatures);
+        this.parent = parent;
+        Map<String, Feature> local = new LinkedHashMap<>(Names.mapCapacity(localFeatures.size()));
+        for (Feature feature : localFeatures) {
             String normalizedId = Names.key(feature.id(), "feature id");
-            Feature previousById = indexedById.putIfAbsent(normalizedId, feature);
-            if (previousById != null) {
+            if (local.putIfAbsent(normalizedId, feature) != null) {
                 throw new IllegalArgumentException("duplicate feature id");
             }
-
-            @SuppressWarnings("unchecked")
-            Class<? extends Feature> featureType = (Class<? extends Feature>) feature.getClass();
-            Feature previousByType = indexedByType.putIfAbsent(featureType, feature);
-            if (previousByType != null) {
-                throw new IllegalArgumentException("duplicate feature type: " + featureType.getName());
-            }
         }
-
-        this.features = copiedFeatures;
-        this.featuresById = Map.copyOf(indexedById);
-        this.featuresByType = Map.copyOf(indexedByType);
-        this.fingerprint = fingerprint(copiedFeatures);
+        Map<String, Feature> effective = parent == null ? local : new LinkedHashMap<>(parent.featuresById);
+        if (parent != null) effective.putAll(local);
+        this.features = List.copyOf(effective.values());
+        this.featuresById = Map.copyOf(effective);
     }
 
     /**
@@ -86,22 +68,13 @@ public final class FeatureRegistry {
         return features;
     }
 
-    /** 返回只由 feature 稳定 id 和具体契约类型决定的冻结指纹。 */
-    public String fingerprint() {
-        return fingerprint;
-    }
-
-    private static String fingerprint(List<Feature> features) {
-        List<Feature> ordered = features.stream()
-                .sorted(java.util.Comparator.comparing(feature -> Names.key(feature.id(), "feature id")))
-                .toList();
-        StableEncoder encoder = StableDigest.sha256(FINGERPRINT_DOMAIN)
-                                            .integer("FEATURE_COUNT", ordered.size());
-        for (Feature feature : ordered) {
-            encoder.text("FEATURE_ID", Names.key(feature.id(), "feature id"))
-                   .text("FEATURE_TYPE", feature.getClass().getName());
-        }
-        return encoder.finishHex();
+    /** 只替换继承来源，本层声明不变；复用字段时不会把旧表的配置变成本层覆盖。 */
+    public FeatureRegistry withParent(FeatureRegistry parent) {
+        FeatureRegistry inherited = Objects.requireNonNull(parent, "parent features");
+        if (inherited.features.isEmpty()) inherited = null;
+        if (this.parent == inherited) return this;
+        if (localFeatures.isEmpty() && inherited == null) return EMPTY;
+        return new FeatureRegistry(localFeatures, inherited);
     }
 
     /**
@@ -126,7 +99,7 @@ public final class FeatureRegistry {
     }
 
     /**
-     * 按具体类型查找 feature。
+     * 按契约类型查找唯一 feature；同类型多个 id 应改用 id 查找，不任意选择。
      *
      * @param type feature 具体类型
      * @param <T>  feature 类型
@@ -134,7 +107,13 @@ public final class FeatureRegistry {
      */
     public <T extends Feature> Optional<T> find(Class<T> type) {
         Objects.requireNonNull(type, "feature type must not be null");
-        return Optional.ofNullable(type.cast(featuresByType.get(type)));
+        T found = null;
+        for (Feature feature : features) {
+            if (!type.isInstance(feature)) continue;
+            if (found != null) throw new IllegalArgumentException("multiple features of type: " + type.getName());
+            found = type.cast(feature);
+        }
+        return Optional.ofNullable(found);
     }
 
     /**
@@ -160,6 +139,7 @@ public final class FeatureRegistry {
     public static final class Builder {
 
         private final List<Feature> features = new ArrayList<>();
+        private FeatureRegistry parent;
 
         private Builder() {
         }
@@ -175,16 +155,22 @@ public final class FeatureRegistry {
             return this;
         }
 
+        /** 设置数据库/Schema/表等上层提供的默认扩展。 */
+        public Builder parent(FeatureRegistry parent) {
+            this.parent = Objects.requireNonNull(parent, "parent features");
+            return this;
+        }
+
         /**
          * 构建只读 feature 注册表。
          *
          * @return feature 注册表
          */
         public FeatureRegistry build() {
-            if (features.isEmpty()) {
+            if (features.isEmpty() && (parent == null || parent.features.isEmpty())) {
                 return EMPTY;
             }
-            return new FeatureRegistry(features);
+            return new FeatureRegistry(features, parent);
         }
     }
 }

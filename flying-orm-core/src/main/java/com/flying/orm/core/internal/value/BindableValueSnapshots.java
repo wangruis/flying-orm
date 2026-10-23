@@ -20,6 +20,17 @@ import java.util.Objects;
  */
 public final class BindableValueSnapshots {
 
+    /** 快照规则取决于实际类型，不随对象内容变化；ClassValue 不阻止业务类型卸载。 */
+    private static final ClassValue<Boolean> SNAPSHOT_TYPES = new ClassValue<>() {
+        @Override
+        protected Boolean computeValue(Class<?> type) {
+            return type.isArray()
+                    || ByteBuffer.class.isAssignableFrom(type)
+                    || CharSequence.class.isAssignableFrom(type) && type != String.class
+                    || java.util.Date.class.isAssignableFrom(type);
+        }
+    };
+
     private BindableValueSnapshots() {
     }
 
@@ -52,6 +63,9 @@ public final class BindableValueSnapshots {
 
     /** 逻辑标量的独立副本；只有真正选中标准文本 codec 后才允许把文本转为 String。 */
     public static Object logicalScalar(Object value) {
+        if (!requiresImmutableSnapshot(value)) {
+            return value;
+        }
         if (value instanceof CharSequence text && !(text instanceof String)) {
             if (text instanceof StringBuilder) return new StringBuilder(text);
             if (text instanceof StringBuffer) return new StringBuffer(text);
@@ -60,16 +74,12 @@ public final class BindableValueSnapshots {
             }
             return text;
         }
-        return immutableScalar(value, null);
+        return copyMutableScalar(value, null);
     }
 
     /** Returns whether the supported bind value needs a defensive immutable snapshot. */
     public static boolean requiresImmutableSnapshot(Object value) {
-        return value != null
-                && (value.getClass().isArray()
-                || value instanceof ByteBuffer
-                || value instanceof CharSequence && !(value instanceof String)
-                || value instanceof java.util.Date);
+        return value != null && SNAPSHOT_TYPES.get(value.getClass());
     }
 
     public static List<Object> immutableValues(List<?> values) {
@@ -89,9 +99,10 @@ public final class BindableValueSnapshots {
     }
 
     public static Object immutableScalar(Object value, Class<?> arrayComponentType) {
-        if (value == null) {
-            return null;
-        }
+        return requiresImmutableSnapshot(value) ? copyMutableScalar(value, arrayComponentType) : value;
+    }
+
+    private static Object copyMutableScalar(Object value, Class<?> arrayComponentType) {
         if (value instanceof ByteBuffer buffer) {
             return copyReadableBuffer(buffer);
         }
@@ -138,7 +149,7 @@ public final class BindableValueSnapshots {
     private static final class SnapshotSession {
         private final boolean freezeScalars;
         private final boolean logicalValues;
-        private final IdentityHashMap<Object, Object> copies = new IdentityHashMap<>();
+        private IdentityHashMap<Object, Object> copies;
         private IdentityHashMap<Object, Object> typedTextCopies;
 
         private SnapshotSession(boolean freezeScalars) {
@@ -151,8 +162,11 @@ public final class BindableValueSnapshots {
         }
 
         private Object snapshot(Object value, Class<?> arrayComponentType) {
-            if (value == null) {
-                return null;
+            if (!requiresImmutableSnapshot(value)) {
+                return value;
+            }
+            if (copies == null) {
+                copies = new IdentityHashMap<>();
             }
             IdentityHashMap<Object, Object> snapshots = copies;
             if (freezeScalars && !logicalValues && value instanceof CharSequence && !(value instanceof String)

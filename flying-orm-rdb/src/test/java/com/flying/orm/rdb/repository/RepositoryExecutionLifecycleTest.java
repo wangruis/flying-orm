@@ -342,7 +342,7 @@ class RepositoryExecutionLifecycleTest {
     private static SyncFormRepository<Person> sync(List<String> events, Supplier<SqlWriteResult> keys,
             Consumer<com.flying.orm.core.sql.render.SqlRequest> request) {
         SyncSqlExecutor executor = (SyncSqlExecutor) Proxy.newProxyInstance(SyncSqlExecutor.class.getClassLoader(),
-                new Class<?>[]{SyncSqlExecutor.class}, (proxy, method, arguments) -> {
+                new Class<?>[]{com.flying.orm.rdb.support.ListQueryFixture.class}, (proxy, method, arguments) -> {
                     if (method.getName().equals("currentTransaction")) {
                         events.add("TRANSACTION_LOOKUP");
                         return Optional.empty();

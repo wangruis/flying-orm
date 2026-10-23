@@ -11,11 +11,11 @@ import java.util.Objects;
 import java.util.Set;
 
 /**
- * 结构化扩展条件在进入可配置查询前必须公开的最小事实。
+ * 结构化扩展条件可主动声明的能力和成本。
  *
  * <p>描述器只说明稳定身份、字段用途、需要的数据库能力，以及一次渲染承诺的参数和复杂度上限；
- * 它不持有 renderer、连接或请求值。旧 handler 没有描述器时仍可作为启动期可信扩展使用，但受治理的
- * 外部查询会明确拒绝它，避免把任意业务 renderer 暴露成请求可选插件。</p>
+ * 它不持有 renderer、连接或请求值。描述器不代替外部操作符放行；普通业务扩展无需为了接收
+ * 结构化条件而额外声明描述器。</p>
  *
  * @author wangr
  * @version v3.2
@@ -39,8 +39,8 @@ public final class TermExtensionDescriptor {
                                     int complexityCost) {
         this.id = Names.key(id, "term extension id");
         this.fieldUse = Objects.requireNonNull(fieldUse, "term extension field use must not be null");
-        if (fieldUse != FieldUse.FILTER) {
-            throw new IllegalArgumentException("term extension field use must be FILTER");
+        if (fieldUse != FieldUse.FILTER && fieldUse != FieldUse.JOIN) {
+            throw new IllegalArgumentException("term extension field use must be FILTER or JOIN");
         }
         this.requiredCapabilities = normalizeCapabilities(requiredCapabilities);
         if (maxParameters < 0) {
@@ -61,6 +61,12 @@ public final class TermExtensionDescriptor {
                                                  int complexityCost) {
         return new TermExtensionDescriptor(
                 id, FieldUse.FILTER, requiredCapabilities, maxParameters, complexityCost);
+    }
+
+    /** 显式声明只用于 ON 值条件的扩展；不自动授予 WHERE/FILTER 权限。 */
+    public static TermExtensionDescriptor join(String id, Collection<String> requiredCapabilities,
+                                                 int maxParameters, int complexityCost) {
+        return new TermExtensionDescriptor(id, FieldUse.JOIN, requiredCapabilities, maxParameters, complexityCost);
     }
 
     public String id() {

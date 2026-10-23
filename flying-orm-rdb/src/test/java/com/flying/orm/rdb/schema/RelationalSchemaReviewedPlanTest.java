@@ -3,7 +3,6 @@ package com.flying.orm.rdb.schema;
 import com.flying.orm.core.metadata.ColumnDefinition;
 import com.flying.orm.core.metadata.PrimaryKeyDefinition;
 import com.flying.orm.core.metadata.RelationIdentity;
-import com.flying.orm.core.metadata.RelationalMetadataFingerprint;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.rdb.dialect.DatabaseDescriptor;
@@ -21,18 +20,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class RelationalSchemaReviewedPlanTest {
 
     @Test
-    void successCannotBeReportedWithoutPostVerification() {
-        assertThrows(IllegalArgumentException.class, () -> SchemaExecutionReport.of(
-                "plan",
-                SchemaExecutionStatus.SUCCESS,
-                List.of(),
-                null,
-                null,
-                null));
-    }
-
-    @Test
-    void freezesDiffSqlAndAllExecutionPreconditionsInOneReviewedPlan() {
+    void freezesDiffAndSqlInOnePlan() {
         RdbDialect dialect = RdbDialect.h2();
         DatabaseDescriptor database = DatabaseDescriptor.of("H2", "2.3", dialect);
         RelationalTableDefinition desired = RelationalTableDefinition
@@ -43,26 +31,16 @@ class RelationalSchemaReviewedPlanTest {
         SchemaSnapshot actual = SchemaSnapshot.absent(desired.identity());
         RelationalSchemaPlanReviewer reviewer = RelationalSchemaPlanReviewer.create(dialect);
 
-        ReviewedSchemaPlan first = reviewer.review(
+        SchemaMigrationPlan first = reviewer.review(
                 database, desired, actual, SchemaSnapshotCoverage.complete(),
                 SchemaCompatibilityMode.SAFE_INCREMENTAL);
-        ReviewedSchemaPlan second = reviewer.review(
+        SchemaMigrationPlan second = reviewer.review(
                 database, desired, actual, SchemaSnapshotCoverage.complete(),
                 SchemaCompatibilityMode.SAFE_INCREMENTAL);
 
         assertSame(desired, first.desiredTable().orElseThrow());
-        assertEquals(RelationalMetadataFingerprint.of(desired), first.desiredFingerprint());
-        assertEquals(SchemaSnapshotFingerprint.of(actual), first.actualFingerprint());
-        assertEquals(first.fingerprint(), second.fingerprint());
+        assertEquals(first.requests(), second.requests());
         assertFalse(first.requests().isEmpty());
-        assertFalse(first.requiresManualAction());
-        assertEquals(List.of(
-                             SchemaPlanPrecondition.Kind.DATABASE_DESCRIPTOR,
-                             SchemaPlanPrecondition.Kind.CAPABILITIES,
-                             SchemaPlanPrecondition.Kind.ACTUAL_SCHEMA,
-                             SchemaPlanPrecondition.Kind.SNAPSHOT_COVERAGE),
-                     first.steps().getFirst().preconditions().stream()
-                             .map(SchemaPlanPrecondition::kind).toList());
     }
 
     @Test
@@ -79,20 +57,19 @@ class RelationalSchemaReviewedPlanTest {
                 .primaryKey(PrimaryKeyDefinition.of("pk_accounts", "id"))
                 .build();
 
-        ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
+        SchemaMigrationPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
                 database,
                 desired,
                 SchemaSnapshot.absent(desired.identity()),
                 SchemaSnapshotCoverage.complete(),
                 SchemaCompatibilityMode.SAFE_INCREMENTAL);
 
-        assertFalse(plan.requiresManualAction());
         assertTrue(plan.requests().stream()
                 .anyMatch(request -> request.sql().startsWith("exec sp_executesql ")));
     }
 
     @Test
-    void keepsInvalidMysqlIdentityLayoutAsManualWork() {
+    void rejectsInvalidMysqlIdentityLayoutDuringPlanning() {
         RdbDialect dialect = RdbDialect.mysql();
         DatabaseDescriptor database = DatabaseDescriptor.of("MySQL", "8.4", dialect);
         RelationalTableDefinition desired = RelationalTableDefinition
@@ -105,15 +82,12 @@ class RelationalSchemaReviewedPlanTest {
                 .primaryKey(PrimaryKeyDefinition.of("pk_accounts", "id"))
                 .build();
 
-        ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
+        assertThrows(UnsupportedOperationException.class, () -> RelationalSchemaPlanReviewer.create(dialect).review(
                 database,
                 desired,
                 SchemaSnapshot.absent(desired.identity()),
                 SchemaSnapshotCoverage.complete(),
-                SchemaCompatibilityMode.SAFE_INCREMENTAL);
-
-        assertTrue(plan.requiresManualAction());
-        assertTrue(plan.requests().isEmpty());
+                SchemaCompatibilityMode.SAFE_INCREMENTAL));
     }
 
     @Test
@@ -131,7 +105,7 @@ class RelationalSchemaReviewedPlanTest {
                 .primaryKey(PrimaryKeyDefinition.of("PRIMARY", "id"))
                 .build();
 
-        ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
+        SchemaMigrationPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
                 database, desired, SchemaSnapshot.present(observed),
                 SchemaSnapshotCoverage.complete(), SchemaCompatibilityMode.EXACT);
 
@@ -171,7 +145,7 @@ class RelationalSchemaReviewedPlanTest {
                         .build())
                 .build();
 
-        ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
+        SchemaMigrationPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
                 database,
                 desired,
                 SchemaSnapshot.absent(desired.identity()),

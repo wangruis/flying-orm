@@ -154,7 +154,7 @@ class R2dbcSequenceProgressFactsTest {
             if (observed) executor = executor.withObserver(events::add);
             return executor.executeInConnection(new SqlExecutionSequence(
                     List.of(request(SqlExecutionPhase.SETUP)), List.of(request(SqlExecutionPhase.WORK)),
-                    List.of(request(SqlExecutionPhase.CLEANUP))), SqlExecutionOptions.safeDefaults());
+                    List.of(request(SqlExecutionPhase.CLEANUP))), SqlExecutionOptions.unlimited());
         }
 
         private List<SqlExecutionObservation> targetEvents() {

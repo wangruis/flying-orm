@@ -4,9 +4,7 @@ import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.internal.value.BindableValueSnapshots;
 import com.flying.orm.core.internal.value.OwnedBindableValues;
 
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
 
@@ -33,9 +31,9 @@ public record SqlFragment(String sql, List<Object> parameters) {
         sql = Objects.requireNonNull(sql, "sql fragment must not be null").trim();
         List<Object> safeParameters = OwnedBindableValues.ownedValues(
                 Objects.requireNonNull(parameters, "sql parameters must not be null"));
-        parameters = OwnedBindableValues.isPublished(safeParameters)
-                ? safeParameters : OwnedBindableValues.publishOwned(
-                        Collections.unmodifiableList(copyBindableParameters(safeParameters)));
+        parameters = safeParameters.isEmpty() ? List.of()
+                : OwnedBindableValues.isPublished(safeParameters)
+                        ? safeParameters : copyBindableParameters(safeParameters);
     }
 
     @Override
@@ -59,6 +57,9 @@ public record SqlFragment(String sql, List<Object> parameters) {
     }
 
     private static List<Object> convertParameters(List<Object> parameters) {
+        if (parameters.isEmpty()) {
+            return List.of();
+        }
         OwnedBindableValues.Buffer converted = OwnedBindableValues.buffer(parameters.size());
         for (Object parameter : parameters) {
             Object encoded = parameter instanceof EncodedParameter marker
@@ -70,12 +71,11 @@ public record SqlFragment(String sql, List<Object> parameters) {
     }
 
     private static List<Object> copyBindableParameters(List<Object> parameters) {
-        List<Object> copied = new ArrayList<>(parameters.size());
-        parameters.stream()
-                .map(SqlFragment::bindableParameter)
-                .map(BindableValueSnapshots::immutableValue)
-                .forEach(copied::add);
-        return copied;
+        OwnedBindableValues.Buffer copied = OwnedBindableValues.buffer(parameters.size());
+        for (Object parameter : parameters) {
+            copied.add(BindableValueSnapshots.immutableValue(bindableParameter(parameter)));
+        }
+        return copied.publish();
     }
 
     static Object encodedParameter(Object parameter) {

@@ -41,6 +41,21 @@ public interface PaginationDialect {
      */
     List<Object> paginationParameters(List<Object> parameters, PageQuery page);
 
+    /**
+     * 用已渲染的投影列表和 FROM/WHERE/GROUP/ORDER 片段生成首行 SELECT。
+     * 不接收完整 SELECT、CTE 或集合查询；片段由可信渲染器提供，不来自前端。
+     * 未排序时由数据库决定首行。自定义方言默认复用分页实现。
+     */
+    default String firstSelectSql(String projections, String fromClause, List<Object> parameters) {
+        return PaginationDialect.paginateSql(this, "select " + projections + " " + fromClause,
+                parameters, PageQuery.of(1, 1));
+    }
+
+    /** 按 firstSelectSql 的占位符顺序生成参数；与 SQL 生成分开，支持复用结构计划缓存。 */
+    default List<Object> firstSelectParameters(List<Object> parameters) {
+        return paginationParameters(parameters, PageQuery.of(1, 1));
+    }
+
     /** 内核只取 SQL 时不构造内置方言的临时请求；外部扩展仍执行原 paginate 回调。 */
     @InternalApi
     static String paginateSql(PaginationDialect dialect, String sql, List<Object> parameters, PageQuery page) {
@@ -131,6 +146,19 @@ enum StandardPaginationDialect implements PaginationDialect {
 
     /** SQL Server 2012 及以上要求分页前必须有明确排序。 */
     SQL_SERVER_OFFSET_FETCH {
+        @Override
+        public String firstSelectSql(String projections, String fromClause, List<Object> parameters) {
+            return "select top (?) " + projections + " " + fromClause;
+        }
+
+        @Override
+        public List<Object> firstSelectParameters(List<Object> parameters) {
+            List<Object> values = new ArrayList<>(parameters.size() + 1);
+            values.add(1);
+            values.addAll(parameters);
+            return values;
+        }
+
         @Override
         String paginateSql(String sql) {
             String safeSql = requireSql(sql).trim();

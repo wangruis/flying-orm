@@ -11,6 +11,10 @@ import java.util.Objects;
  * {@code generated ... as identity}、{@code sequence.nextval}，还是 SQL Server 的 {@code identity(seed, increment)}，
  * 由 RDB 方言在 DDL 阶段决定。对象构造后只读，可以跟随表单元数据安全缓存。</p>
  *
+ * <p>MySQL identity 与 Oracle 命名序列不能回读原始起点；其 {@code startWith} 只在新建时生效，
+ * 结构同步不会据此重置已有生成器。此类元数据回读使用默认起点（升序 1、Oracle 降序 -1），
+ * 不表示历史上实际使用的起点；步长和缓存等可观察属性仍按方言比较。</p>
+ *
  * @param strategy     生成方式
  * @param sequenceName SEQUENCE 使用的名字，其他方式必须为空
  * @param startWith    第一个值

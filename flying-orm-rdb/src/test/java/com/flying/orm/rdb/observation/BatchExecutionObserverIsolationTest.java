@@ -19,7 +19,7 @@ class BatchExecutionObserverIsolationTest {
         };
         BatchExecutionObserver safe = BatchExecutionObservers.safe(throwing);
         SqlExecutionLogObserver log = SqlExecutionLogObserver.create(
-                SqlExecutionLogOptions.defaults(), ignored -> {
+                SqlExecutionLogOptions.defaults(), (level, message) -> {
                     // Real log observer already owns sink isolation.
                 });
 
@@ -35,5 +35,21 @@ class BatchExecutionObserverIsolationTest {
                 .collect(Collectors.toSet());
 
         assertEquals(Set.of(), nestedTypes);
+    }
+
+    @Test
+    void disabledBatchObserverIsResolvedOnceAtAssembly() {
+        java.util.concurrent.atomic.AtomicInteger probes = new java.util.concurrent.atomic.AtomicInteger();
+        BatchExecutionObserver disabled = new BatchExecutionObserver() {
+            @Override public boolean enabled() { probes.incrementAndGet(); return false; }
+            @Override public void onExecution(BatchExecutionObservation observation) {
+                throw new AssertionError("disabled callback");
+            }
+        };
+        BatchExecutionObserver configured = BatchExecutionObserver.composite(
+                BatchExecutionObserver.noop(), disabled);
+        org.junit.jupiter.api.Assertions.assertFalse(configured.enabled());
+        assertEquals(1, probes.get());
+        assertSame(BatchExecutionObserver.noop(), configured);
     }
 }

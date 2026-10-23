@@ -71,7 +71,7 @@ Flux<DynamicRow> rows = operator.dml().query(users)
     .select("id", "name")
     .where("org_id", 7L)
     .orderByAsc("id")
-    .fetchMap();
+    .fetch();
 
 Mono<Long> inserted = operator.dml()
     .insert(users, Map.of("id", 1L, "name", "Alice", "org_id", 7L));
@@ -96,7 +96,7 @@ Flux<String> names = users.createQuery()
     .map(User::getName);
 ```
 
-`fetch()` 可把投影映射为部分实体：Bean 未选择的属性保留构造器和字段初始化值，record 未选择的组件使用 Java 默认值。需要完整实体时不写 `select`。注解与实体定义见 [ANNOTATIONS.md](ANNOTATIONS.md)。
+`fetch()`、`execute()`、`one()`、`page()` 统一支持部分实体投影：Bean 未选择的属性保留构造器和字段初始化值，record 未选择的组件使用 Java 默认值。需要完整实体时不写 `select`。注解与实体定义见 [ANNOTATIONS.md](ANNOTATIONS.md)。
 
 ## 前端条件与数据范围
 

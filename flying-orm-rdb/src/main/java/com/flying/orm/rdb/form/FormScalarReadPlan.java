@@ -2,6 +2,7 @@ package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.form.DynamicField;
+import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.rdb.codec.DialectScalarValueCodec;
 import com.flying.orm.rdb.codec.JdbcLegacyTemporalAdapter;
 
@@ -9,6 +10,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
+import java.time.OffsetTime;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.Objects;
@@ -35,7 +37,8 @@ record FormScalarReadPlan(Class<?> targetType,
         if (boundType == Object.class) {
             return null;
         }
-        Class<?> genericType = DialectScalarValueCodec.parameterType(field.databaseType(), "generic", true);
+        Class<?> genericType = field.databaseType().logicalType() == LogicalType.OFFSET_TIME
+                ? OffsetTime.class : DialectScalarValueCodec.parameterType(field.databaseType(), "generic", true);
         Class<?> targetType = boundType == Boolean.class || genericType == Object.class ? boundType : genericType;
         boolean numeric = Number.class.isAssignableFrom(targetType);
         boolean temporal = targetType == LocalDate.class

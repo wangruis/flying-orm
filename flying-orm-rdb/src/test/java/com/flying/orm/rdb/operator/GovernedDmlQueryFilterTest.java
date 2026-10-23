@@ -29,9 +29,9 @@ class GovernedDmlQueryFilterTest {
                         "member-of", "membership", "users", "owner_id", "group_id"))
                 .build().withIdentifierRenderer(RdbDialect.postgresql().schema()::identifier);
         for (String field : java.util.List.of("id", "users.id")) {
-            DmlQueryCommand command = new DmlQueryCommand(renderer, DataScope.none());
+            PlanningDynamicQuery command = new PlanningDynamicQuery(renderer, DataScope.none());
             command.from("users");
-            command.where(where -> where.term(field, "member-of", 1L));
+            command.where(command.conditions(where -> where.where(field, "member-of", 1L)));
             String sql = command.toRequest().sql();
             org.junit.jupiter.api.Assertions.assertTrue(sql.contains(
                     "\"users_relation\".\"owner_id\" = \"users\".\"id\""), sql);
@@ -60,10 +60,10 @@ class GovernedDmlQueryFilterTest {
         };
         ReactiveFormClient forms = ReactiveFormClient.create(
                 executor, FormDataSqlRenderer.create(renderer, RdbDialect.postgresql()));
-        QueryOperator query = new DmlOperator(forms, executor, renderer, DataScope.none())
+        QueryOperator query = new DmlOperator(forms, executor, renderer, DataScope.none(), RdbDialect.postgresql())
                 .query().from(form, policy, QueryShapeLimits.defaults()).select("id")
                 .where(where -> where.is("secret", "classified"));
 
-        assertThrows(ScopeAccessException.class, () -> query.fetchMap().blockLast());
+        assertThrows(ScopeAccessException.class, () -> query.fetch().blockLast());
     }
 }

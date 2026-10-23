@@ -66,23 +66,6 @@ public record SqlExecutionObservation(SqlExecutionOperation operation,
         }
     }
 
-    /**
-     * 保留 V1 手工构造事件的源码兼容性。执行器自己不会走这里，而是始终写明 JDBC 或 R2DBC。
-     */
-    public SqlExecutionObservation(SqlExecutionOperation operation,
-                                   SqlStatementType statementType,
-                                   SqlExecutionStatus status,
-                                   SqlFailureCategory failureCategory,
-                                   String sql,
-                                   int parameterCount,
-                                   int batchSize,
-                                   long rows,
-                                   long durationNanos,
-                                   Throwable error) {
-        this(operation, SqlExecutionBackend.UNKNOWN, statementType, status, failureCategory, sql,
-             parameterCount, batchSize, rows, durationNanos, error);
-    }
-
     public Duration duration() {
         return Duration.ofNanos(durationNanos);
     }

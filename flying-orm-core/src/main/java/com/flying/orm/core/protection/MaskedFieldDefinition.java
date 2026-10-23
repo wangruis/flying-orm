@@ -19,7 +19,7 @@ public record MaskedFieldDefinition(String policy,
                                     int suffix,
                                     SensitiveDisplayMode display) {
 
-    private static final Pattern EXTENSION_ID = Pattern.compile("[A-Za-z0-9._-]{1,32}");
+    private static final Pattern EXTENSION_ID = Pattern.compile("[A-Za-z0-9._-]+");
 
     /** 完成字段声明校验。 */
     public MaskedFieldDefinition {

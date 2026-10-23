@@ -1,12 +1,12 @@
 package com.flying.orm.core.metadata;
 
-import com.flying.orm.core.field.FieldIdentity;
 import com.flying.orm.core.internal.Names;
 
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -57,21 +57,20 @@ final class MetadataNameIndex<T> {
         return new MetadataNameIndex<>(exactValues, foldedValues);
     }
 
-    Optional<T> find(String name, String fieldName) {
-        FieldIdentity identity = FieldIdentity.of(name);
-        String exactName = identity.name();
+    Optional<T> find(String name) {
+        String exactName = Names.requireText(name, "field name");
         T exactValue = exactValues.get(exactName);
         if (exactValue != null) {
             return Optional.of(exactValue);
         }
-        return Optional.ofNullable(unambiguousFoldedValues.get(identity.key()));
+        return Optional.ofNullable(unambiguousFoldedValues.get(exactName.toLowerCase(Locale.ROOT)));
     }
 
     /**
      * 只接受精确物理名称。Schema 约束不能借用面向调用方查询的大小写兼容规则，否则 quoted identifier
      * 会在构建成功后指向另一列。
      */
-    Optional<T> findExact(String name, String fieldName) {
-        return Optional.ofNullable(exactValues.get(FieldIdentity.of(name).name()));
+    Optional<T> findExact(String name) {
+        return Optional.ofNullable(exactValues.get(Names.requireText(name, "field name")));
     }
 }

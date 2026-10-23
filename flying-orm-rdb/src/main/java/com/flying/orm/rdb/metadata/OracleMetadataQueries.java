@@ -3,6 +3,7 @@ package com.flying.orm.rdb.metadata;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.type.DatabaseTypes;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -36,6 +37,8 @@ final class OracleMetadataQueries {
 
     private static final String BASE_COLUMNS_SQL_TEMPLATE = """
             select c.COLUMN_NAME,
+                   c.TABLE_NAME as METADATA_TABLE,
+                   table_info.COMMENTS as TABLE_COMMENT,
                    c.OWNER as RESOLUTION_SCHEMA,
                    case
                        when c.DATA_TYPE = 'VARCHAR2' and c.CHAR_LENGTH = 18
@@ -91,8 +94,12 @@ final class OracleMetadataQueries {
                                   and nvl(${COLUMN_SHARDED_FLAG}, 'N') = 'N'
                                   and nvl(${COLUMN_SESSION_FLAG}, 'N') = 'N'
                                   and nvl(${COLUMN_KEEP_VALUE}, 'N') = 'N'
-                                  and column_sequence.MIN_VALUE = 1
-                                  and column_sequence.MAX_VALUE = 9999999999999999999999999999
+                                  and column_sequence.MIN_VALUE = case
+                                      when column_sequence.INCREMENT_BY > 0 then 1
+                                      else -999999999999999999999999999 end
+                                  and column_sequence.MAX_VALUE = case
+                                      when column_sequence.INCREMENT_BY > 0
+                                          then 9999999999999999999999999999 else -1 end
                               ))) or (idc.COLUMN_NAME is not null and (
                                   idc.GENERATION_TYPE = 'BY DEFAULT'
                                   and ${DEFAULT_ON_NULL} = 'YES'
@@ -137,8 +144,12 @@ final class OracleMetadataQueries {
                                or nvl(${COLUMN_SHARDED_FLAG}, 'N') <> 'N'
                                or nvl(${COLUMN_SESSION_FLAG}, 'N') <> 'N'
                                or nvl(${COLUMN_KEEP_VALUE}, 'N') <> 'N'
-                               or column_sequence.MIN_VALUE <> 1
-                               or column_sequence.MAX_VALUE <> 9999999999999999999999999999)
+                               or column_sequence.MIN_VALUE <> case
+                                   when column_sequence.INCREMENT_BY > 0 then 1
+                                   else -999999999999999999999999999 end
+                               or column_sequence.MAX_VALUE <> case
+                                   when column_sequence.INCREMENT_BY > 0
+                                       then 9999999999999999999999999999 else -1 end)
                            then 'non-default named sequence options'
                        when idc.COLUMN_NAME is not null and (
                                identity_sequence.CYCLE_FLAG <> 'N'
@@ -161,7 +172,8 @@ final class OracleMetadataQueries {
                    c.DATA_DEFAULT as COLUMN_DEFAULT,
                    c.DATA_DEFAULT as GENERATION_EXPRESSION,
                    ${SEQUENCE_NAME} as GENERATION_SEQUENCE_NAME,
-                   case when ${SEQUENCE_NAME} is not null then 1 else
+                   case when ${SEQUENCE_NAME} is not null
+                       then case when column_sequence.INCREMENT_BY > 0 then 1 else -1 end else
                        to_number(regexp_substr(idc.IDENTITY_OPTIONS,
                            'START WITH:[[:space:]]*([+-]?[0-9]+)', 1, 1, 'i', 1))
                    end as GENERATION_START,
@@ -174,6 +186,8 @@ final class OracleMetadataQueries {
                    case when idc.COLUMN_NAME is null then 'false' else 'true' end as IS_IDENTITY,
                    case when pk.CONSTRAINT_NAME is null then 'false' else 'true' end as PRIMARY_KEY
             from ALL_TAB_COLS c
+            left join ALL_TAB_COMMENTS table_info
+              on table_info.OWNER = c.OWNER and table_info.TABLE_NAME = c.TABLE_NAME
             left join ALL_COL_COMMENTS cc
                    on cc.OWNER = c.OWNER
                   and cc.TABLE_NAME = c.TABLE_NAME
@@ -203,13 +217,7 @@ final class OracleMetadataQueries {
                    on pk.OWNER = c.OWNER
                   and pk.TABLE_NAME = c.TABLE_NAME
                   and pk.COLUMN_NAME = c.COLUMN_NAME
-            where c.TABLE_NAME = case
-                when exists (
-                    select 1
-                    from ALL_TAB_COLS exact_column
-                    where exact_column.OWNER = c.OWNER
-                      and exact_column.TABLE_NAME = ?
-                ) then ? else upper(?) end
+            where ${TABLE_FILTER}
               and not (
                   c.HIDDEN_COLUMN = 'YES'
                   and c.VIRTUAL_COLUMN = 'YES'
@@ -250,6 +258,7 @@ final class OracleMetadataQueries {
 
     private static final String BASE_INDEXES_SQL = """
             select i.INDEX_NAME,
+                   i.TABLE_NAME as METADATA_TABLE,
                    ic.COLUMN_NAME,
                    index_expression.COLUMN_EXPRESSION as INDEX_EXPRESSION,
                    case when i.UNIQUENESS = 'UNIQUE' then 'true' else 'false' end as UNIQUE_INDEX,
@@ -286,13 +295,7 @@ final class OracleMetadataQueries {
              and index_expression.TABLE_OWNER = i.TABLE_OWNER
              and index_expression.TABLE_NAME = i.TABLE_NAME
              and index_expression.COLUMN_POSITION = ic.COLUMN_POSITION
-            where i.TABLE_NAME = case
-                when exists (
-                    select 1
-                    from ALL_TAB_COLUMNS exact_column
-                    where exact_column.OWNER = i.TABLE_OWNER
-                      and exact_column.TABLE_NAME = ?
-                ) then ? else upper(?) end
+            where ${TABLE_FILTER}
               and not exists (
                   select 1
                   from ALL_CONSTRAINTS ac
@@ -305,6 +308,7 @@ final class OracleMetadataQueries {
 
     private static final String BASE_FOREIGN_KEYS_SQL = """
             select ac.OWNER as TABLE_SCHEMA,
+                   ac.TABLE_NAME as METADATA_TABLE,
                    ac.CONSTRAINT_NAME as FOREIGN_KEY_NAME,
                    acc.COLUMN_NAME,
                    rc.OWNER as REFERENCED_TABLE_SCHEMA,
@@ -335,13 +339,7 @@ final class OracleMetadataQueries {
              and rcc.CONSTRAINT_NAME = rc.CONSTRAINT_NAME
              and rcc.POSITION = acc.POSITION
             where ac.CONSTRAINT_TYPE = 'R'
-              and ac.TABLE_NAME = case
-                  when exists (
-                      select 1
-                      from ALL_TAB_COLUMNS exact_column
-                      where exact_column.OWNER = ac.OWNER
-                        and exact_column.TABLE_NAME = ?
-                  ) then ? else upper(?) end
+              and ${TABLE_FILTER}
             """;
 
     private static final String BASE_TABLE_SQL = """
@@ -387,11 +385,7 @@ final class OracleMetadataQueries {
             from ALL_TABLES t
             left join ALL_TAB_COMMENTS tc
               on tc.OWNER = t.OWNER and tc.TABLE_NAME = t.TABLE_NAME and tc.TABLE_TYPE = 'TABLE'
-            where t.TABLE_NAME = case
-                when exists (
-                    select 1 from ALL_TABLES exact_table
-                    where exact_table.OWNER = t.OWNER and exact_table.TABLE_NAME = ?
-                ) then ? else upper(?) end
+            where ${TABLE_FILTER}
             """;
 
     private static final String BASE_PRIMARY_KEY_SQL = constraintColumnsSql("P");
@@ -399,6 +393,7 @@ final class OracleMetadataQueries {
 
     private static final String BASE_CHECKS_SQL = """
             select ac.CONSTRAINT_NAME,
+                   ac.TABLE_NAME as METADATA_TABLE,
                    ac.SEARCH_CONDITION_VC as CHECK_EXPRESSION,
                    case when ac.STATUS = 'ENABLED'
                               and ac.DEFERRABLE = 'NOT DEFERRABLE'
@@ -413,16 +408,13 @@ final class OracleMetadataQueries {
               and not (ac.GENERATED = 'GENERATED NAME'
                   and regexp_like(ac.SEARCH_CONDITION_VC,
                       '^[[:space:]]*"[^"]+"[[:space:]]+IS[[:space:]]+NOT[[:space:]]+NULL[[:space:]]*$', 'i'))
-              and ac.TABLE_NAME = case
-                  when exists (
-                      select 1 from ALL_TABLES exact_table
-                      where exact_table.OWNER = ac.OWNER and exact_table.TABLE_NAME = ?
-                  ) then ? else upper(?) end
+              and ${TABLE_FILTER}
             """;
 
     private static String constraintColumnsSql(String constraintType) {
         return """
                 select ac.CONSTRAINT_NAME,
+                   ac.TABLE_NAME as METADATA_TABLE,
                        acc.COLUMN_NAME,
                        case when ac.STATUS = 'ENABLED'
                                   and ac.DEFERRABLE = 'NOT DEFERRABLE'
@@ -467,28 +459,24 @@ final class OracleMetadataQueries {
                  and ic.TABLE_NAME = i.TABLE_NAME
                  and ic.COLUMN_POSITION = acc.POSITION
                 where ac.CONSTRAINT_TYPE = '__CONSTRAINT_TYPE__'
-                  and ac.TABLE_NAME = case
-                      when exists (
-                          select 1 from ALL_TABLES exact_table
-                          where exact_table.OWNER = ac.OWNER and exact_table.TABLE_NAME = ?
-                      ) then ? else upper(?) end
+                  and ${TABLE_FILTER}
                 """.replace("__CONSTRAINT_TYPE__", constraintType);
     }
 
     private OracleMetadataQueries() {
     }
 
-    static InformationSchemaFormMetadataReader.Queries queries() {
+    static MetadataQueryProfile.Queries queries() {
         return queries(OracleMetadataQueries::columnQuery);
     }
 
-    static InformationSchemaFormMetadataReader.Queries queries12c() {
+    static MetadataQueryProfile.Queries queries12c() {
         return queries(OracleMetadataQueries::columnQuery12c);
     }
 
-    private static InformationSchemaFormMetadataReader.Queries queries(
-            InformationSchemaFormMetadataReader.Query columnQuery) {
-        return InformationSchemaFormMetadataReader.Queries.complete(
+    private static MetadataQueryProfile.Queries queries(
+            MetadataQueryProfile.Query columnQuery) {
+        return MetadataQueryProfile.Queries.complete(
                 columnQuery,
                 OracleMetadataQueries::indexQuery,
                 OracleMetadataQueries::foreignKeyQuery,
@@ -497,7 +485,7 @@ final class OracleMetadataQueries {
                 OracleMetadataQueries::primaryKeyQuery,
                 OracleMetadataQueries::uniqueConstraintQuery,
                 OracleMetadataQueries::checkConstraintQuery,
-                InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE);
+                MetadataQueryProfile.SnapshotDialect.ORACLE);
     }
 
     private static SqlRequest columnQuery(String schema, String table) {
@@ -546,29 +534,30 @@ final class OracleMetadataQueries {
                                             String schema,
                                             String table,
                                             String orderBy) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            return new SqlRequest(base + " and " + ownerColumn
-                    + " = sys_context('USERENV', 'CURRENT_SCHEMA')" + orderBy,
-                                  tableParameters(safeTable));
+        List<Object> parameters = new ArrayList<>(6);
+        String filter = "1 = 1";
+        String tableAlias = ownerColumn.substring(0, ownerColumn.indexOf('.'));
+        if (table != null) {
+            String safeTable = MetadataQueryProfile.requireText(table, "table");
+            filter = tableAlias + ".TABLE_NAME = case when exists (select 1 from ALL_TAB_COLS exact_table"
+                    + " where exact_table.OWNER = " + ownerColumn
+                    + " and exact_table.TABLE_NAME = ?) then ? else upper(?) end";
+            parameters.addAll(List.of(safeTable, safeTable, safeTable));
         }
-        return new SqlRequest(base + " and " + ownerColumn + " = " + ownerExpression() + orderBy,
-                              tableAndOwnerParameters(safeTable, schema));
+        String schemaFilter = "sys_context('USERENV', 'CURRENT_SCHEMA')";
+        if (schema != null && !schema.isBlank()) {
+            schemaFilter = ownerExpression();
+            String safeSchema = schema.trim();
+            parameters.addAll(List.of(safeSchema, safeSchema, safeSchema));
+        }
+        return new SqlRequest(base.replace("${TABLE_FILTER}", filter)
+                + " and " + ownerColumn + " = " + schemaFilter + orderBy, parameters);
     }
 
     /** 精确 quoted owner 存在时优先使用；否则按 Oracle 未加引号标识符规则折叠为大写。 */
     private static String ownerExpression() {
         return "case when exists (select 1 from ALL_USERS exact_owner where exact_owner.USERNAME = ?) "
                 + "then ? else upper(?) end";
-    }
-
-    private static List<Object> tableParameters(String table) {
-        return List.of(table, table, table);
-    }
-
-    private static List<Object> tableAndOwnerParameters(String table, String owner) {
-        String safeOwner = owner.trim();
-        return List.of(table, table, table, safeOwner, safeOwner, safeOwner);
     }
 
     private static String logicalType(String dataType) {

@@ -101,7 +101,8 @@ class FullAuditSchemaRegressionTest {
                         () -> dialect.addColumnSql("orders", definition), definition);
                 assertThrows(IllegalArgumentException.class,
                         () -> dialect.alterColumnTypeSql(
-                                "orders", "payload", "varchar(64)", definition), definition);
+                                RelationIdentity.table("orders"), "payload", "varchar(64)",
+                                definition, true, null), definition);
             }
         }
     }

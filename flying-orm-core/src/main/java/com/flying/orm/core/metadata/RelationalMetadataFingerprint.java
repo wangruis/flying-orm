@@ -19,9 +19,23 @@ import java.util.Objects;
  */
 public final class RelationalMetadataFingerprint {
 
-    private static final StableDigest.Domain DOMAIN = StableDigest.domain("relational-metadata/v1");
+    private static final StableDigest.Domain DOMAIN = StableDigest.domain("relational-metadata/v2");
+    private static final StableDigest.Domain SCHEMA_DOMAIN = StableDigest.domain("relational-schema/v2");
 
     private RelationalMetadataFingerprint() {
+    }
+
+    /** Schema 摘要包含命名空间和按名称排序的全部表；空集合也保留其命名空间。 */
+    public static String of(RelationalSchemaDefinition schema) {
+        RelationalSchemaDefinition source = Objects.requireNonNull(schema, "relational schema must not be null");
+        StableEncoder encoder = StableDigest.sha256(SCHEMA_DOMAIN)
+                .nullableText("CATALOG", source.catalog().orElse(null))
+                .nullableText("SCHEMA", source.schema().orElse(null))
+                .integer("TABLE_COUNT", source.tables().size());
+        for (RelationalTableDefinition table : sorted(source.tables(), RelationalTableDefinition::name)) {
+            encoder.text("TABLE_FINGERPRINT", of(table));
+        }
+        return encoder.finishHex();
     }
 
     /** @return 64 个小写十六进制字符组成的稳定关系指纹 */
@@ -77,7 +91,8 @@ public final class RelationalMetadataFingerprint {
         return encoder.finishHex();
     }
 
-    private static void encodeColumn(StableEncoder encoder, ColumnDefinition column) {
+    /** 将完整物理列声明写入结构摘要，供表和实体模型共用同一编码规则。 */
+    public static void encodeColumn(StableEncoder encoder, ColumnDefinition column) {
         encoder.marker("COLUMN")
                .text("COLUMN_NAME", column.name())
                .text("COLUMN_TYPE", column.databaseType().canonical())
@@ -95,10 +110,7 @@ public final class RelationalMetadataFingerprint {
                .nullableText("COLUMN_CHARSET", column.charset())
                .nullableText("COLUMN_COLLATION", column.collation());
         encodeDefault(encoder, column.defaultValue());
-        // Unnamed defaults retain the existing encoding; observed names protect reviewed plans against drift.
-        if (column.defaultConstraintName() != null) {
-            encoder.text("COLUMN_DEFAULT_CONSTRAINT_NAME", column.defaultConstraintName());
-        }
+        encoder.nullableText("COLUMN_DEFAULT_CONSTRAINT_NAME", column.defaultConstraintName());
     }
 
     private static void encodeDefault(StableEncoder encoder, ColumnDefault value) {
@@ -153,19 +165,8 @@ public final class RelationalMetadataFingerprint {
     }
 
     private static void encodeLiteral(StableEncoder encoder, String tag, Object value) {
-        if (value == null) {
-            encoder.marker(tag + "_NULL");
-            return;
-        }
-        encoder.text(tag + "_TYPE", value.getClass().getName());
-        if (value instanceof byte[] bytes) {
-            encoder.bytes(tag, bytes);
-        } else if (value instanceof Enum<?> enumeration) {
-            encoder.text(tag, enumeration.name());
-        } else {
-            // ColumnDefault 与 CheckPredicate 已在公共边界限制可接受的不可变标量；这些类型的文本表示是稳定的。
-            encoder.text(tag, value.toString());
-        }
+        // ColumnDefault 与 CheckPredicate 已规范化为非空、不可变标量，不再兼容未进入模型的旧值形状。
+        encoder.text(tag + "_TYPE", value.getClass().getName()).text(tag, value.toString());
     }
 
     private static void encodeIdentity(StableEncoder encoder, String marker, RelationIdentity identity) {
@@ -180,10 +181,7 @@ public final class RelationalMetadataFingerprint {
         encoder.integer("UNIQUE_COUNT", ordered.size());
         for (UniqueConstraintDefinition value : ordered) {
             encodeColumns(encoder, "UNIQUE", value.name(), value.columns());
-            // DEFAULT 保持既有编码字节；仅显式语义扩展才改变指纹。
-            if (value.nullPolicy() != UniqueNullPolicy.DEFAULT) {
-                encoder.text("UNIQUE_NULL_POLICY", value.nullPolicy().name());
-            }
+            encoder.text("UNIQUE_NULL_POLICY", value.nullPolicy().name());
         }
     }
 

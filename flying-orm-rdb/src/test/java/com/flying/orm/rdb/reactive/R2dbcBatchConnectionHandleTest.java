@@ -94,7 +94,7 @@ class R2dbcBatchConnectionHandleTest {
         DynamicRow row = DynamicRow.copyOf(Map.of("content", blob));
 
         assertThrows(IllegalStateException.class,
-                () -> scope.materialize(row, SqlExecutionOptions.safeDefaults()).block());
+                () -> scope.materialize(row, SqlExecutionOptions.unlimited()).block());
         assertEquals(1, discards.get());
     }
 

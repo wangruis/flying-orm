@@ -47,6 +47,7 @@ public final class SchemaOperation {
         DROP_PRIMARY_KEY,
         DROP_COLUMN,
         DROP_TABLE,
+        RENAME_COLUMN,
         VERIFY_MANUALLY
     }
 
@@ -130,7 +131,7 @@ public final class SchemaOperation {
             case CREATE_TABLE -> requireAdd(RelationalTableDefinition.class);
             case DROP_TABLE -> requireDrop(RelationalTableDefinition.class);
             case ADD_COLUMN -> requireAdd(ColumnDefinition.class);
-            case CHANGE_COLUMN -> requireChange(ColumnDefinition.class);
+            case CHANGE_COLUMN, RENAME_COLUMN -> requireChange(ColumnDefinition.class);
             case DROP_COLUMN -> requireDrop(ColumnDefinition.class);
             case ADD_PRIMARY_KEY -> requireAdd(PrimaryKeyDefinition.class);
             case CHANGE_PRIMARY_KEY -> requireChange(PrimaryKeyDefinition.class);

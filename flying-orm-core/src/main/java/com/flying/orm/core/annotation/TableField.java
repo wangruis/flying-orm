@@ -40,6 +40,12 @@ public @interface TableField {
     FieldFill fill() default FieldFill.DEFAULT;
 
     /**
+     * 是否把填充值同步写回实体；默认只用于 SQL 参数。
+     * 回填发生在参数准备阶段，不表示数据库执行成功；仅支持可写的普通 JavaBean 字段。
+     */
+    boolean fillBack() default false;
+
+    /**
      * 插入时的字段值策略。
      */
     FieldStrategy insertStrategy() default FieldStrategy.DEFAULT;

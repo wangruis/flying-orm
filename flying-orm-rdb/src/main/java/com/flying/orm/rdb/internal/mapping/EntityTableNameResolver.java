@@ -7,16 +7,22 @@ import com.flying.orm.rdb.mapping.MappingException;
 
 import java.util.Optional;
 
-/** 从 flying-orm 的表注解或命名约定确定分段表身份和旧版限定表名。 */
+/** 从表注解或命名约定解析 CRUD 与 Schema 共用的物理关系身份。 */
 final class EntityTableNameResolver {
 
     private EntityTableNameResolver() {
     }
 
+    /** 持久对象的命名输入来自注解原始表名，不随关系展示格式调整。 */
+    static String namingSource(Class<?> type, RelationIdentity identity) {
+        return FlyingAnnotationReader.tableName(type).map(TableName::value)
+                .map(FlyingAnnotationReader::text).orElse(identity.table());
+    }
+
     /**
      * 直接从实体注解构造分段关系身份。
      *
-     * <p>{@link TableName#value()} 中即使含有点号，也只会被当作完整表名保存。</p>
+     * <p>无显式命名空间时支持限定名简写；显式声明命名空间后各段按字面值保存。</p>
      */
     static RelationIdentity resolveIdentity(Class<?> type) {
         Optional<TableName> tableDefinition = FlyingAnnotationReader.tableName(type);
@@ -31,64 +37,14 @@ final class EntityTableNameResolver {
         String catalog = catalogDefinition == null
                 ? null
                 : catalogDefinition.value();
-        return RelationIdentity.of(catalog, schema, table == null ? defaultName : table);
-    }
-
-    /**
-     * 为完整关系模型保留旧版点分表名的物理含义。
-     *
-     * <p>旧 CRUD 会把 {@code schema.table} 交给标识符渲染器逐段引用。完整关系模型不能再把这个
-     * 字符串塞进单个 table 段，否则 Repository 与 Schema 会指向不同的物理对象。显式 schema/catalog
-     * 已经没有歧义，只有旧式两段 value 才在这里按原有语义转换；更多段没有受支持的旧模型，严格
-     * 关系入口会直接拒绝而不是猜测 catalog。</p>
-     */
-    static RelationIdentity resolveRelationalIdentity(Class<?> type) {
-        RelationIdentity identity = resolveIdentity(type);
-        if (hasExplicitNamespace(type) || !identity.table().contains(".")) {
-            return identity;
+        String name = table == null ? defaultName : table;
+        if (catalogDefinition != null || schema != null || !name.contains(".")) {
+            return RelationIdentity.of(catalog, schema, name);
         }
-        String[] parts = identity.table().split("\\.", -1);
-        for (String part : parts) {
-            if (part.isBlank()) {
-                throw new MappingException("legacy qualified table name must not contain blank segments: "
-                                                   + type.getName());
-            }
+        try {
+            return RelationIdentity.parse(name);
+        } catch (IllegalArgumentException error) {
+            throw new MappingException("invalid qualified table name: " + type.getName(), error);
         }
-        return switch (parts.length) {
-            case 2 -> RelationIdentity.of(null, parts[0], parts[1]);
-            default -> throw new MappingException(
-                    "legacy qualified table name must contain exactly two segments: " + type.getName());
-        };
-    }
-
-    /**
-     * 判断实体是否显式启用了 3.2 分段命名空间。
-     *
-     * <p>不能根据解析后的字符串猜测：旧 {@code @TableName("schema.table")} 必须继续走原有
-     * String 语义，只有 catalog 注解或非空 schema 属性才切换 Repository 的分段渲染。</p>
-     */
-    static boolean hasExplicitNamespace(Class<?> type) {
-        if (type.getAnnotation(TableCatalog.class) != null) {
-            return true;
-        }
-        return FlyingAnnotationReader.tableName(type)
-                                     .map(TableName::schema)
-                                     .map(FlyingAnnotationReader::text)
-                                     .isPresent();
-    }
-
-    /**
-     * 把已经分段的关系身份转成旧实体映射使用的限定字符串。
-     *
-     * <p>旧公开访问器历来只认识 {@code schema.table}，所以这里不加入 catalog，也绝不按点号
-     * 反向猜测名称段。完整 SQL 渲染同时持有 {@link RelationIdentity}。</p>
-     */
-    static String resolveTable(RelationIdentity identity) {
-        String schema = identity.schema().orElse(null);
-        StringBuilder table = new StringBuilder(identity.table().length() + 32);
-        if (schema != null) {
-            table.append(schema).append('.');
-        }
-        return table.append(identity.table()).toString();
     }
 }

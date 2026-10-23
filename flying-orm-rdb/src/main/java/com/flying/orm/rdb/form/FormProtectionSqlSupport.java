@@ -5,30 +5,23 @@ import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.page.CursorPageQuery;
-import com.flying.orm.core.page.PageQuery;
-import com.flying.orm.core.page.PageSort;
-import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.sql.render.SqlRequest;
-import com.flying.orm.core.internal.value.OwnedBindableValues;
 import com.flying.orm.core.internal.value.BindableValueSnapshots;
-import com.flying.orm.rdb.dialect.PaginationDialect;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.internal.binding.SqlNullParameter;
 import com.flying.orm.rdb.internal.condition.ConditionNodes;
 import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
-import com.flying.orm.rdb.lock.LockingReadDialect;
-import com.flying.orm.rdb.lock.OptimisticLockOptions;
-import com.flying.orm.rdb.lock.ReadLock;
 import com.flying.orm.rdb.protection.ProtectedContainsLayout;
+import com.flying.orm.rdb.protection.ProtectedConditions;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 import com.flying.orm.rdb.protection.ProtectedFieldReprotection;
 import com.flying.orm.rdb.protection.ProtectedFormLayout;
 import com.flying.orm.rdb.result.DynamicRow;
 
 import java.util.LinkedHashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -50,24 +43,20 @@ final class FormProtectionSqlSupport {
 
     private final FormSqlRenderSupport support;
     private final FormQuerySqlRenderer queries;
-    private final FormWriteSqlRenderer writes;
     private final ProtectedFieldRuntime protectedFields;
     private final ValueCodecRegistry protectedCodecs;
     final ProtectedContainsSqlPlanner contains;
 
     FormProtectionSqlSupport(FormSqlRenderSupport support,
                              FormQuerySqlRenderer queries,
-                             FormWriteSqlRenderer writes,
-                             ProtectedFieldRuntime protectedFields,
-                             PaginationDialect pagination) {
+                             ProtectedFieldRuntime protectedFields) {
         this.support = Objects.requireNonNull(support, "form SQL render support must not be null");
         this.queries = Objects.requireNonNull(queries, "form query SQL renderer must not be null");
-        this.writes = Objects.requireNonNull(writes, "form write SQL renderer must not be null");
         this.protectedFields = Objects.requireNonNull(
                 protectedFields, "protected field runtime must not be null");
         this.protectedCodecs = support.customFieldCodecs.isEmpty() ? support.valueCodecs
                 : FormEncodedConditionValue.registerWith(support.valueCodecs);
-        this.contains = new ProtectedContainsSqlPlanner(this.support, pagination);
+        this.contains = new ProtectedContainsSqlPlanner(this.support);
     }
 
     FormPreparedWrite prepareWrite(DynamicForm form,
@@ -101,28 +90,15 @@ final class FormProtectionSqlSupport {
         return new WriteOperation(
                 safeForm,
                 safePhysicalForm,
-                protectedFields.writeOperation(safeForm, safePhysicalForm, scope, protectedCodecs),
+                safeForm.protections().encryptedFields().isEmpty() ? null
+                        : protectedFields.writeOperation(safeForm, safePhysicalForm, scope, protectedCodecs),
                 layout == null ? null : new SideIndexPlan(safeForm, layout));
-    }
-
-    private Map<String, Object> canonicalValues(DynamicForm form, Map<String, Object> values) {
-        Map<String, Object> safeValues = Objects.requireNonNull(values, "protected write values must not be null");
-        Map<String, Object> canonical = new LinkedHashMap<>(Math.max(16, safeValues.size() * 2));
-        for (Map.Entry<String, Object> entry : safeValues.entrySet()) {
-            String field = support.field(form, entry.getKey()).name();
-            if (canonical.containsKey(field)) {
-                throw new IllegalArgumentException("duplicate normalized protected write field");
-            }
-            canonical.put(field, entry.getValue());
-        }
-        return canonical;
     }
 
     final class WriteOperation {
 
         private final DynamicForm form;
         private final DynamicForm physicalForm;
-        private final boolean protectsValues;
         private final ProtectedFieldRuntime.WriteOperation values;
         private final SideIndexPlan sideIndex;
 
@@ -132,7 +108,6 @@ final class FormProtectionSqlSupport {
                                SideIndexPlan sideIndex) {
             this.form = form;
             this.physicalForm = physicalForm;
-            this.protectsValues = !form.protections().encryptedFields().isEmpty();
             this.values = values;
             this.sideIndex = sideIndex;
         }
@@ -140,20 +115,16 @@ final class FormProtectionSqlSupport {
         FormPreparedWrite prepare(Map<String, Object> logicalValues) {
             Map<String, Object> safeValues = Objects.requireNonNull(
                     logicalValues, "dynamic form values must not be null");
-            if (!protectsValues) {
-                return new FormPreparedWrite(physicalForm, safeValues);
+            if (values == null) {
+                return new FormPreparedWrite(physicalForm, safeValues, List.of());
             }
-            ProtectedFieldRuntime.PreparedWrite prepared = values.prepare(encodeProtectedValues(form, safeValues));
-            return new FormPreparedWrite(prepared.physicalForm(), prepared.ownedValues());
+            List<ProtectedFieldRuntime.ContainsFieldTokens> tokens = sideIndex == null ? List.of() : new ArrayList<>();
+            ProtectedFieldRuntime.PreparedWrite prepared = values.prepare(
+                    encodeProtectedValues(form, safeValues), sideIndex == null ? null : tokens::add);
+            return new FormPreparedWrite(prepared.physicalForm(), prepared.ownedValues(), tokens);
         }
 
-        SqlRequest update(FormPreparedWrite write,
-                          ConditionGroup where,
-                          OptimisticLockOptions lock) {
-            return FormProtectionSqlSupport.this.update(write, where, lock);
-        }
-
-        Optional<ProtectedWriteWork> protectedWrite(Map<String, Object> logicalValues,
+        Optional<ProtectedWriteWork> protectedWrite(FormPreparedWrite write,
                                                     SqlRequest writeRequest,
                                                     ProtectedFieldRuntime.PreparedQuery ownerQuery,
                                                     ProtectedWriteWork.Kind kind,
@@ -161,19 +132,18 @@ final class FormProtectionSqlSupport {
             if (sideIndex == null) {
                 return Optional.empty();
             }
-            Map<String, Object> canonical = canonicalValues(form, logicalValues);
             if (kind == ProtectedWriteWork.Kind.UPDATE
-                    && sideIndex.owners.stream().anyMatch(canonical::containsKey)) {
+                    && sideIndex.owners.stream().anyMatch(write.values()::containsKey)) {
                 throw new IllegalArgumentException(
                         "protected contains update must not change primary key");
             }
-            List<ProtectedFieldRuntime.ContainsFieldTokens> tokens = values.containsTokens(
-                    encodeProtectedValues(form, canonical));
+            List<ProtectedFieldRuntime.ContainsFieldTokens> tokens = write.containsTokens();
             if (tokens.isEmpty()) {
                 return Optional.empty();
             }
-            SqlRequest ownerRequest = ownerQuery == null ? null : queries.selectProjected(
-                    ownerQuery.physicalForm(), ownerQuery.where(), sideIndex.owners, List.of(), List.of());
+            SqlRequest ownerRequest = ownerQuery == null ? null : queries.select(
+                    ownerQuery.physicalForm(), ownerQuery.where(), sideIndex.owners, List.of(), List.of(),
+                    null, false, null, null);
             List<ProtectedWriteWork.FieldTokens> fields = tokens.stream()
                     .map(field -> ProtectedWriteWork.FieldTokens.owned(
                             field.fieldTag(), field.tokenCount(), field::ownedToken))
@@ -190,34 +160,19 @@ final class FormProtectionSqlSupport {
                     fields));
         }
 
-        /** 单条 INSERT 的绑定顺序与已准备字段顺序一致；只取最终参数，不再执行 codec。 */
-        Map<String, Object> insertOwner(FormPreparedWrite write, SqlRequest request) {
-            if (sideIndex == null) {
-                return Map.of();
-            }
-            Map<String, Object> owner = new LinkedHashMap<>();
-            List<Object> parameters = OwnedBindableValues.ownedValues(request.parameters());
-            int index = 0;
-            for (String column : write.values().keySet()) {
-                var field = write.physicalForm().field(column);
-                if (field.primaryKey()) {
-                    Object value = parameters.get(index);
-                    owner.put(field.name(), value instanceof SqlNullParameter ? null : value);
-                }
-                index++;
-            }
-            return owner;
-        }
-
-        /** 批量复用已有字段索引，仅定位 owner 分量，后续行不重复扫描整行字段。 */
+        /** 单条与批量共用列到绑定参数的位置，只取最终参数，不再执行主键 codec。 */
         Map<String, Object> insertOwner(BatchInsertPlan plan, Object[] parameters) {
+            if (sideIndex == null) return Map.of();
             Map<String, Object> owner = new LinkedHashMap<>();
             for (String name : sideIndex.owners) {
                 String normalized = physicalForm.field(name).normalizedName();
-                Integer index = plan.columnLayout().indexesByNormalizedName().get(normalized);
+                Integer index = plan.columnLayout().indexOf(normalized);
                 if (index != null) {
-                    int parameterIndex = index < plan.scopeParameterIndex()
-                            ? index : index + plan.scopeParameters().size();
+                    if (plan.columnLayout().computed(index)) {
+                        throw new IllegalArgumentException("protected contains owner requires a value or generated key");
+                    }
+                    int parameterIndex = plan.columnLayout().parameterIndex(index);
+                    if (parameterIndex >= plan.predicateParameterIndex()) parameterIndex += plan.predicateParameters().size();
                     Object value = parameters[parameterIndex];
                     owner.put(name, value instanceof SqlNullParameter ? null : value);
                 }
@@ -282,7 +237,8 @@ final class FormProtectionSqlSupport {
                                                                                 ConditionGroup where,
                                                                                 DataScope scope) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        if (safeForm.protections().encryptedFields().isEmpty()) {
+        if (safeForm.protections().encryptedFields().isEmpty()
+                || !ConditionNodes.anyTerm(where, term -> ProtectedConditions.CONTAINS.equals(term.operator()))) {
             return Optional.empty();
         }
         return protectedFields.prepareContainsQuery(
@@ -330,91 +286,6 @@ final class FormProtectionSqlSupport {
         } catch (RuntimeException failure) {
             throw new IllegalArgumentException("encrypted field value cannot be encoded");
         }
-    }
-
-    /** 字段出现即需要维护侧索引；null 也必须捕获 owner 以删除旧 token。 */
-    boolean requiresOwnerQuery(DynamicForm form, Map<String, Object> logicalValues) {
-        if (form.protections().encryptedFields().isEmpty()) {
-            return false;
-        }
-        for (String name : logicalValues.keySet()) {
-            var definition = form.protections().encrypted(support.field(form, name).name()).orElse(null);
-            if (definition != null && definition.searchModes().contains(EncryptedSearchMode.CONTAINS)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    List<SqlRequest> containsCandidates(ProtectedFieldRuntime.PreparedContainsQuery query, int candidateLimit) {
-        return contains.candidates(query, candidateLimit);
-    }
-
-    SqlRequest insert(FormPreparedWrite write) {
-        return writes.insert(write.physicalForm(), write.values());
-    }
-
-    SqlRequest update(FormPreparedWrite write, ConditionGroup where) {
-        return writes.update(write.physicalForm(), write.values(), where);
-    }
-
-    SqlRequest update(FormPreparedWrite write,
-                      ConditionGroup where,
-                      OptimisticLockOptions lock) {
-        return writes.update(write.physicalForm(), write.values(), where, lock);
-    }
-
-    SqlRequest delete(ProtectedFieldRuntime.PreparedQuery query, OptimisticLockOptions lock) {
-        return lock == null
-                ? writes.delete(query.physicalForm(), query.where())
-                : writes.delete(query.physicalForm(), query.where(), lock);
-    }
-
-    SqlRequest select(ProtectedFieldRuntime.PreparedQuery query,
-                      List<String> groups,
-                      List<PageSort> sorts) {
-        return queries.selectProjected(query.physicalForm(), query.where(), query.visibleFields(), groups, sorts);
-    }
-
-    SqlRequest selectLocking(ProtectedFieldRuntime.PreparedQuery query,
-                             List<String> groups,
-                             List<PageSort> sorts,
-                             LockingReadDialect dialect,
-                             ReadLock lock) {
-        return queries.selectProjectedLocking(
-                query.physicalForm(), query.where(), query.visibleFields(), groups, sorts, dialect, lock);
-    }
-
-    SqlRequest select(ProtectedFieldRuntime.PreparedQuery query, PageQuery page) {
-        return queries.selectPhysical(query.physicalForm(), query.visibleFields(), query.where(), page);
-    }
-
-    SqlRequest select(ProtectedFieldRuntime.PreparedQuery query, CursorPageQuery page) {
-        return queries.selectPhysical(query.physicalForm(), query.visibleFields(), query.where(), page);
-    }
-
-    SqlRequest select(ProtectedFieldRuntime.PreparedQuery query,
-                      CursorPageNormalizer.NormalizedCursorPage page) {
-        return queries.selectPhysical(query.physicalForm(), query.visibleFields(), query.where(), page);
-    }
-
-    SqlRequest selectKeyset(ProtectedFieldRuntime.PreparedQuery query,
-                            HiddenProjectionLayout layout,
-                            KeysetPageNormalizer.NormalizedKeysetPage page) {
-        return queries.selectKeyset(query.physicalForm(), query.where(), layout, page);
-    }
-
-    SqlRequest selectKeysetLocking(ProtectedFieldRuntime.PreparedQuery query,
-                                   HiddenProjectionLayout layout,
-                                   KeysetPageNormalizer.NormalizedKeysetPage page,
-                                   LockingReadDialect dialect,
-                                   ReadLock lock) {
-        return queries.selectKeysetLocking(
-                query.physicalForm(), query.where(), layout, page, dialect, lock);
-    }
-
-    SqlRequest count(ProtectedFieldRuntime.PreparedQuery query) {
-        return queries.count(query.physicalForm(), query.where());
     }
 
     DynamicRow transform(DynamicForm form,
@@ -491,12 +362,6 @@ final class FormProtectionSqlSupport {
                             ProtectedFieldRuntime.PreparedContainsQuery query,
                             DynamicRow decryptedRow) {
         return protectedFields.matchesContains(form, query, decryptedRow);
-    }
-
-    DynamicRow mask(DynamicForm form,
-                    DynamicRow decryptedRow,
-                    SensitiveDisplayMode displayMode) {
-        return protectedFields.maskResult(form, decryptedRow, displayMode);
     }
 
     Object maskValue(Object value,

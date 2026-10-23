@@ -1,6 +1,5 @@
 package com.flying.orm.core.form;
 
-import com.flying.orm.core.metadata.RelationalMetadataAdapter;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Field;
@@ -18,7 +17,7 @@ class LegacyDynamicFormSchemaColdPathTest {
                 .build();
         String fingerprint = form.structureFingerprint();
 
-        RelationalMetadataAdapter.from(form);
+        form.toTableDefinition();
 
         assertEquals(fingerprint, form.structureFingerprint());
         assertFalse(Arrays.stream(DynamicForm.class.getDeclaredFields())

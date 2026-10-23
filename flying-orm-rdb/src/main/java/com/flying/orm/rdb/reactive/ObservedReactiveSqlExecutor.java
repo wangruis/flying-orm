@@ -25,7 +25,7 @@ import org.reactivestreams.Publisher;
  *
  * <p>R2dbcSqlExecutor 自己走内置观测路径，其他执行器通过接口的 {@code withObserver/withObservers}
  * 得到本装饰器。它只记录信号，不改变 SQL、事务和生成键结果；observer 的普通异常不会影响数据库操作，
- * 但异常图中的 JVM 致命错误仍立即冒泡。</p>
+ * 直接抛出的 Error 仍立即传播，不递归检查普通异常的 cause。</p>
  *
  * @author wangr
  * @date 2026-07-29
@@ -61,6 +61,11 @@ final class ObservedReactiveSqlExecutor extends ForwardingReactiveSqlExecutor {
                 observer, "sql execution observer must not be null");
         BatchExecutionObserver configuredBatch = Objects.requireNonNull(
                 batchObserver, "batch execution observer must not be null");
+        configuredSql = SqlExecutionObservers.composite(configuredSql);
+        configuredBatch = BatchExecutionObserver.composite(BatchExecutionObserver.noop(), configuredBatch);
+        if (!configuredSql.enabled() && !configuredBatch.enabled()) {
+            return safeDelegate;
+        }
         Deque<ObservedReactiveSqlExecutor> existingObservers = new ArrayDeque<>();
         safeDelegate = ForwardingReactiveSqlExecutor.withoutPolicy(
                 safeDelegate,
@@ -74,9 +79,6 @@ final class ObservedReactiveSqlExecutor extends ForwardingReactiveSqlExecutor {
         }
         configuredSql = SqlExecutionObservers.composite(previousSql, configuredSql);
         configuredBatch = BatchExecutionObserver.composite(previousBatch, configuredBatch);
-        if (!configuredSql.enabled() && !configuredBatch.enabled()) {
-            return safeDelegate;
-        }
         return ForwardingReactiveSqlExecutor.preservingScopedCapability(
                 safeDelegate,
                 new ObservedReactiveSqlExecutor(safeDelegate, configuredSql, configuredBatch));
@@ -106,8 +108,7 @@ final class ObservedReactiveSqlExecutor extends ForwardingReactiveSqlExecutor {
                            safeRequest,
                             0,
                             Flux.defer(() -> delegate().query(safeRequest, safeOptions)
-                                                    .onErrorMap(ReactiveSqlExecutionProtection::translate)),
-                            safeOptions);
+                                                    .onErrorMap(ReactiveSqlExecutionProtection::translate)));
     }
 
     @Override
@@ -129,21 +130,7 @@ final class ObservedReactiveSqlExecutor extends ForwardingReactiveSqlExecutor {
                            safeRequest,
                             0,
                             Mono.defer(() -> delegate().rowsUpdated(safeRequest, safeOptions)
-                                                    .onErrorMap(ReactiveSqlExecutionProtection::translate)),
-                            safeOptions);
-    }
-
-    @Override
-    public Mono<SqlWriteResult> rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
-        SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
-        SqlExecutionOptions safeOptions = Objects.requireNonNull(options,
-                                                                  "sql execution options must not be null");
-        Mono<SqlWriteResult> source = Mono.defer(() -> delegate().rowsUpdatedReturningKeys(safeRequest, safeOptions)
-                                                              .onErrorMap(ReactiveSqlExecutionProtection::translate));
-        return observationSupport.observeMono(SqlExecutionOperation.UPDATE,
-                                               safeRequest, 0, source,
-                                               SqlWriteResult::affectedRows,
-                                               safeOptions);
+                                                    .onErrorMap(ReactiveSqlExecutionProtection::translate)));
     }
 
     @Override
@@ -153,14 +140,11 @@ final class ObservedReactiveSqlExecutor extends ForwardingReactiveSqlExecutor {
         SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
         SqlExecutionOptions safeOptions = Objects.requireNonNull(options,
                                                                   "sql execution options must not be null");
-        String safeColumn = Objects.requireNonNull(generatedKeyColumn,
-                                                   "generated key column must not be null");
         Mono<SqlWriteResult> source = Mono.defer(() -> delegate().rowsUpdatedReturningKeys(
-                safeRequest, safeOptions, safeColumn).onErrorMap(ReactiveSqlExecutionProtection::translate));
+                safeRequest, safeOptions, generatedKeyColumn).onErrorMap(ReactiveSqlExecutionProtection::translate));
         return observationSupport.observeMono(SqlExecutionOperation.UPDATE,
                                                safeRequest, 0, source,
-                                               SqlWriteResult::affectedRows,
-                                               safeOptions);
+                                               SqlWriteResult::affectedRows);
     }
 
     /** 保护写入作为一个同连接工作单元观测，侧索引内部参数不单独暴露。 */
@@ -176,8 +160,7 @@ final class ObservedReactiveSqlExecutor extends ForwardingReactiveSqlExecutor {
                 safeWork.writeRequest(),
                 0,
                 source,
-                SqlWriteResult::affectedRows,
-                safeOptions);
+                SqlWriteResult::affectedRows);
     }
 
     @Override

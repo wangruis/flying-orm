@@ -7,7 +7,7 @@ import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.execution.ExternalTransactionTestSupport;
-import com.flying.orm.rdb.form.BatchOptimisticUpdate;
+import com.flying.orm.rdb.form.BatchUpdate;
 import com.flying.orm.rdb.form.spec.BatchSpec;
 import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.lock.OptimisticLockOptions;
@@ -85,7 +85,7 @@ class H2UuidNullBindingTest {
                         ConditionGroup where = ConditionGroup.and().where("id", "=", ID).build();
                         if (operation.startsWith("batch-")) {
                             BatchSpec spec = update
-                                    ? BatchSpec.update(FORM, Flux.just(new BatchOptimisticUpdate(values, where,
+                                    ? BatchSpec.update(FORM, Flux.just(new BatchUpdate(values, where,
                                             OptimisticLockOptions.increment("version", 1L))))
                                     : BatchSpec.insert(FORM, Flux.just(values));
                             BatchExecutionEvidence result = ExternalTransactionTestSupport.reactive(factory, transaction ->

@@ -8,13 +8,13 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.Consumer;
 
 /**
  * 一张表的规范关系定义。
  *
- * <p>旧的 {@link TableMetadata} 仍是普通 CRUD 使用的轻量视图；只有显式进入 Schema、迁移或
- * DDL 路径时才需要创建本对象。构造阶段会复制全部集合并一次性核对列引用，发布后可以安全地
- * 在线程间共享，也不会让可选关系能力给旧热路径增加对象或查找成本。</p>
+ * <p>元数据读取、动态表单和完整结构规划共享同一物理定义。构造阶段冻结集合和名称索引，
+ * 不读取数据库；普通 CRUD 不必加载未使用的约束或分区信息。</p>
  *
  * @author wangr
  * @date 2026-09-03
@@ -29,7 +29,9 @@ public final class RelationalTableDefinition {
     private final PrimaryKeyDefinition primaryKey;
     private final List<UniqueConstraintDefinition> uniqueConstraints;
     private final List<IndexDefinition> indexes;
+    private final MetadataNameIndex<IndexDefinition> indexesByName;
     private final List<ForeignKeyDefinition> foreignKeys;
+    private final MetadataNameIndex<ForeignKeyDefinition> foreignKeysByName;
     private final List<CheckConstraintDefinition> checks;
     private final TablePartitionDefinition partition;
 
@@ -44,7 +46,11 @@ public final class RelationalTableDefinition {
         primaryKey = builder.primaryKey;
         uniqueConstraints = List.copyOf(builder.uniqueConstraints);
         indexes = List.copyOf(builder.indexes);
+        indexesByName = MetadataNameIndex.ofOwned(indexes,
+                IndexDefinition::name, IndexDefinition::normalizedName, "index");
         foreignKeys = List.copyOf(builder.foreignKeys);
+        foreignKeysByName = MetadataNameIndex.ofOwned(foreignKeys,
+                ForeignKeyDefinition::name, ForeignKeyDefinition::normalizedName, "foreign key");
         checks = List.copyOf(builder.checks);
         partition = builder.partition;
 
@@ -55,6 +61,20 @@ public final class RelationalTableDefinition {
     /** 创建只在当前配置线程使用的构建器。 */
     public static Builder builder(RelationIdentity identity) {
         return new Builder(identity);
+    }
+
+    /** 创建无命名空间的表定义；点号是表名的一部分。 */
+    public static Builder builder(String table) {
+        return builder(RelationIdentity.table(table));
+    }
+
+    /** 返回未拼接 catalog/schema 的物理表名。 */
+    public String name() {
+        return identity.table();
+    }
+
+    public String normalizedName() {
+        return Names.key(name(), "table name");
     }
 
     /** @return 保留 catalog、schema 和 table 分段的关系身份 */
@@ -74,7 +94,7 @@ public final class RelationalTableDefinition {
 
     /** 精确名称优先；只有大小写折叠后仍唯一时才提供兼容查找。 */
     public Optional<ColumnDefinition> findColumn(String name) {
-        return columnsByName.find(name, "column name");
+        return columnsByName.find(name);
     }
 
     /** @return 指定列；不存在时给出不回显输入值的确定性错误 */
@@ -93,19 +113,30 @@ public final class RelationalTableDefinition {
         return uniqueConstraints;
     }
 
-    /** 兼容更短的领域用语。 */
-    public List<UniqueConstraintDefinition> uniques() {
-        return uniqueConstraints;
-    }
-
     /** @return 命名索引的不可变快照 */
     public List<IndexDefinition> indexes() {
         return indexes;
     }
 
+    public Optional<IndexDefinition> findIndex(String name) {
+        return indexesByName.find(name);
+    }
+
+    public IndexDefinition index(String name) {
+        return findIndex(name).orElseThrow(() -> new IllegalArgumentException("index does not exist"));
+    }
+
     /** @return 命名外键的不可变快照 */
     public List<ForeignKeyDefinition> foreignKeys() {
         return foreignKeys;
+    }
+
+    public Optional<ForeignKeyDefinition> findForeignKey(String name) {
+        return foreignKeysByName.find(name);
+    }
+
+    public ForeignKeyDefinition foreignKey(String name) {
+        return findForeignKey(name).orElseThrow(() -> new IllegalArgumentException("foreign key does not exist"));
     }
 
     /** @return 命名 CHECK 约束的不可变快照 */
@@ -178,7 +209,7 @@ public final class RelationalTableDefinition {
             requirePredicateColumns(check.predicate());
         }
         if (partition != null) {
-            ColumnDefinition key = columnsByName.findExact(partition.column(), "column name")
+            ColumnDefinition key = columnsByName.findExact(partition.column())
                     .orElseThrow(() -> new IllegalArgumentException(
                             "table partition references an unknown column"));
             if (key.databaseType().isArray() || switch (key.databaseType().logicalType()) {
@@ -209,7 +240,7 @@ public final class RelationalTableDefinition {
     }
 
     private void requireColumn(String name, String owner) {
-        if (columnsByName.findExact(name, "column name").isEmpty()) {
+        if (columnsByName.findExact(name).isEmpty()) {
             throw new IllegalArgumentException(owner + " references an unknown column");
         }
     }
@@ -244,6 +275,13 @@ public final class RelationalTableDefinition {
             return this;
         }
 
+        /** 配置并添加一列；回调返回后立即冻结列定义，不保留可变列构建器。 */
+        public Builder addColumn(String name, String databaseType, Consumer<ColumnDefinition.Builder> definition) {
+            ColumnDefinition.Builder column = ColumnDefinition.builder(name, databaseType);
+            Objects.requireNonNull(definition, "column configuration must not be null").accept(column);
+            return addColumn(column.build());
+        }
+
         public Builder primaryKey(PrimaryKeyDefinition definition) {
             if (primaryKey != null) {
                 throw new IllegalStateException("primary key is already defined");
@@ -258,17 +296,9 @@ public final class RelationalTableDefinition {
             return this;
         }
 
-        public Builder unique(UniqueConstraintDefinition definition) {
-            return addUnique(definition);
-        }
-
         public Builder addIndex(IndexDefinition definition) {
             indexes.add(Objects.requireNonNull(definition, "index definition must not be null"));
             return this;
-        }
-
-        public Builder index(IndexDefinition definition) {
-            return addIndex(definition);
         }
 
         public Builder addForeignKey(ForeignKeyDefinition definition) {
@@ -276,17 +306,9 @@ public final class RelationalTableDefinition {
             return this;
         }
 
-        public Builder foreignKey(ForeignKeyDefinition definition) {
-            return addForeignKey(definition);
-        }
-
         public Builder addCheck(CheckConstraintDefinition definition) {
             checks.add(Objects.requireNonNull(definition, "check constraint definition must not be null"));
             return this;
-        }
-
-        public Builder check(CheckConstraintDefinition definition) {
-            return addCheck(definition);
         }
 
         /** 声明受控分区父表；一张表只能有一项分区定义。 */

@@ -1,6 +1,5 @@
 package com.flying.orm.rdb.reactive;
 
-import com.flying.orm.rdb.internal.protection.ProtectedReplacementBatchPlan;
 import io.r2dbc.spi.Connection;
 import io.r2dbc.spi.Result;
 import io.r2dbc.spi.Statement;
@@ -12,84 +11,32 @@ import java.util.List;
 /** Executes a bounded, verified R2DBC statement batch for protected side-index tokens. */
 final class R2dbcProtectedSideIndexDml {
 
-    static final int MAX_TOKEN_BATCH_SIZE = 500;
-
     private R2dbcProtectedSideIndexDml() {
     }
 
-    static Mono<Void> insertParameterSets(Connection connection,
-                                          String sql,
-                                          List<List<Object>> parameterSets) {
-        if (parameterSets.size() > MAX_TOKEN_BATCH_SIZE) {
-            return Mono.error(new IllegalArgumentException(
-                    "protected side index token batch exceeds internal limit"));
-        }
-        if (parameterSets.isEmpty()) {
-            return Mono.empty();
-        }
-        int parametersPerSet = parameterSets.getFirst().size();
-        if (parametersPerSet == 0) {
-            return Mono.error(new IllegalArgumentException(
-                    "protected side index token batch exceeds internal limit"));
-        }
-        int batchSize = Math.min(
-                MAX_TOKEN_BATCH_SIZE,
-                Math.max(1, ProtectedReplacementBatchPlan.MAX_PARAMETERS / parametersPerSet));
-        int chunks = (parameterSets.size() + batchSize - 1) / batchSize;
-        return Flux.range(0, chunks)
-                   .concatMap(chunk -> executeParameterSets(
-                           connection,
-                           sql,
-                           parameterSets.subList(
-                                   chunk * batchSize,
-                                   Math.min(parameterSets.size(), (chunk + 1) * batchSize))), 1)
-                   .then();
+    static Mono<Void> insertParameterSets(Connection connection, String sql, List<List<Object>> parameterSets) {
+        return execute(connection, sql, parameterSets, true);
     }
 
-    static Mono<Void> deleteParameterSets(Connection connection,
-                                          String sql,
-                                          List<List<Object>> parameterSets) {
-        if (parameterSets.size() > MAX_TOKEN_BATCH_SIZE
-                || (parameterSets.size() > 1 && parameterSets.stream().mapToLong(List::size).sum()
-                > ProtectedReplacementBatchPlan.MAX_PARAMETERS)) {
-            return Mono.error(new IllegalArgumentException(
-                    "protected side index delete batch exceeds internal limit"));
-        }
-        if (parameterSets.isEmpty()) {
-            return Mono.empty();
-        }
+    static Mono<Void> deleteParameterSets(Connection connection, String sql, List<List<Object>> parameterSets) {
+        return execute(connection, sql, parameterSets, false);
+    }
+
+    private static Mono<Void> execute(Connection connection, String sql, List<List<Object>> parameterSets,
+                                      boolean insert) {
+        if (parameterSets.isEmpty()) return Mono.empty();
         return Mono.defer(() -> {
             Statement statement = connection.createStatement(sql);
             for (int index = 0; index < parameterSets.size(); index++) {
                 bind(statement, parameterSets.get(index));
-                if (index + 1 < parameterSets.size()) {
-                    statement.add();
-                }
+                if (index + 1 < parameterSets.size()) statement.add();
             }
-            return Flux.from(statement.execute())
-                       .concatMap(Result::getRowsUpdated, 1)
-                       .then();
-        });
-    }
-
-    private static Mono<Void> executeParameterSets(Connection connection,
-                                                   String sql,
-                                                   List<List<Object>> parameterSets) {
-        if (parameterSets.isEmpty()) {
-            return Mono.empty();
-        }
-        return Mono.defer(() -> {
-            Statement statement = connection.createStatement(sql);
-            for (int index = 0; index < parameterSets.size(); index++) {
-                bind(statement, parameterSets.get(index));
-                if (index + 1 < parameterSets.size()) {
-                    statement.add();
-                }
-            }
-            return Flux.from(statement.execute())
-                       .concatMap(Result::getRowsUpdated, 1)
-                       .reduce(0L, R2dbcExecutionCounts::add)
-                       .flatMap(total -> requireExactTotal(total, parameterSets.size()));
+            Flux<Long> counts = Flux.from(statement.execute()).concatMap(Result::getRowsUpdated, 1);
+            return insert ? counts.reduce(0L, R2dbcExecutionCounts::add)
+                    .flatMap(total -> total == parameterSets.size() ? Mono.empty()
+                            : Mono.error(new IllegalStateException(
+                                    "protected side index insert batch must affect one row per token")))
+                    : counts.then();
         });
     }
 
@@ -102,13 +49,5 @@ final class R2dbcProtectedSideIndexDml {
                 statement.bind(index, R2dbcParameterValues.forBinding(value));
             }
         }
-    }
-
-    private static Mono<Void> requireExactTotal(long affectedRows, int tokenCount) {
-        if (affectedRows != tokenCount) {
-            return Mono.error(new IllegalStateException(
-                    "protected side index insert batch must affect one row per token"));
-        }
-        return Mono.empty();
     }
 }

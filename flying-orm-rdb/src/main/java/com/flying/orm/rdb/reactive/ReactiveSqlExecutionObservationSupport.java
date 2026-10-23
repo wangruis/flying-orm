@@ -5,7 +5,6 @@ import com.flying.orm.core.internal.value.OwnedBindableValues;
 import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.execution.GeneratedKeyReadException;
-import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.observation.BatchExecutionObserver;
 import com.flying.orm.rdb.observation.SqlExecutionBackend;
 import com.flying.orm.rdb.observation.SqlExecutionObservation;
@@ -42,9 +41,6 @@ final class ReactiveSqlExecutionObservationSupport {
     private final boolean sqlEnabled;
 
     private final boolean needsParameterValues;
-
-
-
     private final ReactiveBatchExecutionObservationSupport batches;
 
     private ReactiveSqlExecutionObservationSupport(SqlExecutionObserver sqlObserver,
@@ -66,11 +62,6 @@ final class ReactiveSqlExecutionObservationSupport {
         return new ReactiveSqlExecutionObservationSupport(sqlObserver, batchObserver);
     }
 
-    static BatchExecutionObserver combineBatchObservers(BatchExecutionObserver first,
-                                                         BatchExecutionObserver second) {
-        return BatchExecutionObserver.composite(first, second);
-    }
-
     boolean enabled() {
         return sqlEnabled;
     }
@@ -79,26 +70,15 @@ final class ReactiveSqlExecutionObservationSupport {
                             SqlRequest request,
                             int batchSize,
                             Flux<T> source) {
-        return observeFlux(operation, request, batchSize, source,
-                           SqlExecutionOptions.safeDefaults());
-    }
-
-    <T> Flux<T> observeFlux(SqlExecutionOperation operation,
-                            SqlRequest request,
-                            int batchSize,
-                            Flux<T> source,
-                            SqlExecutionOptions options) {
         return observeFlux(operation, request, OwnedBindableValues.ownedValues(request.parameters()),
-                batchSize, source, options);
+                batchSize, source);
     }
 
     <T> Flux<T> observeFlux(SqlExecutionOperation operation,
                             SqlRequest request,
                             List<Object> executionParameters,
                             int batchSize,
-                            Flux<T> source,
-                            SqlExecutionOptions options) {
-        Objects.requireNonNull(options, "sql execution options must not be null");
+                            Flux<T> source) {
         if (!sqlEnabled) {
             return Objects.requireNonNull(source, "sql observation source must not be null");
         }
@@ -118,16 +98,7 @@ final class ReactiveSqlExecutionObservationSupport {
                            int batchSize,
                            Mono<Long> source) {
         return observeMono(operation, request, batchSize, source,
-                           rows -> rows == null ? 0L : rows, SqlExecutionOptions.safeDefaults());
-    }
-
-    Mono<Long> observeMono(SqlExecutionOperation operation,
-                           SqlRequest request,
-                           int batchSize,
-                           Mono<Long> source,
-                           SqlExecutionOptions options) {
-        return observeMono(operation, request, batchSize, source,
-                           rows -> rows == null ? 0L : rows, options);
+                           rows -> rows);
     }
 
     /** 让生成键等复合写入结果复用完全相同的计时和异常观测，不重复订阅数据库 Publisher。 */
@@ -136,18 +107,8 @@ final class ReactiveSqlExecutionObservationSupport {
                             int batchSize,
                             Mono<T> source,
                             ToLongFunction<T> affectedRows) {
-        return observeMono(operation, request, batchSize, source,
-                           affectedRows, SqlExecutionOptions.safeDefaults());
-    }
-
-    <T> Mono<T> observeMono(SqlExecutionOperation operation,
-                            SqlRequest request,
-                            int batchSize,
-                            Mono<T> source,
-                            ToLongFunction<T> affectedRows,
-                            SqlExecutionOptions options) {
         return observeMono(operation, request, OwnedBindableValues.ownedValues(request.parameters()),
-                batchSize, source, affectedRows, options);
+                batchSize, source, affectedRows, () -> 0L);
     }
 
     <T> Mono<T> observeMono(SqlExecutionOperation operation,
@@ -156,20 +117,7 @@ final class ReactiveSqlExecutionObservationSupport {
                             int batchSize,
                             Mono<T> source,
                             ToLongFunction<T> affectedRows,
-                            SqlExecutionOptions options) {
-        return observeMono(operation, request, executionParameters, batchSize,
-                           source, affectedRows, () -> 0L, options);
-    }
-
-    <T> Mono<T> observeMono(SqlExecutionOperation operation,
-                            SqlRequest request,
-                            List<Object> executionParameters,
-                            int batchSize,
-                            Mono<T> source,
-                            ToLongFunction<T> affectedRows,
-                            LongSupplier confirmedRows,
-                            SqlExecutionOptions options) {
-        Objects.requireNonNull(options, "sql execution options must not be null");
+                            LongSupplier confirmedRows) {
         LongSupplier safeConfirmedRows = Objects.requireNonNull(
                 confirmedRows, "confirmed SQL rows supplier must not be null");
         if (!sqlEnabled) {
@@ -222,7 +170,7 @@ final class ReactiveSqlExecutionObservationSupport {
 
         private final SqlExecutionObserver observer;
         private final boolean needsParameterValues;
-            private final Request request;
+        private final Request request;
         private final long startedAt = System.nanoTime();
         private final AtomicBoolean terminal = new AtomicBoolean();
         private final AtomicLong rows = new AtomicLong();
@@ -233,7 +181,7 @@ final class ReactiveSqlExecutionObservationSupport {
             this.observer = Objects.requireNonNull(
                     observer, "sql execution observer must not be null");
             this.needsParameterValues = needsParameterValues;
-                this.request = Objects.requireNonNull(
+            this.request = Objects.requireNonNull(
                     request, "sql observation request must not be null");
         }
 

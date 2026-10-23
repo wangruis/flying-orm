@@ -28,24 +28,14 @@ public interface BatchExecutionObserver {
     }
 
     static BatchExecutionObserver noop() {
-        return new BatchExecutionObserver() {
-            @Override
-            public boolean enabled() {
-                return false;
-            }
-
-            @Override
-            public void onExecution(BatchExecutionObservation observation) {
-                // 明确关闭观测。
-            }
-        };
+        return BatchExecutionObservers.noop();
     }
 
     /**
      * 把两个批量 observer 合成一个，并隔离每个 observer 自己的普通运行时故障。
      *
      * <p>日志、指标和业务审计可以同时接入；普通回调故障不会阻止另一个回调，也不会反向改变已经确定的
-     * 数据库结果，异常图中的 JVM 致命错误则原样传播。组合只发生在客户端启动阶段，
+     * 数据库结果，直接抛出的 {@link Error} 则原样传播。组合只发生在客户端启动阶段，
      * 批量热路径里不会重复创建包装对象。</p>
      */
     static BatchExecutionObserver composite(BatchExecutionObserver first, BatchExecutionObserver second) {

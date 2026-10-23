@@ -36,7 +36,7 @@ class JdbcProtectedWriteFatalTest {
                     original.ownerPredicateSql(), original.deleteSql(), original.insertSql(), original.fields());
 
             Throwable failure = assertThrows(Throwable.class, () -> driver.executor()
-                    .protectedWrite(request, SqlExecutionOptions.safeDefaults()));
+                    .protectedWrite(request, SqlExecutionOptions.unlimited()));
 
             assertSame(driver.fatal, failure);
             assertEquals(1, driver.releases);
@@ -59,7 +59,7 @@ class JdbcProtectedWriteFatalTest {
         driver.releaseFailure = new VirtualMachineError("release fatal") { };
 
         Throwable failure = assertThrows(Throwable.class, () -> driver.executor()
-                .protectedWrite(work(), SqlExecutionOptions.safeDefaults()));
+                .protectedWrite(work(), SqlExecutionOptions.unlimited()));
 
         assertSame(driver.fatal, failure);
         assertEquals(List.of(driver.releaseFailure), List.of(failure.getSuppressed()));
@@ -75,7 +75,7 @@ class JdbcProtectedWriteFatalTest {
         driver.statementCloseFailure = driver.fatal;
 
         Throwable failure = assertThrows(Throwable.class, () -> driver.executor()
-                .protectedWrite(work(), SqlExecutionOptions.safeDefaults()));
+                .protectedWrite(work(), SqlExecutionOptions.unlimited()));
 
         assertEquals(1, driver.statementCloses);
         assertEquals(0, driver.closes);
@@ -89,7 +89,7 @@ class JdbcProtectedWriteFatalTest {
 
         Throwable failure = assertThrows(VirtualMachineError.class, () -> driver.executor()
 
-                .protectedWrite(work(), SqlExecutionOptions.safeDefaults()));
+                .protectedWrite(work(), SqlExecutionOptions.unlimited()));
 
         assertEquals(0, driver.commits);
         assertEquals(0, driver.rollbacks);
@@ -103,7 +103,7 @@ class JdbcProtectedWriteFatalTest {
         driver.commitFailure = driver.fatal;
         JdbcSqlExecutor executor = driver.executor();
 
-        assertEquals(1L, executor.protectedWrite(work(), SqlExecutionOptions.safeDefaults()).affectedRows());
+        assertEquals(1L, executor.protectedWrite(work(), SqlExecutionOptions.unlimited()).affectedRows());
         assertEquals(0, driver.commits);
         assertEquals(0, driver.rollbacks);
         assertEquals(0, driver.closes);

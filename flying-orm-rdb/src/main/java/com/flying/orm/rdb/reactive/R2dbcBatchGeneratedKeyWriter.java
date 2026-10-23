@@ -29,42 +29,20 @@ final class R2dbcBatchGeneratedKeyWriter {
                                String transportSql,
                                ProtectedBatchRows.RowView row,
                                long inputOffset,
-                               Supplier<R2dbcLargeObjectScope> largeObjects) {
-        return write(connection, request, transportSql, row, inputOffset, largeObjects, null);
-    }
-
-    Mono<GeneratedWrite> write(Connection connection,
-                               BatchWriteRequest request,
-                               String transportSql,
-                               ProtectedBatchRows.RowView row,
-                               long inputOffset,
-                               Supplier<R2dbcLargeObjectScope> largeObjects,
-                               R2dbcBatchEvidenceCounts evidence) {
-        return write(connection, request, transportSql, row, inputOffset, largeObjects,
-                largeObjectOptions(request), evidence);
-    }
-
-    Mono<GeneratedWrite> write(Connection connection,
-                               BatchWriteRequest request,
-                               String transportSql,
-                               ProtectedBatchRows.RowView row,
-                               long inputOffset,
                                Supplier<R2dbcLargeObjectScope> largeObjects,
                                SqlExecutionOptions options,
                                R2dbcBatchEvidenceCounts evidence) {
         return Mono.defer(() -> {
             Statement statement = Objects.requireNonNull(connection, "r2dbc connection must not be null")
                     .createStatement(transportSql);
-            bind(statement, request, row);
+            R2dbcParameterValues.bindBatch(statement, request, row, 0);
             statement.returnGeneratedValues(request.generatedKeys().columnName());
             Accumulator accumulator = new Accumulator(
                     inputOffset,
                     Objects.requireNonNull(options, "sql execution options must not be null"),
                     largeObjects,
                     evidence);
-            if (evidence != null) {
-                evidence.startBusinessExecution();
-            }
+            evidence.startBusinessExecution();
             return Flux.from(statement.execute())
                     .concatMap(result -> Flux.from(result.flatMap(segment -> consume(segment, accumulator))), 1)
                     .doOnComplete(accumulator::completeSql)
@@ -89,19 +67,6 @@ final class R2dbcBatchGeneratedKeyWriter {
     static SqlExecutionOptions largeObjectOptions(BatchWriteRequest request) {
         long limit = request.options().maxBufferedBytes();
         return new SqlExecutionOptions(0, limit, limit, limit, 0);
-    }
-
-    private static void bind(Statement statement,
-                             BatchWriteRequest request,
-                             ProtectedBatchRows.RowView row) {
-        for (int index = 0; index < row.parameterCount(); index++) {
-            Object value = row.row()[index];
-            if (value == null) {
-                statement.bindNull(index, request.parameterTypes().get(index));
-            } else {
-                statement.bind(index, R2dbcParameterValues.forOwnedBinding(value));
-            }
-        }
     }
 
     /** 每一行都使用独立累加器，不把可变状态带入后续缓冲或下一次订阅。 */
@@ -129,9 +94,7 @@ final class R2dbcBatchGeneratedKeyWriter {
         private void addAffectedRows(long rows) {
             updateCountSeen = true;
             if (rows >= 0) affectedRows = R2dbcExecutionCounts.add(affectedRows, rows);
-            if (evidence != null) {
-                evidence.recordRowCount(rows);
-            }
+            evidence.record(rows);
         }
 
         private Mono<Void> addGeneratedKey(Result.RowSegment segment) {
@@ -168,8 +131,7 @@ final class R2dbcBatchGeneratedKeyWriter {
         }
 
         private void completeSql() {
-            if (evidence == null) return;
-            if (!updateCountSeen && generatedKey != null) evidence.recordRowCount(1L);
+            if (!updateCountSeen && generatedKey != null) evidence.record(1L);
             evidence.completeRow(affectedRows);
         }
 

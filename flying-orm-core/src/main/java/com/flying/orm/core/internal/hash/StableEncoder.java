@@ -1,6 +1,5 @@
 package com.flying.orm.core.internal.hash;
 
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.HexFormat;
@@ -21,7 +20,8 @@ public final class StableEncoder {
     private static final byte[] EMPTY = new byte[0];
 
     private final MessageDigest digest;
-    private final byte[] numberBuffer = new byte[Long.BYTES];
+    // 复用小缓冲区合并常用段头；较长标签仍分段写入，不限制输入长度。
+    private final byte[] numberBuffer = new byte[32];
     private boolean finished;
 
     StableEncoder(MessageDigest digest) {
@@ -35,8 +35,22 @@ public final class StableEncoder {
 
     /** 写入非空 UTF-8 文本。 */
     public StableEncoder text(String tag, String value) {
-        return bytes(tag, Objects.requireNonNull(value, "stable text must not be null")
-                                 .getBytes(StandardCharsets.UTF_8));
+        String safeValue = Objects.requireNonNull(value, "stable text must not be null");
+        if (safeValue.length() <= Long.BYTES) {
+            for (int index = 0; index < safeValue.length(); index++) {
+                if (safeValue.charAt(index) > 127) {
+                    return bytes(tag, safeValue.getBytes(StandardCharsets.UTF_8));
+                }
+            }
+            ensureOpen();
+            beginSegment(tag, safeValue.length());
+            for (int index = 0; index < safeValue.length(); index++) {
+                numberBuffer[index] = (byte) safeValue.charAt(index);
+            }
+            digest.update(numberBuffer, 0, safeValue.length());
+            return this;
+        }
+        return bytes(tag, safeValue.getBytes(StandardCharsets.UTF_8));
     }
 
     /** 写入可空 UTF-8 文本；空值拥有独立编码。 */
@@ -84,16 +98,6 @@ public final class StableEncoder {
         return this;
     }
 
-    /** 写入缓冲区从 position 到 limit 的内容，不改变调用方状态。 */
-    StableEncoder bytes(String tag, ByteBuffer value) {
-        ensureOpen();
-        ByteBuffer remaining = Objects.requireNonNull(value, "stable buffer must not be null")
-                                      .asReadOnlyBuffer();
-        beginSegment(tag, remaining.remaining());
-        digest.update(remaining);
-        return this;
-    }
-
     /** 完成摘要并返回小写十六进制；编码器随后失效。 */
     public String finishHex() {
         ensureOpen();
@@ -106,18 +110,56 @@ public final class StableEncoder {
         if (safeTag.isEmpty()) {
             throw new IllegalArgumentException("stable tag must not be empty");
         }
-        byte[] tagBytes = safeTag.getBytes(StandardCharsets.UTF_8);
-        writeInt(tagBytes.length);
-        digest.update(tagBytes);
-        writeInt(valueLength);
+        if (!writeHeader(safeTag, valueLength)) {
+            writeTag(safeTag);
+            writeInt(valueLength);
+        }
+    }
+
+    private boolean writeHeader(String tag, int valueLength) {
+        if (tag.length() > numberBuffer.length - 2 * Integer.BYTES) return false;
+        for (int index = 0; index < tag.length(); index++) {
+            char character = tag.charAt(index);
+            if (character > 127) return false;
+            numberBuffer[Integer.BYTES + index] = (byte) character;
+        }
+        putInt(0, tag.length());
+        putInt(Integer.BYTES + tag.length(), valueLength);
+        digest.update(numberBuffer, 0, 2 * Integer.BYTES + tag.length());
+        return true;
+    }
+
+    /** 固定 ASCII 标签复用数字缓冲区；其他文本仍由 JDK 保持完整 UTF-8 替换语义。 */
+    private void writeTag(String tag) {
+        for (int index = 0; index < tag.length(); index++) {
+            if (tag.charAt(index) > 127) {
+                byte[] bytes = tag.getBytes(StandardCharsets.UTF_8);
+                writeInt(bytes.length);
+                digest.update(bytes);
+                return;
+            }
+        }
+        writeInt(tag.length());
+        for (int offset = 0; offset < tag.length();) {
+            int length = Math.min(numberBuffer.length, tag.length() - offset);
+            for (int index = 0; index < length; index++) {
+                numberBuffer[index] = (byte) tag.charAt(offset + index);
+            }
+            digest.update(numberBuffer, 0, length);
+            offset += length;
+        }
     }
 
     private void writeInt(int value) {
-        numberBuffer[0] = (byte) (value >>> 24);
-        numberBuffer[1] = (byte) (value >>> 16);
-        numberBuffer[2] = (byte) (value >>> 8);
-        numberBuffer[3] = (byte) value;
+        putInt(0, value);
         digest.update(numberBuffer, 0, Integer.BYTES);
+    }
+
+    private void putInt(int offset, int value) {
+        numberBuffer[offset] = (byte) (value >>> 24);
+        numberBuffer[offset + 1] = (byte) (value >>> 16);
+        numberBuffer[offset + 2] = (byte) (value >>> 8);
+        numberBuffer[offset + 3] = (byte) value;
     }
 
     private void writeLong(long value) {

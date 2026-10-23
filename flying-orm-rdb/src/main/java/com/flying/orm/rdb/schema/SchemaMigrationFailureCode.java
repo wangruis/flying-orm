@@ -16,13 +16,9 @@ import java.util.Objects;
 public enum SchemaMigrationFailureCode {
     /** 没有失败。 */
     NONE,
-    /** 计划要求在线 DDL，但当前 SQL 可能阻塞业务。 */
-    ONLINE_DDL_REQUIRED,
-    /** 计划有回滚缺口，调用方没有提供与当前指纹一致的批准。 */
-    APPROVAL_REQUIRED,
-    /** 计划包含没有通用安全 SQL 的动作，只能按结构化步骤人工处理。 */
+    /** 增量目标不足以生成所需 DDL，调用方须提供完整结构目标。 */
     MANUAL_ACTION_REQUIRED,
-    /** 兼容失败码：当前执行器缺少调用方所需的执行能力。 */
+    /** 当前执行环境不满足 DDL 语义，例如 MySQL 注释所需的会话模式。 */
     EXECUTOR_CAPABILITY_REQUIRED,
     /** 执行器或资源所有者报告清理失败；不表示 Schema 自行治理会话。 */
     CLEANUP_FAILED,

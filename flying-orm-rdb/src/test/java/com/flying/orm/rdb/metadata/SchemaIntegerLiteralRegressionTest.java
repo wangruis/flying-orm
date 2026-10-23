@@ -14,8 +14,8 @@ import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 
 class SchemaIntegerLiteralRegressionTest {
 
-    private static final InformationSchemaFormMetadataReader.SnapshotDialect MYSQL =
-            InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL;
+    private static final MetadataQueryProfile.SnapshotDialect MYSQL =
+            MetadataQueryProfile.SnapshotDialect.MYSQL;
 
     @Test
     void mediumIntDefaultRetainsItsFullValue() {

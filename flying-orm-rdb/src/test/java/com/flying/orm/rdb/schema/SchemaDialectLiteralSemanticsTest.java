@@ -131,7 +131,7 @@ class SchemaDialectLiteralSemanticsTest {
     }
 
     @Test
-    void oracleCurrentTimeDefaultRequiresManualSqlForCreateAndAdd() {
+    void oracleCurrentTimeDefaultIsUnsupportedForCreateAndAdd() {
         RdbDialect dialect = RdbDialect.oracle();
         ColumnDefinition column = ColumnDefinition.builder("created_time", "TIME")
                 .defaultValue(ColumnDefault.currentTime()).build();
@@ -148,12 +148,9 @@ class SchemaDialectLiteralSemanticsTest {
         assertAll(
                 () -> assertThrows(UnsupportedOperationException.class, () -> renderer.render(create)),
                 () -> assertThrows(UnsupportedOperationException.class, () -> renderer.render(add)));
-        ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
+        assertThrows(UnsupportedOperationException.class, () -> RelationalSchemaPlanReviewer.create(dialect).review(
                 DatabaseDescriptor.of("Oracle", "19", dialect), table, SchemaSnapshot.absent(table.identity()),
-                SchemaSnapshotCoverage.complete(), SchemaCompatibilityMode.EXACT);
-        assertTrue(plan.requiresManualAction());
-        assertEquals(1, plan.steps().size());
-        assertTrue(plan.steps().getFirst().request().isEmpty());
+                SchemaSnapshotCoverage.complete(), SchemaCompatibilityMode.EXACT));
     }
 
     @Test

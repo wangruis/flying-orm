@@ -24,9 +24,6 @@ public record ArrayConditionValue(List<Object> values, DatabaseType databaseType
 
     public ArrayConditionValue {
         List<Object> source = Objects.requireNonNull(values, "array condition values must not be null");
-        if (source.isEmpty()) {
-            throw new IllegalArgumentException("array condition values must not be empty");
-        }
         databaseType = Objects.requireNonNull(databaseType, "array condition data type must not be null");
         if (!ArrayValueCodec.isArrayDataType(databaseType)) {
             throw new IllegalArgumentException("array condition field must use an SQL array type");
@@ -51,14 +48,6 @@ public record ArrayConditionValue(List<Object> values, DatabaseType databaseType
 
     public static ArrayConditionValue of(Object value, DatabaseType databaseType) {
         return new ArrayConditionValue(inputValues(value), databaseType);
-    }
-
-    /**
-     * 保留 3.0.x 的字符串类型访问器，避免已编译调用方在 3.1.0 升级后发生链接错误。
-     * 新代码可使用 record 生成的 {@link #databaseType()} 获取结构化类型。
-     */
-    public String dataType() {
-        return databaseType.declaration();
     }
 
     public Object parameter() {

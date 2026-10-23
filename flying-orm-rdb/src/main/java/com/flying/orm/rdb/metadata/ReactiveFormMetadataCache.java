@@ -1,5 +1,7 @@
 package com.flying.orm.rdb.metadata;
 
+import com.flying.orm.core.metadata.RelationIdentity;
+
 /**
  * 带本地缓存能力的响应式元数据读取器。
  *
@@ -12,16 +14,19 @@ package com.flying.orm.rdb.metadata;
  * @date 2026-08-03
  * @version v1.0
  */
-public interface ReactiveFormMetadataCache extends ReactiveFormMetadataReader, MetadataCacheInvalidator {
+public interface ReactiveFormMetadataCache extends ReactiveFormMetadataReader {
 
     /**
      * 清掉指定物理表的缓存。这里明确重声明一次，是为了保证缓存 reader 必须真的执行失效，
      * 不能沿用普通元数据 reader 的空操作。
      *
-     * @param table 物理表名，可以是 table 或 schema.table
+     * @param relation 分段物理关系身份
      */
     @Override
-    void invalidate(String table);
+    void invalidate(RelationIdentity relation);
+
+    @Override
+    void invalidateAll();
 
     /**
      * 读取当前缓存快照。返回值只包含不可变基础数据，不会泄露具体缓存实现。

@@ -1,11 +1,11 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.core.metadata.RelationalTableDefinition;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.annotation.TableColumn;
 import com.flying.orm.core.annotation.TableId;
 import com.flying.orm.core.annotation.TableName;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.RelationalTableDefinition;
-import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.DatabaseDescriptor;
 import com.flying.orm.rdb.dialect.RdbDialect;
@@ -21,32 +21,17 @@ import com.flying.orm.rdb.sync.SyncSqlExecutor;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class SchemaSnapshotCoverageGuardTest {
-
-    @Test
-    void lowLevelReviewAndExecutionRequireAnExplicitCurrentCoverageSource() {
-        assertTrue(Arrays.stream(RelationalSchemaPlanReviewer.class.getMethods())
-                .filter(method -> method.getName().equals("review"))
-                .allMatch(method -> Arrays.asList(method.getParameterTypes())
-                        .contains(SchemaSnapshotCoverage.class)));
-        assertTrue(Arrays.stream(VerifiedSchemaPlanExecutor.class.getMethods())
-                .filter(method -> method.getName().equals("executeJdbc")
-                        || method.getName().equals("executeReactive"))
-                .allMatch(method -> Arrays.stream(method.getParameterTypes())
-                        .filter(Supplier.class::equals)
-                        .count() == 2L));
-    }
 
     @Test
     void everyBuiltInReaderDeclaresCompleteCoverage() {
@@ -75,14 +60,12 @@ class SchemaSnapshotCoverageGuardTest {
         DatabaseDescriptor database = DatabaseDescriptor.of("H2", "2.3", dialect);
         RelationalTableDefinition desired = desired();
 
-        ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
+        assertThrows(IllegalStateException.class, () -> RelationalSchemaPlanReviewer.create(dialect).review(
                 database,
                 desired,
                 SchemaSnapshot.absent(desired.identity()),
                 SchemaSnapshotCoverage.none(),
-                SchemaCompatibilityMode.SAFE_INCREMENTAL);
-
-        assertManualWithoutSql(plan);
+                SchemaCompatibilityMode.SAFE_INCREMENTAL));
     }
 
     @Test
@@ -93,42 +76,13 @@ class SchemaSnapshotCoverageGuardTest {
         EmptyReactiveExecutor executor = new EmptyReactiveExecutor();
         CompleteReader reader = new CompleteReader(SchemaSnapshot.absent(desired.identity()));
 
-        ReviewedSchemaPlan plan = ReactiveSchemaClient.create(executor, dialect)
+        SchemaMigrationPlan plan = ReactiveSchemaClient.create(executor, dialect)
                 .reviewRelational(database, desired, reader, SchemaCompatibilityMode.SAFE_INCREMENTAL)
                 .block();
 
-        assertFalse(plan.requiresManualAction());
         assertFalse(plan.requests().isEmpty());
-        assertEquals(SchemaSnapshotCoverage.complete().fingerprint(),
-                     plan.snapshotCoverageFingerprint());
-    }
-
-    @Test
-    void executionRejectsCoverageDriftBeforeReadingAgainOrSendingSql() {
-        RdbDialect dialect = RdbDialect.h2();
-        DatabaseDescriptor database = DatabaseDescriptor.of("H2", "2.3", dialect);
-        RelationalTableDefinition desired = desired();
-        EmptyReactiveExecutor executor = new EmptyReactiveExecutor();
-        CompleteReader reviewReader = new CompleteReader(SchemaSnapshot.absent(desired.identity()));
-        ReviewedSchemaPlan plan = ReactiveSchemaClient.create(executor, dialect)
-                .reviewRelational(database, desired, reviewReader, SchemaCompatibilityMode.SAFE_INCREMENTAL)
-                .block();
-        CountingPartialReader changedReader = new CountingPartialReader(
-                SchemaSnapshot.absent(desired.identity()));
-
-        SchemaExecutionReport report = ReactiveSchemaClient.create(executor, dialect)
-                .executeReviewed(plan, changedReader).block();
-
-        assertEquals(SchemaExecutionStatus.PRECONDITION_FAILED, report.status());
-        assertEquals(0, changedReader.snapshotReads.get());
-        assertTrue(executor.updates.isEmpty());
-    }
-
-    private static void assertManualWithoutSql(ReviewedSchemaPlan plan) {
-        assertTrue(plan.requiresManualAction());
-        assertTrue(plan.requests().isEmpty());
-        assertEquals(List.of(SchemaOperation.Kind.VERIFY_MANUALLY),
-                     plan.operations().stream().map(SchemaOperation::kind).toList());
+        assertEquals(SchemaSnapshotCoverage.complete(),
+                     plan.snapshotCoverage());
     }
 
     private static List<RdbDialect> builtInDialects() {
@@ -148,7 +102,7 @@ class SchemaSnapshotCoverageGuardTest {
         private Long id;
     }
 
-    private static final class EmptySyncExecutor implements SyncSqlExecutor {
+    private static final class EmptySyncExecutor implements com.flying.orm.rdb.support.ListQueryFixture {
 
         private final List<SqlRequest> updates = new ArrayList<>();
 
@@ -164,7 +118,7 @@ class SchemaSnapshotCoverageGuardTest {
         }
 
         @Override
-        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
             throw new UnsupportedOperationException();
         }
     }
@@ -199,22 +153,17 @@ class SchemaSnapshotCoverageGuardTest {
         }
 
         @Override
-        public Mono<SchemaSnapshot> readSnapshot(String table) {
+        public Mono<SchemaSnapshot> readSnapshot(RelationIdentity relation) {
             return Mono.just(snapshot);
         }
 
         @Override
-        public Mono<DynamicForm> readForm(String formId, String table) {
+        public Mono<DynamicForm> readForm(String formId, RelationIdentity relation) {
             return Mono.error(new UnsupportedOperationException());
         }
 
         @Override
-        public Mono<DynamicForm> readForm(String formId, String schema, String table) {
-            return Mono.error(new UnsupportedOperationException());
-        }
-
-        @Override
-        public Mono<TableMetadata> readTable(String table) {
+        public Mono<RelationalTableDefinition> readTable(RelationIdentity relation) {
             return Mono.error(new UnsupportedOperationException());
         }
     }

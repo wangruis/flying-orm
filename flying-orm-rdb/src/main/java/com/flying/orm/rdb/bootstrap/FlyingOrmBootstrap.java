@@ -1,5 +1,8 @@
 package com.flying.orm.rdb.bootstrap;
 
+import com.flying.orm.rdb.observation.BatchExecutionObserver;
+import com.flying.orm.rdb.observation.SqlExecutionObserver;
+
 import java.util.Objects;
 
 /**
@@ -75,9 +78,9 @@ public final class FlyingOrmBootstrap {
     private static void configureObservers(FlyingOrmClientBuilder builder,
                                            FlyingOrmConfiguration configuration,
                                            FlyingOrmEnvironment environment) {
-        if (environment.sqlObserver().isPresent()) {
-            builder.observers(environment.sqlObserver().orElseThrow(),
-                              environment.batchObserver().orElseThrow());
+        if (environment.sqlObserver().isPresent() || environment.batchObserver().isPresent()) {
+            builder.observers(environment.sqlObserver().orElseGet(SqlExecutionObserver::noop),
+                              environment.batchObserver().orElseGet(BatchExecutionObserver::noop));
         }
         environment.migrationObserver().ifPresent(builder::migrationObserver);
         if (configuration.sqlLog().enabled()) {

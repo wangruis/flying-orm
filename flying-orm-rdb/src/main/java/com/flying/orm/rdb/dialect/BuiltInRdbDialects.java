@@ -30,9 +30,9 @@ final class BuiltInRdbDialects {
                 UpsertDialect.h2(),
                 JsonDialect.h2(),
                 "default",
-                Set.of(DialectFeature.IDENTITY_COLUMNS,
-                       DialectFeature.SEQUENCES,
-                       DialectFeature.MERGE_UPSERT),
+                Set.of(DialectCapabilityId.IDENTITY_COLUMNS,
+                       DialectCapabilityId.SEQUENCES,
+                       DialectCapabilityId.MERGE_UPSERT),
                 256);
     }
 
@@ -70,15 +70,15 @@ final class BuiltInRdbDialects {
                         .mysqlTableComment()
                         .dropIndexOnTable()
                         .generatedValues(SchemaDialect.GeneratedValueStyle.MYSQL)
-                        .operationDependentOnlineDdl()
+
                         .build(),
                 PaginationDialect.limitOffset(),
                 UpsertDialect.mysql(),
                 JsonDialect.plain(),
                 "8.0.16+",
-                Set.of(DialectFeature.JSON_FUNCTIONS,
-                       DialectFeature.IDENTITY_COLUMNS,
-                       DialectFeature.MYSQL_RELATIONAL_METADATA),
+                Set.of(DialectCapabilityId.JSON_FUNCTIONS,
+                       DialectCapabilityId.IDENTITY_COLUMNS,
+                       DialectCapabilityId.MYSQL_RELATIONAL_METADATA),
                 64);
     }
 
@@ -113,19 +113,20 @@ final class BuiltInRdbDialects {
                         .commentOnColumn()
                         .commentOnTable()
                         .generatedValues(SchemaDialect.GeneratedValueStyle.POSTGRESQL)
-                        .concurrentIndexOnlineDdl()
+                        .concurrentIndexes()
                         .build(),
                 PaginationDialect.limitOffset(),
                 UpsertDialect.postgresql(),
                 JsonDialect.postgresql(),
                 "default",
-                Set.of(DialectFeature.JSON_FUNCTIONS,
-                       DialectFeature.NATIVE_JSON,
-                       DialectFeature.NATIVE_BOOLEAN,
-                       DialectFeature.LARGE_OBJECTS,
-                       DialectFeature.IDENTITY_COLUMNS,
-                       DialectFeature.SEQUENCES,
-                       DialectFeature.POSTGRESQL_VECTOR),
+                Set.of(DialectCapabilityId.JSON_FUNCTIONS,
+                       DialectCapabilityId.NATIVE_JSON,
+                       DialectCapabilityId.NATIVE_BOOLEAN,
+                       DialectCapabilityId.LARGE_OBJECTS,
+                       DialectCapabilityId.IDENTITY_COLUMNS,
+                       DialectCapabilityId.SEQUENCES,
+                       DialectCapabilityId.POSTGRESQL_VECTOR,
+                       DialectCapabilityId.FULL_OUTER_JOIN),
                 63);
     }
 
@@ -165,7 +166,7 @@ final class BuiltInRdbDialects {
                         .commentOnTable()
                         .generatedValues(SchemaDialect.GeneratedValueStyle.ORACLE)
                         .oracleColumnChanges()
-                        .licenseOrEditionDependentOnlineDdl()
+
                         .build(),
                 PaginationDialect.offsetFetch(),
                 UpsertDialect.oracle(),
@@ -212,7 +213,7 @@ final class BuiltInRdbDialects {
                         .sqlServerRenameColumn()
                         .generatedValues(SchemaDialect.GeneratedValueStyle.SQL_SERVER)
                         .sqlServerColumnChanges()
-                        .licenseOrEditionDependentOnlineDdl()
+
                         .build(),
                 PaginationDialect.sqlServerOffsetFetch(),
                 UpsertDialect.sqlServer(),
@@ -222,46 +223,51 @@ final class BuiltInRdbDialects {
                 128);
     }
 
-    private static Set<DialectFeature> oracleFeatures(OracleVersion version) {
+    private static Set<DialectCapabilityId> oracleFeatures(OracleVersion version) {
         if (version.nativeBoolean()) {
-            return Set.of(DialectFeature.OFFSET_FETCH_PAGINATION,
-                          DialectFeature.MERGE_UPSERT,
-                          DialectFeature.IDENTITY_COLUMNS,
-                          DialectFeature.SEQUENCES,
-                          DialectFeature.JSON_FUNCTIONS,
-                          DialectFeature.NATIVE_JSON,
-                          DialectFeature.NATIVE_BOOLEAN,
-                          DialectFeature.LARGE_OBJECTS);
+            return Set.of(DialectCapabilityId.OFFSET_FETCH_PAGINATION,
+                          DialectCapabilityId.MERGE_UPSERT,
+                          DialectCapabilityId.IDENTITY_COLUMNS,
+                          DialectCapabilityId.SEQUENCES,
+                          DialectCapabilityId.JSON_FUNCTIONS,
+                          DialectCapabilityId.NATIVE_JSON,
+                          DialectCapabilityId.NATIVE_BOOLEAN,
+                          DialectCapabilityId.LARGE_OBJECTS,
+                          DialectCapabilityId.FULL_OUTER_JOIN);
         }
         if (version.nativeJson()) {
-            return Set.of(DialectFeature.OFFSET_FETCH_PAGINATION,
-                          DialectFeature.MERGE_UPSERT,
-                          DialectFeature.IDENTITY_COLUMNS,
-                          DialectFeature.SEQUENCES,
-                          DialectFeature.JSON_FUNCTIONS,
-                          DialectFeature.NATIVE_JSON,
-                          DialectFeature.LARGE_OBJECTS);
+            return Set.of(DialectCapabilityId.OFFSET_FETCH_PAGINATION,
+                          DialectCapabilityId.MERGE_UPSERT,
+                          DialectCapabilityId.IDENTITY_COLUMNS,
+                          DialectCapabilityId.SEQUENCES,
+                          DialectCapabilityId.JSON_FUNCTIONS,
+                          DialectCapabilityId.NATIVE_JSON,
+                          DialectCapabilityId.LARGE_OBJECTS,
+                          DialectCapabilityId.FULL_OUTER_JOIN);
         }
-        return Set.of(DialectFeature.OFFSET_FETCH_PAGINATION,
-                      DialectFeature.MERGE_UPSERT,
-                      DialectFeature.IDENTITY_COLUMNS,
-                      DialectFeature.SEQUENCES,
-                      DialectFeature.JSON_FUNCTIONS,
-                      DialectFeature.LARGE_OBJECTS);
+        return Set.of(DialectCapabilityId.OFFSET_FETCH_PAGINATION,
+                      DialectCapabilityId.MERGE_UPSERT,
+                      DialectCapabilityId.IDENTITY_COLUMNS,
+                      DialectCapabilityId.SEQUENCES,
+                      DialectCapabilityId.JSON_FUNCTIONS,
+                      DialectCapabilityId.LARGE_OBJECTS,
+                      DialectCapabilityId.FULL_OUTER_JOIN);
     }
 
-    private static Set<DialectFeature> sqlServerFeatures(SqlServerVersion version) {
+    private static Set<DialectCapabilityId> sqlServerFeatures(SqlServerVersion version) {
         return version.jsonFunctions()
-                ? Set.of(DialectFeature.OFFSET_FETCH_PAGINATION,
-                         DialectFeature.MERGE_UPSERT,
-                         DialectFeature.IDENTITY_COLUMNS,
-                         DialectFeature.SEQUENCES,
-                         DialectFeature.JSON_FUNCTIONS,
-                         DialectFeature.LARGE_OBJECTS)
-                : Set.of(DialectFeature.OFFSET_FETCH_PAGINATION,
-                         DialectFeature.MERGE_UPSERT,
-                         DialectFeature.IDENTITY_COLUMNS,
-                         DialectFeature.SEQUENCES,
-                         DialectFeature.LARGE_OBJECTS);
+                ? Set.of(DialectCapabilityId.OFFSET_FETCH_PAGINATION,
+                         DialectCapabilityId.MERGE_UPSERT,
+                         DialectCapabilityId.IDENTITY_COLUMNS,
+                         DialectCapabilityId.SEQUENCES,
+                         DialectCapabilityId.JSON_FUNCTIONS,
+                         DialectCapabilityId.LARGE_OBJECTS,
+                         DialectCapabilityId.FULL_OUTER_JOIN)
+                : Set.of(DialectCapabilityId.OFFSET_FETCH_PAGINATION,
+                         DialectCapabilityId.MERGE_UPSERT,
+                         DialectCapabilityId.IDENTITY_COLUMNS,
+                         DialectCapabilityId.SEQUENCES,
+                         DialectCapabilityId.LARGE_OBJECTS,
+                         DialectCapabilityId.FULL_OUTER_JOIN);
     }
 }

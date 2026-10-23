@@ -1,68 +1,90 @@
 package com.flying.orm.rdb.form;
 
+import com.flying.orm.core.field.FieldIdentity;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.expression.ValueExpression;
 
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
 /**
- * 固定一次批量写入的列布局，把字段规范名提前映射成参数下标。首行确定 SQL 列顺序，后续每行即使 Map
+ * 固定一次批量写入的列布局，按需建立字段规范名到参数下标的索引。首行确定 SQL 列顺序，后续每行即使 Map
  * 迭代顺序不同，也会按同一位置输出参数，避免列和值错位。
  *
  * <p>布局同时负责逐字段 codec 转换，确保首行和后续行遵循完全相同的 JSON、Array、LOB 和时间规则。
- * record 内部集合在构造时复制，可在同一次批量流水线中安全读取。</p>
+ * 字段列表在构造时冻结，索引由布局独占且不对外暴露，可在同一次批量流水线中安全读取。</p>
  *
  * @author wangr
  * @date 2026-07-24
  * @version v1.0
  */
-record BatchColumnLayout(DynamicForm form,
-                         List<DynamicField> fields,
-                         Map<String, Integer> indexesByNormalizedName,
-                         FormSqlRenderSupport support) {
+final class BatchColumnLayout {
 
-    BatchColumnLayout {
-        form = Objects.requireNonNull(form, "dynamic form must not be null");
-        fields = List.copyOf(Objects.requireNonNull(fields, "batch column fields must not be null"));
-        if (fields.isEmpty()) {
-            throw new IllegalArgumentException("batch column fields must not be empty");
-        }
-        indexesByNormalizedName = Map.copyOf(Objects.requireNonNull(indexesByNormalizedName,
-                                                                     "batch column indexes must not be null"));
-        support = Objects.requireNonNull(support, "form SQL render support must not be null");
-        // 一列必须恰好对应一个参数位置；数量不一致说明布局构造存在重复或遗漏。
-        if (indexesByNormalizedName.size() != fields.size()) {
-            throw new IllegalArgumentException("batch column indexes must match field count");
-        }
+    private static final Object UNBOUND = new Object();
+
+    private final DynamicForm form;
+    private final List<DynamicField> fields;
+    private volatile Map<String, Integer> indexesByNormalizedName;
+    private final FormSqlRenderSupport support;
+    private final List<String> expressions;
+    private final int[] offsets;
+
+    private BatchColumnLayout(DynamicForm form, FormSqlRenderSupport.WriteFields row, FormSqlRenderSupport support) {
+        this.form = Objects.requireNonNull(form, "dynamic form must not be null");
+        this.fields = List.copyOf(row.fields());
+        this.support = Objects.requireNonNull(support, "form SQL render support must not be null");
+        this.expressions = row.expressions();
+        this.offsets = row.offsets();
     }
 
-    static BatchColumnLayout of(DynamicForm form,
-                                List<DynamicField> fields,
-                                FormSqlRenderSupport support) {
-        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        List<DynamicField> safeFields = Objects.requireNonNull(fields, "batch column fields must not be null");
-        Map<String, Integer> indexes = new HashMap<>(Math.max(16, safeFields.size() * 2));
-        // form.field 同时确认列属于当前动态表单，不能把别的表字段混入这一批 SQL。
-        for (int i = 0; i < safeFields.size(); i++) {
-            DynamicField field = Objects.requireNonNull(safeFields.get(i), "batch column field must not be null");
-            String normalizedName = field.normalizedName();
-            Integer previous = indexes.putIfAbsent(normalizedName, i);
+    /** 声明布局中的同序行直接绑定；子集或重排行才需要名称索引。 */
+    private Map<String, Integer> indexes() {
+        Map<String, Integer> current = indexesByNormalizedName;
+        if (current != null) return current;
+        current = HashMap.newHashMap(fields.size());
+        // 完整构建后一次发布；并发首次使用即使重复构建，也不共享正在修改的 Map。
+        for (int index = 0; index < this.fields.size(); index++) {
+            DynamicField field = this.fields.get(index);
+            Integer previous = current.putIfAbsent(field.normalizedName(), index);
             if (previous != null) {
                 throw new IllegalArgumentException("duplicate batch column field: " + field.name());
             }
-            safeForm.field(field.name());
+            form.field(field.name());
         }
-        return new BatchColumnLayout(safeForm,
-                                     safeFields,
-                                     indexes,
-                                     support);
+        indexesByNormalizedName = current;
+        return current;
+    }
+
+    static BatchColumnLayout of(DynamicForm form,
+                                FormSqlRenderSupport.WriteFields row,
+                                FormSqlRenderSupport support) {
+        return new BatchColumnLayout(form, row, support);
+    }
+
+    List<DynamicField> fields() {
+        return fields;
+    }
+
+    Integer indexOf(String normalizedName) {
+        return indexes().get(normalizedName);
+    }
+
+    boolean hasExpressions() { return offsets != null; }
+
+    int parameterIndex(int column) { return offsets == null ? column : offsets[column]; }
+
+    int parameterCount() { return parameterIndex(fields.size()); }
+
+    boolean computed(int column) {
+        return hasExpressions() && !expressions.get(column).equals(support.valueExpression(fields.get(column)));
     }
 
     Object[] parameters(Map<String, Object> row, long rowIndex) {
-        Object[] parameters = new Object[fields.size()];
+        Object[] parameters = new Object[parameterCount()];
         writeParameters(row, rowIndex, parameters);
         return parameters;
     }
@@ -73,20 +95,36 @@ record BatchColumnLayout(DynamicForm form,
         if (safeRow.size() != fields.size()) {
             throw new IllegalArgumentException("batch insert row [" + rowIndex + "] fields must match the first row");
         }
-
-        // seen 数组避免每行构建临时 Set，同时能发现规范化后重复的字段名。
-        boolean[] seen = new boolean[fields.size()];
-        int seenCount = 0;
-        for (Map.Entry<String, Object> entry : safeRow.entrySet()) {
-            DynamicField field = form.field(entry.getKey());
-            Integer index = indexesByNormalizedName.get(field.normalizedName());
-            if (index == null) {
+        if (hasExpressions()) {
+            FormSqlRenderSupport.WriteFields encoded = support.writeFields(form, safeRow, rowIndex);
+            if (!encoded.fields().containsAll(fields)) {
                 throw new IllegalArgumentException("batch insert row [" + rowIndex + "] fields must match the first row");
             }
-            if (seen[index]) {
+            encoded = encoded.select(fields);
+            if (!expressions.equals(encoded.expressions(support)) || encoded.parameters().length != parameterCount()) {
+                throw new IllegalArgumentException("batch insert expressions must match the current SQL layout");
+            }
+            System.arraycopy(encoded.parameters(), 0, parameters, 0, parameterCount());
+            return;
+        }
+
+        // 直接复用最终参数数组去重；null 是已绑定的合法值，不能用来表示尚未绑定。
+        Arrays.fill(parameters, 0, fields.size(), UNBOUND);
+        int seenCount = 0;
+        for (Map.Entry<String, Object> entry : safeRow.entrySet()) {
+            String name = FieldIdentity.of(entry.getKey()).key();
+            int index = seenCount;
+            if (fields != form.fields() || !fields.get(index).normalizedName().equals(name)) {
+                Integer mappedIndex = indexes().get(name);
+                if (mappedIndex == null) {
+                    form.field(entry.getKey()); // 保留未知字段与首行布局不匹配的异常区别。
+                    throw new IllegalArgumentException("batch insert row [" + rowIndex + "] fields must match the first row");
+                }
+                index = mappedIndex;
+            }
+            if (parameters[index] != UNBOUND) {
                 throw new IllegalArgumentException("duplicate normalized batch insert field");
             }
-            seen[index] = true;
             seenCount++;
             DynamicField layoutField = fields.get(index);
             Object value = entry.getValue();
@@ -94,17 +132,12 @@ record BatchColumnLayout(DynamicForm form,
                 throw new IllegalArgumentException("batch write row [" + rowIndex + "] field ["
                                                            + layoutField.name() + "] does not allow update delta");
             }
-            parameters[index] = write(layoutField, value);
+            if (value instanceof ValueExpression.Value bound) value = bound.value();
+            parameters[index] = support.writeValue(layoutField, value);
         }
         if (seenCount != fields.size()) {
             throw new IllegalArgumentException("batch insert row [" + rowIndex + "] fields must match the first row");
         }
     }
 
-    /**
-     * 首行和后续行必须走同一套字段转换，否则批量第二行才会暴露类型错误。
-     */
-    private Object write(DynamicField field, Object value) {
-        return support.writeValue(field, value);
-    }
 }

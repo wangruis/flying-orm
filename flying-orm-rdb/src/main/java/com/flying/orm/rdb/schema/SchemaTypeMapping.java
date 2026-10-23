@@ -8,6 +8,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -22,7 +23,7 @@ final class SchemaTypeMapping {
     private static final Set<String> TYPES_WITHOUT_ARGUMENTS = Set.of(
             "blob", "clob", "nclob", "text", "tinytext", "mediumtext", "longtext",
             "tinyblob", "mediumblob", "longblob", "bytea", "json", "jsonb", "uuid",
-            "boolean", "bool", "date", "xml", "sqlxml");
+            "boolean", "bool", "date", "xml", "sqlxml", "enum", "set");
     private static final Set<String> POSTGRESQL_INTEGER_TYPES = Set.of(
             "smallint", "int2", "integer", "int", "int4", "bigint", "int8",
             "smallserial", "serial2", "serial", "serial4", "bigserial", "serial8",
@@ -48,15 +49,21 @@ final class SchemaTypeMapping {
     private static final long ISO_LOCAL_TIME_MAX_LENGTH = 18L;
 
     private final Map<String, String> mappings;
+    private final Map<String, Function<DatabaseType, String>> renderers;
     private final SchemaDialect.GeneratedValueStyle databaseStyle;
 
-    SchemaTypeMapping(Map<String, String> mappings, SchemaDialect.GeneratedValueStyle databaseStyle) {
+    SchemaTypeMapping(Map<String, String> mappings,
+                      Map<String, Function<DatabaseType, String>> renderers,
+                      SchemaDialect.GeneratedValueStyle databaseStyle) {
         this.mappings = Map.copyOf(Objects.requireNonNull(mappings, "type mappings must not be null"));
+        this.renderers = Map.copyOf(renderers);
         this.databaseStyle = Objects.requireNonNull(databaseStyle, "database style must not be null");
     }
 
     String render(String value) {
         DatabaseType logical = safeType(value, "data type");
+        String custom = customType(logical, null, null, null);
+        if (custom != null) return custom;
         String mapped = mappedType(logical);
         validateTemporalPrecision(logical, safeType(mapped, "mapped data type"), null);
         return mapped;
@@ -64,6 +71,17 @@ final class SchemaTypeMapping {
 
     String render(String value, Integer length, Integer precision, Integer scale) {
         DatabaseType logical = safeType(value, "data type");
+        String custom = customType(logical, length, precision, scale);
+        if (custom != null) return custom;
+        return mappedType(logical, length, precision, scale);
+    }
+
+    /** Legacy metadata retains built-in logical aliases, but has already applied custom type sizing. */
+    String renderMetadata(String value, Integer length, Integer precision, Integer scale) {
+        return mappedType(safeType(value, "metadata data type"), length, precision, scale);
+    }
+
+    private String mappedType(DatabaseType logical, Integer length, Integer precision, Integer scale) {
         validateTemporalArguments(logical, length, scale);
         String mapped = mappedType(logical);
         DatabaseType physical = safeType(mapped, "mapped data type");
@@ -80,6 +98,18 @@ final class SchemaTypeMapping {
             return physical.declaration();
         }
         return withTypeArguments(physical.declaration(), length, precision, scale);
+    }
+
+    private String customType(DatabaseType logical, Integer length, Integer precision, Integer scale) {
+        if (renderers.isEmpty()) return null;
+        DatabaseType input = length == null && precision == null && scale == null ? logical
+                : safeType(applyTypeArguments(logical.declaration(), length, precision, scale), "data type");
+        Function<DatabaseType, String> renderer = renderers.get(input.canonical());
+        if (renderer == null && !mappings.containsKey(logical.canonical())) {
+            renderer = renderers.get(input.comparisonShape());
+        }
+        if (renderer == null) return null;
+        return safeType(renderer.apply(input), "rendered data type").declaration();
     }
 
     private String mappedType(DatabaseType type) {
@@ -179,6 +209,10 @@ final class SchemaTypeMapping {
         if ((length != null || precision != null || scale != null) && !acceptsTypeArguments(type)) {
             throw new IllegalArgumentException("data type does not accept length or precision arguments: " + type);
         }
+        return applyTypeArguments(type, length, precision, scale);
+    }
+
+    private static String applyTypeArguments(String type, Integer length, Integer precision, Integer scale) {
         if (length != null) {
             return withArguments(type, String.valueOf(length));
         }

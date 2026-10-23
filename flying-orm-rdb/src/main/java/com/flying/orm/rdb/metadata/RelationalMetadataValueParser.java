@@ -4,6 +4,7 @@ import com.flying.orm.core.metadata.CheckPredicate;
 import com.flying.orm.core.metadata.ColumnDefault;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.core.type.LogicalType;
+import com.flying.orm.rdb.internal.template.SchemaDefaultExpressions;
 
 import java.math.BigDecimal;
 import java.math.RoundingMode;
@@ -26,11 +27,10 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * 把数据库字典中的默认值和 CHECK 文本还原成 flying-orm 的封闭关系模型。
+ * 把数据库字典中的默认值和 CHECK 文本还原成 flying-orm 的关系模型。
  *
- * <p>这里只接受 {@code RelationalSchemaSqlRenderer} 能生成的语法。数据库中出现函数、任意表达式、
- * 自定义操作符或其他无法无损表达的结构时会明确失败，不能把原始 SQL 带回模型，也不能猜成另一个
- * 谓词。该解析只发生在显式 Schema 读取冷路径。</p>
+ * <p>默认值优先还原成受控值，其他默认表达式保留为明确的原生 SQL；CHECK 仍只接受能够无损建模的
+ * 谓词，不猜测未知语法。该解析只发生在显式 Schema 读取冷路径，目录是可信的数据库元数据来源。</p>
  */
 final class RelationalMetadataValueParser {
 
@@ -63,22 +63,48 @@ final class RelationalMetadataValueParser {
     static ColumnDefault columnDefault(
             String expression,
             DatabaseType databaseType,
-            InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
+            MetadataQueryProfile.SnapshotDialect dialect) {
+        return columnDefault(expression, databaseType, dialect, false);
+    }
+
+    static ColumnDefault columnDefault(
+            String expression,
+            DatabaseType databaseType,
+            MetadataQueryProfile.SnapshotDialect dialect,
+            boolean mysqlExpression) {
         if (expression == null) {
             return ColumnDefault.none();
         }
-        if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL
+        if (mysqlExpression) {
+            // MySQL 的文本列默认值没有 SQL 引号，必须先用 EXTRA 区分表达式与字面量。
+            return ColumnDefault.nativeExpression(SchemaDefaultExpressions.normalize(expression, dialect.name()));
+        }
+        try {
+            return knownColumnDefault(expression, databaseType, dialect);
+        } catch (IllegalStateException unsupported) {
+            if (dialect == MetadataQueryProfile.SnapshotDialect.MYSQL) {
+                throw unsupported;
+            }
+            return ColumnDefault.nativeExpression(SchemaDefaultExpressions.normalize(expression, dialect.name()));
+        }
+    }
+
+    private static ColumnDefault knownColumnDefault(
+            String expression,
+            DatabaseType databaseType,
+            MetadataQueryProfile.SnapshotDialect dialect) {
+        if (dialect == MetadataQueryProfile.SnapshotDialect.MYSQL
                 && databaseType.logicalType() == LogicalType.TEXT) {
             // MySQL 的 COLUMN_DEFAULT 是字典值，不是带引号的 SQL 字面量。
             return ColumnDefault.literal(expression);
         }
-        String value = stripOuterParentheses(expression.trim());
-        if ((dialect == InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE
-                || dialect == InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER)
+        String value = stripOuterParentheses(expression.trim(), dialect);
+        if ((dialect == MetadataQueryProfile.SnapshotDialect.ORACLE
+                || dialect == MetadataQueryProfile.SnapshotDialect.SQL_SERVER)
                 && "NULL".equalsIgnoreCase(value)) {
             return ColumnDefault.none();
         }
-        if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER) {
+        if (dialect == MetadataQueryProfile.SnapshotDialect.SQL_SERVER) {
             var cast = SQL_SERVER_TEMPORAL_CAST.matcher(value);
             var convert = SQL_SERVER_TEMPORAL_CONVERT.matcher(value);
             if (cast.matches() || convert.matches()) {
@@ -92,15 +118,15 @@ final class RelationalMetadataValueParser {
             }
         }
         String keywordValue = value;
-        if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL) {
+        if (dialect == MetadataQueryProfile.SnapshotDialect.MYSQL) {
             keywordValue = MYSQL_TEMPORAL_KEYWORD_PRECISION.matcher(value).replaceFirst("$1");
         }
-        if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER
+        if (dialect == MetadataQueryProfile.SnapshotDialect.SQL_SERVER
                 && "GETDATE()".equalsIgnoreCase(value)) {
             return ColumnDefault.currentTimestamp();
         }
         String keyword = keywordValue.replace("()", "").toUpperCase(Locale.ROOT);
-        if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL) {
+        if (dialect == MetadataQueryProfile.SnapshotDialect.MYSQL) {
             keyword = switch (keyword) {
                 case "CURDATE" -> "CURRENT_DATE";
                 case "CURTIME" -> "CURRENT_TIME";
@@ -121,14 +147,14 @@ final class RelationalMetadataValueParser {
         }
 
         String literal = stripPostgresqlLiteralCast(value, databaseType, dialect);
-        if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE) {
+        if (dialect == MetadataQueryProfile.SnapshotDialect.ORACLE) {
             var temporal = ORACLE_TEMPORAL_LITERAL.matcher(literal);
             if (temporal.matches()) {
                 return ColumnDefault.literal(oracleTemporalLiteral(
                         temporal.group(1), temporal.group(2), databaseType));
             }
         }
-        if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.H2) {
+        if (dialect == MetadataQueryProfile.SnapshotDialect.H2) {
             Matcher typed = H2_TYPED_LITERAL.matcher(literal);
             if (typed.matches()) {
                 return ColumnDefault.literal(h2TypedLiteral(
@@ -149,7 +175,7 @@ final class RelationalMetadataValueParser {
         if (databaseType.logicalType().numeric()) {
             return ColumnDefault.literal(number(literal, databaseType));
         }
-        if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL) {
+        if (dialect == MetadataQueryProfile.SnapshotDialect.MYSQL) {
             return ColumnDefault.literal(convertString(literal, databaseType.logicalType()));
         }
         throw new IllegalStateException("column default cannot be represented safely");
@@ -158,7 +184,7 @@ final class RelationalMetadataValueParser {
     static CheckPredicate checkPredicate(
             String expression,
             Map<String, DatabaseType> columnTypes,
-            InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
+            MetadataQueryProfile.SnapshotDialect dialect) {
         String source = Objects.requireNonNull(expression, "check expression must not be null").trim();
         if (source.regionMatches(true, 0, "CHECK", 0, 5)) {
             source = source.substring(5).trim();
@@ -281,8 +307,8 @@ final class RelationalMetadataValueParser {
     private static boolean acceptsTemporalKeyword(
             String keyword,
             LogicalType type,
-            InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
-        if (dialect != InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL) {
+            MetadataQueryProfile.SnapshotDialect dialect) {
+        if (dialect != MetadataQueryProfile.SnapshotDialect.MYSQL) {
             return true;
         }
         return switch (keyword) {
@@ -297,12 +323,12 @@ final class RelationalMetadataValueParser {
     private static Object checkNumber(
             String value,
             DatabaseType type,
-            InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
+            MetadataQueryProfile.SnapshotDialect dialect) {
         if (type.logicalType() != LogicalType.BOOLEAN) {
             return number(value, type);
         }
-        if (dialect != InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER
-                && dialect != InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE) {
+        if (dialect != MetadataQueryProfile.SnapshotDialect.SQL_SERVER
+                && dialect != MetadataQueryProfile.SnapshotDialect.ORACLE) {
             throw new IllegalStateException("numeric boolean schema literal is not supported by dialect");
         }
         if ("0".equals(value)) {
@@ -317,8 +343,8 @@ final class RelationalMetadataValueParser {
     private static String stripPostgresqlLiteralCast(
             String value,
             DatabaseType type,
-            InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
-        if (dialect != InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL) {
+            MetadataQueryProfile.SnapshotDialect dialect) {
+        if (dialect != MetadataQueryProfile.SnapshotDialect.POSTGRESQL) {
             return value;
         }
         if (isQuotedStringPrefix(value)) {
@@ -334,7 +360,7 @@ final class RelationalMetadataValueParser {
         if (cast < 0 || !isPostgresqlLiteralCastSuffix(value.substring(cast))) {
             return value;
         }
-        String literal = stripOuterParentheses(value.substring(0, cast).trim());
+        String literal = stripOuterParentheses(value.substring(0, cast).trim(), dialect);
         validateDefaultCasts(literal, value.substring(cast), type);
         return literal;
     }
@@ -436,32 +462,9 @@ final class RelationalMetadataValueParser {
         return POSTGRESQL_LITERAL_CAST_SUFFIX.matcher(value).matches();
     }
 
-    private static String stripOuterParentheses(String source) {
-        String value = source;
-        while (value.length() > 1 && value.charAt(0) == '(' && matchingOuterParenthesis(value)) {
-            value = value.substring(1, value.length() - 1).trim();
-        }
-        return value;
-    }
-
-    private static boolean matchingOuterParenthesis(String value) {
-        int depth = 0;
-        boolean quoted = false;
-        for (int index = 0; index < value.length(); index++) {
-            char character = value.charAt(index);
-            if (character == '\'') {
-                if (quoted && index + 1 < value.length() && value.charAt(index + 1) == '\'') {
-                    index++;
-                } else {
-                    quoted = !quoted;
-                }
-            } else if (!quoted && character == '(') {
-                depth++;
-            } else if (!quoted && character == ')' && --depth == 0) {
-                return index == value.length() - 1;
-            }
-        }
-        return false;
+    private static String stripOuterParentheses(
+            String source, MetadataQueryProfile.SnapshotDialect dialect) {
+        return source.startsWith("(") ? SchemaDefaultExpressions.normalize(source, dialect.name()) : source;
     }
 
     private static boolean isQuotedString(String value) {
@@ -533,15 +536,14 @@ final class RelationalMetadataValueParser {
 
         private final Lexer lexer;
         private final Map<String, DatabaseType> columnTypes;
-        private final InformationSchemaFormMetadataReader.SnapshotDialect dialect;
+        private final MetadataQueryProfile.SnapshotDialect dialect;
         private Token current;
 
         private Parser(String source,
                        Map<String, DatabaseType> columnTypes,
-                       InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
+                       MetadataQueryProfile.SnapshotDialect dialect) {
             this.lexer = new Lexer(source, dialect);
-            this.columnTypes = Map.copyOf(Objects.requireNonNull(
-                    columnTypes, "check column types must not be null"));
+            this.columnTypes = Objects.requireNonNull(columnTypes, "check column types must not be null");
             this.dialect = dialect;
             this.current = lexer.next();
         }
@@ -586,7 +588,7 @@ final class RelationalMetadataValueParser {
 
         /** Distinguish a parenthesized column operand from a parenthesized predicate. */
         private boolean parenthesizedColumn() {
-            if (dialect != InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL) {
+            if (dialect != MetadataQueryProfile.SnapshotDialect.POSTGRESQL) {
                 return false;
             }
             int savedIndex = lexer.index;
@@ -720,7 +722,7 @@ final class RelationalMetadataValueParser {
                     case STRING -> convertString(token.text(), type.logicalType());
                     case DATE_LITERAL, TIME_LITERAL, OFFSET_TIME_LITERAL,
                          TIMESTAMP_LITERAL, OFFSET_TIMESTAMP_LITERAL, UUID_LITERAL ->
-                            dialect == InformationSchemaFormMetadataReader.SnapshotDialect.H2
+                            dialect == MetadataQueryProfile.SnapshotDialect.H2
                                     ? h2TypedLiteral(token.type(), token.text(), type)
                                     : oracleTemporalLiteral(token.type() == TokenType.DATE_LITERAL
                                             ? "DATE" : "TIMESTAMP", token.text(), type);
@@ -733,7 +735,7 @@ final class RelationalMetadataValueParser {
                     default -> throw unsupported();
                 };
             }
-            if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL
+            if (dialect == MetadataQueryProfile.SnapshotDialect.POSTGRESQL
                     && binaryTextType(type)) {
                 textCasts(type, false);
             } else {
@@ -745,7 +747,7 @@ final class RelationalMetadataValueParser {
         /** Only erase PostgreSQL text/varchar casts that preserve the operand's value and comparison. */
         private void textCasts(DatabaseType type, boolean array) {
             while (match(TokenType.CAST)) {
-                if (dialect != InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL
+                if (dialect != MetadataQueryProfile.SnapshotDialect.POSTGRESQL
                         || !binaryTextType(type)) {
                     throw unsupported();
                 }
@@ -774,7 +776,7 @@ final class RelationalMetadataValueParser {
 
         private void literalCasts(List<String> casts) {
             while (match(TokenType.CAST)) {
-                if (dialect != InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL) throw unsupported();
+                if (dialect != MetadataQueryProfile.SnapshotDialect.POSTGRESQL) throw unsupported();
                 StringBuilder cast = new StringBuilder(expect(TokenType.IDENTIFIER).text());
                 while (current.type() == TokenType.IDENTIFIER) cast.append(' ').append(expect(TokenType.IDENTIFIER).text());
                 casts.add(cast.toString());
@@ -881,10 +883,10 @@ final class RelationalMetadataValueParser {
     private static final class Lexer {
 
         private final String source;
-        private final InformationSchemaFormMetadataReader.SnapshotDialect dialect;
+        private final MetadataQueryProfile.SnapshotDialect dialect;
         private int index;
 
-        private Lexer(String source, InformationSchemaFormMetadataReader.SnapshotDialect dialect) {
+        private Lexer(String source, MetadataQueryProfile.SnapshotDialect dialect) {
             this.source = Objects.requireNonNull(source, "check expression must not be null");
             this.dialect = Objects.requireNonNull(dialect, "snapshot dialect must not be null");
         }
@@ -895,7 +897,7 @@ final class RelationalMetadataValueParser {
                 return new Token(TokenType.END, "");
             }
             char value = source.charAt(index);
-            if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.H2
+            if (dialect == MetadataQueryProfile.SnapshotDialect.H2
                     && (value == 'D' || value == 'd' || value == 'T' || value == 't'
                         || value == 'U' || value == 'u')) {
                 Matcher typed = H2_TYPED_LITERAL.matcher(source).region(index, source.length());
@@ -904,7 +906,7 @@ final class RelationalMetadataValueParser {
                     return new Token(h2LiteralToken(typed.group(1)), typed.group(2));
                 }
             }
-            if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE
+            if (dialect == MetadataQueryProfile.SnapshotDialect.ORACLE
                     && (value == 'D' || value == 'd' || value == 'T' || value == 't')) {
                 var temporal = ORACLE_TEMPORAL_LITERAL.matcher(source).region(index, source.length());
                 if (temporal.lookingAt()) {
@@ -913,7 +915,7 @@ final class RelationalMetadataValueParser {
                             ? TokenType.DATE_LITERAL : TokenType.TIMESTAMP_LITERAL, temporal.group(2));
                 }
             }
-            if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.H2
+            if (dialect == MetadataQueryProfile.SnapshotDialect.H2
                     && (value == 'C' || value == 'c')) {
                 // H2 会给数值常量补 CAST；只识别当前词法位置，不改写字符串或引号内的标识符。
                 Matcher cast = H2_NUMERIC_LITERAL_CAST.matcher(source).region(index, source.length());
@@ -923,7 +925,7 @@ final class RelationalMetadataValueParser {
                     return new Token(TokenType.NUMERIC_CAST_LITERAL, cast.group(1));
                 }
             }
-            if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER) {
+            if (dialect == MetadataQueryProfile.SnapshotDialect.SQL_SERVER) {
                 if (value == '[') {
                     return identifier(']');
                 }
@@ -933,7 +935,7 @@ final class RelationalMetadataValueParser {
                     return string();
                 }
             }
-            if (dialect == InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL
+            if (dialect == MetadataQueryProfile.SnapshotDialect.MYSQL
                     && source.regionMatches(true, index, "_utf8mb4", 0, 8)) {
                 index += 8;
                 skipWhitespace();
@@ -954,7 +956,7 @@ final class RelationalMetadataValueParser {
                 throw unsupported();
             }
             if (value == '\'' ) {
-                return dialect == InformationSchemaFormMetadataReader.SnapshotDialect.MYSQL
+                return dialect == MetadataQueryProfile.SnapshotDialect.MYSQL
                         ? mysqlString() : string();
             }
             if (value == '"' || value == '`') {
@@ -1000,7 +1002,7 @@ final class RelationalMetadataValueParser {
         }
 
         private Token cast() {
-            if (dialect != InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL
+            if (dialect != MetadataQueryProfile.SnapshotDialect.POSTGRESQL
                     || index >= source.length() || source.charAt(index) != ':') {
                 throw unsupported();
             }

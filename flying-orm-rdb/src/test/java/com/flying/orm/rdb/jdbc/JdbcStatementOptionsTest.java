@@ -11,6 +11,8 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class JdbcStatementOptionsTest {
 
@@ -31,21 +33,21 @@ class JdbcStatementOptionsTest {
         JdbcStatementOptions.applyForScrollableCursor(statement, options);
         assertEquals(List.of("setFetchSize=32", "setMaxRows=7"), calls);
         calls.clear();
-        JdbcStatementOptions.apply(statement, SqlExecutionOptions.safeDefaults());
+        JdbcStatementOptions.apply(statement, SqlExecutionOptions.unlimited());
         assertEquals(List.of(), calls);
     }
 
     @Test
-    void keepsScrollableResultBoundedWhenLargeMaxRowsIsUnsupported() throws Exception {
-        assertLargeMaxRowsFallback(new SQLFeatureNotSupportedException("unsupported"));
+    void doesNotSilentlyReduceScrollableRowsWhenLargeMaxRowsIsUnsupported() {
+        assertLargeMaxRowsFailure(new SQLFeatureNotSupportedException("unsupported"));
     }
 
     @Test
-    void keepsScrollableResultBoundedWhenDriverUsesTheJdbcDefaultMethod() throws Exception {
-        assertLargeMaxRowsFallback(new UnsupportedOperationException("not implemented"));
+    void doesNotSilentlyReduceScrollableRowsWhenDriverUsesTheJdbcDefaultMethod() {
+        assertLargeMaxRowsFailure(new UnsupportedOperationException("not implemented"));
     }
 
-    private static void assertLargeMaxRowsFallback(Throwable largeMaxRowsFailure) throws Exception {
+    private static void assertLargeMaxRowsFailure(Throwable largeMaxRowsFailure) {
         AtomicInteger fallbackMaxRows = new AtomicInteger();
         Statement statement = (Statement) Proxy.newProxyInstance(
                 Statement.class.getClassLoader(),
@@ -59,11 +61,12 @@ class JdbcStatementOptionsTest {
                     default -> defaultValue(method.getReturnType());
                 });
 
-        JdbcStatementOptions.applyForScrollableCursor(
+        Throwable actual = assertThrows(largeMaxRowsFailure.getClass(), () -> JdbcStatementOptions.applyForScrollableCursor(
                 statement,
-                SqlExecutionOptions.safeDefaults().withMaxRows((long) Integer.MAX_VALUE + 1L));
+                SqlExecutionOptions.unlimited().withMaxRows((long) Integer.MAX_VALUE + 1L)));
 
-        assertEquals(Integer.MAX_VALUE, fallbackMaxRows.get());
+        assertSame(largeMaxRowsFailure, actual);
+        assertEquals(0, fallbackMaxRows.get());
     }
 
     private static Object defaultValue(Class<?> type) {

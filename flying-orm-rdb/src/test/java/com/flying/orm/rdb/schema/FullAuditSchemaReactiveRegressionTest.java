@@ -1,8 +1,11 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
+
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.sql.render.SqlRequest;
+import com.flying.orm.rdb.execution.SqlExecutionSequenceException;
 import com.flying.orm.rdb.observation.SqlExecutionStatus;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
@@ -30,20 +33,37 @@ class FullAuditSchemaReactiveRegressionTest {
             new SqlRequest("alter table orders add column description varchar(64)", List.of());
 
     @Test
+    void directMigrationDoesNotReportSuccessWhenExecutorOmitsACount() {
+        List<SqlRequest> executed = new ArrayList<>();
+        SchemaMigrationExecutor executor = executor(Mono.empty(), executed, new ArrayList<>());
+        AtomicInteger invalidations = new AtomicInteger();
+
+        IllegalStateException failure = assertThrows(IllegalStateException.class,
+                () -> executor.executeWithInvalidation(List.of(FIRST, SECOND), List.of("orders"),
+                        ignored -> invalidations.incrementAndGet(), SqlExecutionOptions.unlimited()).block());
+
+        assertEquals("reactive SQL executor returned no result", failure.getMessage());
+        assertEquals(List.of(FIRST, SECOND), executed);
+        assertEquals(1, invalidations.get());
+    }
+
+    @Test
     void reviewedMigrationFailureObservesCompletedFirstStepAndPropagatesOriginalError() {
         IllegalStateException failure = new IllegalStateException("second DDL failed");
         List<SqlRequest> executed = new ArrayList<>();
         List<SchemaMigrationObservation> observations = new ArrayList<>();
         SchemaMigrationExecutor executor = executor(Mono.error(failure), executed, observations);
 
-        IllegalStateException thrown = assertThrows(IllegalStateException.class,
-                () -> executeReviewed(executor).block());
+        SqlExecutionSequenceException thrown = assertThrows(SqlExecutionSequenceException.class,
+                () -> execute(executor).block());
 
-        assertSame(failure, thrown);
+        assertSame(failure, thrown.getCause());
+        assertEquals(1, thrown.stepIndex());
+        assertEquals(List.of(FIRST), thrown.completedWorkSteps().stream().map(step -> step.request()).toList());
         assertEquals(List.of(FIRST, SECOND), executed);
         SchemaMigrationObservation event = assertObservation(
                 observations, SqlExecutionStatus.ERROR, 1, 7L);
-        assertSame(failure, event.error());
+        assertSame(thrown, event.error());
     }
 
     @Test
@@ -54,7 +74,7 @@ class FullAuditSchemaReactiveRegressionTest {
         SchemaMigrationExecutor executor = executor(
                 Mono.<Long>never().doOnCancel(cancelled::incrementAndGet), executed, observations);
 
-        Disposable subscription = executeReviewed(executor).subscribe();
+        Disposable subscription = execute(executor).subscribe();
         try {
             assertEquals(List.of(FIRST, SECOND), executed);
             assertTrue(observations.isEmpty());
@@ -74,7 +94,7 @@ class FullAuditSchemaReactiveRegressionTest {
         List<SchemaMigrationObservation> observations = new ArrayList<>();
         SchemaMigrationExecutor executor = executor(Mono.just(11L), executed, observations);
 
-        SchemaMigrationResult result = executeReviewed(executor).block();
+        SchemaMigrationResult result = execute(executor).block();
 
         assertNotNull(result);
         assertEquals(List.of(FIRST, SECOND), executed);
@@ -110,18 +130,15 @@ class FullAuditSchemaReactiveRegressionTest {
                 sqlExecutor, observations::add);
     }
 
-    private static Mono<SchemaMigrationResult> executeReviewed(SchemaMigrationExecutor executor) {
+    private static Mono<SchemaMigrationResult> execute(SchemaMigrationExecutor executor) {
         DynamicForm target = DynamicForm.builder("orders", "orders")
                 .addField(DynamicField.primaryKey("id", "BIGINT"))
                 .build();
         SchemaMigrationPlan migration = new SchemaMigrationPlan(
-                target, List.of(), List.of(), true, List.of(FIRST, SECOND), List.of());
-        ReviewedSchemaMigrationPlan reviewed = new ReviewedSchemaMigrationPlan(
-                migration,
-                new SchemaRollbackPlan(List.of(), List.of()),
-                new OnlineDdlReview(OnlineDdlMode.ALLOW_BLOCKING, List.of()));
-        return executor.executeReviewed(
-                reviewed, List.of("orders"), ignored -> {}, SchemaMigrationExecutionOptions.defaults());
+                target.toTableDefinition(), true, List.of(FIRST, SECOND), List.of());
+        SchemaMigrationPlan reviewed = migration;
+        return executor.execute(
+                reviewed, List.of("orders"), ignored -> {}, SqlExecutionOptions.unlimited());
     }
 
     private static SchemaMigrationObservation assertObservation(

@@ -22,7 +22,7 @@ class PostgresqlCheckCastRegressionTest {
                 .map(type -> DynamicTest.dynamicTest(type, () -> {
                     assertEquals(ColumnDefault.literal("0.1"), RelationalMetadataValueParser.columnDefault(
                             "'0.1'::" + type, DatabaseType.of(type),
-                            InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL));
+                            MetadataQueryProfile.SnapshotDialect.POSTGRESQL));
                     assertEquals(CheckPredicate.compare("val", CheckPredicate.ComparisonOperator.GREATER_THAN,
                             "0.1"), parse("val > '0.1'::" + type, type));
                 }));
@@ -66,12 +66,12 @@ class PostgresqlCheckCastRegressionTest {
 
     @Test
     void doesNotIgnoreFixedWidthToVariableWidthDefaultConversion() {
-        assertThrows(IllegalStateException.class, () -> RelationalMetadataValueParser.columnDefault(
+        assertEquals(ColumnDefault.nativeExpression("'a '::bpchar"), RelationalMetadataValueParser.columnDefault(
                 "'a '::bpchar", DatabaseType.of("VARCHAR"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL));
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL));
         assertEquals(ColumnDefault.literal("a "), RelationalMetadataValueParser.columnDefault(
                 "'a '::text", DatabaseType.of("VARCHAR"),
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL));
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL));
     }
 
     @TestFactory
@@ -132,6 +132,6 @@ class PostgresqlCheckCastRegressionTest {
 
     private static CheckPredicate parse(String sql, String type) {
         return RelationalMetadataValueParser.checkPredicate(sql, Map.of("val", DatabaseType.of(type)),
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL);
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL);
     }
 }

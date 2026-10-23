@@ -1,8 +1,6 @@
 package com.flying.orm.core.sql.render;
 
 import com.flying.orm.core.internal.Names;
-import com.flying.orm.core.internal.hash.StableDigest;
-import com.flying.orm.core.internal.hash.StableEncoder;
 
 import com.flying.orm.core.condition.ConditionValueShape;
 import com.flying.orm.core.condition.TermExtensionDescriptor;
@@ -25,33 +23,19 @@ import java.util.Optional;
  */
 public final class SqlTermRegistry {
 
-    private static final StableDigest.Domain DESCRIPTOR_FINGERPRINT_DOMAIN =
-            StableDigest.domain("sql-term-registry-descriptors/v1");
-
-    private static final DescriptorState NO_DESCRIPTORS = new DescriptorState(
-            false,
-            StableDigest.sha256(DESCRIPTOR_FINGERPRINT_DOMAIN)
-                        .integer("DESCRIPTOR_COUNT", 0)
-                        .finishHex());
-
     private final Map<String, SqlTermHandler> handlersById;
 
     private final TermRegistry conditionTerms;
 
-    private final boolean hasDescriptors;
-
     private final boolean hasCorrelatedTerms;
-
-    private final String descriptorFingerprint;
 
     private SqlTermRegistry(List<SqlTermHandler> handlers) {
         Map<String, SqlTermHandler> indexedHandlers = new LinkedHashMap<>(Names.mapCapacity(handlers.size()));
         TermRegistry.Builder conditionTerms = TermRegistry.builder();
-        List<TermExtensionDescriptor> descriptors = new ArrayList<>();
         boolean correlated = false;
         for (SqlTermHandler handler : handlers) {
             SqlTermHandler safeHandler = Objects.requireNonNull(handler, "sql term handler must not be null");
-            correlated |= safeHandler instanceof RelationExistsTermHandler;
+            correlated |= safeHandler instanceof CorrelatedSqlTermHandler;
             String normalizedId = Names.key(safeHandler.id(), "sql term id");
             ConditionValueShape shape = Objects.requireNonNull(safeHandler.shape(),
                                                                "sql term value shape must not be null");
@@ -65,16 +49,12 @@ public final class SqlTermRegistry {
                 if (!normalizedId.equals(value.id())) {
                     throw new IllegalArgumentException("term extension descriptor id must match handler id");
                 }
-                descriptors.add(value);
             });
             conditionTerms.add(conditionTerm(safeHandler, shape, descriptor));
         }
         handlersById = Map.copyOf(indexedHandlers);
         this.hasCorrelatedTerms = correlated;
         this.conditionTerms = conditionTerms.build();
-        DescriptorState descriptorState = descriptorState(descriptors);
-        this.hasDescriptors = descriptorState.present();
-        this.descriptorFingerprint = descriptorState.fingerprint();
     }
 
     /**
@@ -107,21 +87,20 @@ public final class SqlTermRegistry {
     }
 
     public boolean hasDescriptors() {
-        return hasDescriptors;
+        return conditionTerms.hasDescriptors();
     }
 
     boolean hasCorrelatedTerms() {
         return hasCorrelatedTerms;
     }
 
-    /** 返回与 descriptor 声明内容相关、与注册顺序无关的冻结指纹。 */
+    /** 与条件元数据共用声明指纹；只由描述器内容决定，与注册顺序无关。 */
     public String descriptorFingerprint() {
-        return descriptorFingerprint;
+        return conditionTerms.descriptorFingerprint();
     }
 
     public Optional<TermExtensionDescriptor> descriptor(String id) {
-        return find(id).flatMap(handler -> Objects.requireNonNull(
-                handler.descriptor(), "term extension descriptor lookup must not return null"));
+        return conditionTerms.descriptor(id);
     }
 
     /**
@@ -144,23 +123,6 @@ public final class SqlTermRegistry {
                 ? standard
                 : descriptor.<TermHandler>map(value -> TermHandler.described(value, shape))
                             .orElseGet(() -> TermHandler.simple(handler.id(), shape));
-    }
-
-    private static DescriptorState descriptorState(List<TermExtensionDescriptor> descriptors) {
-        if (descriptors.isEmpty()) {
-            return NO_DESCRIPTORS;
-        }
-        List<TermExtensionDescriptor> ordered = descriptors.stream()
-                .sorted(java.util.Comparator.comparing(TermExtensionDescriptor::id)).toList();
-        StableEncoder encoder = StableDigest.sha256(DESCRIPTOR_FINGERPRINT_DOMAIN)
-                                            .integer("DESCRIPTOR_COUNT", ordered.size());
-        for (TermExtensionDescriptor descriptor : ordered) {
-            encoder.text("DESCRIPTOR", descriptor.fingerprint());
-        }
-        return new DescriptorState(!ordered.isEmpty(), encoder.finishHex());
-    }
-
-    private record DescriptorState(boolean present, String fingerprint) {
     }
 
     /**

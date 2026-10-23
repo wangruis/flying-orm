@@ -8,8 +8,8 @@ import com.flying.orm.core.annotation.TablePrimaryKey;
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.page.CursorPageQuery;
-import com.flying.orm.core.page.CursorSort;
+import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetSort;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import com.flying.orm.core.protection.EncryptedSearchMode;
 import com.flying.orm.core.scope.DataScope;
@@ -58,7 +58,7 @@ class ProtectedContainsProtocolColumnCollisionTest {
     }
 
     @Test
-    void writesAndBothContainsReadShapesUseTheSchemaProtocolColumns() {
+    void writesAndContainsReadShapesUseTheSchemaProtocolColumns() {
         List<String> owners = List.of("FIELD_TAG", "field_tag_1", "Token_Hash", "token_hash_1");
         DynamicForm form = form(owners);
         try (ProtectedFieldRuntime runtime = ProtectedFieldRuntime.create(
@@ -76,20 +76,22 @@ class ProtectedContainsProtocolColumnCollisionTest {
                 var physical = renderer.protection().physicalForm(form);
                 var operation = renderer.protection().writeOperation(form, physical, DataScope.none());
                 var prepared = operation.prepare(values);
-                var request = renderer.protection().insert(prepared);
-                var work = operation.protectedWrite(values, request, null,
-                        ProtectedWriteWork.Kind.INSERT, operation.insertOwner(prepared, request)).orElseThrow();
+                BatchInsertPlan insert = renderer.batchRenderer.insertPlan(prepared.physicalForm(), prepared.values());
+                var request = insert.singleRequest();
+                var work = operation.protectedWrite(prepared, request, null,
+                        ProtectedWriteWork.Kind.INSERT, operation.insertOwner(insert, insert.firstParameters())).orElseThrow();
                 assertEquals(owners, work.ownerFields());
                 assertTrue(work.deleteSql().endsWith(" and \"" + tag + "\" = ?"), work.deleteSql());
                 assertTrue(work.insertSql().contains(", \"" + tag + "\", \"" + token + "\")"), work.insertSql());
                 var where = ConditionGroup.and().add(ProtectedConditions.contains("secret", "pha")).build();
                 var query = renderer.protection().prepareContainsQuery(form, form, where, DataScope.none())
                         .orElseThrow();
-                var requests = List.of(renderer.protection().containsCandidates(query, 10).getFirst(),
+                var requests = List.of(renderer.protection().contains.verificationRows(query),
                         renderer.protection().contains.rows(query, List.of()),
                         renderer.protection().contains.rows(query,
-                                CursorPageQuery.after(10, List.of(1L, 1L, 1L, 1L),
-                                        CursorSort.asc(owners.getFirst()))));
+                                KeysetPageNormalizer.normalize(form,
+                                        KeysetPageQuery.after(10, com.flying.orm.core.page.CursorPosition.of(List.of(1L, 1L, 1L, 1L)),
+                                                KeysetSort.asc(owners.getFirst(), com.flying.orm.core.page.NullOrder.LAST))), null));
                 for (var candidate : requests) {
                     assertTrue(candidate.sql().contains("\"" + tag + "\" = ?"), candidate.sql());
                     assertTrue(candidate.sql().contains("\"" + token + "\" in ("), candidate.sql());

@@ -7,7 +7,7 @@ import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.rdb.cache.OrmCachePolicy;
-import com.flying.orm.rdb.dialect.DialectFeature;
+import com.flying.orm.rdb.dialect.DialectCapabilityId;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.internal.plan.StructuralPlanCaches;
 import org.junit.jupiter.api.Test;
@@ -45,7 +45,8 @@ class FormIdentifierBoundaryTest {
                 .addTerm(SqlTermHandler.relationExists("member-of", "membership", "m", "owner_id", "group_id"))
                 .build().withIdentifierRenderer(dialect.schema()::identifier);
         FormSqlRenderSupport support = new FormSqlRenderSupport(conditions, dialect.json(), dialect.name(), true,
-                dialect.schema()::identifier, StructuralPlanCaches.create(OrmCachePolicy.safeDefaults()));
+                dialect.schema()::identifier, StructuralPlanCaches.create(OrmCachePolicy.safeDefaults()), java.util.Map.of(),
+                dialect.capabilities(), dialect.schema()::relationIdentifier);
         DynamicForm form = DynamicForm.builder("users", "users")
                 .addField(DynamicField.primaryKey("id", "BIGINT")).build();
         assertTrue(support.condition(form, ConditionGroup.and().where("id", "=", 1L).build()).cacheable());
@@ -76,7 +77,7 @@ class FormIdentifierBoundaryTest {
         var planner = new JoinQueryPlanner(renderer,
                 new FormScopeSupport(renderer, StructuredConditionResolver.defaults(),
                         com.flying.orm.core.scope.DataScope.none()),
-                com.flying.orm.rdb.execution.SqlExecutionOptions.safeDefaults());
+                com.flying.orm.rdb.execution.SqlExecutionOptions.unlimited());
         String sql = planner.plan(spec, null).request().sql();
         assertTrue(sql.contains("\"t0_relation\".\"owner_id\" = \"t0\".\"id\""), sql);
         assertTrue(sql.contains("\"t1_relation\".\"owner_id\" = \"t1\".\"id\""), sql);
@@ -100,11 +101,11 @@ class FormIdentifierBoundaryTest {
             var planner = new FormOperationPlanner(renderer,
                     new FormScopeSupport(renderer, StructuredConditionResolver.defaults(),
                             com.flying.orm.core.scope.DataScope.none()),
-                    com.flying.orm.rdb.execution.SqlExecutionOptions.safeDefaults());
+                    com.flying.orm.rdb.execution.SqlExecutionOptions.unlimited());
             var where = ConditionGroup.and(conditions.terms())
                     .add(com.flying.orm.rdb.protection.ProtectedConditions.contains("secret", "abc"))
                     .where("id", "member-of", 7L).build();
-            String sql = planner.select(com.flying.orm.rdb.form.spec.QuerySpec.of(form, where)).request().sql();
+            String sql = planner.reads.select(com.flying.orm.rdb.form.spec.QuerySpec.of(form, where)).request().sql();
             assertTrue(sql.contains("\"fop_business_relation\".\"owner_id\" = fop_business.\"id\""), sql);
         }
     }
@@ -145,15 +146,16 @@ class FormIdentifierBoundaryTest {
         UnaryOperator<String> identifiers = name -> {
             calls.incrementAndGet();
             return dialect.schema().identifier(
-                    SqlIdentifiers.requireIdentifier(name, "test form identifier"));
+                    SqlIdentifiers.requireIdentifier(name));
         };
         FormSqlRenderSupport support = new FormSqlRenderSupport(
                 SqlRenderer.builder().addDefaultTerms().build().withIdentifierRenderer(identifiers),
                 dialect.json(),
                 dialect.name(),
-                dialect.supports(DialectFeature.NATIVE_BOOLEAN),
+                dialect.supports(DialectCapabilityId.NATIVE_BOOLEAN),
                 identifiers,
-                StructuralPlanCaches.create(OrmCachePolicy.safeDefaults()));
+                StructuralPlanCaches.create(OrmCachePolicy.safeDefaults()), java.util.Map.of(),
+                dialect.capabilities(), dialect.schema()::relationIdentifier);
 
         assertThrows(IllegalArgumentException.class, () -> support.identifier("unsafe;drop"));
         assertEquals(1, calls.get());

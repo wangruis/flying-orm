@@ -1,11 +1,10 @@
 package com.flying.orm.rdb.schema;
 
-import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 
 /**
- * 被安全策略拦下来的结构变更。它不是错误，而是提醒上层：这类动作最好先让人确认。
+ * 本次未执行的结构变更及其原因，不包含应用迁移或故障处置流程。
  *
  * @param kind   变更类型
  * @param name   字段名或索引名
@@ -17,8 +16,7 @@ import java.util.Objects;
 public record SkippedSchemaChange(Kind kind,
                                   String name,
                                   String reason,
-                                  Map<String, Object> details,
-                                  List<String> suggestedSteps) {
+                                  Map<String, Object> details) {
 
     public enum Kind {
         DROP_COLUMN,
@@ -32,7 +30,7 @@ public record SkippedSchemaChange(Kind kind,
     }
 
     public SkippedSchemaChange(Kind kind, String name, String reason) {
-        this(kind, name, reason, Map.of(), List.of());
+        this(kind, name, reason, Map.of());
     }
 
     public SkippedSchemaChange {
@@ -40,8 +38,6 @@ public record SkippedSchemaChange(Kind kind,
         name = requireText(name, "skipped schema change name");
         reason = requireText(reason, "skipped schema change reason");
         details = Map.copyOf(Objects.requireNonNull(details, "skipped schema change details must not be null"));
-        suggestedSteps = List.copyOf(Objects.requireNonNull(suggestedSteps,
-                                                            "skipped schema change suggested steps must not be null"));
     }
 
     /**

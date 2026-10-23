@@ -71,16 +71,24 @@ public final class EntityFieldNames {
     }
 
     private static String compact(String value, boolean removeSpaces) {
-        StringBuilder key = new StringBuilder(value.length());
+        StringBuilder key = null;
         boolean nonAscii = false;
         for (int index = 0; index < value.length(); index++) {
             char current = value.charAt(index);
-            if (current != '_' && current != '-' && (!removeSpaces || current != ' ')) {
-                nonAscii |= current > 0x7f;
-                key.append(current >= 'A' && current <= 'Z' ? (char) (current + ('a' - 'A')) : current);
+            boolean retained = current != '_' && current != '-' && (!removeSpaces || current != ' ');
+            char normalized = current >= 'A' && current <= 'Z' ? (char) (current + ('a' - 'A')) : current;
+            nonAscii |= retained && current > 0x7f;
+            if (key == null) {
+                if (retained && normalized == current) {
+                    continue;
+                }
+                key = new StringBuilder(value.length()).append(value, 0, index);
+            }
+            if (retained) {
+                key.append(normalized);
             }
         }
-        String normalized = key.toString();
+        String normalized = key == null ? value : key.toString();
         return nonAscii ? normalized.toLowerCase(Locale.ROOT) : normalized;
     }
 }

@@ -30,7 +30,7 @@ class PostgreSqlPhysicalTypeFidelityTest {
 
     @Test
     void separatesCrudLogicalTypesFromSchemaPhysicalDeclarations() {
-        InformationSchemaFormMetadataReader.Queries queries = PostgreSqlMetadataQueries.queries();
+        MetadataQueryProfile.Queries queries = PostgreSqlMetadataQueries.queries();
 
         assertEquals("BLOB[]", queries.typeMapper().apply("bytea[]"));
         for (String declaration : List.of(

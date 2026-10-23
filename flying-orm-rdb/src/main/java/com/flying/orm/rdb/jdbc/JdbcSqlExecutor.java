@@ -7,7 +7,6 @@ import com.flying.orm.core.internal.value.OwnedBindableValues;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.codec.SqlTypedValue;
 import com.flying.orm.rdb.dialect.RdbDialect;
-import com.flying.orm.rdb.exception.RdbExceptionTranslator;
 import com.flying.orm.rdb.execution.GeneratedKeyReadException;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
@@ -31,6 +30,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Predicate;
 
 /**
  * 原生 JDBC 同步 SQL 执行器。
@@ -74,7 +74,7 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
     /** 使用上层显式选择的 SQL 方言创建原生 JDBC 执行器，不读取连接元数据。 */
     public static JdbcSqlExecutor create(JdbcConnectionAccess connectionAccess, RdbDialect dialect) {
         return new JdbcSqlExecutor(connectionAccess,
-                                   SqlExecutionOptions.safeDefaults(), SqlExecutionObserver.noop(),
+                                   SqlExecutionOptions.unlimited(), SqlExecutionObserver.noop(),
                                    Objects.requireNonNull(dialect, "RDB dialect must not be null"));
     }
 
@@ -113,18 +113,26 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
             return result;
         } catch (SQLException error) {
             failure = error;
-            throw RdbExceptionTranslator.translate(error);
+            throw translate(error);
         } catch (RuntimeException | Error error) {
             failure = error;
             throw error;
         } finally {
-            release(connection, firstRequest, SqlExecutionOperation.UPDATE, completed, failure);
+            try {
+                release(connection, firstRequest, SqlExecutionOperation.UPDATE, completed, failure);
+            } catch (RuntimeException cleanup) {
+                throw translate(cleanup);
+            }
         }
     }
 
     Connection acquire(SqlRequest request) throws SQLException {
         return boundConnection != null ? boundConnection
                 : Objects.requireNonNull(connections.getConnection(request), "jdbc connection must not be null");
+    }
+
+    RuntimeException translate(Throwable error) {
+        return dialect.translateException(error);
     }
 
     void release(Connection connection, SqlRequest request, SqlExecutionOperation operation,
@@ -134,58 +142,42 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
     }
 
     @Override
-    public List<DynamicRow> query(SqlRequest request) {
-        return query(request, defaultOptions);
-    }
-
-    @Override
-    public List<DynamicRow> query(SqlRequest request, SqlExecutionOptions options) {
-        return Collections.unmodifiableList(queryOwned(request, options, 0));
-    }
-
-    private List<DynamicRow> queryOwned(SqlRequest request,
-                                        SqlExecutionOptions options,
-                                        int rowLimit) {
-        if (rowLimit < 0) {
-            throw new IllegalArgumentException("query row limit must not be negative");
-        }
-        SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
-        List<Object> executionParameters = snapshotExecutionParameters(safeRequest);
-        SqlExecutionOptions safeOptions = Objects.requireNonNull(options, "sql execution options must not be null");
-        String executionSql = executionSql(safeRequest);
-        SqlStatementType statementType = observations.statementType(
-                safeRequest, safeOptions.maxRows() > 0 || safeOptions.maxResultBytes() > 0);
-        long startedAt = observations.startedAt();
-        List<DynamicRow> rows = new ArrayList<>();
-
-        try {
-            Connection connection = acquire(safeRequest);
-
-            executeQuery(connection, safeRequest, executionSql, executionParameters, statementType, safeOptions, rows, rowLimit);
-            observations.success(SqlExecutionOperation.QUERY, safeRequest, executionParameters, statementType,
-                                 rows.size(), startedAt);
-            return rows;
-        } catch (SQLException | RuntimeException error) {
-            RuntimeException translated = RdbExceptionTranslator.translate(error);
-            observations.failure(SqlExecutionOperation.QUERY, safeRequest, executionParameters, statementType,
-                                 rows.size(), startedAt, translated);
-            throw translated;
-        }
+    public long queryWhile(SqlRequest request, SqlExecutionOptions options, Predicate<? super DynamicRow> consumer) {
+        return queryWhile(request, options, row -> row, consumer);
     }
 
     @InternalApi
     @Override
-    public <T> List<T> queryMapped(SqlRequest request,
-                                   SqlExecutionOptions options,
-                                   RowMapper<T> mapper,
-                                   int rowLimit) {
-        if (rowLimit < 0) {
-            throw new IllegalArgumentException("mapped query row limit must not be negative");
-        }
+    public <T> long queryWhile(SqlRequest request, SqlExecutionOptions options,
+                               RowMapper<T> mapper, Predicate<? super T> consumer) {
         RowMapper<T> safeMapper = Objects.requireNonNull(mapper, "row mapper must not be null");
-        List<DynamicRow> rows = queryOwned(
-                request, options == null ? defaultOptions : options, rowLimit);
-        return mapOwnedRows(rows, safeMapper);
+        Predicate<? super T> safeConsumer = Objects.requireNonNull(consumer, "row consumer must not be null");
+        SqlRequest safeRequest = Objects.requireNonNull(request, "sql request must not be null");
+        List<Object> executionParameters = snapshotExecutionParameters(safeRequest);
+        SqlExecutionOptions safeOptions = options == null ? defaultOptions : options;
+        String executionSql = executionSql(safeRequest);
+        SqlStatementType statementType = observations.statementType(
+                safeRequest, safeOptions.maxRows() > 0 || safeOptions.maxResultBytes() > 0);
+        long startedAt = observations.startedAt();
+        long[] consumed = {0L};
+
+        try {
+            Connection connection = acquire(safeRequest);
+
+            executeQuery(connection, safeRequest, executionSql, executionParameters, statementType, safeOptions, safeMapper, row -> {
+                boolean more = safeConsumer.test(row);
+                consumed[0]++;
+                return more;
+            });
+            observations.success(SqlExecutionOperation.QUERY, safeRequest, executionParameters, statementType,
+                                 consumed[0], startedAt);
+            return consumed[0];
+        } catch (SQLException | RuntimeException error) {
+            RuntimeException translated = translate(error);
+            observations.failure(SqlExecutionOperation.QUERY, safeRequest, executionParameters, statementType,
+                                 consumed[0], startedAt, translated);
+            throw translated;
+        }
     }
 
     @Override
@@ -231,7 +223,7 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
                                  affectedRows, startedAt);
             return affectedRows;
         } catch (SQLException | RuntimeException error) {
-            RuntimeException translated = RdbExceptionTranslator.translate(error);
+            RuntimeException translated = translate(error);
             observations.failure(SqlExecutionOperation.UPDATE, safeRequest, executionParameters, statementType,
                                  affectedRows, startedAt, translated);
             throw translated;
@@ -239,12 +231,6 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
     }
 
     @Override
-    public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
-        return rowsUpdatedReturningKeys(request, options, null);
-    }
-
-    @Override
-    @InternalApi
     public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request,
                                                    SqlExecutionOptions options,
                                                    String generatedKeyColumn) {
@@ -302,7 +288,7 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
                                  affectedRows, startedAt);
             return new SqlWriteResult(affectedRows, keys);
         } catch (SQLException | RuntimeException error) {
-            RuntimeException translated = RdbExceptionTranslator.translate(error);
+            RuntimeException translated = translate(error);
             observations.failure(SqlExecutionOperation.UPDATE, safeRequest, executionParameters, statementType,
                                  affectedRows, startedAt, translated);
             throw translated;
@@ -342,14 +328,14 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
         return value;
     }
 
-    private void executeQuery(Connection connection,
+    private <T> void executeQuery(Connection connection,
                               SqlRequest request,
                               String executionSql,
                               List<Object> executionParameters,
                               SqlStatementType statementType,
                               SqlExecutionOptions options,
-                              List<DynamicRow> result,
-                              int rowLimit) throws SQLException {
+                              RowMapper<T> mapper,
+                              Predicate<? super T> consumer) throws SQLException {
         PreparedStatement statement = null;
         ResultSet resultSet = null;
         Throwable operationFailure = null;
@@ -360,8 +346,8 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
             JdbcStatementBinder.bind(statement, executionParameters);
             JdbcStatementControl.requireNotInterrupted(statement);
             resultSet = statement.executeQuery();
-            JdbcResultSetReader.readQueryRows(
-                    resultSet, statement, statementType, options, result, rowLimit);
+            JdbcResultSetReader.consumeQueryRows(
+                    resultSet, statement, statementType, options, mapper, consumer);
             outcomeConfirmed = true;
         } catch (SQLException | RuntimeException | Error error) {
             operationFailure = error;
@@ -370,18 +356,6 @@ public final class JdbcSqlExecutor implements SyncSqlExecutor {
             release(connection, request, SqlExecutionOperation.QUERY, outcomeConfirmed, operationFailure, resultSet, statement);
         }
     }
-
-    /** SQL 成功且资源关闭后，复用唯一自有 ArrayList 的槽位保存映射结果。 */
-    @SuppressWarnings({"rawtypes", "unchecked"})
-    private static <T> List<T> mapOwnedRows(List<DynamicRow> rows, RowMapper<T> mapper) {
-        List ownedRows = rows;
-        for (int index = 0; index < ownedRows.size(); index++) {
-            DynamicRow row = (DynamicRow) ownedRows.get(index);
-            ownedRows.set(index, mapper.map(row));
-        }
-        return Collections.unmodifiableList((List<T>) ownedRows);
-    }
-
 
     void requireSingle(SqlRequest request) {
         executionSql(request);

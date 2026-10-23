@@ -143,6 +143,19 @@ public final class BatchExecutionEvidence {
             return new BatchExecutionEvidence(this, state, failure);
         }
 
+        /** Preserves timeout/cancellation reasons independently of already-proven successful rows. */
+        public synchronized BatchExecutionEvidence failure(Failure failure, boolean unconfirmedExecution) {
+            BatchExecutionState state = switch (failure.kind()) {
+                case TIMEOUT, LOCK_TIMEOUT -> BatchExecutionState.TIMED_OUT;
+                case CANCELLED -> BatchExecutionState.CANCELLED;
+                default -> successfulPrefix > 0 || !successful.isEmpty() ? BatchExecutionState.PARTIAL
+                        : unconfirmedExecution
+                                && (failure.kind() == RdbErrorKind.CONNECTION || failure.kind() == RdbErrorKind.UNKNOWN)
+                                ? BatchExecutionState.UNKNOWN : BatchExecutionState.FAILED;
+            };
+            return new BatchExecutionEvidence(this, state, failure);
+        }
+
         private void requireRecording() {
             if (terminal) throw new IllegalStateException("batch execution already has a terminal window");
         }
@@ -206,34 +219,16 @@ public final class BatchExecutionEvidence {
             if (translated instanceof RdbException rdbError) {
                 Throwable driverError = rdbError.getCause();
                 return new Failure(driverError.getClass().getName(),
-                                   publicMessage(rdbError.kind()),
+                                   rdbError.kind().message(),
                                    rdbError.sqlState(),
                                    rdbError.errorCode() == null ? 0 : rdbError.errorCode(),
                                    rdbError.kind());
             }
             return new Failure(safeError.getClass().getName(),
-                               publicMessage(RdbErrorKind.UNKNOWN),
+                               RdbErrorKind.UNKNOWN.message(),
                                null,
                                0,
                                RdbErrorKind.UNKNOWN);
-        }
-
-        /**
-         * 驱动消息经常把冲突值、表名甚至 SQL 片段一起带出来，不能放进会返回给使用方的批量结果。
-         * 公开层只按稳定分类给固定说明，详细驱动消息仍保留在原异常和受控观测链路里。
-         */
-        private static String publicMessage(RdbErrorKind kind) {
-            return switch (kind) {
-                case DUPLICATE_KEY -> "database duplicate key conflict";
-                case CONSTRAINT -> "database integrity constraint failed";
-                case BAD_SQL -> "database rejected sql";
-                case CONNECTION -> "database connection failed";
-                case TIMEOUT -> "database operation timed out";
-                case DEADLOCK -> "database transaction deadlocked";
-                case LOCK_TIMEOUT -> "database lock wait timed out";
-                case CANCELLED -> "database operation was cancelled";
-                case UNKNOWN -> "database operation failed";
-            };
         }
 
         private static String publicSqlState(String value) {

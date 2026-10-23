@@ -124,7 +124,7 @@ class R2dbcAtomicBatchTimeoutInputCountTest {
         BatchExecutionEvidenceException error = assertThrows(
                 BatchExecutionEvidenceException.class,
                 () -> R2dbcSqlExecutor.create(com.flying.orm.rdb.execution.ConnectionAccessTestSupport.reactive(connectionFactory), RdbDialect.postgresql())
-                        .writeBatchEvidence(request(Flux.error(failure), 2))
+                        .writeBatch(request(Flux.error(failure), 2))
                         .block(Duration.ofSeconds(2)));
 
         assertEquals(0, connectionRequests.get());

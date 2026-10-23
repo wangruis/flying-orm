@@ -1,5 +1,7 @@
 package com.flying.orm.rdb.bootstrap;
 
+import com.flying.orm.rdb.mapping.EntityModelRegistry;
+import com.flying.orm.rdb.metadata.MetadataCacheInvalidator;
 import com.flying.orm.rdb.protection.ProtectedFieldRuntime;
 
 import java.util.Objects;
@@ -17,12 +19,15 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 final class FlyingOrmSharedResources {
 
-    private final FlyingOrmCacheGraph cacheGraph;
+    private final EntityModelRegistry entityModels;
+    private final MetadataCacheInvalidator metadata;
     private final ProtectedFieldRuntime protectedFields;
     private final AtomicInteger references = new AtomicInteger(1);
 
-    FlyingOrmSharedResources(FlyingOrmCacheGraph cacheGraph, ProtectedFieldRuntime protectedFields) {
-        this.cacheGraph = Objects.requireNonNull(cacheGraph, "client cache graph must not be null");
+    FlyingOrmSharedResources(EntityModelRegistry entityModels, MetadataCacheInvalidator metadata,
+                             ProtectedFieldRuntime protectedFields) {
+        this.entityModels = Objects.requireNonNull(entityModels, "entity model registry must not be null");
+        this.metadata = Objects.requireNonNull(metadata, "metadata cache invalidator must not be null");
         this.protectedFields = Objects.requireNonNull(
                 protectedFields, "protected field runtime must not be null");
     }
@@ -48,7 +53,8 @@ final class FlyingOrmSharedResources {
         }
         if (remaining == 0) {
             try {
-                cacheGraph.close();
+                entityModels.close();
+                metadata.invalidateAll();
             } finally {
                 protectedFields.close();
             }

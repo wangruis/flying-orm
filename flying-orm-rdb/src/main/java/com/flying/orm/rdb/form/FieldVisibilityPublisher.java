@@ -72,9 +72,9 @@ final class FieldVisibilityPublisher {
         Map<String, Object> visible = null;
         for (int index = 0; index < safeSpec.projections().size(); index++) {
             JoinProjection projection = safeSpec.projections().get(index);
-            String sourceField = projection.field().field();
             String alias = projection.alias();
-            FieldVisibility visibility = safeSnapshot.joinVisibility(projection.field());
+            FieldVisibility visibility = projection.expression() == null
+                    ? safeSnapshot.joinVisibility(projection.field()) : FieldVisibility.FULL;
             if (visibility == FieldVisibility.FULL) {
                 if (visible != null) {
                     visible.put(alias, safeRow.get(alias));
@@ -92,6 +92,7 @@ final class FieldVisibilityPublisher {
                 continue;
             }
             Object value = safeRow.get(alias);
+            String sourceField = projection.field().field();
             DynamicForm sourceForm = projection.field().source().form();
             MaskedFieldDefinition definition = requireMaskDefinition(sourceForm, sourceField);
             value = Objects.requireNonNull(renderer, "form data sql renderer must not be null")

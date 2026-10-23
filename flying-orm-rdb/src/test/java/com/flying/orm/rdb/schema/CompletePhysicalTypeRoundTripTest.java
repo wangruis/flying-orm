@@ -47,13 +47,28 @@ class CompletePhysicalTypeRoundTripTest {
     }
 
     @Test
-    void snapshotFingerprintBindsTypeInterpretationAcrossBothReaders() {
+    void bothReadersPreservePhysicalTypeInterpretation() {
         List<SchemaSnapshot> snapshots = readSnapshots(RdbDialect.sqlServer(), "VARCHAR", "VARCHAR", 32);
-        assertEquals(SchemaSnapshotFingerprint.of(snapshots.getFirst()),
-                SchemaSnapshotFingerprint.of(snapshots.getLast()));
+        assertEquals(snapshots.getFirst().physicalColumnTypes(),
+                snapshots.getLast().physicalColumnTypes());
         for (SchemaSnapshot physical : snapshots) {
             SchemaSnapshot logical = SchemaSnapshot.present(physical.completeTable().orElseThrow());
-            assertNotEquals(SchemaSnapshotFingerprint.of(logical), SchemaSnapshotFingerprint.of(physical));
+            assertNotEquals(logical.physicalColumnTypes(), physical.physicalColumnTypes());
+        }
+    }
+
+    @Test
+    void incrementalInputDoesNotReinterpretAnUndeclaredPhysicalColumn() {
+        RdbDialect dialect = RdbDialect.sqlServer();
+        for (SchemaSnapshot actual : readSnapshots(dialect, "VARCHAR", "VARCHAR", 32)) {
+            RelationalTableDefinition declared = RelationalTableDefinition.builder("types")
+                    .addColumn(ColumnDefinition.builder("extra", "INTEGER").build()).build();
+            SchemaMigrationPlan plan = RelationalSchemaPlanReviewer.create(dialect).planIncremental(
+                    DatabaseDescriptor.of(dialect.name(), "test", dialect), declared, actual,
+                    SchemaSnapshotCoverage.complete());
+            assertEquals(List.of(SchemaOperation.Kind.ADD_COLUMN),
+                    plan.operations().stream().map(SchemaOperation::kind).toList());
+            assertEquals(List.of("extra"), plan.operations().stream().map(SchemaOperation::objectName).toList());
         }
     }
 
@@ -64,38 +79,12 @@ class CompletePhysicalTypeRoundTripTest {
                 .addColumn(ColumnDefinition.builder("value", "VARCHAR").build()).build();
         RelationalTableDefinition desired = RelationalTableDefinition.builder(RelationIdentity.table("types"))
                 .addColumn(ColumnDefinition.builder("value", "VARCHAR").nullable(false).build()).build();
-        ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
+        SchemaMigrationPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
                 DatabaseDescriptor.of(dialect.name(), "test", dialect), desired, SchemaSnapshot.present(actual),
                 SchemaSnapshotCoverage.complete(), SchemaCompatibilityMode.EXACT);
 
-        assertFalse(plan.requiresManualAction());
         assertEquals(1, plan.requests().size());
         assertTrue(plan.requests().getFirst().sql().contains("set not null"));
-    }
-
-    @Test
-    void changedSnapshotTypeOriginFailsExecutionPreconditionsBeforeSql() {
-        for (SchemaSnapshot physical : readSnapshots(RdbDialect.sqlServer(), "VARCHAR", "VARCHAR", 32)) {
-            RelationalTableDefinition actual = physical.completeTable().orElseThrow();
-            SchemaSnapshot logical = SchemaSnapshot.present(actual);
-            RelationalTableDefinition desired = RelationalTableDefinition.builder(actual.identity())
-                    .addColumn(actual.columns().getFirst())
-                    .addColumn(ColumnDefinition.builder("note", "INTEGER").build()).build();
-            ReviewedSchemaPlan plan = VerifiedSchemaPlanFixtures.plan(logical, desired,
-                    new SqlRequest("alter table types add note integer", List.of()));
-            VerifiedSchemaPlanFixtures.SyncExecutor jdbc = new VerifiedSchemaPlanFixtures.SyncExecutor(ignored -> 1L);
-            SchemaExecutionReport jdbcReport = VerifiedSchemaPlanExecutor.executeJdbc(plan, jdbc,
-                    () -> physical, SchemaSnapshotCoverage::complete, () -> { }, SqlExecutionOptions.safeDefaults());
-            assertEquals(SchemaExecutionStatus.PRECONDITION_FAILED, jdbcReport.status());
-            assertTrue(jdbc.requests.isEmpty());
-            VerifiedSchemaPlanFixtures.ReactiveExecutor reactive =
-                    new VerifiedSchemaPlanFixtures.ReactiveExecutor(ignored -> Mono.just(1L));
-            SchemaExecutionReport reactiveReport = VerifiedSchemaPlanExecutor.executeReactive(plan, reactive,
-                    () -> Mono.just(physical), SchemaSnapshotCoverage::complete,
-                    () -> { }, SqlExecutionOptions.safeDefaults()).block();
-            assertEquals(SchemaExecutionStatus.PRECONDITION_FAILED, reactiveReport.status());
-            assertTrue(reactive.requests.isEmpty());
-        }
     }
 
     @Test
@@ -311,12 +300,11 @@ class CompletePhysicalTypeRoundTripTest {
                     dialect.schema().generatedValueClause(generation, actual.databaseType().declaration()));
         }
 
-        ReviewedSchemaPlan jdbcPlan = JdbcSchemaClient.create(jdbcExecutor, dialect)
+        SchemaMigrationPlan jdbcPlan = JdbcSchemaClient.create(jdbcExecutor, dialect)
                 .reviewRelational(database, desired, jdbcReader, SchemaCompatibilityMode.EXACT);
-        ReviewedSchemaPlan reactivePlan = ReactiveSchemaClient.create(reactiveExecutor, dialect)
+        SchemaMigrationPlan reactivePlan = ReactiveSchemaClient.create(reactiveExecutor, dialect)
                 .reviewRelational(database, desired, reactiveReader, SchemaCompatibilityMode.EXACT).block();
-        for (ReviewedSchemaPlan plan : List.of(jdbcPlan, reactivePlan)) {
-            assertFalse(plan.requiresManualAction());
+        for (SchemaMigrationPlan plan : List.of(jdbcPlan, reactivePlan)) {
             assertTrue(plan.steps().isEmpty(), plan.operations().toString());
             assertTrue(plan.requests().isEmpty());
         }
@@ -336,8 +324,8 @@ class CompletePhysicalTypeRoundTripTest {
                     .addColumn(ColumnDefinition.builder("value", "FLOAT(10)").build()).build();
             assertTrue(SchemaDiffer.diff(desired, actual, dialect.capabilities(),
                     SchemaCompatibilityMode.EXACT, dialect.name(), dialect.schema()).operations().isEmpty());
-            assertNotEquals(SchemaSnapshotFingerprint.of(actual),
-                    SchemaSnapshotFingerprint.of(float20.get(reader)));
+            assertNotEquals(actual.columns().value(),
+                    float20.get(reader).columns().value());
             assertEquals(List.of(SchemaOperation.Kind.CHANGE_COLUMN),
                     SchemaDiffer.diff(desired, float20.get(reader), dialect.capabilities(),
                             SchemaCompatibilityMode.EXACT, dialect.name(), dialect.schema())
@@ -450,7 +438,7 @@ class CompletePhysicalTypeRoundTripTest {
     }
 
     private static SyncSqlExecutor jdbcExecutor(Map<String, Object> column) {
-        return new SyncSqlExecutor() {
+        return new com.flying.orm.rdb.support.ListQueryFixture() {
             @Override
             public List<DynamicRow> query(SqlRequest request) {
                 return rows(request, column);
@@ -462,7 +450,7 @@ class CompletePhysicalTypeRoundTripTest {
             }
 
             @Override
-            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                 throw new UnsupportedOperationException();
             }
         };

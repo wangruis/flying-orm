@@ -4,7 +4,7 @@ import java.io.Serializable;
 import java.util.function.Function;
 
 /**
- * 可序列化的实体属性引用，是 flying-orm Lambda API 唯一接受的字段标识。
+ * 可序列化的实体属性引用，关联实体类型和属性值类型。
  *
  * <p>业务代码应传入直接的方法引用，例如 {@code UserEntity::getUserId} 或 record 的
  * {@code UserEntity::userId}。普通 Lambda 表达式可能包含计算、分支或跨对象访问，无法稳定对应

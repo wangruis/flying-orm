@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.internal.plan;
 
 import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.sql.render.SqlStatementPlan;
 
 import java.util.Objects;
@@ -18,7 +19,7 @@ public final class SqlStructurePlan {
 
     private final SqlStatementPlan statement;
     private final String operation;
-    private final String table;
+    private final RelationIdentity table;
 
     /**
      * 创建不可变 SQL 结构计划。
@@ -27,13 +28,13 @@ public final class SqlStructurePlan {
      * @param operation 操作类型
      * @param table 物理表身份
      */
-    private SqlStructurePlan(SqlStatementPlan statement,
+    public SqlStructurePlan(SqlStatementPlan statement,
                             String operation,
-                            String table) {
+                            RelationIdentity table) {
         this.statement = Objects.requireNonNull(
                 statement, "sql statement plan must not be null");
         this.operation = requireText(operation, "sql structure plan operation");
-        this.table = requireText(table, "sql structure plan table");
+        this.table = Objects.requireNonNull(table, "sql structure plan relation must not be null");
     }
 
     /**
@@ -51,7 +52,7 @@ public final class SqlStructurePlan {
                                               String dialect,
                                               SqlBindMarkerStyle bindMarkerStyle,
                                               String operation,
-                                              String table,
+                                              RelationIdentity table,
                                               int parameterCount) {
         if (parameterCount < 0) {
             throw new IllegalArgumentException("sql structure parameter count must not be negative");
@@ -80,7 +81,7 @@ public final class SqlStructurePlan {
     }
 
     /** @return 物理表身份。 */
-    String table() {
+    RelationIdentity table() {
         return table;
     }
 

@@ -19,8 +19,89 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ConditionPlanCacheTest {
+
+    @Test
+    void rendererInstancesKeepDifferentIdentifierRulesInSeparatePlans() {
+        ConditionPlanCache cache = ConditionPlanCache.create(CacheRegionPolicy.conditionPlanDefaults());
+        SqlRenderer base = SqlRenderer.builder().addDefaultTerms().build();
+        SqlRenderer first = base.withIdentifierRenderer(name -> "a." + name);
+        SqlRenderer second = base.withIdentifierRenderer(name -> "b." + name);
+        ConditionGroup where = base.conditions().where("id", "=", 7).build();
+
+        ConditionStructurePlan firstPlan = cache.condition("postgresql", where, first);
+        ConditionStructurePlan secondPlan = cache.condition("postgresql", where, second);
+
+        assertEquals("a.id = ?", firstPlan.plan().sql());
+        assertEquals("b.id = ?", secondPlan.plan().sql());
+        assertEquals(List.of(7), firstPlan.parameters());
+        assertEquals(List.of(7), secondPlan.parameters());
+        assertSame(firstPlan.plan(), cache.condition("postgresql", where, first).plan());
+        assertSame(secondPlan.plan(), cache.condition("postgresql", where, second).plan());
+        assertEquals(2, cache.snapshot().estimatedSize());
+    }
+
+    @Test
+    void conditionEntryRetainsValidationOrderWithOrWithoutCaching() {
+        SqlRenderer renderer = SqlRenderer.builder().addDefaultTerms().build();
+        ConditionGroup where = renderer.conditions().where("id", "=", 1).build();
+        for (CacheRegionPolicy policy : List.of(CacheRegionPolicy.disabled(),
+                CacheRegionPolicy.conditionPlanDefaults())) {
+            ConditionPlanCache cache = ConditionPlanCache.create(policy);
+            assertEquals("condition cache dialect must not be null",
+                    assertThrows(NullPointerException.class, () -> cache.condition(null, null, null)).getMessage());
+            for (String blank : List.of("", " \t\n", "\u2003")) {
+                assertEquals("condition cache dialect must not be blank",
+                        assertThrows(IllegalArgumentException.class,
+                                () -> cache.condition(blank, null, null)).getMessage());
+            }
+            assertEquals("where condition must not be null",
+                    assertThrows(NullPointerException.class,
+                            () -> cache.condition("postgresql", null, null)).getMessage());
+            assertEquals("condition renderer must not be null",
+                    assertThrows(NullPointerException.class,
+                            () -> cache.condition("postgresql", where, null)).getMessage());
+            assertEquals(List.of(1), cache.condition(" postgresql ", where, renderer).parameters());
+        }
+    }
+
+    @Test
+    void membershipPlansAccountForRetainedStructureNotRequestValues() {
+        SqlRenderer renderer = SqlRenderer.builder().addDefaultTerms().build();
+        List<Integer> firstValues = java.util.stream.IntStream.range(0, 1000).boxed().toList();
+        List<Integer> secondValues = java.util.stream.IntStream.range(1000, 2000).boxed().toList();
+        ConditionGroup firstWhere = renderer.conditions().where("id", "in", firstValues).build();
+        ConditionGroup secondWhere = renderer.conditions().where("id", "in", secondValues).build();
+        ConditionPlanCache cache = ConditionPlanCache.create(CacheRegionPolicy.conditionPlanDefaults());
+
+        ConditionStructurePlan first = cache.condition("postgresql", firstWhere, renderer);
+        ConditionStructurePlan second = cache.condition("postgresql", secondWhere, renderer);
+
+        assertSame(first.plan(), second.plan());
+        assertEquals(firstValues, first.parameters());
+        assertEquals(secondValues, second.parameters());
+        assertEquals(1, cache.snapshot().estimatedSize());
+        assertEquals(1, cache.snapshot().hitCount());
+        assertEquals(0, cache.snapshot().rejectedOversizedCount());
+    }
+
+    @Test
+    void conditionStructureStillHonorsDeveloperEntryBudget() {
+        CacheRegionPolicy policy = new CacheRegionPolicy(true, 1000, 10,
+                java.time.Duration.ofMinutes(1), true);
+        ConditionPlanCache cache = ConditionPlanCache.create(policy);
+        SqlRenderer renderer = SqlRenderer.builder().addDefaultTerms().build();
+        List<Integer> values = java.util.stream.IntStream.range(0, 1000).boxed().toList();
+        ConditionGroup where = renderer.conditions().where("id", "in", values).build();
+
+        for (int index = 0; index < 2; index++) {
+            assertEquals(values, cache.condition("postgresql", where, renderer).parameters());
+        }
+        assertEquals(0, cache.snapshot().estimatedSize());
+        assertEquals(2, cache.snapshot().rejectedOversizedCount());
+    }
 
     @Test
     void mutableBindingsStayRequestLocalForDisabledMissHitAndCustomPaths() {

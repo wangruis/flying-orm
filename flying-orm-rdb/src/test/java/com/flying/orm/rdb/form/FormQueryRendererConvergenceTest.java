@@ -5,8 +5,8 @@ import com.flying.orm.core.codec.ValueCodec;
 import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.page.CursorPageQuery;
-import com.flying.orm.core.page.CursorSort;
+import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetSort;
 import com.flying.orm.core.page.PageQuery;
 import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.sql.render.SqlRenderer;
@@ -33,6 +33,17 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FormQueryRendererConvergenceTest {
+    private static SqlRequest keyset(FormQuerySqlRenderer renderer, DynamicForm form,
+                                     ConditionGroup where, KeysetPageQuery page) {
+        return keyset(renderer, form, where, form.fields().stream().map(DynamicField::name).toList(),
+                KeysetPageNormalizer.normalize(form, page));
+    }
+
+    private static SqlRequest keyset(FormQuerySqlRenderer renderer, DynamicForm form,
+                                     ConditionGroup where, List<String> fields,
+                                     KeysetPageNormalizer.NormalizedKeysetPage page) {
+        return renderer.selectKeyset(form, where, HiddenProjectionLayout.of(fields, page), page);
+    }
 
     private static final ConditionGroup EMPTY = ConditionGroup.and().build();
 
@@ -49,9 +60,16 @@ class FormQueryRendererConvergenceTest {
                 String hidden = dialect.schema().identifier("hidden_index");
                 String base = "select " + id + ", " + title + ", " + hidden + " from " + table;
                 PageQuery page = PageQuery.of(2, 3, PageSort.asc("id"));
-                SqlRequest offset = fixture.renderer.select(fixture.form, EMPTY, page);
-                SqlRequest physical = fixture.renderer.selectPhysical(
-                        fixture.form, List.of("title", "id"), EMPTY, page);
+                SqlRequest offset = fixture.renderer.select(fixture.form, EMPTY,
+                        null,
+                        List.of(),
+                        page.sorts(), page,
+                        false, null, null);
+                SqlRequest physical = fixture.renderer.select(fixture.form, EMPTY,
+                        List.of("title", "id"),
+                        List.of(),
+                        page.sorts(), page,
+                        false, null, null);
                 String tail = dialect.name().equals("oracle") || dialect.name().equals("sqlserver")
                         ? " offset ? rows fetch next ? rows only" : " limit ? offset ?";
                 List<Object> parameters = dialect.name().equals("oracle") || dialect.name().equals("sqlserver")
@@ -62,15 +80,19 @@ class FormQueryRendererConvergenceTest {
                         + " order by " + id + " asc" + tail, physical.sql(), dialect.name());
                 assertEquals(parameters, physical.parameters(), dialect.name());
 
-                SqlRequest projected = fixture.renderer.selectProjected(
-                        fixture.form, EMPTY, List.of("title", "id"), List.of("title"),
-                        List.of(PageSort.desc("id")));
+                SqlRequest projected = fixture.renderer.select(fixture.form, EMPTY,
+                        List.of("title", "id"),
+                        List.of("title"),
+                        List.of(PageSort.desc("id")), null,
+                        false, null, null);
                 assertEquals("select " + title + ", " + id + " from " + table
                         + " group by " + title + " order by " + id + " desc", projected.sql(), dialect.name());
                 assertEquals(List.of(), projected.parameters(), dialect.name());
 
-                SqlRequest locked = fixture.renderer.selectProjectedLocking(
-                        fixture.form, EMPTY, List.of("id"), List.of(), List.of(),
+                SqlRequest locked = fixture.renderer.select(fixture.form, EMPTY,
+                        List.of("id"),
+                        List.of(),
+                        List.of(), null, false,
                         dialect.lockingReadDialect(), ReadLock.updateNowait());
                 String lockedSql = dialect.name().equals("sqlserver")
                         ? "select " + id + " from " + table + " WITH (UPDLOCK, ROWLOCK, NOWAIT)"
@@ -78,17 +100,15 @@ class FormQueryRendererConvergenceTest {
                 assertEquals(lockedSql, locked.sql(), dialect.name());
                 assertEquals(List.of(), locked.parameters(), dialect.name());
 
-                SqlRequest cursorFirst = fixture.renderer.select(fixture.form, EMPTY,
-                        CursorPageQuery.first(2, CursorSort.asc("id")));
+                SqlRequest cursorFirst = keyset(fixture.renderer, fixture.form, EMPTY, KeysetPageQuery.first(2, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST)));
                 assertEquals(base + " order by " + id + " asc" + tail,
                         cursorFirst.sql(), dialect.name());
                 assertEquals(dialect.name().equals("oracle") || dialect.name().equals("sqlserver")
                         ? List.of(0L, 3) : List.of(3, 0L), cursorFirst.parameters(), dialect.name());
-                SqlRequest cursorAfter = fixture.renderer.selectPhysical(fixture.form,
-                        List.of("title"), EMPTY,
-                        CursorPageQuery.after(2, List.of(7L), CursorSort.asc("id")));
-                assertEquals("select " + title + " from " + table + " where (" + id
-                        + " > ?) order by " + id + " asc" + tail, cursorAfter.sql(), dialect.name());
+                SqlRequest cursorAfter = keyset(fixture.renderer, fixture.form, EMPTY, List.of("title"), KeysetPageNormalizer.normalize(fixture.form, KeysetPageQuery.after(2, com.flying.orm.core.page.CursorPosition.of(List.of(7L)), KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST))));
+                assertEquals("select " + title + ", " + id + " as " + dialect.schema().identifier("__fo_ks_0")
+                        + " from " + table + " where " + id
+                        + " > ? order by " + id + " asc" + tail, cursorAfter.sql(), dialect.name());
                 assertEquals(dialect.name().equals("oracle") || dialect.name().equals("sqlserver")
                         ? List.of(7L, 0L, 3) : List.of(7L, 3, 0L),
                         cursorAfter.parameters(), dialect.name());
@@ -98,17 +118,24 @@ class FormQueryRendererConvergenceTest {
                 assertEquals(cacheEnabled ? 6 : 0, fixture.caches.sqlSnapshot().missCount(),
                              dialect.name());
                 List<SqlRequest> repeated = List.of(
-                        fixture.renderer.select(fixture.form, EMPTY, page),
-                        fixture.renderer.selectPhysical(fixture.form, List.of("title", "id"), EMPTY, page),
-                        fixture.renderer.selectProjected(fixture.form, EMPTY,
-                                List.of("title", "id"), List.of("title"), List.of(PageSort.desc("id"))),
-                        fixture.renderer.selectProjectedLocking(fixture.form, EMPTY,
-                                List.of("id"), List.of(), List.of(),
-                                dialect.lockingReadDialect(), ReadLock.updateNowait()),
+                        fixture.renderer.select(fixture.form, EMPTY, null, List.of(), page.sorts(), page, false, null, null),
                         fixture.renderer.select(fixture.form, EMPTY,
-                                CursorPageQuery.first(2, CursorSort.asc("id"))),
-                        fixture.renderer.selectPhysical(fixture.form, List.of("title"), EMPTY,
-                                CursorPageQuery.after(2, List.of(7L), CursorSort.asc("id"))));
+                                List.of("title", "id"),
+                                List.of(),
+                                page.sorts(), page,
+                                false, null, null),
+                        fixture.renderer.select(fixture.form, EMPTY,
+                                List.of("title", "id"),
+                                List.of("title"),
+                                List.of(PageSort.desc("id")), null,
+                                false, null, null),
+                        fixture.renderer.select(fixture.form, EMPTY,
+                                List.of("id"),
+                                List.of(),
+                                List.of(), null, false,
+                                dialect.lockingReadDialect(), ReadLock.updateNowait()),
+                        keyset(fixture.renderer, fixture.form, EMPTY, KeysetPageQuery.first(2, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST))),
+                        keyset(fixture.renderer, fixture.form, EMPTY, List.of("title"), KeysetPageNormalizer.normalize(fixture.form, KeysetPageQuery.after(2, com.flying.orm.core.page.CursorPosition.of(List.of(7L)), KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST)))));
                 for (int index = 0; index < first.size(); index++) {
                     assertEquals(first.get(index).sql(), repeated.get(index).sql(), dialect.name());
                     assertEquals(first.get(index).parameters(), repeated.get(index).parameters(), dialect.name());
@@ -122,24 +149,45 @@ class FormQueryRendererConvergenceTest {
     }
 
     @Test
-    void sqlCacheSeparatesOrdinaryPhysicalAndLockingShapesOnColdAndHotRequests() {
+    void equivalentProjectionsShareSqlPlansButLockingRemainsDistinct() {
         Fixture fixture = fixture(RdbDialect.postgresql(), OrmCachePolicy.safeDefaults(),
                                   RdbDialect.postgresql().pagination());
         PageQuery page = PageQuery.of(1, 2, PageSort.asc("id"));
-        SqlRequest ordinary = fixture.renderer.select(fixture.form, EMPTY, page);
+        SqlRequest ordinary = fixture.renderer.select(fixture.form, EMPTY,
+                null,
+                List.of(),
+                page.sorts(), page,
+                false, null, null);
         assertEquals(1, fixture.caches.sqlSnapshot().missCount());
-        assertEquals(ordinary.sql(), fixture.renderer.select(fixture.form, EMPTY, page).sql());
+        assertEquals(ordinary.sql(), fixture.renderer.select(fixture.form, EMPTY,
+                null,
+                List.of(),
+                page.sorts(), page,
+                false, null, null).sql());
         assertEquals(1, fixture.caches.sqlSnapshot().hitCount());
-        SqlRequest physicalAll = fixture.renderer.selectPhysical(
-                fixture.form, List.of("id", "title", "hidden_index"), EMPTY, page);
+        SqlRequest physicalAll = fixture.renderer.select(fixture.form, EMPTY,
+                List.of("id", "title", "hidden_index"),
+                List.of(),
+                page.sorts(), page,
+                false, null, null);
         assertEquals(ordinary.sql(), physicalAll.sql());
-        assertEquals(2, fixture.caches.sqlSnapshot().missCount());
-        assertEquals(physicalAll.sql(), fixture.renderer.selectPhysical(
-                fixture.form, List.of("id", "title", "hidden_index"), EMPTY, page).sql());
-        assertEquals(2, fixture.caches.sqlSnapshot().hitCount());
-        fixture.renderer.selectProjected(fixture.form, EMPTY, List.of("id"), List.of(), List.of());
-        fixture.renderer.selectProjectedLocking(fixture.form, EMPTY, List.of("id"), List.of(),
-                List.of(), RdbDialect.postgresql().lockingReadDialect(), ReadLock.update());
+        assertEquals(1, fixture.caches.sqlSnapshot().missCount());
+        assertEquals(physicalAll.sql(), fixture.renderer.select(fixture.form, EMPTY,
+                List.of("id", "title", "hidden_index"),
+                List.of(),
+                page.sorts(), page,
+                false, null, null).sql());
+        assertEquals(3, fixture.caches.sqlSnapshot().hitCount());
+        fixture.renderer.select(fixture.form, EMPTY, List.of("id"), List.of(), List.of(), null, false, null, null);
+        fixture.renderer.select(fixture.form, EMPTY,
+                List.of("id"),
+                List.of(),
+                List.of(), null, false,
+                RdbDialect.postgresql().lockingReadDialect(), ReadLock.update());
+        assertEquals(3, fixture.caches.sqlSnapshot().missCount());
+        KeysetPageQuery cursor = KeysetPageQuery.first(2, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST));
+        SqlRequest cursorAll = keyset(fixture.renderer, fixture.form, EMPTY, cursor);
+        assertEquals(cursorAll.sql(), keyset(fixture.renderer, fixture.form, EMPTY, List.of("id", "title", "hidden_index"), KeysetPageNormalizer.normalize(fixture.form, cursor)).sql());
         assertEquals(4, fixture.caches.sqlSnapshot().missCount());
     }
 
@@ -148,40 +196,36 @@ class FormQueryRendererConvergenceTest {
         Fixture fixture = fixture(RdbDialect.postgresql(), OrmCachePolicy.safeDefaults(),
                                   RdbDialect.postgresql().pagination());
         List<String> visible = new ArrayList<>(List.of("title", "id"));
-        SqlRequest request = fixture.renderer.selectPhysical(
-                fixture.form, visible, EMPTY, PageQuery.of(1, 2, PageSort.asc("id")));
+        SqlRequest request = fixture.renderer.select(fixture.form, EMPTY, visible,
+                List.of(),
+                PageQuery.of(1, 2, PageSort.asc("id")).sorts(),
+                PageQuery.of(1, 2, PageSort.asc("id")),
+                false, null, null);
         visible.set(0, "hidden_index");
         assertTrue(request.sql().startsWith("select \"title\", \"id\" from \"events\""));
         assertFalse(request.sql().contains("hidden_index"));
-        SqlRequest cursor = fixture.renderer.selectPhysical(fixture.form, List.of("title"), EMPTY,
-                CursorPageQuery.first(2, CursorSort.asc("id")));
-        assertTrue(cursor.sql().startsWith("select \"title\" from \"events\""));
+        SqlRequest cursor = keyset(fixture.renderer, fixture.form, EMPTY, List.of("title"), KeysetPageNormalizer.normalize(fixture.form, KeysetPageQuery.first(2, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST))));
+        assertTrue(cursor.sql().startsWith("select \"title\", \"id\" as \"__fo_ks_0\" from \"events\""));
         assertFalse(cursor.sql().contains("hidden_index"));
     }
 
     @Test
-    void legacyCursorKeepsFirstAfterAscendingDescendingAndExtraRowBudget() {
+    void keysetKeepsFirstAfterAscendingDescendingAndExtraRowBudget() {
         Fixture fixture = fixture(RdbDialect.postgresql(), OrmCachePolicy.safeDefaults(),
                                   RdbDialect.postgresql().pagination());
-        SqlRequest first = fixture.renderer.select(fixture.form, EMPTY,
-                CursorPageQuery.first(2, CursorSort.desc("title")));
+        SqlRequest first = keyset(fixture.renderer, fixture.form, EMPTY, KeysetPageQuery.first(2, KeysetSort.desc("title", com.flying.orm.core.page.NullOrder.LAST)));
         assertEquals("select \"id\", \"title\", \"hidden_index\" from \"events\" "
                 + "order by \"title\" desc, \"id\" desc limit ? offset ?", first.sql());
         assertEquals(List.of(3, 0L), first.parameters());
 
-        SqlRequest after = fixture.renderer.select(fixture.form,
-                ConditionGroup.and().where("id", ">", 1L).build(),
-                CursorPageQuery.after(2, List.of("m", 7L), CursorSort.asc("title"),
-                        CursorSort.desc("id")));
+        SqlRequest after = keyset(fixture.renderer, fixture.form, ConditionGroup.and().where("id", ">", 1L).build(), KeysetPageQuery.after(2, com.flying.orm.core.page.CursorPosition.of(List.of("m", 7L)), KeysetSort.asc("title", com.flying.orm.core.page.NullOrder.LAST), KeysetSort.desc("id", com.flying.orm.core.page.NullOrder.LAST)));
         assertEquals("select \"id\", \"title\", \"hidden_index\" from \"events\" "
-                + "where (\"id\" > ?) and (\"title\" > ? or (\"title\" = ? and \"id\" < ?)) "
+                + "where (\"id\" > ?) and ((\"title\" > ? OR (\"title\" = ? AND \"id\" < ?))) "
                 + "order by \"title\" asc, \"id\" desc limit ? offset ?", after.sql());
         assertEquals(List.of(1L, "m", "m", 7L, 3, 0L), after.parameters());
-        SqlRequest protectedAfter = fixture.renderer.selectPhysical(fixture.form, List.of("title"),
-                EMPTY, CursorPageQuery.after(2, List.of("m", 7L),
-                        CursorSort.asc("title"), CursorSort.desc("id")));
-        assertEquals("select \"title\" from \"events\" "
-                + "where (\"title\" > ? or (\"title\" = ? and \"id\" < ?)) "
+        SqlRequest protectedAfter = keyset(fixture.renderer, fixture.form, EMPTY, List.of("title"), KeysetPageNormalizer.normalize(fixture.form, KeysetPageQuery.after(2, com.flying.orm.core.page.CursorPosition.of(List.of("m", 7L)), KeysetSort.asc("title", com.flying.orm.core.page.NullOrder.LAST), KeysetSort.desc("id", com.flying.orm.core.page.NullOrder.LAST))));
+        assertEquals("select \"title\", \"id\" as \"__fo_ks_0\" from \"events\" "
+                + "where (\"title\" > ? OR (\"title\" = ? AND \"id\" < ?)) "
                 + "order by \"title\" asc, \"id\" desc limit ? offset ?", protectedAfter.sql());
         assertEquals(List.of("m", "m", 7L, 3, 0L), protectedAfter.parameters());
     }
@@ -194,22 +238,20 @@ class FormQueryRendererConvergenceTest {
         CountingPagination pagination = new CountingPagination(dialect.pagination());
         Fixture fixture = fixture(dialect, disabled, pagination);
         PageQuery page = PageQuery.of(1, 2, PageSort.asc("id"));
-        fixture.renderer.select(fixture.form, EMPTY, page);
-        fixture.renderer.select(fixture.form, EMPTY, page);
+        fixture.renderer.select(fixture.form, EMPTY, null, List.of(), page.sorts(), page, false, null, null);
+        fixture.renderer.select(fixture.form, EMPTY, null, List.of(), page.sorts(), page, false, null, null);
         assertEquals(2, pagination.parameters.get());
         assertEquals(2, pagination.paginate.get());
         assertEquals(0, fixture.caches.sqlSnapshot().requestCount());
 
         CountingPagination cachedPagination = new CountingPagination(dialect.pagination());
         Fixture cached = fixture(dialect, OrmCachePolicy.safeDefaults(), cachedPagination);
-        cached.renderer.select(cached.form, EMPTY, page);
-        cached.renderer.select(cached.form, EMPTY, page);
-        cached.renderer.selectPhysical(cached.form, List.of("id"), EMPTY, page);
-        cached.renderer.selectPhysical(cached.form, List.of("id"), EMPTY, page);
-        cached.renderer.select(cached.form, EMPTY,
-                CursorPageQuery.first(2, CursorSort.asc("id")));
-        cached.renderer.select(cached.form, EMPTY,
-                CursorPageQuery.first(2, CursorSort.asc("id")));
+        cached.renderer.select(cached.form, EMPTY, null, List.of(), page.sorts(), page, false, null, null);
+        cached.renderer.select(cached.form, EMPTY, null, List.of(), page.sorts(), page, false, null, null);
+        cached.renderer.select(cached.form, EMPTY, List.of("id"), List.of(), page.sorts(), page, false, null, null);
+        cached.renderer.select(cached.form, EMPTY, List.of("id"), List.of(), page.sorts(), page, false, null, null);
+        keyset(cached.renderer, cached.form, EMPTY, KeysetPageQuery.first(2, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST)));
+        keyset(cached.renderer, cached.form, EMPTY, KeysetPageQuery.first(2, KeysetSort.asc("id", com.flying.orm.core.page.NullOrder.LAST)));
         assertEquals(6, cachedPagination.parameters.get());
         assertEquals(3, cachedPagination.paginate.get());
         assertEquals(3, cached.caches.sqlSnapshot().missCount());
@@ -238,9 +280,17 @@ class FormQueryRendererConvergenceTest {
                                    dialect.pagination()).form;
         ConditionGroup extension = conditions.conditions().where("id", "fixed", 0).build();
         SqlRequest firstTerm = renderer.select(form, extension,
-                PageQuery.of(1, 2, PageSort.asc("id")));
+                null,
+                List.of(),
+                PageQuery.of(1, 2, PageSort.asc("id")).sorts(),
+                PageQuery.of(1, 2, PageSort.asc("id")),
+                false, null, null);
         SqlRequest secondTerm = renderer.select(form, extension,
-                PageQuery.of(1, 2, PageSort.asc("id")));
+                null,
+                List.of(),
+                PageQuery.of(1, 2, PageSort.asc("id")).sorts(),
+                PageQuery.of(1, 2, PageSort.asc("id")),
+                false, null, null);
         assertEquals(firstTerm.sql(), secondTerm.sql());
         assertEquals(List.of(2, 0L), firstTerm.parameters());
         assertEquals(2, termCalls.get());
@@ -248,10 +298,8 @@ class FormQueryRendererConvergenceTest {
         assertEquals(2, pagination.paginate.get());
 
         ConditionGroup where = ConditionGroup.and().where("title", "=", "a").build();
-        SqlRequest cursor = renderer.select(form, where,
-                CursorPageQuery.after(2, List.of("b", 7L), CursorSort.asc("title")));
-        SqlRequest cursorAgain = renderer.select(form, where,
-                CursorPageQuery.after(2, List.of("b", 7L), CursorSort.asc("title")));
+        SqlRequest cursor = keyset(renderer, form, where, KeysetPageQuery.after(2, com.flying.orm.core.page.CursorPosition.of(List.of("b", 7L)), KeysetSort.asc("title", com.flying.orm.core.page.NullOrder.LAST)));
+        SqlRequest cursorAgain = keyset(renderer, form, where, KeysetPageQuery.after(2, com.flying.orm.core.page.CursorPosition.of(List.of("b", 7L)), KeysetSort.asc("title", com.flying.orm.core.page.NullOrder.LAST)));
         assertEquals(cursor.sql(), cursorAgain.sql());
         assertEquals(List.of("encoded:a", "encoded:b", "encoded:b", 7L, 3, 0L),
                      cursor.parameters());
@@ -262,34 +310,20 @@ class FormQueryRendererConvergenceTest {
     }
 
     @Test
-    void invalidInputsKeepTheirValidationOrderIncludingNullProjectedLock() {
+    void normalizedSelectionValidatesModelFieldsAndLockDialect() {
         Fixture fixture = fixture(RdbDialect.postgresql(), OrmCachePolicy.safeDefaults(),
                                   RdbDialect.postgresql().pagination());
-        assertEquals("dynamic form must not be null", assertThrows(NullPointerException.class,
-                () -> fixture.renderer.select(null, EMPTY, (PageQuery) null)).getMessage());
-        assertEquals("visible fields must not be null", assertThrows(NullPointerException.class,
-                () -> fixture.renderer.selectPhysical(fixture.form, null, EMPTY,
-                        (PageQuery) null)).getMessage());
-        assertEquals("query projections must not be null", assertThrows(NullPointerException.class,
-                () -> fixture.renderer.selectProjectedLocking(fixture.form, EMPTY, null, null, null,
-                        null, null)).getMessage());
-        assertEquals("projected query must select at least one entity field",
-                assertThrows(IllegalArgumentException.class,
-                        () -> fixture.renderer.selectProjectedLocking(fixture.form, EMPTY,
-                                List.of(), List.of(), List.of(), null, null)).getMessage());
-        assertEquals("dynamic field does not exist", assertThrows(IllegalArgumentException.class,
-                () -> fixture.renderer.selectProjectedLocking(fixture.form, EMPTY,
-                        List.of("id"), List.of(), List.of(PageSort.asc("missing")),
-                        null, null)).getMessage());
-        assertEquals("locking read dialect must not be null", assertThrows(NullPointerException.class,
-                () -> fixture.renderer.selectProjectedLocking(fixture.form, EMPTY,
-                        List.of("id"), List.of(), List.of(), null, null)).getMessage());
-        assertEquals("read lock must not be null", assertThrows(NullPointerException.class,
-                () -> fixture.renderer.selectProjectedLocking(fixture.form, EMPTY,
-                        List.of("id"), List.of(), List.of(),
-                        RdbDialect.postgresql().lockingReadDialect(), null)).getMessage());
-        assertNotEquals("", fixture.renderer.selectProjected(fixture.form, EMPTY,
-                List.of("id"), List.of(), List.of()).sql());
+        assertThrows(NullPointerException.class, () -> fixture.renderer.select(
+                null, EMPTY, null, List.of(), List.of(), null, false, null, null));
+        assertThrows(IllegalArgumentException.class, () -> fixture.renderer.select(
+                fixture.form, EMPTY, List.of(), List.of(), List.of(), null, false, null, null));
+        assertThrows(IllegalArgumentException.class, () -> fixture.renderer.select(
+                fixture.form, EMPTY, List.of("id"), List.of(), List.of(PageSort.asc("missing")),
+                null, false, null, null));
+        assertThrows(NullPointerException.class, () -> fixture.renderer.select(
+                fixture.form, EMPTY, List.of("id"), List.of(), List.of(), null, false, null, ReadLock.update()));
+        assertNotEquals("", fixture.renderer.select(fixture.form, EMPTY,
+                List.of("id"), List.of(), List.of(), null, false, null, null).sql());
     }
 
     private static List<RdbDialect> dialects() {

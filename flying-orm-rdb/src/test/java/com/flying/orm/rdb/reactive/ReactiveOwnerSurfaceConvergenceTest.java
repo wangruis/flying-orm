@@ -8,6 +8,21 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class ReactiveOwnerSurfaceConvergenceTest {
 
     @Test
+    void sessionDoesNotKeepUnusedRawSqlOrParameterTypeOverloads() {
+        assertAll(
+                () -> assertThrows(NoSuchMethodException.class, () -> R2dbcExecutionSession.class
+                        .getDeclaredMethod("bind", io.r2dbc.spi.Statement.class, java.util.List.class,
+                                java.util.List.class)),
+                () -> assertThrows(NoSuchMethodException.class, () -> R2dbcExecutionSession.class
+                        .getDeclaredMethod("prepareStatement", io.r2dbc.spi.Connection.class, String.class,
+                                int.class, com.flying.orm.core.sql.render.SqlBindMarkerStyle.class,
+                                java.util.List.class)),
+                () -> assertThrows(NoSuchMethodException.class, () -> R2dbcExecutionSession.class
+                        .getDeclaredMethod("sqlForDriver", String.class, int.class,
+                                com.flying.orm.core.sql.render.SqlBindMarkerStyle.class)));
+    }
+
+    @Test
     void ownerOnlyLeafTypesAreNotTopLevelProductionClasses() {
         assertAll(
                 () -> assertClassAbsent(

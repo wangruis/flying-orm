@@ -56,17 +56,17 @@ public final class ForeignKeyDefinition {
         return name;
     }
 
+    /** 返回兼容查找键；物理名称保留原始大小写。 */
+    public String normalizedName() {
+        return Names.key(name, "foreign key name");
+    }
+
     /** 返回本地列，顺序与引用列一一对应。 */
     public List<String> columns() {
         return columns;
     }
 
     public RelationIdentity reference() {
-        return reference;
-    }
-
-    /** {@link #reference()} 的可读别名，便于调用方表达目标表。 */
-    public RelationIdentity referencedTable() {
         return reference;
     }
 
@@ -81,6 +81,19 @@ public final class ForeignKeyDefinition {
 
     public ReferentialAction onUpdate() {
         return onUpdate;
+    }
+
+    @Override
+    public boolean equals(Object candidate) {
+        return this == candidate || candidate instanceof ForeignKeyDefinition other
+                && name.equals(other.name) && columns.equals(other.columns)
+                && reference.equals(other.reference) && referenceColumns.equals(other.referenceColumns)
+                && onDelete == other.onDelete && onUpdate == other.onUpdate;
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(name, columns, reference, referenceColumns, onDelete, onUpdate);
     }
 
     public static final class Builder {
@@ -104,11 +117,6 @@ public final class ForeignKeyDefinition {
         public Builder reference(RelationIdentity reference) {
             this.reference = Objects.requireNonNull(reference, "foreign key reference must not be null");
             return this;
-        }
-
-        /** 兼容偏向属性命名的调用风格。 */
-        public Builder referencedTable(RelationIdentity reference) {
-            return reference(reference);
         }
 
         public Builder addReferenceColumn(String column) {

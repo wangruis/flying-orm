@@ -23,7 +23,7 @@ final class EntityPartitionCompiler {
     static TablePartitionDefinition compile(
             Class<?> entityType,
             List<Field> excludedFields,
-            Map<String, EntityRelationalMetadataCompiler.Property> properties) {
+            Map<String, EntityMetadataResolver.Property> properties) {
         TablePartition annotation = entityType.getAnnotation(TablePartition.class);
         if (annotation == null) {
             return null;
@@ -35,7 +35,7 @@ final class EntityPartitionCompiler {
         if (excludedFields.stream().anyMatch(field -> field.getName().equals(propertyName))) {
             throw new MappingException("table partition property must be a persistent entity property");
         }
-        EntityRelationalMetadataCompiler.Property property = properties.get(propertyName);
+        EntityMetadataResolver.Property property = properties.get(propertyName);
         if (property == null) {
             throw new MappingException("table partition property must be a persistent entity property");
         }

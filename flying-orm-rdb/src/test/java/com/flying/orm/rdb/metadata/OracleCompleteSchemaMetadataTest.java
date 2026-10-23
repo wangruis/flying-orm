@@ -22,11 +22,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class OracleCompleteSchemaMetadataTest {
 
     @Test
-    void declaresAndProjectsEveryCompleteSnapshotFact() {
-        InformationSchemaFormMetadataReader.Queries queries = OracleMetadataQueries.queries();
+    void namedSequenceReadbackAcceptsDescendingDefaultBoundsWithoutInferringOriginalStart() {
+        String sql = OracleMetadataQueries.queries().columnQuery().create("app", "orders").sql()
+                .replaceAll("\\s+", " ");
+        assertTrue(sql.contains("column_sequence.MIN_VALUE = case when column_sequence.INCREMENT_BY > 0 then 1"
+                + " else -999999999999999999999999999 end"));
+        assertTrue(sql.contains("column_sequence.MAX_VALUE = case when column_sequence.INCREMENT_BY > 0"
+                + " then 9999999999999999999999999999 else -1 end"));
+        assertTrue(sql.contains("then case when column_sequence.INCREMENT_BY > 0 then 1 else -1 end else"));
+        assertFalse(sql.contains("column_sequence.LAST_NUMBER"));
+    }
 
-        assertTrue(InformationSchemaFormMetadataReader.coverage(queries).isComplete());
-        assertEquals(InformationSchemaFormMetadataReader.SnapshotDialect.ORACLE,
+    @Test
+    void declaresAndProjectsEveryCompleteSnapshotFact() {
+        MetadataQueryProfile.Queries queries = OracleMetadataQueries.queries();
+
+        assertTrue(new MetadataQueryProfile(queries).coverage().isComplete());
+        assertEquals(MetadataQueryProfile.SnapshotDialect.ORACLE,
                      queries.snapshotDialect());
         assertProjection(queries.tableQuery().create("app", "orders"),
                          "TABLE_COMMENT", "TABLE_REPRESENTABLE");
@@ -69,8 +81,7 @@ class OracleCompleteSchemaMetadataTest {
     void rejectsStandaloneSequenceDefaultsWhenAnySequenceOptionIsMissing() {
         for (String missing : List.of(
                 "GENERATION_START", "GENERATION_INCREMENT", "GENERATION_CACHE")) {
-            InformationSchemaFormMetadataReader reader = new InformationSchemaFormMetadataReader(
-                    new StandaloneSequenceExecutor(missing), OracleMetadataQueries.queries());
+            InformationSchemaFormMetadataReader reader = new InformationSchemaFormMetadataReader(new StandaloneSequenceExecutor(missing), new MetadataQueryProfile(OracleMetadataQueries.queries()));
 
             IllegalStateException error = assertThrows(
                     IllegalStateException.class,
@@ -82,8 +93,7 @@ class OracleCompleteSchemaMetadataTest {
 
     @Test
     void readsAStandaloneSequenceWhenEveryStableCreationOptionIsPresent() {
-        InformationSchemaFormMetadataReader reader = new InformationSchemaFormMetadataReader(
-                new StandaloneSequenceExecutor(null), OracleMetadataQueries.queries());
+        InformationSchemaFormMetadataReader reader = new InformationSchemaFormMetadataReader(new StandaloneSequenceExecutor(null), new MetadataQueryProfile(OracleMetadataQueries.queries()));
 
         var snapshot = reader.readSnapshot("APP", "orders").block();
 
@@ -94,9 +104,7 @@ class OracleCompleteSchemaMetadataTest {
 
     @Test
     void rejectsASequenceMarkerThatDoesNotMatchTheColumnDefault() {
-        InformationSchemaFormMetadataReader reader = new InformationSchemaFormMetadataReader(
-                new StandaloneSequenceExecutor(null, "APP.OTHER_SEQ"),
-                OracleMetadataQueries.queries());
+        InformationSchemaFormMetadataReader reader = new InformationSchemaFormMetadataReader(new StandaloneSequenceExecutor(null, "APP.OTHER_SEQ"), new MetadataQueryProfile(OracleMetadataQueries.queries()));
 
         IllegalStateException error = assertThrows(
                 IllegalStateException.class,
@@ -107,17 +115,17 @@ class OracleCompleteSchemaMetadataTest {
 
     @Test
     void bindsTableAndOwnerForEveryCompleteQuery() {
-        InformationSchemaFormMetadataReader.Queries queries = OracleMetadataQueries.queries();
+        MetadataQueryProfile.Queries queries = OracleMetadataQueries.queries();
         assertNotNull(queries.tableQuery());
         assertNotNull(queries.primaryKeyQuery());
         assertNotNull(queries.uniqueConstraintQuery());
         assertNotNull(queries.checkConstraintQuery());
-        List<InformationSchemaFormMetadataReader.Query> completeQueries = List.of(
+        List<MetadataQueryProfile.Query> completeQueries = List.of(
                 queries.columnQuery(), queries.tableQuery(), queries.primaryKeyQuery(),
                 queries.uniqueConstraintQuery(), queries.indexQuery(), queries.foreignKeyQuery(),
                 queries.checkConstraintQuery());
 
-        for (InformationSchemaFormMetadataReader.Query query : completeQueries) {
+        for (MetadataQueryProfile.Query query : completeQueries) {
             SqlRequest request = query.create("app", "orders");
             assertEquals(List.of("orders", "orders", "orders", "app", "app", "app"),
                          request.parameters());

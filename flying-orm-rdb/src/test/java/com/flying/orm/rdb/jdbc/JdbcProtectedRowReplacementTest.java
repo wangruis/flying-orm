@@ -1,5 +1,6 @@
 package com.flying.orm.rdb.jdbc;
 
+import com.flying.orm.rdb.internal.protection.ProtectedReplacementBatchPlan;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
 import com.flying.orm.rdb.result.DynamicRow;
@@ -35,14 +36,14 @@ class JdbcProtectedRowReplacementTest {
         assertEquals(List.of("delete", "delete-close"), events);
     }
 
-    private static JdbcProtectedBatchSideIndex.RowState state() {
+    private static ProtectedReplacementBatchPlan.Row state() {
         var work = new ProtectedWriteWork(ProtectedWriteWork.Kind.UPSERT,
                 new SqlRequest("update sample set value_col=? where id=?", List.of("value", 7L)),
                 null, List.of("id"), Map.of("id", 7L), "id=?",
                 "delete from tokens where id=? and field_tag=?",
                 "insert into tokens(id,field_tag,token) values (?,?,?)",
                 List.of(new ProtectedWriteWork.FieldTokens("value_col", List.of(new byte[]{1}))));
-        return new JdbcProtectedBatchSideIndex.RowState(work, List.of());
+        return new ProtectedReplacementBatchPlan.Row(work, List.of());
     }
 
     private static Connection connection(List<String> events, SQLException closeFailure) {
@@ -54,7 +55,7 @@ class JdbcProtectedRowReplacementTest {
                             new Class<?>[]{PreparedStatement.class}, (statement, call, values) -> switch (call.getName()) {
                                 case "setObject", "setNull", "setBinaryStream", "addBatch" -> null;
                                 case "executeUpdate" -> { events.add("delete"); yield 0; }
-                                case "executeBatch" -> { events.add("insert"); yield new int[]{1}; }
+                                case "executeBatch" -> { events.add(delete ? "delete" : "insert"); yield new int[]{delete ? 0 : 1}; }
                                 case "close" -> {
                                     events.add(delete ? "delete-close" : "insert-close");
                                     if (delete && closeFailure != null) throw closeFailure;

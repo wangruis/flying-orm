@@ -10,8 +10,8 @@ import java.util.Objects;
 /**
  * 完整、不可变的关系列定义。
  *
- * <p>这个类型只服务显式 Schema/DDL 路径。构建时一次性完成规范化与组合校验，发布后的访问器不再
- * 解析类型、不复制集合，也不会影响旧 CRUD 的列元数据热路径。</p>
+ * <p>字段的物理声明只在这里保存。构建时完成规范化与组合校验，发布后的访问器不再解析类型或复制数据。
+ * 值相等比较完整声明；数据库回读与目标的方言匹配由 Schema 规划器负责。</p>
  *
  * @author wangr
  * @version v3.2
@@ -57,10 +57,10 @@ public final class ColumnDefinition {
         if (scale != null && scale > precision) {
             throw new IllegalArgumentException("column scale must not be greater than precision");
         }
-        if (temporalPrecision != null && !databaseType.isTemporal()) {
+        if (temporalPrecision != null && !databaseType.logicalType().temporal()) {
             throw new IllegalArgumentException("temporal precision requires a temporal database type");
         }
-        if ((precision != null || scale != null) && databaseType.isTemporal()) {
+        if ((precision != null || scale != null) && databaseType.logicalType().temporal()) {
             throw new IllegalArgumentException("temporal database type must use temporal precision");
         }
     }
@@ -136,6 +136,44 @@ public final class ColumnDefinition {
 
     public String collation() {
         return collation;
+    }
+
+    /** 创建独立的编辑草稿，保留包括数据库回读信息在内的完整列声明。 */
+    public Builder toBuilder() {
+        return toBuilder(identity);
+    }
+
+    /** 改名时仍复用完整列属性，不由各调用者重新拼装。 */
+    public Builder toBuilder(FieldIdentity identity) {
+        return new Builder(identity, databaseType).codecId(codecId).nullable(nullable)
+                .length(length).precision(precision).scale(scale).temporalPrecision(temporalPrecision)
+                .defaultValue(defaultValue).defaultConstraintName(defaultConstraintName).comment(comment)
+                .generation(generation).charset(charset).collation(collation);
+    }
+
+    @Override
+    public boolean equals(Object candidate) {
+        return this == candidate || candidate instanceof ColumnDefinition other
+                && nullable == other.nullable
+                && identity.equals(other.identity)
+                && databaseType.equals(other.databaseType)
+                && codecId.equals(other.codecId)
+                && Objects.equals(length, other.length)
+                && Objects.equals(precision, other.precision)
+                && Objects.equals(scale, other.scale)
+                && Objects.equals(temporalPrecision, other.temporalPrecision)
+                && defaultValue.equals(other.defaultValue)
+                && Objects.equals(defaultConstraintName, other.defaultConstraintName)
+                && Objects.equals(comment, other.comment)
+                && generation.equals(other.generation)
+                && Objects.equals(charset, other.charset)
+                && Objects.equals(collation, other.collation);
+    }
+
+    @Override
+    public int hashCode() {
+        return Objects.hash(identity, databaseType, codecId, nullable, length, precision, scale,
+                temporalPrecision, defaultValue, defaultConstraintName, comment, generation, charset, collation);
     }
 
     /** 构建器只在配置线程内使用。 */
@@ -248,7 +286,7 @@ public final class ColumnDefinition {
         if (value == null) {
             return null;
         }
-        String name = SqlIdentifiers.requireIdentifier(value, "column default constraint name");
+        String name = SqlIdentifiers.requireIdentifier(value);
         if (name.indexOf('.') >= 0) {
             throw new IllegalArgumentException("column default constraint name must not be qualified");
         }

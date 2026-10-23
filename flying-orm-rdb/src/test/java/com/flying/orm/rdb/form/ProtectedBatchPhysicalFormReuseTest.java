@@ -17,32 +17,37 @@ class ProtectedBatchPhysicalFormReuseTest {
         String reactiveUpdates = source("ReactiveFormBatchUpdateOperations.java");
         String syncBatches = source("NativeSyncFormBatchOperations.java");
         String scopes = source("FormScopeSupport.java");
+        String batchRows = source("FormProtectedBatchRows.java");
 
-        assertContains(reactiveInserts,
-                "renderer.protection().writeOperation( safeForm, physicalForm, scope, protectionLayout.contains())");
-        assertContains(reactiveInserts, "protection.prepare(logical)");
+        assertContains(reactiveUpdates, "FormProtectedBatchRows.updateRequest(");
+        assertContains(syncBatches, "FormProtectedBatchRows.updateRequest(");
+        assertContains(reactiveInserts, "FormProtectedBatchRows.insertRequest(");
+        assertContains(syncBatches, "FormProtectedBatchRows.insertRequest(");
+        assertFalse(reactiveUpdates.contains("newBatchUpdatePlan.Cursor("));
+        assertFalse(syncBatches.contains("newBatchUpdatePlan.Cursor("));
+        assertFalse(reactiveInserts.contains("newBatchInsertPlan.Cursor("));
+        assertFalse(syncBatches.contains("newBatchInsertPlan.Cursor("));
+
+        assertContains(batchRows,
+                "renderer.protection().writeOperation( form, physicalForm, scope, protectionLayout)");
+        assertContains(batchRows, "protection.prepare(logical)");
         assertFalse(reactiveInserts.contains(
                 "renderer.protection().prepareWrite(safeForm, logical, scope)"));
 
-        assertContains(syncBatches,
-                "renderer.protection().writeOperation( form, physicalForm, scope, protectionLayout.contains())");
-        assertContains(syncBatches, "protection.prepare(logical)");
         assertFalse(syncBatches.contains(
                 "renderer.protection().prepareWrite(form, logical, scope)"));
 
-        assertContains(reactiveUpdates,
-                "scopes.prepareBatchScope( safeForm, physicalForm, effectiveScope)");
-        assertContains(reactiveUpdates,
-                "scopes.prepareBatchUpdate( form, first.form(), update, batchScope, protection)");
-        assertContains(syncBatches,
-                "scopes.prepareBatchScope( form, physicalForm, scope)");
-        assertContains(syncBatches,
-                "scopes.prepareBatchUpdate( form, first.form(), requireUpdate(row), batchScope, protection)");
+        assertContains(batchRows, "scopes.prepareBatchScope(form, physicalForm, scope)");
+        assertContains(batchRows, "scopes.prepareBatchUpdate( form, physicalForm, update, batchScope, protection)");
 
         assertContains(scopes,
                 "PreparedBatchUpdate prepareBatchUpdate(DynamicForm form, DynamicForm physicalForm,");
         assertContains(scopes,
-                "FormPreparedWrite write = protection.prepare(logicalValues)");
+                "if (protection == null)");
+        assertContains(batchRows,
+                "FormPreparedWrite first = protection == null ? null : protection.prepare(firstValues)");
+        assertContains(batchRows,
+                "protection == null ? null : protection.prepare(logical)");
     }
 
     private static void assertContains(String source, String expected) {

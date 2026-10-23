@@ -3,16 +3,19 @@ package com.flying.orm.rdb.execution;
 import com.flying.orm.core.internal.value.OwnedBindableValues;
 import com.flying.orm.rdb.batch.BatchMemoryBudget;
 import com.flying.orm.rdb.batch.BatchMemoryLimitExceededException;
+import com.flying.orm.rdb.batch.BatchWriteRequest;
+import com.flying.orm.core.sql.render.SqlStatementPlan;
 import com.flying.orm.rdb.internal.InternalApi;
 
 import java.util.Arrays;
 import java.util.Objects;
+import java.util.List;
 
 /**
- * 在批量参数行尾携带受保护侧索引工作描述，并确保内部元数据不会绑定给数据库驱动。
+ * 解码批量行的可选 SQL 布局和受保护侧索引工作，内部元数据不会绑定给数据库驱动。
  *
- * <p>普通批量行仍必须与 parameterCount 完全相等。只有 flying-orm 自己生成、且最后一个元素为
- * {@link ProtectedWriteWork} 才允许多一个内部槽位；JDBC/R2DBC 执行器会在绑定前剥离它。
+ * <p>普通参数行必须与 parameterCount 完全相等。ORM 生成的行可在参数后携带 {@link ProtectedWriteWork}，
+ * 布局变化时再附加 {@link Layout}；仅声明支持布局切换的执行器接收后者。两类元数据均在绑定前剥离。
  * 侧索引工作在同一借用连接上维护 CONTAINS 令牌，多语句一致性由上层决定和保证。</p>
  *
  * @author wangr
@@ -40,7 +43,7 @@ public final class ProtectedBatchRows {
         return extended;
     }
 
-    /** 校验已经移交所有权的批量行并计算预算，JDBC/R2DBC 后续复用同一视图，不重复复制参数。 */
+    /** 校验自有行；仅在配置有限字节预算时估算，JDBC/R2DBC 复用同一视图。 */
     public static RowView admit(Object[] row, int parameterCount, long maxBufferedBytes, String limitName) {
         Object[] safeRow = Objects.requireNonNull(row, "batch row must not be null");
         if (maxBufferedBytes <= 0L) {
@@ -48,11 +51,12 @@ public final class ProtectedBatchRows {
         }
         Objects.requireNonNull(limitName, "batch snapshot limit name must not be null");
         RowView view = decode(safeRow, parameterCount);
+        if (maxBufferedBytes == Long.MAX_VALUE) return view;
         long estimatedBytes = estimateRowBytes(view);
         if (estimatedBytes == Long.MAX_VALUE || estimatedBytes > maxBufferedBytes) {
             throw new BatchMemoryLimitExceededException(limitName, maxBufferedBytes, estimatedBytes);
         }
-        return new RowView(safeRow, parameterCount, view.work(), estimatedBytes);
+        return new RowView(safeRow, view.parameterCount(), view.work(), estimatedBytes, view.layout());
     }
 
     /** 在批量准入时解码行形状和工作元数据。 */
@@ -60,15 +64,21 @@ public final class ProtectedBatchRows {
         if (row == null || parameterCount < 0) {
             throw invalidShape();
         }
-        if (row.length == parameterCount) {
-            return new RowView(row, parameterCount, null, -1L);
+        Layout layout = row.length > 0 && row[row.length - 1] instanceof Layout changed ? changed : null;
+        int length = row.length;
+        if (layout != null) {
+            parameterCount = layout.statement().parameterCount();
+            length--;
         }
-        if (row.length != parameterCount + 1) {
+        if (length == parameterCount) {
+            return new RowView(row, parameterCount, null, -1L, layout);
+        }
+        if (length != parameterCount + 1) {
             throw invalidShape();
         }
         Object metadata = row[parameterCount];
         if (metadata instanceof ProtectedWriteWork work) {
-            return new RowView(row, parameterCount, work, -1L);
+            return new RowView(row, parameterCount, work, -1L, layout);
         }
         throw invalidShape();
     }
@@ -79,6 +89,7 @@ public final class ProtectedBatchRows {
         Object[] safeRow = safeView.row();
         int parameterCount = safeView.parameterCount();
         long total = BatchMemoryBudget.estimateRowBytes(safeRow, parameterCount);
+        if (view.layout() != null) total = add(total, 48L + 2L * view.layout().statement().sql().length());
         ProtectedWriteWork work = safeView.work();
         if (work == null) {
             return total;
@@ -109,6 +120,30 @@ public final class ProtectedBatchRows {
         return left != 0L && right > Long.MAX_VALUE / left ? Long.MAX_VALUE : left * right;
     }
 
+    /** 同一输入窗口按相邻 SQL 布局切分，不重排行，也不提前读取下一窗口。 */
+    public static int windowEnd(List<RowView> rows, int from) {
+        Layout layout = rows.get(from).layout();
+        int end = from + 1;
+        while (end < rows.size() && Objects.equals(layout, rows.get(end).layout())) end++;
+        return end;
+    }
+
+    /** 仅为非首行布局附加 SQL 结构；普通同形批量的参数数组保持不变。 */
+    public record Layout(SqlStatementPlan statement, List<Class<?>> parameterTypes, boolean generatedKeys) {
+        public Layout(SqlStatementPlan statement, List<Class<?>> parameterTypes) { this(statement, parameterTypes, true); }
+        public Layout {
+            Objects.requireNonNull(statement, "batch row statement must not be null");
+            parameterTypes = List.copyOf(parameterTypes);
+            if (statement.parameterCount() != parameterTypes.size()) throw invalidShape();
+        }
+
+        public Object[] attach(Object[] row) {
+            Object[] extended = Arrays.copyOf(row, row.length + 1);
+            extended[row.length] = this;
+            return extended;
+        }
+    }
+
     /** 已校验行的只读内部视图；数组所有权仍属于当前批量执行。 */
     public static final class RowView {
 
@@ -116,15 +151,17 @@ public final class ProtectedBatchRows {
         private final int parameterCount;
         private final ProtectedWriteWork work;
         private final long estimatedBytes;
+        private final Layout layout;
 
         private RowView(Object[] row,
                         int parameterCount,
                         ProtectedWriteWork work,
-                        long estimatedBytes) {
+                        long estimatedBytes, Layout layout) {
             this.row = row;
             this.parameterCount = parameterCount;
             this.work = work;
             this.estimatedBytes = estimatedBytes;
+            this.layout = layout;
         }
 
         public Object[] row() {
@@ -139,11 +176,16 @@ public final class ProtectedBatchRows {
             return work;
         }
 
+        public Layout layout() { return layout; }
+
+        public BatchWriteRequest request(BatchWriteRequest original) {
+            return layout == null ? original : new BatchWriteRequest(layout.statement(), layout.parameterTypes(),
+                    original.rows(), original.options(), original.rowCountPolicy(), layout.generatedKeys()
+                            ? original.generatedKeys() : com.flying.orm.rdb.batch.BatchGeneratedKeys.none());
+        }
+
         public long estimatedBytes() {
-            if (estimatedBytes < 0L) {
-                throw new IllegalStateException("protected batch row view has no byte estimate");
-            }
-            return estimatedBytes;
+            return estimatedBytes < 0L ? estimateRowBytes(this) : estimatedBytes;
         }
     }
 }

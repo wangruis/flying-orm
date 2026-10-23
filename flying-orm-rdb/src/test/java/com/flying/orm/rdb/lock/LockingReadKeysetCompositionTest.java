@@ -30,9 +30,7 @@ class LockingReadKeysetCompositionTest {
         AtomicReference<com.flying.orm.core.sql.render.SqlRequest> request = new AtomicReference<>();
         var client = LockingReadTestSupport.syncClient(
                 RdbDialect.postgresql(), queries, request);
-        LockingReadSpec spec = LockingReadSpec.of(
-                QuerySpec.of(LockingReadTestSupport.form(), ConditionGroup.and().build()),
-                ReadLock.updateSkipLocked());
+        QuerySpec spec = QuerySpec.of(LockingReadTestSupport.form(), ConditionGroup.and().build()).withLock(ReadLock.updateSkipLocked());
         KeysetPageQuery page = KeysetPageQuery.first(
                 20, KeysetSort.asc("tenant_id", NullOrder.LAST));
 
@@ -57,11 +55,11 @@ class LockingReadKeysetCompositionTest {
         KeysetPageQuery page = KeysetPageQuery.first(
                 20, KeysetSort.asc("tenant_id", NullOrder.LAST));
 
-        client.lockingRead(LockingReadSpec.of(query, ReadLock.update()), page);
+        client.lockingRead(query.withLock(ReadLock.update()), page);
         String waitSql = request.get().sql();
-        client.lockingRead(LockingReadSpec.of(query, ReadLock.updateNowait()), page);
+        client.lockingRead(query.withLock(ReadLock.updateNowait()), page);
         String noWaitSql = request.get().sql();
-        client.lockingRead(LockingReadSpec.of(query, ReadLock.updateSkipLocked()), page);
+        client.lockingRead(query.withLock(ReadLock.updateSkipLocked()), page);
         String skipLockedSql = request.get().sql();
 
         assertEquals(3, queries.get());
@@ -86,7 +84,7 @@ class LockingReadKeysetCompositionTest {
         QuerySpec query = QuerySpec.of(
                         LockingReadTestSupport.form(), ConditionGroup.and().build())
                 .withProjection(List.of("tenant_id"), List.of());
-        LockingReadSpec spec = LockingReadSpec.of(query, ReadLock.update());
+        QuerySpec spec = query.withLock(ReadLock.update());
         KeysetPageQuery page = KeysetPageQuery.first(
                 20, KeysetSort.asc("tenant_id", NullOrder.LAST));
 
@@ -100,9 +98,7 @@ class LockingReadKeysetCompositionTest {
         AtomicReference<com.flying.orm.core.sql.render.SqlRequest> request = new AtomicReference<>();
         var client = LockingReadTestSupport.syncClient(
                 RdbDialect.oracle(), queries, request);
-        LockingReadSpec spec = LockingReadSpec.of(
-                QuerySpec.of(LockingReadTestSupport.form(), ConditionGroup.and().build()),
-                ReadLock.update());
+        QuerySpec spec = QuerySpec.of(LockingReadTestSupport.form(), ConditionGroup.and().build()).withLock(ReadLock.update());
         KeysetPageQuery page = KeysetPageQuery.first(
                 20, KeysetSort.asc("tenant_id", NullOrder.LAST));
 

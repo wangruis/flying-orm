@@ -21,6 +21,27 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 class JdbcBatchStreamingLimitTest {
 
     @Test
+    void estimatesValuesOnlyWhenAByteBudgetIsConfigured() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger estimates = new java.util.concurrent.atomic.AtomicInteger();
+        java.math.BigDecimal value = new java.math.BigDecimal("123") {
+            @Override
+            public int precision() { estimates.incrementAndGet(); return super.precision(); }
+        };
+        BatchWriteRequest request = com.flying.orm.rdb.batch.BatchWriteRequests.request(
+                "insert into samples(value) values (?)", 1, List.of(java.math.BigDecimal.class),
+                SqlBindMarkerStyle.CANONICAL, Flux.range(0, 3).map(ignored -> new Object[]{value}),
+                BatchWriteOptions.of(2));
+        try (JdbcBatchRows rows = rows(request)) {
+            assertEquals(2, JdbcBatchSupport.readBuffer(rows, request).size());
+            assertEquals(1, JdbcBatchSupport.readBuffer(rows, request).size());
+        }
+        assertEquals(0, estimates.get());
+        assertThrows(BatchMemoryLimitExceededException.class,
+                () -> ProtectedBatchRows.admit(new Object[]{value}, 1, 1, "row bytes"));
+        assertEquals(1, estimates.get());
+    }
+
+    @Test
     void defaultBatchCanStreamBeyondFormerTotalRowLimit() throws Exception {
         BatchWriteRequest request = com.flying.orm.rdb.batch.BatchWriteRequests.request(
                 "insert into samples(value) values (?)", 1, List.of(Integer.class),
@@ -134,7 +155,7 @@ class JdbcBatchStreamingLimitTest {
                     rows, request);
 
             assertInstanceOf(ProtectedBatchRows.RowView.class, chunk.getFirst());
-            new JdbcBatchChunkExecutor().execute(
+            new JdbcBatchChunkExecutor("postgresql").execute(
                     connection(bound), request, 0L, chunk,
                     new JdbcBatchEvidenceSupport.Counts(0L, chunk.size(), request.rowCountPolicy()));
         }

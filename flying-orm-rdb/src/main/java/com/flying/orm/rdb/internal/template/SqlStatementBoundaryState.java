@@ -1,7 +1,7 @@
 package com.flying.orm.rdb.internal.template;
 
 /**
- * SQL 单语句边界的顶层词法状态，只判断后续关键字是否仍属于当前语句。
+ * SQL Server 无分号批处理边界的顶层词法状态，只判断后续关键字是否仍属于当前语句。
  * @author wangr
  * @date 2026-08-16
  * @version v2.0
@@ -15,7 +15,7 @@ final class SqlStatementBoundaryState {
     private boolean upsertClause, upsertUpdate, upsertSet;
     private boolean insertSource, insertMultiTable, insertMultiTableSelect;
     private boolean updateSet;
-    private boolean selectLockClause, selectFetchClause, selectFetchRows;
+    private boolean selectFetchClause, selectFetchRows;
     private boolean grantPrivileges = true;
     private boolean grantWithOption;
     private boolean createPartition, createPartitionOf, createPartitionFor, createPartitionValues;
@@ -28,7 +28,7 @@ final class SqlStatementBoundaryState {
             alter.comma();
         }
     }
-    void accept(String word, boolean mysqlDialect, boolean sqlServerDialect) {
+    void accept(String word) {
         String before = previousWord;
         previousWord = word;
         boolean endClosedCase = "END".equals(word) && caseDepth > 0;
@@ -37,7 +37,7 @@ final class SqlStatementBoundaryState {
         } else if (endClosedCase) {
             caseDepth--;
         }
-        if (sqlServerDialect && "CONVERSATION".equals(word) && "END".equals(before)
+        if ("CONVERSATION".equals(word) && "END".equals(before)
                 && !previousEndClosedCase && statement != null && !"END".equals(statement)) {
             throw multipleStatements();
         }
@@ -46,15 +46,8 @@ final class SqlStatementBoundaryState {
             // WITH GRANT OPTION 只允许 WITH 后紧邻的 GRANT；不能让该状态跨过 ADMIN/OPTION 吞掉下一条语句。
             grantWithOption = false;
         }
-        alter.accept(statement, word, before, sqlServerDialect);
+        alter.accept(statement, word, before);
         validateSelectFetchTail(word);
-        if ("SELECT".equals(statement) && "FOR".equals(word)) {
-            // SQL Server 的 FOR 只用于 JSON/XML/BROWSE，不能把后续独立 UPDATE 吸收到当前查询。
-            selectLockClause = !sqlServerDialect;
-        } else if (selectLockClause && ("JSON".equals(word) || "XML".equals(word) || "BROWSE".equals(word))) {
-            // 可移植标记请求在拿到连接前也必须关闭 SQL Server 输出子句留下的伪锁状态。
-            selectLockClause = false;
-        }
         if (isPrivilegeStatement() && ("ON".equals(word) || "TO".equals(word) || "FROM".equals(word))) {
             grantPrivileges = false;
         }
@@ -97,7 +90,7 @@ final class SqlStatementBoundaryState {
             return;
         }
         acceptMergeWord(word);
-        if (!SqlStatementBoundary.isStatementStart(word, sqlServerDialect)) {
+        if (!SqlStatementBoundary.isStatementStart(word)) {
             if (statement == null && prefix == null) {
                 // 原生 SQL 的单条语句不应被一个永远追不上各方言的首词白名单限制。
                 // 这里只固定首条语句；分号、已知的后续语句起点和方言复验仍负责拒绝批处理。
@@ -123,7 +116,7 @@ final class SqlStatementBoundaryState {
             }
             return;
         }
-        if (!isContinuation(word, before, mysqlDialect)) {
+        if (!isContinuation(word, before)) {
             throw multipleStatements();
         }
     }
@@ -153,7 +146,7 @@ final class SqlStatementBoundaryState {
             mergeThen = true;
         }
     }
-    private boolean isContinuation(String word, String before, boolean mysqlDialect) {
+    private boolean isContinuation(String word, String before) {
         if (setOperator && ("SELECT".equals(word) || "VALUES".equals(word))) {
             setOperator = false;
             return true;
@@ -164,10 +157,6 @@ final class SqlStatementBoundaryState {
         }
         if ("GRANT".equals(statement) && "GRANT".equals(word) && grantWithOption) {
             grantWithOption = false;
-            return true;
-        }
-        if ("SELECT".equals(statement) && "UPDATE".equals(word) && selectLockClause) {
-            selectLockClause = false;
             return true;
         }
         if ("SELECT".equals(statement) && "FETCH".equals(word)) {
@@ -200,12 +189,9 @@ final class SqlStatementBoundaryState {
         }
         if ("CREATE".equals(statement)) {
             return ("REPLACE".equals(word) || "ALTER".equals(word)) && "OR".equals(before)
-                    || mysqlDialect && "REPLACE".equals(word)
                     || ("SELECT".equals(word) || "WITH".equals(word) || "VALUES".equals(word))
-                    && (createAs || mysqlDialect)
-                    || mysqlDialect && "SET".equals(word) && "CHARACTER".equals(before)
+                    && createAs
                     || createTrigger && ("INSERT".equals(word) || "UPDATE".equals(word) || "DELETE".equals(word))
-                    || mysqlDialect && createTrigger && "SET".equals(word)
                     || createTriggerTarget && "EXECUTE".equals(word)
                     || acceptsCreatePartitionValues(word)
                     || "COMMENT".equals(word);

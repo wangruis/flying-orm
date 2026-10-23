@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.operator;
 
-import com.flying.orm.core.metadata.ForeignKeyMetadata;
+import com.flying.orm.core.metadata.ForeignKeyDefinition;
+import com.flying.orm.core.metadata.RelationIdentity;
 
 /**
  * 外键 builder 只描述目标关系，是否真的迁移交给上层看计划后决定。
@@ -9,14 +10,16 @@ import com.flying.orm.core.metadata.ForeignKeyMetadata;
  * @date 2026-07-29
  * @version v1.0
  */
-public final class ForeignKeyBuilder {
+public final class ForeignKeyBuilder<T> {
 
-    private final CreateOrAlterTableBuilder table;
-    private final ForeignKeyMetadata.Builder foreignKey;
+    private final T table;
+    private final DdlStructureDraft draft;
+    private final ForeignKeyDefinition.Builder foreignKey;
 
-    ForeignKeyBuilder(CreateOrAlterTableBuilder table, String name) {
+    ForeignKeyBuilder(T table, DdlStructureDraft draft, String name) {
         this.table = table;
-        this.foreignKey = ForeignKeyMetadata.builder(DdlStructureDraft.requireText(name, "foreign key name"));
+        this.draft = draft;
+        this.foreignKey = ForeignKeyDefinition.builder(DdlStructureDraft.requireText(name, "foreign key name"));
     }
 
     /**
@@ -25,7 +28,7 @@ public final class ForeignKeyBuilder {
      * @param name 当前表列名
      * @return 当前外键构建器
      */
-    public ForeignKeyBuilder column(String name) {
+    public ForeignKeyBuilder<T> column(String name) {
         foreignKey.addColumn(DdlStructureDraft.requireText(name, "foreign key column"));
         return this;
     }
@@ -37,7 +40,7 @@ public final class ForeignKeyBuilder {
      * @param rest 其余列
      * @return 当前外键构建器
      */
-    public ForeignKeyBuilder columns(String first, String... rest) {
+    public ForeignKeyBuilder<T> columns(String first, String... rest) {
         column(first);
         for (String column : rest) {
             column(column);
@@ -51,8 +54,8 @@ public final class ForeignKeyBuilder {
      * @param name 引用表名
      * @return 当前外键构建器
      */
-    public ForeignKeyBuilder referenceTable(String name) {
-        foreignKey.referenceTable(DdlStructureDraft.requireText(name, "foreign key reference table"));
+    public ForeignKeyBuilder<T> referenceTable(String name) {
+        foreignKey.reference(RelationIdentity.table(name));
         return this;
     }
 
@@ -62,7 +65,7 @@ public final class ForeignKeyBuilder {
      * @param name 引用表列名
      * @return 当前外键构建器
      */
-    public ForeignKeyBuilder referenceColumn(String name) {
+    public ForeignKeyBuilder<T> referenceColumn(String name) {
         foreignKey.addReferenceColumn(DdlStructureDraft.requireText(name, "foreign key reference column"));
         return this;
     }
@@ -74,7 +77,7 @@ public final class ForeignKeyBuilder {
      * @param rest 其余列
      * @return 当前外键构建器
      */
-    public ForeignKeyBuilder referenceColumns(String first, String... rest) {
+    public ForeignKeyBuilder<T> referenceColumns(String first, String... rest) {
         referenceColumn(first);
         for (String column : rest) {
             referenceColumn(column);
@@ -87,8 +90,8 @@ public final class ForeignKeyBuilder {
      *
      * @return 所属表构建器
      */
-    public CreateOrAlterTableBuilder commit() {
-        table.draft().addForeignKey(foreignKey.build());
+    public T commit() {
+        draft.addForeignKey(foreignKey.build());
         return table;
     }
 }

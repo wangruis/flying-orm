@@ -32,6 +32,37 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class NativeTemporalTypeTest {
 
     @Test
+    void ordinaryScalarWritesRetainApplicationCodecOutputAndInvocationCount() {
+        AtomicInteger writes = new AtomicInteger();
+        Object encoded = new Object();
+        ValueCodec codec = new ValueCodec() {
+            @Override
+            public boolean supports(Class<?> type) {
+                return type == Long.class;
+            }
+
+            @Override
+            public Object write(Object value) {
+                writes.incrementAndGet();
+                return encoded;
+            }
+
+            @Override
+            public Object read(Object value, Class<?> type) {
+                throw new AssertionError("ordinary scalar writes must not perform a read conversion");
+            }
+        };
+        ValueCodecRegistry codecs = ValueCodecRegistry.standard().withFirst(codec);
+        int expectedWrites = 0;
+        for (String dialect : java.util.List.of("postgresql", "mysql", "oracle", "sqlserver", "custom")) {
+            for (String type : java.util.List.of("SMALLINT", "INTEGER", "BIGINT", "DECIMAL", "DOUBLE", "DATE", "TIMESTAMP")) {
+                assertSame(encoded, DialectScalarValueCodec.write(7L, type, dialect, false, codecs));
+                assertEquals(++expectedWrites, writes.get());
+            }
+        }
+    }
+
+    @Test
     void adaptsLegacyJdbcTemporalValuesAtTheScalarDriverBoundary() {
         LocalDate date = LocalDate.of(2026, 8, 30);
         LocalTime time = LocalTime.of(10, 11, 12);
@@ -257,19 +288,20 @@ class NativeTemporalTypeTest {
     void treatsStandardTimeZoneAliasesAsTheSameRuntimeTemporalTypes() {
         OffsetTime value = OffsetTime.of(12, 34, 56, 123456000, ZoneOffset.ofHours(8));
         String standardOffsetTime = "TIME(6) WITH TIME ZONE";
+        ValueCodecRegistry codecs = ValueCodecRegistry.standard();
 
         assertEquals(OffsetTime.class,
-                     OffsetTimeValueCodec.parameterType(standardOffsetTime, "postgresql"));
-        assertEquals(value, OffsetTimeValueCodec.write(value, standardOffsetTime, "postgresql"));
-        assertEquals(String.class, OffsetTimeValueCodec.parameterType(standardOffsetTime, "mysql"));
-        assertEquals(String.class, OffsetTimeValueCodec.parameterType(standardOffsetTime, "oracle"));
-        assertEquals(String.class, OffsetTimeValueCodec.parameterType(standardOffsetTime, "sqlserver"));
-        assertEquals(value.toString(), OffsetTimeValueCodec.write(value, standardOffsetTime, "mysql"));
-        assertEquals(value.toString(), OffsetTimeValueCodec.write(value, "OFFSET_TIME(6)", "oracle"));
-        assertEquals(value, OffsetTimeValueCodec.read(value.toString()));
+                     DialectScalarValueCodec.parameterType(standardOffsetTime, "postgresql", true));
+        assertEquals(value, DialectScalarValueCodec.write(value, standardOffsetTime, "postgresql", true, codecs));
+        assertEquals(String.class, DialectScalarValueCodec.parameterType(standardOffsetTime, "mysql", true));
+        assertEquals(String.class, DialectScalarValueCodec.parameterType(standardOffsetTime, "oracle", false));
+        assertEquals(String.class, DialectScalarValueCodec.parameterType(standardOffsetTime, "sqlserver", true));
+        assertEquals(value.toString(), DialectScalarValueCodec.write(value, standardOffsetTime, "mysql", true, codecs));
+        assertEquals(value.toString(), DialectScalarValueCodec.write(value, "OFFSET_TIME(6)", "oracle", false, codecs));
+        assertEquals(value, DialectScalarValueCodec.read(value.toString(), standardOffsetTime, codecs));
 
-        assertFalse(OffsetTimeValueCodec.isOffsetTimeDataType("TIME(6) WITHOUT TIME ZONE"));
-        assertFalse(OffsetTimeValueCodec.isOffsetTimeDataType("TIMETZ(6)"));
+        assertEquals(OffsetTime.class, DialectScalarValueCodec.parameterType("TIMETZ(6)", "postgresql", true));
+        assertEquals(value, DialectScalarValueCodec.write(value, "TIMETZ(6)", "postgresql", true, codecs));
         assertEquals(LocalTime.class,
                      DialectScalarValueCodec.parameterType(
                              "TIME(6) WITHOUT TIME ZONE", "postgresql", true));

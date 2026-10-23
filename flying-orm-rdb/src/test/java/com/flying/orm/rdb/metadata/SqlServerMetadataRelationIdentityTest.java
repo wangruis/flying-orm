@@ -75,7 +75,10 @@ class SqlServerMetadataRelationIdentityTest {
             assertEquals(7, requests.size());
             for (SqlRequest request : requests) {
                 assertEquals(List.of("log.events", "audit"), request.parameters());
-                assertFalse(request.sql().contains("object_id("), request.sql());
+                // 注释关联可按字典中的完整名称解析 object_id；调用方的 schema 必须仍是字面等值条件。
+                assertFalse(request.sql().contains("object_id(quotename(?))"), request.sql());
+                assertTrue(request.sql().matches("(?s).* and (c\\.TABLE_SCHEMA|s\\.name|ps\\.name) = \\?( order by .*)?"),
+                        request.sql());
             }
         }
     }
@@ -89,7 +92,7 @@ class SqlServerMetadataRelationIdentityTest {
     }
 
     private static SyncSqlExecutor sync(List<SqlRequest> requests) {
-        return new SyncSqlExecutor() {
+        return new com.flying.orm.rdb.support.ListQueryFixture() {
             @Override
             public List<DynamicRow> query(SqlRequest request) {
                 requests.add(request);
@@ -102,7 +105,7 @@ class SqlServerMetadataRelationIdentityTest {
             }
 
             @Override
-            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                 throw new AssertionError("metadata reading must not execute writes");
             }
         };

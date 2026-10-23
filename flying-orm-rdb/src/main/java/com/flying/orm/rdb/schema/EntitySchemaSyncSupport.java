@@ -6,24 +6,22 @@ import com.flying.orm.core.metadata.PrimaryKeyDefinition;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
-import com.flying.orm.rdb.mapping.EntityMetadata;
 import com.flying.orm.rdb.mapping.EntitySchemaDescriptor;
 
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import java.util.Objects;
 
-/** 启动同步两条执行轨道共用的实体去重、报告校验和批准指纹检查。 */
+/** 启动同步共用的实体去重、结构差异校验和物理依赖检查。 */
 final class EntitySchemaSyncSupport {
 
     private EntitySchemaSyncSupport() {
     }
 
-    static List<EntitySchemaTarget> targets(EntityModelRegistry models, Collection<Class<?>> entityTypes) {
+    static List<EntitySchemaDescriptor<?>> targets(EntityModelRegistry models, Collection<Class<?>> entityTypes) {
         Collection<Class<?>> safeTypes = Objects.requireNonNull(entityTypes, "entity types must not be null");
-        LinkedHashMap<Class<?>, EntitySchemaTarget> byType = new LinkedHashMap<>();
+        LinkedHashMap<Class<?>, EntitySchemaDescriptor<?>> byType = new LinkedHashMap<>();
         LinkedHashMap<RelationIdentity, Class<?>> byTable = new LinkedHashMap<>();
         for (Class<?> type : safeTypes) {
             Class<?> safeType = Objects.requireNonNull(type, "entity type must not be null");
@@ -39,45 +37,21 @@ final class EntitySchemaSyncSupport {
                                                            + descriptor.metadata().table() + "': " + previous.getName()
                                                            + " and " + safeType.getName());
             }
-            byType.put(safeType, new EntitySchemaTarget(descriptor));
+            byType.put(safeType, descriptor);
         }
         return List.copyOf(byType.values());
-    }
-
-    static EntitySchemaSyncReport validate(List<SchemaMigrationPlan> plans) {
-        EntitySchemaSyncReport report = new EntitySchemaSyncReport(
-                EntitySchemaSyncMode.VALIDATE, plans, List.of(), List.of());
-        if (report.hasDifferences()) {
-            throw new EntitySchemaSyncException(
-                    "entity schema validation found database differences", report);
-        }
-        return report;
-    }
-
-    static void rejectSkipped(EntitySchemaSyncMode mode,
-                              List<SchemaMigrationPlan> plans,
-                              List<ReviewedSchemaMigrationPlan> reviews) {
-        EntitySchemaSyncReport report = new EntitySchemaSyncReport(mode, plans, reviews, List.of());
-        if (report.requiresManualReview()) {
-            throw new EntitySchemaSyncException(
-                    "entity schema synchronization contains changes the current migration engine cannot execute",
-                    report);
-        }
     }
 
     /** 父候选键仍被另一张实际表引用时，整批在第一条 SQL 前关闭。 */
     static void rejectReferencedCandidateKeyChanges(EntitySchemaSyncMode mode,
                                                      List<SchemaSnapshot> snapshots,
-                                                     List<ReviewedSchemaPlan> plans,
+                                                     List<SchemaMigrationPlan> plans,
                                                      SchemaDialect dialect) {
         if (mode == EntitySchemaSyncMode.VALIDATE) {
             return;
         }
-        for (ReviewedSchemaPlan plan : plans) {
+        for (SchemaMigrationPlan plan : plans) {
             for (SchemaPlanStep step : plan.steps()) {
-                if (!step.executable()) {
-                    continue;
-                }
                 SchemaOperation operation = step.operation();
                 boolean physicalActualTypes = snapshots.stream()
                         .filter(snapshot -> snapshot.identity().equals(operation.relation()))
@@ -94,10 +68,10 @@ final class EntitySchemaSyncSupport {
                             .anyMatch(foreignKey -> invalidatesReference(
                                     operation, foreignKey.referenceColumns(), dialect, physicalActualTypes));
                     if (blocked) {
-                        throw new EntityRelationalSchemaSyncException(
+                        throw new EntitySchemaSyncException(
                                 "entity relational schema synchronization changes a candidate key "
                                         + "that is still referenced by another table",
-                                new EntityRelationalSchemaSyncReport(mode, plans, List.of()));
+                                new EntitySchemaSyncReport(mode, plans, List.of()));
                     }
                 }
             }
@@ -143,51 +117,4 @@ final class EntitySchemaSyncSupport {
         return !SchemaDefinitionEquality.sameColumnType(actual, desired, dialect, physicalActualTypes);
     }
 
-    static Map<String, SchemaMigrationApproval> normalizedApprovals(
-            Map<String, SchemaMigrationApproval> approvals) {
-        Map<String, SchemaMigrationApproval> safe = Objects.requireNonNull(
-                approvals, "schema migration approvals must not be null");
-        LinkedHashMap<String, SchemaMigrationApproval> normalized = new LinkedHashMap<>();
-        safe.forEach((table, approval) -> {
-            String key = normalizeTable(table);
-            if (normalized.putIfAbsent(key, Objects.requireNonNull(
-                    approval, "schema migration approval must not be null")) != null) {
-                throw new IllegalArgumentException("duplicate schema approval table");
-            }
-        });
-        return Map.copyOf(normalized);
-    }
-
-    static void verifyApprovals(List<ReviewedSchemaMigrationPlan> reviews,
-                                Map<String, SchemaMigrationApproval> approvals) {
-        // 先把所有批准核对完再执行第一条 DDL，避免第二张表批准错误时留下半完成的启动迁移。
-        reviews.forEach(review -> review.requestsForExecution(approvalFor(review, approvals)));
-    }
-
-    static SchemaMigrationApproval approvalFor(ReviewedSchemaMigrationPlan review,
-                                                Map<String, SchemaMigrationApproval> approvals) {
-        return approvals.get(normalizeTable(review.migration().target().table()));
-    }
-
-    private static String normalizeTable(String table) {
-        String text = Objects.requireNonNull(table, "schema approval table must not be null").trim();
-        if (text.isEmpty()) {
-            throw new IllegalArgumentException("schema approval table must not be blank");
-        }
-        // 迁移 DDL 会按传入大小写引用物理表名。大小写不同的 quoted identifier 可能是两个真实表，
-        // 去重和审批键必须保留同一物理身份，不能把一个表的批准复用到另一个表。
-        return text;
-    }
-}
-
-record EntitySchemaTarget(EntitySchemaDescriptor<?> descriptor) {
-
-    EntitySchemaTarget {
-        descriptor = Objects.requireNonNull(descriptor, "entity schema descriptor must not be null");
-    }
-
-    /** 保留启动同步内部既有的轻量访问写法，真实所有权仍由完整 descriptor 承担。 */
-    EntityMetadata<?> metadata() {
-        return descriptor.metadata();
-    }
 }

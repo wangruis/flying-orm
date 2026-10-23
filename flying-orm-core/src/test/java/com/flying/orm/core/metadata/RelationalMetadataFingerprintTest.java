@@ -8,6 +8,32 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 class RelationalMetadataFingerprintTest {
 
     @Test
+    void emptySchemasRetainTheirDeclaredNamespaceInTheFingerprint() {
+        RelationalSchemaDefinition first = RelationalSchemaDefinition.builder("catalog", "first").build();
+        RelationalSchemaDefinition second = RelationalSchemaDefinition.builder("catalog", "second").build();
+        RelationalSchemaDefinition otherCatalog = RelationalSchemaDefinition.builder("other", "first").build();
+
+        assertNotEquals(RelationalMetadataFingerprint.of(first), RelationalMetadataFingerprint.of(second));
+        assertNotEquals(RelationalMetadataFingerprint.of(first), RelationalMetadataFingerprint.of(otherCatalog));
+        assertEquals(RelationalMetadataFingerprint.of(first), RelationalMetadataFingerprint.of(
+                RelationalSchemaDefinition.builder("catalog", "first").build()));
+    }
+
+    @Test
+    void schemaFingerprintIgnoresTableOrderButIncludesEveryTable() {
+        RelationalTableDefinition first = table("a", "b", false);
+        RelationalTableDefinition second = RelationalTableDefinition.builder("other")
+                .addColumn(ColumnDefinition.builder("id", "BIGINT").build()).build();
+        String schema = RelationalMetadataFingerprint.of(
+                RelationalSchemaDefinition.of(java.util.List.of(first, second)));
+
+        assertEquals(schema, RelationalMetadataFingerprint.of(
+                RelationalSchemaDefinition.of(java.util.List.of(second, first))));
+        assertNotEquals(schema, RelationalMetadataFingerprint.of(
+                RelationalSchemaDefinition.of(java.util.List.of(first))));
+    }
+
+    @Test
     void namedConstraintCollectionOrderIsStableButCompositeColumnOrderIsSemantic() {
         RelationalTableDefinition first = table("a", "b", false);
         RelationalTableDefinition reorderedConstraints = table("a", "b", true);

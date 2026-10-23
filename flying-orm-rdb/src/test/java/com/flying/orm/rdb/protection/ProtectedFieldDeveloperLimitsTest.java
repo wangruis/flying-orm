@@ -20,6 +20,20 @@ class ProtectedFieldDeveloperLimitsTest {
             new ProtectedFieldContext("orders", "note", "tenant-a");
 
     @Test
+    void extensionNamesAreNotLimitedByAnOrmChosenLength() {
+        String id = "business." + "normalization-and-display.".repeat(4);
+        EncryptedFieldDefinition encrypted = EncryptedFieldDefinition.builder().normalizer(id).build();
+        MaskedFieldDefinition masked = MaskedFieldDefinition.builder(id).build();
+        ProtectedValueNormalizerRegistry normalizers = ProtectedValueNormalizerRegistry.standard()
+                .with(id, value -> value);
+        MaskingPolicyRegistry masks = MaskingPolicyRegistry.standard()
+                .with(id, (value, definition) -> "[hidden]");
+
+        assertEquals("secret", normalizers.normalize(encrypted.normalizer(), "secret", Integer.MAX_VALUE));
+        assertEquals("[hidden]", masks.mask("secret", masked));
+    }
+
+    @Test
     void customMaskMayReturnDeveloperChosenDisplayLength() {
         String display = "[This value is hidden by the application's disclosure policy]";
         MaskingPolicyRegistry masks = MaskingPolicyRegistry.standard()
@@ -107,6 +121,8 @@ class ProtectedFieldDeveloperLimitsTest {
                 .maxNormalizedLength(value.length()).build();
         try (ProtectedFieldKeyRing keys = ProtectedFieldKeyRing.single("v1", key(1))) {
             ProtectedSearchTokenService tokens = tokens(keys);
+            assertArrayEquals(tokens.currentExactToken(value, definition, CONTEXT),
+                    tokens.currentExactToken(value, EncryptedFieldDefinition.builder().build(), CONTEXT));
             assertArrayEquals(tokens.currentExactToken(value, definition, CONTEXT),
                     tokens.exactQueryTokens(value, definition, CONTEXT).getFirst());
             assertThrows(IllegalArgumentException.class,

@@ -64,11 +64,7 @@ final class JdbcStatementOptions {
             statement.setMaxRows((int) maxRows);
             return;
         }
-        try {
-            statement.setLargeMaxRows(maxRows);
-        } catch (SQLFeatureNotSupportedException | UnsupportedOperationException | AbstractMethodError unsupported) {
-            // 滚动结果集会直接交给回调，没有 ORM 读取循环兜底；宁可采用更小的安全上限，也不能退化为无界。
-            statement.setMaxRows(Integer.MAX_VALUE);
-        }
+        // 滚动游标没有 ORM 读取循环；驱动不能表达调用方指定的容量时原样报错，不擅自缩减结果。
+        statement.setLargeMaxRows(maxRows);
     }
 }

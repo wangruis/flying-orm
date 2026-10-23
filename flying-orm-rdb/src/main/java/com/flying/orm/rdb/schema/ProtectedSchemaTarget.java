@@ -2,10 +2,10 @@ package com.flying.orm.rdb.schema;
 
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.ColumnMetadata;
-import com.flying.orm.core.metadata.ForeignKeyMetadata;
-import com.flying.orm.core.metadata.IndexMetadata;
-import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.metadata.ColumnDefinition;
+import com.flying.orm.core.metadata.ForeignKeyDefinition;
+import com.flying.orm.core.metadata.IndexDefinition;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.rdb.protection.ProtectedFormLayout;
 import com.flying.orm.rdb.protection.ProtectedRelationalSchemaProjector;
 
@@ -27,8 +27,8 @@ import java.util.Set;
  * @version v1.0
  */
 record ProtectedSchemaTarget(DynamicForm form,
-                             List<IndexMetadata> indexes,
-                             List<ForeignKeyMetadata> foreignKeys) {
+                             List<IndexDefinition> indexes,
+                             List<ForeignKeyDefinition> foreignKeys) {
 
     ProtectedSchemaTarget {
         form = Objects.requireNonNull(form, "protected schema form must not be null");
@@ -39,39 +39,38 @@ record ProtectedSchemaTarget(DynamicForm form,
 
     /** @return 物理列、自动盲索引和仍然安全的显式结构声明。 */
     static ProtectedSchemaTarget resolve(DynamicForm logical,
-                                         List<IndexMetadata> indexes,
-                                         List<ForeignKeyMetadata> foreignKeys) {
-        DynamicForm safeLogical = SchemaMigrationSupport.requireLegacyRelation(logical);
-        List<IndexMetadata> safeIndexes = Objects.requireNonNull(indexes, "target indexes must not be null");
-        List<ForeignKeyMetadata> safeForeignKeys = Objects.requireNonNull(
+                                         List<IndexDefinition> indexes,
+                                         List<ForeignKeyDefinition> foreignKeys) {
+        DynamicForm safeLogical = Objects.requireNonNull(logical, "dynamic form must not be null");
+        List<IndexDefinition> safeIndexes = Objects.requireNonNull(indexes, "target indexes must not be null");
+        List<ForeignKeyDefinition> safeForeignKeys = Objects.requireNonNull(
                 foreignKeys, "target foreign keys must not be null");
-        if (safeLogical.protections().encryptedFields().isEmpty()) {
+        if (safeLogical.protections().encryptedFields().isEmpty()
+                && safeLogical.fields().stream().noneMatch(DynamicField::unique)) {
             return new ProtectedSchemaTarget(safeLogical, safeIndexes, safeForeignKeys);
         }
 
         DynamicForm physical = ProtectedFormLayout.physical(safeLogical);
-        Map<String, IndexMetadata> merged = new LinkedHashMap<>();
+        Map<String, IndexDefinition> merged = new LinkedHashMap<>();
         Set<String> automaticIndexes = new HashSet<>();
-        physical.toTableMetadata().indexes().forEach(index -> {
+        physical.toTableDefinition().indexes().forEach(index -> {
             String name = key(index.name());
             automaticIndexes.add(name);
             merged.put(name, index);
         });
-        for (IndexMetadata index : safeIndexes) {
-            List<String> projectedColumns = ProtectedRelationalSchemaProjector.projectIndexColumns(
-                    safeLogical, index.columns(), index.unique());
-            IndexMetadata projected = project(index, projectedColumns);
+        for (IndexDefinition index : safeIndexes) {
+            IndexDefinition projected = ProtectedRelationalSchemaProjector.projectIndex(safeLogical, index);
             if (index.unique()) {
                 merged.entrySet().removeIf(entry -> automaticIndexes.contains(entry.getKey())
                         && sameUniqueColumns(entry.getValue(), projected));
             }
-            IndexMetadata previous = merged.putIfAbsent(key(projected.name()), projected);
+            IndexDefinition previous = merged.putIfAbsent(key(projected.name()), projected);
             if (previous != null && !sameIndex(previous, projected)) {
                 // 自动索引与上层重复传入的同一声明可以合并；同名但不同定义必须在 DDL 前拒绝。
                 throw new IllegalArgumentException("duplicate protected schema index name");
             }
         }
-        for (ForeignKeyMetadata foreignKey : safeForeignKeys) {
+        for (ForeignKeyDefinition foreignKey : safeForeignKeys) {
             boolean encrypted = foreignKey.columns().stream()
                                           .map(safeLogical::field)
                                           .anyMatch(field -> safeLogical.protections()
@@ -86,8 +85,8 @@ record ProtectedSchemaTarget(DynamicForm form,
     /**
      * 已有同名业务列只有在元数据已经呈现为二进制存储时才能直接接入保护协议；文本列必须走显式数据迁移。
      */
-    static void validateExistingStorage(TableMetadata current, DynamicForm logical) {
-        TableMetadata safeCurrent = Objects.requireNonNull(current, "current table metadata must not be null");
+    void validateExistingStorage(RelationalTableDefinition current, DynamicForm logical) {
+        RelationalTableDefinition safeCurrent = Objects.requireNonNull(current, "current table metadata must not be null");
         DynamicForm safeLogical = Objects.requireNonNull(logical, "target dynamic form must not be null");
         safeLogical.protections().encryptedFields().keySet().forEach(fieldName ->
                 safeCurrent.findColumn(fieldName).ifPresent(column -> {
@@ -99,7 +98,7 @@ record ProtectedSchemaTarget(DynamicForm form,
         if (safeLogical.protections().encryptedFields().isEmpty()) {
             return;
         }
-        ProtectedFormLayout.physical(safeLogical).fields().stream()
+        form.fields().stream()
                            .filter(field -> ProtectedFormLayout.isHashType(field.databaseType()))
                            .forEach(field -> safeCurrent.findColumn(field.name()).ifPresent(column -> {
                                if (!column.databaseType().isBinary()
@@ -113,40 +112,25 @@ record ProtectedSchemaTarget(DynamicForm form,
     /**
      * Metadata reader 会把各数据库的 BLOB/BYTEA/VARBINARY/RAW 统一为 BLOB，不能再与内部伪类型逐字比较。
      */
-    static boolean sameProtectedStorage(ColumnMetadata source, DynamicField target) {
+    static boolean sameProtectedStorage(ColumnDefinition source, DynamicField target) {
         boolean compatible = ProtectedFormLayout.isCiphertextType(target.databaseType())
                 ? source.databaseType().isBinary() && source.length() == null
                 : ProtectedFormLayout.isHashType(target.databaseType())
                         && source.databaseType().isBinary()
                         && (source.length() == null || source.length() >= 32);
         return compatible
-                && source.primaryKey() == target.primaryKey()
                 && source.nullable() == target.nullable()
                 && Objects.equals(source.generation(), target.generation());
     }
 
-    private static IndexMetadata project(IndexMetadata source, List<String> columns) {
-        if (columns.equals(source.columns())) {
-            return source;
-        }
-        IndexMetadata.Builder builder = IndexMetadata.builder(source.name());
-        if (source.unique()) {
-            builder.unique();
-        }
-        columns.forEach(builder::addColumn);
-        return builder.build();
-    }
-
-    private static boolean sameUniqueColumns(IndexMetadata left, IndexMetadata right) {
+    private static boolean sameUniqueColumns(IndexDefinition left, IndexDefinition right) {
         return left.unique() && right.unique()
                 && left.columns().stream().map(ProtectedSchemaTarget::key).toList()
                 .equals(right.columns().stream().map(ProtectedSchemaTarget::key).toList());
     }
 
-    private static boolean sameIndex(IndexMetadata left, IndexMetadata right) {
-        return left.unique() == right.unique()
-                && left.columns().stream().map(ProtectedSchemaTarget::key).toList()
-                       .equals(right.columns().stream().map(ProtectedSchemaTarget::key).toList());
+    private static boolean sameIndex(IndexDefinition left, IndexDefinition right) {
+        return left.unique() == right.unique() && left.keys().equals(right.keys());
     }
 
     private static String key(String name) {

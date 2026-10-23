@@ -70,7 +70,7 @@ public final class FieldUseSnapshot {
         this.callerJoinVisibility = compiledJoin == null ? Map.of() : Map.copyOf(compiledJoin);
     }
 
-    /** @return 旧入口和显式 unrestricted preview 共用的零分配快照 */
+    /** @return 未启用字段治理时共用的零分配快照 */
     public static FieldUseSnapshot unrestricted() {
         return UNRESTRICTED;
     }

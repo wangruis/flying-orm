@@ -21,6 +21,8 @@ public final class FieldScope {
 
     private static final Set<String> EMPTY_FIELDS = Set.of();
 
+    private static final FieldScope UNRESTRICTED = new FieldScope(EMPTY_FIELDS, EMPTY_FIELDS, true, true);
+
     private final Set<String> readableFields;
 
     private final Set<String> writableFields;
@@ -54,7 +56,7 @@ public final class FieldScope {
 
     /** @return 读写都不限制的字段范围 */
     public static FieldScope unrestricted() {
-        return new FieldScope(EMPTY_FIELDS, EMPTY_FIELDS, true, true);
+        return UNRESTRICTED;
     }
 
     /** 创建只限制读取字段的范围。字段名按小写比较。 */
@@ -109,6 +111,12 @@ public final class FieldScope {
     static FieldScope intersect(FieldScope left, FieldScope right) {
         FieldScope safeLeft = Objects.requireNonNull(left, "left field scope must not be null");
         FieldScope safeRight = Objects.requireNonNull(right, "right field scope must not be null");
+        if (safeLeft == safeRight || safeRight.unrestrictedRead && safeRight.unrestrictedWrite) {
+            return safeLeft;
+        }
+        if (safeLeft.unrestrictedRead && safeLeft.unrestrictedWrite) {
+            return safeRight;
+        }
         Set<String> readable = intersectFields(safeLeft.readableFields,
                                                safeLeft.unrestrictedRead,
                                                safeRight.readableFields,

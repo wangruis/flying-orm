@@ -1,6 +1,6 @@
 package com.flying.orm.rdb.aggregate;
 
-import java.util.LinkedHashMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -15,28 +15,31 @@ public final class AggregateRowLayout {
 
     private final List<GroupSelection> groups;
     private final List<AggregateExpression<?>> aggregates;
-    private final Map<GroupSelection, Integer> groupIndexes;
-    private final Map<AggregateExpression<?>, Integer> aggregateIndexes;
+    // String 与两种 final record 的身份互不相等，共享一个索引但不混淆查找语义。
+    private final Map<Object, Integer> indexes;
 
     private AggregateRowLayout(List<GroupSelection> groups,
                                List<AggregateExpression<?>> aggregates) {
         this.groups = List.copyOf(Objects.requireNonNull(groups, "aggregate groups must not be null"));
         this.aggregates = List.copyOf(Objects.requireNonNull(
                 aggregates, "aggregate expressions must not be null"));
-        Map<GroupSelection, Integer> groupMap = new LinkedHashMap<>();
+        Map<Object, Integer> positions = new HashMap<>();
         for (int index = 0; index < this.groups.size(); index++) {
-            if (groupMap.putIfAbsent(this.groups.get(index), index) != null) {
+            GroupSelection group = this.groups.get(index);
+            if (positions.putIfAbsent(group, index) != null) {
                 throw new IllegalArgumentException("aggregate group selection must not be duplicated");
             }
+            positions.merge(group.alias(), index, (previous, current) -> -1);
         }
-        Map<AggregateExpression<?>, Integer> aggregateMap = new LinkedHashMap<>();
         for (int index = 0; index < this.aggregates.size(); index++) {
-            if (aggregateMap.putIfAbsent(this.aggregates.get(index), this.groups.size() + index) != null) {
+            AggregateExpression<?> aggregate = this.aggregates.get(index);
+            int position = this.groups.size() + index;
+            if (positions.putIfAbsent(aggregate, position) != null) {
                 throw new IllegalArgumentException("aggregate expression must not be duplicated");
             }
+            positions.merge(aggregate.alias(), position, (previous, current) -> -1);
         }
-        groupIndexes = Map.copyOf(groupMap);
-        aggregateIndexes = Map.copyOf(aggregateMap);
+        indexes = positions;
     }
 
     public static AggregateRowLayout of(List<GroupSelection> groups,
@@ -56,8 +59,16 @@ public final class AggregateRowLayout {
         return groups.size() + aggregates.size();
     }
 
+    int indexOf(String alias) {
+        Integer index = indexes.get(Objects.requireNonNull(alias, "aggregate result alias must not be null"));
+        if (index == null || index < 0) {
+            throw new IllegalArgumentException("aggregate result alias must identify exactly one column: " + alias);
+        }
+        return index;
+    }
+
     int indexOf(GroupSelection group) {
-        Integer index = groupIndexes.get(Objects.requireNonNull(group, "aggregate group must not be null"));
+        Integer index = indexes.get(Objects.requireNonNull(group, "aggregate group must not be null"));
         if (index == null) {
             throw new IllegalArgumentException("group selection does not belong to this aggregate row layout");
         }
@@ -65,7 +76,7 @@ public final class AggregateRowLayout {
     }
 
     int indexOf(AggregateExpression<?> aggregate) {
-        Integer index = aggregateIndexes.get(Objects.requireNonNull(
+        Integer index = indexes.get(Objects.requireNonNull(
                 aggregate, "aggregate expression must not be null"));
         if (index == null) {
             throw new IllegalArgumentException("expression does not belong to this aggregate row layout");

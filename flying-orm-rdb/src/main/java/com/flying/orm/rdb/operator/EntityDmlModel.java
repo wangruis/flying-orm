@@ -1,8 +1,8 @@
 package com.flying.orm.rdb.operator;
 
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.mapping.EntityMetadata;
+import com.flying.orm.rdb.mapping.EntityModelRegistry;
 import com.flying.orm.rdb.internal.mapping.EntityValues;
 
 import java.util.Objects;
@@ -22,25 +22,13 @@ final class EntityDmlModel<T> {
     private final DynamicForm form;
     private final EntityValues<T> entityValues;
 
-    EntityDmlModel(EntityMetadata<T> metadata) {
-        this(metadata, Objects.requireNonNull(metadata, "entity metadata must not be null").toDynamicForm());
+    EntityDmlModel(EntityModelRegistry models, DynamicForm form, Class<T> type) {
+        this.metadata = models.metadata(Objects.requireNonNull(type, "entity type must not be null"));
+        this.form = form == null ? metadata.toDynamicForm() : form;
+        this.entityValues = metadata.hasEnumConditionValues() ? models.entityValues(type) : null;
     }
 
-    EntityDmlModel(EntityMetadata<T> metadata, DynamicForm form) {
-        this(metadata, form, null);
-    }
-
-    EntityDmlModel(EntityMetadata<T> metadata, DynamicForm form, EntityValues<T> entityValues) {
-        this.metadata = Objects.requireNonNull(metadata, "entity metadata must not be null");
-        this.form = Objects.requireNonNull(form, "entity dynamic form must not be null");
-        this.entityValues = entityValues;
-    }
-
-    EntityMetadata<T> metadata() {
-        return metadata;
-    }
-
-    EntityCommandState<T> newState(SqlRenderer renderer) {
-        return new EntityCommandState<>(metadata, form, renderer, entityValues);
-    }
+    EntityMetadata<T> metadata() { return metadata; }
+    DynamicForm form() { return form; }
+    EntityValues<T> entityValues() { return entityValues; }
 }

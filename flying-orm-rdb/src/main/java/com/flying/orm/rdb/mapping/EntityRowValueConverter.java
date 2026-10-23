@@ -9,16 +9,54 @@ import com.flying.orm.rdb.codec.JdbcLegacyTemporalAdapter;
 import com.flying.orm.rdb.internal.mapping.EntityEnumValueCodec;
 import com.flying.orm.rdb.json.JsonValueCodec;
 
+import java.lang.reflect.Type;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 import java.util.Collection;
+import java.util.function.Function;
 
 /** 把驱动值转换为实体字段值；反射写入计划只负责选择目标成员。 */
 final class EntityRowValueConverter {
 
+    private static final ValueCodec DECODED_JSON = new ValueCodec() {
+        @Override
+        public boolean supports(Class<?> targetType) { return JsonValueCodec.supportsTarget(targetType); }
+        @Override
+        public Object read(Object value, Class<?> targetType) { return JsonValueCodec.readDecoded(value, targetType); }
+    };
+
     private EntityRowValueConverter() {
+    }
+
+    @FunctionalInterface
+    interface Reader {
+        Object read(Object value, ValueCodecRegistry codecs);
+    }
+
+    /** record、setter、直接字段共享同一转换计划，输入形态只在创建计划时选择。 */
+    static Reader bind(Class<?> entityType, Class<?> declaringType, Type memberType,
+                       Class<?> targetType, EntityFieldMetadata field, boolean rawInput, boolean decodedInput) {
+        EntityTypeMappingRegistry.Mapping mapping = field.customMapping();
+        boolean json = !field.databaseType().isArray() && field.databaseType().logicalType() == LogicalType.JSON;
+        if (mapping == null && json && JsonValueCodec.supportsTarget(targetType)) {
+            Function<Object, Object> reader = JsonValueCodec.bindReader(memberType, entityType, declaringType, decodedInput);
+            return (value, codecs) -> {
+                try {
+                    return reader.apply(value);
+                } catch (IllegalArgumentException error) {
+                    throw new MappingException("row value cannot be converted to " + memberType.getTypeName(), error);
+                }
+            };
+        }
+        EntityEnumValueCodec enumValue = enumValueCodec(targetType, field);
+        ValueCodec codec = rawInput ? null : mapping != null ? mapping.codec()
+                : decodedInput && json && field.enumValueMember() != null ? DECODED_JSON : null;
+        Reader reader = (value, codecs) -> convert(value, targetType, field.databaseType(),
+                field.enumStorage(), enumValue, codec, codecs);
+        return rawInput && mapping != null
+                ? (value, codecs) -> reader.read(readCustom(value, mapping), codecs) : reader;
     }
 
     static Object readCustom(Object value, EntityTypeMappingRegistry.Mapping mapping) {

@@ -11,6 +11,9 @@ import com.flying.orm.rdb.execution.SqlRowLimitExceededException;
 import io.r2dbc.spi.R2dbcTimeoutException;
 
 import java.sql.SQLTimeoutException;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.Set;
 import java.util.concurrent.TimeoutException;
 
 /**
@@ -51,8 +54,8 @@ public enum SqlFailureCategory {
     /**
      * 把执行异常归到稳定的观测类别。
      *
-     * <p>批量和异步调用可能给驱动异常再包几层。这里沿 cause 链检查当前异常及最多 32 层原因，
-     * 遇到自引用提前结束；深度上限也保证循环原因链不会导致无限遍历。</p>
+     * <p>批量和异步调用可能给驱动异常再包几层。沿 cause 链每个异常只检查一次，
+     * 循环引用处结束，不按固定深度丢弃已经存在的执行事实。</p>
      *
      * @param error 执行链抛出的异常
      * @return 可用于指标、日志和告警聚合的粗粒度类别
@@ -65,7 +68,8 @@ public enum SqlFailureCategory {
         RdbException databaseFailure = null;
         RdbErrorKind batchFailure = null;
         Throwable current = error;
-        for (int depth = 0; current != null && depth <= 32; depth++) {
+        Set<Throwable> seen = Collections.newSetFromMap(new IdentityHashMap<>());
+        while (current != null && seen.add(current)) {
             optimisticLock |= current instanceof BatchOptimisticLockException;
             if (current instanceof BatchExecutionEvidenceException batchException) {
                 BatchExecutionEvidence evidence = batchException.evidence();
@@ -82,11 +86,7 @@ public enum SqlFailureCategory {
             if (databaseFailure == null && current instanceof RdbException rdbException) {
                 databaseFailure = rdbException;
             }
-            Throwable next = current.getCause();
-            if (next == current) {
-                break;
-            }
-            current = next;
+            current = current.getCause();
         }
         if (optimisticLock) {
             return OPTIMISTIC_LOCK;
@@ -104,7 +104,8 @@ public enum SqlFailureCategory {
         if (batchFailure != null) return fromKind(batchFailure);
         // Custom executors may expose an untranslated driver or cancellation failure.
         // Reuse the database boundary classification without unwrapping business exceptions.
-        return error != null && RdbExceptionTranslator.translate(error) instanceof RdbException translated
+        return current == null && error != null
+                && RdbExceptionTranslator.translate(error) instanceof RdbException translated
                 ? fromKind(translated.kind()) : UNKNOWN;
     }
 

@@ -9,6 +9,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 
 /**
  * 把已注册模板渲染为参数化 {@link SqlRequest}。
@@ -21,11 +22,9 @@ import java.util.Objects;
  */
 public final class SqlTemplateEngine {
 
-    private final SqlTemplateRegistry registry;
-
     private final SqlTemplateRenderer.Backend backend;
 
-    private final Map<String, SqlTemplateRenderer.CompiledTemplate> compiledTemplates;
+    private final Map<String, PreparedSql> compiledTemplates;
 
     private SqlTemplateEngine(SqlTemplateRegistry registry,
                               RdbDialect dialect,
@@ -33,12 +32,15 @@ public final class SqlTemplateEngine {
                               boolean jdbcBindMarkers) {
         SqlTemplateRegistry safeRegistry = Objects.requireNonNull(
                 registry, "SQL template registry must not be null");
-        this.registry = safeRegistry;
         this.backend = SqlTemplateRenderer.Backend.create(dialect, valueCodecs, jdbcBindMarkers);
-        Map<String, SqlTemplateRenderer.CompiledTemplate> compiled = new LinkedHashMap<>();
+        Map<String, PreparedSql> compiled = new LinkedHashMap<>();
         for (SqlTemplateRegistry.Entry entry : safeRegistry.entries()) {
+            SqlTemplateRenderer.CompiledTemplate template = SqlTemplateRenderer.compile(entry.template(), backend);
+            if (!template.valueSlots().containsAll(entry.serverParameters())) {
+                throw new IllegalArgumentException("SQL template server parameters are not all used by SQL template");
+            }
             compiled.put(SqlTemplateRegistry.normalize(entry.template().id()),
-                         SqlTemplateRenderer.compileReusable(entry.template(), this.backend));
+                    new PreparedSql(template, entry.serverParameters()));
         }
         this.compiledTemplates = Collections.unmodifiableMap(compiled);
     }
@@ -57,29 +59,17 @@ public final class SqlTemplateEngine {
         }
         SqlTemplateRenderer.Backend jdbcBackend = SqlTemplateRenderer.Backend.create(
                 backend.dialect(), backend.valueCodecs(), true);
-        Map<String, SqlTemplateRenderer.CompiledTemplate> jdbcTemplates = new LinkedHashMap<>();
+        Map<String, PreparedSql> jdbcTemplates = new LinkedHashMap<>();
         compiledTemplates.forEach((id, compiled) -> jdbcTemplates.put(
-                id, SqlTemplateRenderer.retarget(compiled, jdbcBackend)));
-        return new SqlTemplateEngine(registry, jdbcBackend, jdbcTemplates);
+                id, new PreparedSql(SqlTemplateRenderer.retarget(compiled.compiled, jdbcBackend),
+                        compiled.serverParameters)));
+        return new SqlTemplateEngine(jdbcBackend, jdbcTemplates);
     }
 
     public SqlRequest render(String templateId,
                              Map<String, ?> values,
                              Map<String, String> identifiers) {
-        return SqlTemplateRenderer.renderCompiled(
-                compiledTemplate(templateId), values, identifiers, false);
-    }
-
-    /**
-     * 渲染已经在模板调用状态或参数提供器边界取得所有权的参数。
-     * 仅供 flying-orm 内部跨包协作，业务代码应调用 {@link #render(String, Map, Map)}。
-     */
-    @InternalApi
-    public SqlRequest renderOwned(String templateId,
-                                  Map<String, ?> values,
-                                  Map<String, String> identifiers) {
-        return SqlTemplateRenderer.renderCompiled(
-                compiledTemplate(templateId), values, identifiers, true);
+        return prepare(templateId).render(values, identifiers);
     }
 
     /**
@@ -90,14 +80,14 @@ public final class SqlTemplateEngine {
                                            RdbDialect dialect,
                                            ValueCodecRegistry valueCodecs) {
         return prepareNative(sql, SqlTemplateRenderer.Backend.create(dialect, valueCodecs, false))
-                .render(values);
+                .render(values, Map.of());
     }
 
     /**
      * 原生 SQL 调用状态在创建时完成一次方言校验和占位符编译，重复执行时只绑定本次参数。
      */
     @InternalApi
-    public static PreparedNativeSql prepareNative(String sql,
+    public static PreparedSql prepareNative(String sql,
                                                   RdbDialect dialect,
                                                   ValueCodecRegistry valueCodecs,
                                                   boolean jdbcBindMarkers) {
@@ -105,13 +95,15 @@ public final class SqlTemplateEngine {
                 sql, SqlTemplateRenderer.Backend.create(dialect, valueCodecs, jdbcBindMarkers));
     }
 
-    private static PreparedNativeSql prepareNative(String sql, SqlTemplateRenderer.Backend backend) {
-        return new PreparedNativeSql(
-                SqlTemplateRenderer.compileReusable(SqlTemplate.nativeStatement(sql), backend));
+    private static PreparedSql prepareNative(String sql, SqlTemplateRenderer.Backend backend) {
+        return new PreparedSql(
+                SqlTemplateRenderer.compile(SqlTemplate.nativeStatement(sql), backend), Set.of());
     }
 
-    private SqlTemplateRenderer.CompiledTemplate compiledTemplate(String templateId) {
-        SqlTemplateRenderer.CompiledTemplate compiled = compiledTemplates.get(
+    /** 在调用创建时绑定注册事实；重复执行不再按 ID 查找或重复传递服务端参数声明。 */
+    @InternalApi
+    public PreparedSql prepare(String templateId) {
+        PreparedSql compiled = compiledTemplates.get(
                 SqlTemplateRegistry.normalize(templateId));
         if (compiled == null) {
             throw new IllegalArgumentException("SQL template is not registered");
@@ -119,27 +111,41 @@ public final class SqlTemplateEngine {
         return compiled;
     }
 
-    private SqlTemplateEngine(SqlTemplateRegistry registry,
-                              SqlTemplateRenderer.Backend backend,
-                              Map<String, SqlTemplateRenderer.CompiledTemplate> compiledTemplates) {
-        this.registry = Objects.requireNonNull(registry, "SQL template registry must not be null");
+    private SqlTemplateEngine(SqlTemplateRenderer.Backend backend,
+                              Map<String, PreparedSql> compiledTemplates) {
         this.backend = Objects.requireNonNull(backend, "SQL template backend must not be null");
         this.compiledTemplates = Collections.unmodifiableMap(Objects.requireNonNull(
                 compiledTemplates, "compiled SQL templates must not be null"));
     }
 
-    /** 模块内部复用的原生 SQL 编译结果，不属于业务公开 API。 */
+    /** 原生 SQL 与注册模板共用的不可变编译结果；每次渲染只接收本次调用数据。 */
     @InternalApi
-    public static final class PreparedNativeSql {
+    public static final class PreparedSql {
         private final SqlTemplateRenderer.CompiledTemplate compiled;
+        private final Set<String> serverParameters;
 
-        private PreparedNativeSql(SqlTemplateRenderer.CompiledTemplate compiled) {
-            this.compiled = Objects.requireNonNull(compiled, "compiled native SQL must not be null");
+        private PreparedSql(SqlTemplateRenderer.CompiledTemplate compiled, Set<String> serverParameters) {
+            this.compiled = compiled;
+            this.serverParameters = Set.copyOf(serverParameters);
         }
 
-        /** 使用当前调用已经收集的参数生成不可变请求。 */
-        public SqlRequest render(Map<String, ?> values) {
-            return SqlTemplateRenderer.renderCompiled(compiled, values, Map.of(), false);
+        public Set<String> serverParameters() {
+            return serverParameters;
+        }
+
+        /** 是否为 SQL 实际使用的值参数；共享参数 Map 中的其他属性不参与绑定。 */
+        public boolean hasParameter(String name) {
+            return compiled.valueSlots().contains(name);
+        }
+
+        /** 按 SQL 实际占位符取值生成不可变请求；缺失值拒绝，未引用的键忽略。 */
+        public SqlRequest render(Map<String, ?> values, Map<String, String> identifiers) {
+            return SqlTemplateRenderer.renderCompiled(compiled, values, identifiers, false);
+        }
+
+        /** 仅供已在调用边界取得参数所有权的模块内部调用。 */
+        public SqlRequest renderOwned(Map<String, ?> values, Map<String, String> identifiers) {
+            return SqlTemplateRenderer.renderCompiled(compiled, values, identifiers, true);
         }
     }
 }

@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.operator;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.condition.LogicalOperator;
 import com.flying.orm.core.condition.TermRegistry;
 import com.flying.orm.core.lambda.EntityProperty;
 import com.flying.orm.core.sql.render.SqlRenderer;
@@ -9,7 +10,6 @@ import com.flying.orm.rdb.internal.mapping.EntityPropertyResolver;
 import com.flying.orm.rdb.internal.mapping.EntityValues;
 import com.flying.orm.rdb.protection.ProtectedConditions;
 
-import java.util.List;
 import java.util.Objects;
 import java.util.function.Consumer;
 
@@ -22,16 +22,12 @@ import java.util.function.Consumer;
  * @date 2026-08-03
  * @version v1.0
  */
-public final class EntityCondition<T> {
+public final class EntityCondition<T> implements ConditionDsl<EntityProperty<T, ?>, EntityCondition<T>> {
 
     private final EntityMetadata<T> metadata;
     private final ConditionGroup.Builder builder;
     private final EntityValues<T> entityValues;
     private final TermRegistry terms;
-
-    EntityCondition(EntityMetadata<T> metadata, ConditionGroup.Builder builder) {
-        this(metadata, builder, null, TermRegistry.empty());
-    }
 
     private EntityCondition(EntityMetadata<T> metadata, ConditionGroup.Builder builder,
                             EntityValues<T> entityValues, TermRegistry terms) {
@@ -41,95 +37,92 @@ public final class EntityCondition<T> {
         this.terms = terms;
     }
 
-    EntityCondition(EntityMetadata<T> metadata, SqlRenderer renderer) {
-        this(metadata, Objects.requireNonNull(renderer, "sql renderer must not be null").conditions());
-    }
-
     EntityCondition(EntityMetadata<T> metadata, SqlRenderer renderer, EntityValues<T> entityValues) {
         this(metadata, Objects.requireNonNull(renderer, "sql renderer must not be null").conditions(),
                 entityValues, renderer.terms());
     }
 
-    /** 添加严格等值条件。 */
-    public EntityCondition<T> where(EntityProperty<T, ?> property, Object value) {
-        return where(property, "=", value);
+    /** 添加可选标准或业务条件；值为空时不生成节点，严格 where 的行为不变。 */
+    public EntityCondition<T> whereIfPresent(EntityProperty<T, ?> property, String operator, Object value) {
+        builder.whereIfPresent(column(property), operator, value);
+        return this;
     }
 
     /** 追加标准或已注册的业务条件，连接方式由当前 AND/OR 组决定。 */
     public EntityCondition<T> where(EntityProperty<T, ?> property, String operator, Object value) {
-        return term(property, operator, value);
-    }
-
-    /** 追加条件；在 OR 组内，各次调用以 OR 连接，在 AND 组内以 AND 连接。 */
-    public EntityCondition<T> and(EntityProperty<T, ?> property, String operator, Object value) {
-        return where(property, operator, value);
-    }
-
-    /** 添加自定义或标准 term，字段和值均不作为原始 SQL。 */
-    public EntityCondition<T> term(EntityProperty<T, ?> property, String operator, Object value) {
-        builder.where(column(property), Objects.requireNonNull(operator, "condition operator must not be null"), value);
+        builder.add(column(property), operator, value);
         return this;
     }
 
-    /** 添加 IN 集合条件。 */
-    public EntityCondition<T> in(EntityProperty<T, ?> property, Iterable<?> values) {
-        return term(property, "in", values);
+    /** 按实体属性名或映射列名追加条件，与 Getter 共用值转换和参数绑定。 */
+    public EntityCondition<T> where(String property, String operator, Object value) {
+        builder.add(metadata.field(property).columnName(), operator, value);
+        return this;
     }
 
-    EntityCondition<T> notIn(EntityProperty<T, ?> property, Iterable<?> values) {
-        return term(property, "not-in", values);
+    public EntityCondition<T> where(String property, Object value) { return where(property, "=", value); }
+
+    /** 可选条件只省略空值，不改变实体字段解析规则。 */
+    public EntityCondition<T> whereIfPresent(String property, String operator, Object value) {
+        builder.whereIfPresent(metadata.field(property).columnName(), operator, value);
+        return this;
     }
 
-    /** 添加闭区间 BETWEEN 条件。 */
-    public EntityCondition<T> between(EntityProperty<T, ?> property, Object start, Object end) {
-        return term(property, "between", List.of(
-                Objects.requireNonNull(start, "between start must not be null"),
-                Objects.requireNonNull(end, "between end must not be null")));
+    public EntityCondition<T> whereIfPresent(String property, Object value) {
+        return whereIfPresent(property, "=", value);
     }
 
     /** 在嵌套条件组中精确匹配声明了 EXACT 的加密字段。 */
     public EntityCondition<T> exactEncrypted(EntityProperty<T, ?> property, Object value) {
-        return term(property, ProtectedConditions.EXACT, value);
+        return where(property, ProtectedConditions.EXACT, value);
     }
 
     /** 在嵌套条件组中后缀匹配声明了固定长度的加密字段。 */
     public EntityCondition<T> suffixEncrypted(EntityProperty<T, ?> property, Object value) {
-        return term(property, ProtectedConditions.SUFFIX, value);
+        return where(property, ProtectedConditions.SUFFIX, value);
     }
 
     /** 在嵌套条件组中包含匹配声明了 CONTAINS 的加密字段。 */
     public EntityCondition<T> containsEncrypted(EntityProperty<T, ?> property, Object value) {
-        return term(property, ProtectedConditions.CONTAINS, value);
+        return where(property, ProtectedConditions.CONTAINS, value);
     }
 
-    /** 添加 IS NULL 条件。 */
-    public EntityCondition<T> isNull(EntityProperty<T, ?> property) {
-        builder.whereNull(column(property));
-        return this;
-    }
-
-    /** 添加 IS NOT NULL 条件。 */
-    public EntityCondition<T> isNotNull(EntityProperty<T, ?> property) {
-        builder.whereNotNull(column(property));
-        return this;
-    }
-
-    void or(Consumer<EntityCondition<T>> consumer) {
+    /** 追加括号包裹的 OR 条件组，组内可以继续嵌套。 */
+    public EntityCondition<T> or(Consumer<EntityCondition<T>> consumer) {
         Objects.requireNonNull(consumer, "entity OR condition must not be null");
         builder.or(nested -> consumer.accept(new EntityCondition<>(metadata, nested, entityValues, terms)));
+        return this;
     }
 
-    void andGroup(Consumer<EntityCondition<T>> consumer) {
+    /** 追加括号包裹的 AND 条件组，组内可以继续嵌套。 */
+    public EntityCondition<T> andGroup(Consumer<EntityCondition<T>> consumer) {
         Objects.requireNonNull(consumer, "entity AND condition must not be null");
         builder.and(nested -> consumer.accept(new EntityCondition<>(metadata, nested, entityValues, terms)));
+        return this;
     }
 
     String column(EntityProperty<T, ?> property) {
         return EntityPropertyResolver.column(metadata, property);
     }
 
+    TermRegistry terms() {
+        return terms;
+    }
+
+    Object conditionValue(String column, String operator, Object value) {
+        return entityValues == null ? value : entityValues.normalizeConditionScalar(column, operator, value, terms);
+    }
+
     ConditionGroup build() {
         ConditionGroup where = builder.build();
         return entityValues == null ? where : entityValues.normalizeCondition(where, terms);
+    }
+
+    EntityCondition<T> copy() {
+        ConditionGroup raw = builder.build();
+        ConditionGroup.Builder copied = raw.operator() == LogicalOperator.AND
+                ? ConditionGroup.and(terms) : ConditionGroup.or(terms);
+        raw.children().forEach(copied::add);
+        return new EntityCondition<>(metadata, copied, entityValues, terms);
     }
 }

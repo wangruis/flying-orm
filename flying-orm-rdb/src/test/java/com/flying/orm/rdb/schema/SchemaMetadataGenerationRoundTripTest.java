@@ -20,6 +20,7 @@ import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.stream.Stream;
 
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -64,7 +65,7 @@ class SchemaMetadataGenerationRoundTripTest {
             RelationalTableDefinition initial = RelationalTableDefinition.builder(identity).addColumn(id).build();
             var creation = reviewer.review(database, initial, metadata.readSnapshot("tenant", "events"),
                     metadata.snapshotCoverage(), SchemaCompatibilityMode.EXACT);
-            assertEquals(SchemaExecutionStatus.SUCCESS, client.executeReviewed(creation, metadata).status());
+            assertNotNull(client.execute(creation, metadata));
 
             SchemaSnapshot actual = metadata.readSnapshot("tenant", "events");
             assertEquals("events_seq", actual.columns().value().getFirst().generation().sequenceName());
@@ -76,8 +77,7 @@ class SchemaMetadataGenerationRoundTripTest {
 
             assertEquals(0, addition.requests().stream()
                     .filter(request -> request.sql().startsWith("create sequence ")).count());
-            assertEquals(SchemaExecutionStatus.SUCCESS, client.executeReviewed(addition, metadata,
-                    SchemaMigrationApproval.approve(addition, "reuse existing qualified sequence")).status());
+            assertNotNull(client.execute(addition, metadata));
             var verified = reviewer.review(database, desired, metadata.readSnapshot("tenant", "events"),
                     metadata.snapshotCoverage(), SchemaCompatibilityMode.EXACT);
             assertTrue(verified.steps().isEmpty(), verified.operations().toString());
@@ -107,9 +107,9 @@ class SchemaMetadataGenerationRoundTripTest {
             var plan = reviewer.review(database, desired, metadata.readSnapshot("tenant", "events"),
                     metadata.snapshotCoverage(), SchemaCompatibilityMode.EXACT);
 
-            var report = JdbcSchemaClient.create(executor, dialect).executeReviewed(plan, metadata);
+            var report = JdbcSchemaClient.create(executor, dialect).execute(plan, metadata);
 
-            assertEquals(SchemaExecutionStatus.SUCCESS, report.status());
+            assertNotNull(report);
             var verified = reviewer.review(database, desired, metadata.readSnapshot("tenant", "events"),
                     metadata.snapshotCoverage(), SchemaCompatibilityMode.EXACT);
             assertTrue(verified.steps().isEmpty(), verified.operations().toString());

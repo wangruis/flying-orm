@@ -41,6 +41,30 @@ import java.util.function.Supplier;
 import static org.junit.jupiter.api.Assertions.*;
 
 class EntityEnumEntryClosureTest {
+    @Test
+    void expressionSetResolvesGetterColumnsAndEnumLiteralsOnBothExecutionPaths() {
+        Capture capture = new Capture();
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql());
+        ReactiveFormClient async = ReactiveFormClient.create(capture.reactive(), renderer);
+        SyncFormClient sync = SyncFormClient.create(capture, (request, callback) -> {
+            throw new AssertionError("unexpected batch");
+        }, renderer);
+        sync.entity(Account.class).update().setExpression(Account::getStatus,
+                expression -> expression.field(Account::getStatus)
+                        .coalesce(expression.value(Account::getStatus, Status.DISABLED)))
+                .where(Account::id, 1L).execute();
+        Mono<Long> update = async.entity(Account.class).update().setExpression(Account::getStatus,
+                expression -> expression.field(Account::getStatus)
+                        .coalesce(expression.value(Account::getStatus, Status.ACTIVE)))
+                .where(Account::id, 2L).execute();
+        assertEquals(1, capture.requests.size());
+        assertEquals(1L, update.block());
+        assertEquals(List.of("D", 1L), capture.requests.get(0).parameters());
+        assertEquals(List.of("A", 2L), capture.requests.get(1).parameters());
+        assertTrue(capture.requests.get(0).sql().contains("\"status_code\" = coalesce(\"status_code\", ?)"));
+    }
+
     @TestFactory
     List<DynamicTest> publicPropertyValuesReachQueryPageUpdateAndDelete() {
         List<DynamicTest> tests = new ArrayList<>();
@@ -204,6 +228,9 @@ class EntityEnumEntryClosureTest {
         TermRegistry terms = TermRegistry.builder()
                 .add(TermHandler.simple("custom-status", ConditionValueShape.SCALAR)).build();
         assertSame(Status.ACTIVE, values.normalizeConditionValue("status", "custom-status", Status.ACTIVE, terms));
+        assertSame(Status.ACTIVE, values.normalizeConditionScalar("status", "custom-status", Status.ACTIVE, terms));
+        assertSame(Status.ACTIVE, values.normalizeConditionScalar("status", "=", Status.ACTIVE, terms));
+        assertEquals("A", values.normalizeConditionScalar("status", "in", Status.ACTIVE, TermRegistry.standard()));
         assertNull(values.normalizeWriteValue("status", null));
         assertEquals("A", values.normalizeWriteValue("status", "A"));
     }
@@ -227,7 +254,7 @@ class EntityEnumEntryClosureTest {
         @EnumValue private final Map<String, String> code = Map.of("code", "A");
     }
 
-    private static final class Capture implements SyncSqlExecutor {
+    private static final class Capture implements com.flying.orm.rdb.support.ListQueryFixture {
         private SqlRequest request;
         private final List<SqlRequest> requests = new ArrayList<>();
         public List<DynamicRow> query(SqlRequest value) {
@@ -237,7 +264,7 @@ class EntityEnumEntryClosureTest {
                     ? List.of(DynamicRow.copyOf(Map.of("total", 1L))) : List.of();
         }
         public long rowsUpdated(SqlRequest value) { request = value; requests.add(value); return 1; }
-        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest value, SqlExecutionOptions options) {
+        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest value, SqlExecutionOptions options, String generatedKeyColumn) {
             throw new AssertionError("unexpected generated keys");
         }
         private ReactiveSqlExecutor reactive() {

@@ -3,6 +3,7 @@ package com.flying.orm.rdb.metadata;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.type.DatabaseTypes;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -17,6 +18,8 @@ final class H2MetadataQueries {
 
     private static final String BASE_COLUMNS_SQL = """
             select lower(c.COLUMN_NAME) as COLUMN_NAME,
+                   c.TABLE_NAME as METADATA_TABLE,
+                   table_info.REMARKS as TABLE_COMMENT,
                    lower(c.TABLE_SCHEMA) as RESOLUTION_SCHEMA,
                    case
                        when upper(c.DATA_TYPE) = 'CHARACTER VARYING'
@@ -161,6 +164,8 @@ final class H2MetadataQueries {
                    c.IS_IDENTITY as IS_IDENTITY,
                    case when pk.CONSTRAINT_NAME is null then false else true end as PRIMARY_KEY
             from INFORMATION_SCHEMA.COLUMNS c
+            left join INFORMATION_SCHEMA.TABLES table_info
+              on table_info.TABLE_SCHEMA = c.TABLE_SCHEMA and table_info.TABLE_NAME = c.TABLE_NAME
             left join INFORMATION_SCHEMA.SEQUENCES generation_sequence
               on c.IS_IDENTITY = 'NO'
              and c.COLUMN_DEFAULT = 'NEXT VALUE FOR "'
@@ -182,18 +187,13 @@ final class H2MetadataQueries {
               on pk.TABLE_SCHEMA = c.TABLE_SCHEMA
              and pk.TABLE_NAME = c.TABLE_NAME
              and pk.COLUMN_NAME = c.COLUMN_NAME
-            where c.TABLE_NAME = case
-                when exists (
-                    select 1
-                    from INFORMATION_SCHEMA.COLUMNS exact_column
-                    where exact_column.TABLE_SCHEMA = c.TABLE_SCHEMA
-                      and exact_column.TABLE_NAME = ?
-                ) then ? else upper(?) end
+            where ${TABLE_FILTER}
             """;
 
     // UNIQUE 和外键都可以复用显式索引；只隐藏约束生成的支撑索引，保留开发者声明的独立索引。
     private static final String BASE_INDEXES_SQL = """
             select lower(i.INDEX_NAME) as INDEX_NAME,
+                   i.TABLE_NAME as METADATA_TABLE,
                    lower(ic.COLUMN_NAME) as COLUMN_NAME,
                    case when ic.IS_UNIQUE then true else false end as UNIQUE_INDEX,
                    ic.ORDERING_SPECIFICATION as INDEX_DIRECTION,
@@ -264,13 +264,7 @@ final class H2MetadataQueries {
                 from INFORMATION_SCHEMA.SETTINGS
                 where SETTING_NAME = 'DEFAULT_NULL_ORDERING'
             ) null_ordering_setting
-            where i.TABLE_NAME = case
-                when exists (
-                    select 1
-                    from INFORMATION_SCHEMA.COLUMNS exact_column
-                    where exact_column.TABLE_SCHEMA = i.TABLE_SCHEMA
-                      and exact_column.TABLE_NAME = ?
-                ) then ? else upper(?) end
+            where ${TABLE_FILTER}
               and i.INDEX_NAME is not null
               and not exists (
                   select 1
@@ -286,6 +280,7 @@ final class H2MetadataQueries {
 
     private static final String BASE_FOREIGN_KEYS_SQL = """
             select lower(tc.TABLE_SCHEMA) as TABLE_SCHEMA,
+                   tc.TABLE_NAME as METADATA_TABLE,
                    lower(fk.CONSTRAINT_NAME) as FOREIGN_KEY_NAME,
                    lower(fk.COLUMN_NAME) as COLUMN_NAME,
                    lower(pk.TABLE_SCHEMA) as REFERENCED_TABLE_SCHEMA,
@@ -325,13 +320,7 @@ final class H2MetadataQueries {
              and pk.CONSTRAINT_NAME = rc.UNIQUE_CONSTRAINT_NAME
              and pk.ORDINAL_POSITION = fk.POSITION_IN_UNIQUE_CONSTRAINT
             where tc.CONSTRAINT_TYPE = 'FOREIGN KEY'
-              and tc.TABLE_NAME = case
-                  when exists (
-                      select 1
-                      from INFORMATION_SCHEMA.COLUMNS exact_column
-                      where exact_column.TABLE_SCHEMA = tc.TABLE_SCHEMA
-                        and exact_column.TABLE_NAME = ?
-                  ) then ? else upper(?) end
+              and ${TABLE_FILTER}
             """;
 
     private static final String BASE_TABLE_SQL = """
@@ -343,12 +332,7 @@ final class H2MetadataQueries {
                                   and regexp_like(t.TABLE_SCHEMA, '^[A-Z_][A-Z0-9_]*$')
                         then true else false end as TABLE_REPRESENTABLE
             from INFORMATION_SCHEMA.TABLES t
-            where t.TABLE_NAME = case
-                when exists (
-                    select 1 from INFORMATION_SCHEMA.TABLES exact_table
-                    where exact_table.TABLE_SCHEMA = t.TABLE_SCHEMA
-                      and exact_table.TABLE_NAME = ?
-                ) then ? else upper(?) end
+            where ${TABLE_FILTER}
             """;
 
     private static final String BASE_PRIMARY_KEY_SQL = constraintColumnsSql("PRIMARY KEY");
@@ -356,6 +340,7 @@ final class H2MetadataQueries {
 
     private static final String BASE_CHECKS_SQL = """
             select lower(tc.CONSTRAINT_NAME) as CONSTRAINT_NAME,
+                   tc.TABLE_NAME as METADATA_TABLE,
                    cc.CHECK_CLAUSE as CHECK_EXPRESSION,
                    case when tc.IS_DEFERRABLE = 'NO'
                                   and tc.INITIALLY_DEFERRED = 'NO'
@@ -373,19 +358,14 @@ final class H2MetadataQueries {
               on tc.CONSTRAINT_SCHEMA = cc.CONSTRAINT_SCHEMA
              and tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
             where tc.CONSTRAINT_TYPE = 'CHECK'
-              and tc.TABLE_NAME = case
-                  when exists (
-                      select 1 from INFORMATION_SCHEMA.TABLES exact_table
-                      where exact_table.TABLE_SCHEMA = tc.TABLE_SCHEMA
-                        and exact_table.TABLE_NAME = ?
-                  ) then ? else upper(?) end
+              and ${TABLE_FILTER}
             """;
 
     private H2MetadataQueries() {
     }
 
-    static InformationSchemaFormMetadataReader.Queries queries() {
-        return InformationSchemaFormMetadataReader.Queries.complete(
+    static MetadataQueryProfile.Queries queries() {
+        return MetadataQueryProfile.Queries.complete(
                 H2MetadataQueries::columnQuery,
                 H2MetadataQueries::indexQuery,
                 H2MetadataQueries::foreignKeyQuery,
@@ -394,7 +374,7 @@ final class H2MetadataQueries {
                 H2MetadataQueries::primaryKeyQuery,
                 H2MetadataQueries::uniqueConstraintQuery,
                 H2MetadataQueries::checkConstraintQuery,
-                InformationSchemaFormMetadataReader.SnapshotDialect.H2);
+                MetadataQueryProfile.SnapshotDialect.H2);
     }
 
     private static SqlRequest columnQuery(String schema, String table) {
@@ -433,18 +413,29 @@ final class H2MetadataQueries {
                                           String table,
                                           String tableAlias,
                                           String orderBy) {
-        String safeTable = InformationSchemaFormMetadataReader.requireText(table, "table");
-        if (schema == null || schema.isBlank()) {
-            return new SqlRequest(base + " and " + tableAlias + ".TABLE_SCHEMA = current_schema()" + orderBy,
-                                  tableParameters(safeTable));
+        List<Object> parameters = new ArrayList<>(6);
+        String filter = "1 = 1";
+        if (table != null) {
+            String safeTable = MetadataQueryProfile.requireText(table, "table");
+            filter = tableAlias + ".TABLE_NAME = case when exists (select 1 from INFORMATION_SCHEMA.TABLES exact_table"
+                    + " where exact_table.TABLE_SCHEMA = " + tableAlias + ".TABLE_SCHEMA"
+                    + " and exact_table.TABLE_NAME = ?) then ? else upper(?) end";
+            parameters.addAll(List.of(safeTable, safeTable, safeTable));
         }
-        String sql = base + " and " + tableAlias + ".TABLE_SCHEMA = " + schemaExpression() + orderBy;
-        return new SqlRequest(sql, tableAndSchemaParameters(safeTable, schema));
+        String schemaFilter = "current_schema()";
+        if (schema != null && !schema.isBlank()) {
+            schemaFilter = schemaExpression();
+            String safeSchema = schema.trim();
+            parameters.addAll(List.of(safeSchema, safeSchema, safeSchema));
+        }
+        return new SqlRequest(base.replace("${TABLE_FILTER}", filter)
+                + " and " + tableAlias + ".TABLE_SCHEMA = " + schemaFilter + orderBy, parameters);
     }
 
     private static String constraintColumnsSql(String type) {
         return """
                 select lower(tc.CONSTRAINT_NAME) as CONSTRAINT_NAME,
+                   tc.TABLE_NAME as METADATA_TABLE,
                        lower(kcu.COLUMN_NAME) as COLUMN_NAME,
                        case when tc.IS_DEFERRABLE = 'NO'
                                       and tc.INITIALLY_DEFERRED = 'NO'
@@ -467,12 +458,7 @@ final class H2MetadataQueries {
                  and kcu.TABLE_NAME = tc.TABLE_NAME
                  and kcu.CONSTRAINT_NAME = tc.CONSTRAINT_NAME
                 where tc.CONSTRAINT_TYPE = '${TYPE}'
-                  and tc.TABLE_NAME = case
-                      when exists (
-                          select 1 from INFORMATION_SCHEMA.TABLES exact_table
-                          where exact_table.TABLE_SCHEMA = tc.TABLE_SCHEMA
-                            and exact_table.TABLE_NAME = ?
-                      ) then ? else upper(?) end
+                  and ${TABLE_FILTER}
                 """.replace("${TYPE}", type);
     }
 
@@ -480,15 +466,6 @@ final class H2MetadataQueries {
     private static String schemaExpression() {
         return "case when exists (select 1 from INFORMATION_SCHEMA.SCHEMATA exact_schema "
                 + "where exact_schema.SCHEMA_NAME = ?) then ? else upper(?) end";
-    }
-
-    private static List<Object> tableParameters(String table) {
-        return List.of(table, table, table);
-    }
-
-    private static List<Object> tableAndSchemaParameters(String table, String schema) {
-        String safeSchema = schema.trim();
-        return List.of(table, table, table, safeSchema, safeSchema, safeSchema);
     }
 
     private static String logicalType(String dataType) {

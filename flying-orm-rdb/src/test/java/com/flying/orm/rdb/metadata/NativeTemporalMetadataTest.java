@@ -2,9 +2,13 @@ package com.flying.orm.rdb.metadata;
 
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.form.DynamicField;
-import com.flying.orm.core.metadata.ColumnMetadata;
+import com.flying.orm.core.metadata.ColumnDefinition;
+import com.flying.orm.core.metadata.RelationIdentity;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.schema.FormSchemaSqlRenderer;
+import com.flying.orm.rdb.schema.RelationalSchemaSqlRenderer;
+import com.flying.orm.rdb.schema.SchemaOperation;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -21,9 +25,6 @@ class NativeTemporalMetadataTest {
 
     @Test
     void rejectsPostgreSqlIndexesThatCannotBeRepresentedWithoutLosingSemantics() {
-        DynamicForm form = DynamicForm.builder("users", "users")
-                                      .addField(DynamicField.of("email", "VARCHAR"))
-                                      .build();
         Map<String, Object> partialIndex = Map.of(
                 "INDEX_NAME", "uq_active_email",
                 "COLUMN_NAME", "email",
@@ -33,8 +34,10 @@ class NativeTemporalMetadataTest {
 
         IllegalStateException failure = assertThrows(
                 IllegalStateException.class,
-                () -> FormMetadataRowConverter.toTableMetadata(
-                        "users", form, List.of(partialIndex), List.of()));
+                () -> FormMetadataRowConverter.toTableDefinition(RelationIdentity.table("users"),
+                        FormMetadataRowConverter.tableBuilder(RelationIdentity.table("users"), List.of(
+                                Map.of("COLUMN_NAME", "email", "DATA_TYPE", "VARCHAR")), value -> value),
+                        List.of(partialIndex), List.of(), List.of(), MetadataQueryProfile.SnapshotDialect.PARTIAL));
 
         assertTrue(failure.getMessage().contains("uq_active_email"));
         assertTrue(failure.getMessage().contains("partial predicate"));
@@ -90,7 +93,7 @@ class NativeTemporalMetadataTest {
     }
 
     @Test
-    void indexProbesRejectOperationalAndPartitionShapesMissingFromIndexMetadata() {
+    void indexProbesRejectOperationalAndPartitionShapesMissingFromIndexDefinition() {
         String h2 = H2MetadataQueries.queries().indexQuery().create(null, "users").sql();
         assertTrue(h2.contains("i.INDEX_TYPE_NAME in ('INDEX', 'UNIQUE INDEX')"));
         assertTrue(h2.contains("ic.ORDERING_SPECIFICATION = 'ASC'"));
@@ -160,7 +163,7 @@ class NativeTemporalMetadataTest {
                 .typeMapper().apply("DATE"));
 
         DynamicForm form = FormMetadataRowConverter.toDynamicForm(
-                "business_calendar", "business_calendar", List.of(
+                "business_calendar", com.flying.orm.core.metadata.RelationIdentity.parse("business_calendar"), List.of(
                         Map.of("COLUMN_NAME", "business_date",
                                "DATA_TYPE", "DATE",
                                "PRIMARY_KEY", false,
@@ -169,12 +172,12 @@ class NativeTemporalMetadataTest {
 
         assertEquals("ORACLE_DATE", form.field("business_date").dataType());
         assertEquals("DATE", RdbDialect.oracle().schema().dataType(
-                form.toTableMetadata().column("business_date").dataType()));
+                form.toTableDefinition().column("business_date").databaseType().declaration()));
     }
 
     @Test
     void preservesPostgreSqlArrayElementTypeArguments() {
-        InformationSchemaFormMetadataReader.Queries queries = PostgreSqlMetadataQueries.queries();
+        MetadataQueryProfile.Queries queries = PostgreSqlMetadataQueries.queries();
         String sql = queries.columnQuery().create("public", "events").sql();
 
         assertTrue(sql.contains("pg_catalog.format_type"));
@@ -194,7 +197,7 @@ class NativeTemporalMetadataTest {
 
     @Test
     void preservesPostgreSqlBitStringLengthsAcrossMetadataRoundTrips() {
-        InformationSchemaFormMetadataReader.Queries queries = PostgreSqlMetadataQueries.queries();
+        MetadataQueryProfile.Queries queries = PostgreSqlMetadataQueries.queries();
         String sql = queries.columnQuery().create("public", "events").sql().toLowerCase(java.util.Locale.ROOT);
 
         assertTrue(sql.contains("c.data_type in ('array', 'user-defined', 'bit', 'bit varying')"));
@@ -211,7 +214,7 @@ class NativeTemporalMetadataTest {
         assertTrue(sql.contains("c.DATETIME_PRECISION as TEMPORAL_PRECISION"));
 
         DynamicForm form = FormMetadataRowConverter.toDynamicForm(
-                "events", "events", List.of(
+                "events", com.flying.orm.core.metadata.RelationIdentity.parse("events"), List.of(
                         Map.of("COLUMN_NAME", "created_at",
                                "DATA_TYPE", "timestamp",
                                "TEMPORAL_PRECISION", 6,
@@ -228,20 +231,20 @@ class NativeTemporalMetadataTest {
         assertEquals(6, form.field("created_at").precision());
         assertNull(form.field("created_at").scale());
         assertEquals(0, form.field("processed_at").precision());
-        assertEquals(0, form.toTableMetadata().column("processed_at").precision());
+        assertEquals(0, form.toTableDefinition().column("processed_at").temporalPrecision());
         assertEquals("TIMESTAMP(0)",
                      RdbDialect.mysql().schema().dataType("TIMESTAMPTZ", null, 0, null));
         assertThrows(IllegalArgumentException.class,
                      () -> DynamicField.of("processed_at", "TIMESTAMPTZ").withPrecision(0, 0));
         assertThrows(IllegalArgumentException.class,
-                     () -> ColumnMetadata.of("processed_at", "TIMESTAMPTZ").withPrecision(0, 0));
+                     () -> DynamicField.of("processed_at", "TIMESTAMPTZ").withPrecision(0, 0));
         assertThrows(IllegalArgumentException.class,
                      () -> DynamicField.of("amount", "DECIMAL").withPrecision(0, 0));
     }
 
     @Test
     void preservesMysqlIntegerModifiersAcrossMetadataRoundTrips() {
-        InformationSchemaFormMetadataReader.Queries queries = MySqlMetadataQueries.queries();
+        MetadataQueryProfile.Queries queries = MySqlMetadataQueries.queries();
         String sql = queries.columnQuery().create(null, "devices").sql().toLowerCase(java.util.Locale.ROOT);
 
         assertTrue(sql.contains("c.data_type"));
@@ -293,18 +296,18 @@ class NativeTemporalMetadataTest {
                                                 .addField(DynamicField.of("value", "BLOB"))
                                                 .build();
         var blobWidening = FormSchemaSqlRenderer.create(schema)
-                                                .migrateSafelyPlan(currentBlob.toTableMetadata(),
+                                                .migrateSafelyPlan(currentBlob.toTableDefinition(),
                                                                    targetLongBlob, List.of());
-        assertTrue(blobWidening.hasExecutableSql() || blobWidening.requiresManualReview());
+        assertTrue(blobWidening.hasExecutableSql() || blobWidening.hasSkippedChanges());
 
         DynamicForm currentTinyint = metadataForm(queries, "tinyint", null);
         DynamicForm targetInteger = DynamicForm.builder("counters", "counters")
                                                .addField(DynamicField.of("value", "INTEGER"))
                                                .build();
         var widening = FormSchemaSqlRenderer.create(schema)
-                                            .migrateSafelyPlan(currentTinyint.toTableMetadata(),
+                                            .migrateSafelyPlan(currentTinyint.toTableDefinition(),
                                                                targetInteger, List.of());
-        assertTrue(widening.hasExecutableSql() || widening.requiresManualReview());
+        assertTrue(widening.hasExecutableSql() || widening.hasSkippedChanges());
     }
 
     @Test
@@ -337,7 +340,7 @@ class NativeTemporalMetadataTest {
 
     @Test
     void preservesSqlServerMaxTypesWithoutApplyingTheUnlimitedLengthSentinel() {
-        InformationSchemaFormMetadataReader.Queries queries = SqlServerMetadataQueries.queries();
+        MetadataQueryProfile.Queries queries = SqlServerMetadataQueries.queries();
         String sql = queries.columnQuery().create(null, "documents").sql().toLowerCase(java.util.Locale.ROOT);
 
         assertTrue(sql.contains("in ('nvarchar', 'varchar')"));
@@ -364,13 +367,20 @@ class NativeTemporalMetadataTest {
     void permitsZeroFractionalPrecisionForTemporalArrays() {
         for (String dataType : List.of("TIME[]", "TIMETZ[]", "TIMESTAMP[]", "TIMESTAMPTZ[]")) {
             DynamicField field = DynamicField.of("event_times", dataType).withPrecision(0, null);
-            ColumnMetadata column = ColumnMetadata.of("event_times", dataType).withPrecision(0, null);
+            ColumnDefinition column = field.column();
 
             assertEquals(0, field.precision());
-            assertEquals(0, column.precision());
+            assertEquals(0, column.temporalPrecision());
+            assertNull(column.precision());
             assertTrue(RdbDialect.postgresql().schema()
                                  .dataType(dataType, null, 0, null)
                                  .contains("(0)[]"));
+            RelationalTableDefinition table = RelationalTableDefinition.builder(RelationIdentity.table("events"))
+                    .addColumn(column).build();
+            assertTrue(RelationalSchemaSqlRenderer.create(RdbDialect.postgresql().schema())
+                    .render(SchemaOperation.of(SchemaOperation.Kind.CREATE_TABLE, table.identity(), "events",
+                            null, table, SchemaOperation.Compatibility.SAFE_INCREMENTAL))
+                    .getFirst().sql().contains("(0)[]"));
         }
     }
 
@@ -394,7 +404,7 @@ class NativeTemporalMetadataTest {
                                                                                         .sql());
 
         DynamicForm oracleForm = FormMetadataRowConverter.toDynamicForm(
-                "events", "events", List.of(
+                "events", com.flying.orm.core.metadata.RelationIdentity.parse("events"), List.of(
                         Map.of("COLUMN_NAME", "created_at",
                                "DATA_TYPE", "TIMESTAMP(3) WITH TIME ZONE",
                                "PRIMARY_KEY", false,
@@ -408,9 +418,9 @@ class NativeTemporalMetadataTest {
         assertEquals(3, oracleForm.field("created_at").precision());
         assertEquals("TIMESTAMP WITH LOCAL TIME ZONE", oracleForm.field("session_at").dataType());
         assertEquals(4, oracleForm.field("session_at").precision());
-        ColumnMetadata sessionColumn = oracleForm.toTableMetadata().column("session_at");
-        assertEquals("TIMESTAMP WITH LOCAL TIME ZONE", sessionColumn.dataType());
-        assertEquals(4, sessionColumn.precision());
+        com.flying.orm.core.metadata.ColumnDefinition sessionColumn = oracleForm.toTableDefinition().column("session_at");
+        assertEquals("TIMESTAMP WITH LOCAL TIME ZONE", sessionColumn.databaseType().declaration());
+        assertEquals(4, sessionColumn.temporalPrecision());
     }
 
     @Test
@@ -456,11 +466,11 @@ class NativeTemporalMetadataTest {
     }
 
     private static void assertLobRoundTrip(RdbDialect dialect,
-                                           InformationSchemaFormMetadataReader.Queries queries,
+                                           MetadataQueryProfile.Queries queries,
                                            String physicalType,
                                            String targetType) {
         DynamicForm currentForm = FormMetadataRowConverter.toDynamicForm(
-                "documents", "documents", List.of(
+                "documents", com.flying.orm.core.metadata.RelationIdentity.parse("documents"), List.of(
                         Map.of("COLUMN_NAME", "content",
                                "DATA_TYPE", physicalType,
                                "CHARACTER_MAXIMUM_LENGTH", -1,
@@ -472,12 +482,12 @@ class NativeTemporalMetadataTest {
                                         .build();
 
         var plan = FormSchemaSqlRenderer.create(dialect.schema())
-                                        .migrateSafelyPlan(currentForm.toTableMetadata(), target, List.of());
+                                        .migrateSafelyPlan(currentForm.toTableDefinition(), target, List.of());
         assertFalse(plan.hasExecutableSql(), plan.sqlTexts().toString());
-        assertFalse(plan.requiresManualReview(), plan.skippedSummaries().toString());
+        assertFalse(plan.hasSkippedChanges(), plan.skippedSummaries().toString());
     }
 
-    private static void assertMysqlIntegerRoundTrip(InformationSchemaFormMetadataReader.Queries queries,
+    private static void assertMysqlIntegerRoundTrip(MetadataQueryProfile.Queries queries,
                                                     String physicalType,
                                                     String targetType) {
         DynamicForm current = metadataForm(queries, physicalType, null);
@@ -485,12 +495,12 @@ class NativeTemporalMetadataTest {
                                         .addField(DynamicField.of("value", targetType))
                                         .build();
         var plan = FormSchemaSqlRenderer.create(RdbDialect.mysql().schema())
-                                        .migrateSafelyPlan(current.toTableMetadata(), target, List.of());
+                                        .migrateSafelyPlan(current.toTableDefinition(), target, List.of());
         assertFalse(plan.hasExecutableSql(), plan.sqlTexts().toString());
-        assertFalse(plan.requiresManualReview(), plan.skippedSummaries().toString());
+        assertFalse(plan.hasSkippedChanges(), plan.skippedSummaries().toString());
     }
 
-    private static void assertMysqlBinaryRoundTrip(InformationSchemaFormMetadataReader.Queries queries,
+    private static void assertMysqlBinaryRoundTrip(MetadataQueryProfile.Queries queries,
                                                    String physicalType,
                                                    int length,
                                                    String targetType) {
@@ -499,12 +509,12 @@ class NativeTemporalMetadataTest {
                                         .addField(DynamicField.of("value", targetType))
                                         .build();
         var plan = FormSchemaSqlRenderer.create(RdbDialect.mysql().schema())
-                                        .migrateSafelyPlan(current.toTableMetadata(), target, List.of());
+                                        .migrateSafelyPlan(current.toTableDefinition(), target, List.of());
         assertFalse(plan.hasExecutableSql(), plan.sqlTexts().toString());
-        assertFalse(plan.requiresManualReview(), plan.skippedSummaries().toString());
+        assertFalse(plan.hasSkippedChanges(), plan.skippedSummaries().toString());
     }
 
-    private static void assertPostgreSqlBitRoundTrip(InformationSchemaFormMetadataReader.Queries queries,
+    private static void assertPostgreSqlBitRoundTrip(MetadataQueryProfile.Queries queries,
                                                      String physicalType,
                                                      String targetType) {
         DynamicForm current = metadataForm(queries, physicalType, 8);
@@ -512,9 +522,9 @@ class NativeTemporalMetadataTest {
                                         .addField(DynamicField.of("value", targetType))
                                         .build();
         var plan = FormSchemaSqlRenderer.create(RdbDialect.postgresql().schema())
-                                        .migrateSafelyPlan(current.toTableMetadata(), target, List.of());
+                                        .migrateSafelyPlan(current.toTableDefinition(), target, List.of());
         assertFalse(plan.hasExecutableSql(), plan.sqlTexts().toString());
-        assertFalse(plan.requiresManualReview(), plan.skippedSummaries().toString());
+        assertFalse(plan.hasSkippedChanges(), plan.skippedSummaries().toString());
     }
 
     private static void assertSqlServerBinaryRoundTrip(int length) {
@@ -526,12 +536,12 @@ class NativeTemporalMetadataTest {
         var schema = RdbDialect.sqlServer().schema();
         assertEquals("VARBINARY(" + length + ")", schema.dataType("BLOB", length, null, null));
         var plan = FormSchemaSqlRenderer.create(schema)
-                                        .migrateSafelyPlan(current.toTableMetadata(), target, List.of());
+                                        .migrateSafelyPlan(current.toTableDefinition(), target, List.of());
         assertFalse(plan.hasExecutableSql(), plan.sqlTexts().toString());
-        assertFalse(plan.requiresManualReview(), plan.skippedSummaries().toString());
+        assertFalse(plan.hasSkippedChanges(), plan.skippedSummaries().toString());
     }
 
-    private static DynamicForm metadataForm(InformationSchemaFormMetadataReader.Queries queries,
+    private static DynamicForm metadataForm(MetadataQueryProfile.Queries queries,
                                             String dataType,
                                             Integer length) {
         java.util.HashMap<String, Object> row = new java.util.HashMap<>();
@@ -543,6 +553,6 @@ class NativeTemporalMetadataTest {
             row.put("CHARACTER_MAXIMUM_LENGTH", length);
         }
         return FormMetadataRowConverter.toDynamicForm(
-                "counters", "counters", List.of(row), queries.typeMapper());
+                "counters", com.flying.orm.core.metadata.RelationIdentity.parse("counters"), List.of(row), queries.typeMapper());
     }
 }

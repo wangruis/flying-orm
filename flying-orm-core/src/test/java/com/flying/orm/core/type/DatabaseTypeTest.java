@@ -6,6 +6,8 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class DatabaseTypeTest {
@@ -75,6 +77,60 @@ class DatabaseTypeTest {
     @Test
     void equalityUsesCanonicalTypeSyntax() {
         assertEquals(DatabaseType.of("VARCHAR ( 64 )"), DatabaseType.of(" varchar(64) "));
+    }
+
+    @Test
+    void preservesUnsupportedQuotedDeclarationsWithoutAcceptingThemAsSql() {
+        for (String declaration : List.of("custom('Active')", "\"CaseSensitive\"", "`CaseSensitive`")) {
+            DatabaseType type = DatabaseType.of(declaration);
+            assertEquals(declaration, type.declaration());
+            assertEquals(declaration, type.canonical());
+            assertEquals(declaration, type.comparisonShape());
+            assertFalse(type.safeDeclaration());
+            assertThrows(IllegalArgumentException.class, () -> type.requireSafe("column type"));
+        }
+        assertNotEquals(DatabaseType.of("enum('Active')"), DatabaseType.of("enum('active')"));
+        assertNotEquals(DatabaseType.of("set('A  B')"), DatabaseType.of("set('A B')"));
+        assertNotEquals(DatabaseType.of("enum('A , B')"), DatabaseType.of("enum('A,B')"));
+    }
+
+    @Test
+    void parsesLiteralMembersWithoutNormalizingTheirContentsOrTreatingThemAsSizes() {
+        DatabaseType type = DatabaseType.of(" EnUm ( 'Active', 'It''s (Active)', 'A , B', '' ) ");
+        assertTrue(type.safeDeclaration());
+        assertEquals("ENUM", type.baseName());
+        assertEquals(List.of("'Active'", "'It''s (Active)'", "'A , B'", "''"), type.arguments());
+        assertEquals("enum('Active','It''s (Active)','A , B','')", type.canonical());
+        assertEquals(type.canonical(), type.comparisonShape());
+        assertTrue(type.isTextual());
+        assertEquals(DatabaseType.of("SET ( 'Read', 'Write' )"), DatabaseType.of("set('Read','Write')"));
+        assertNotEquals(DatabaseType.of("enum('A','B')"), DatabaseType.of("enum('B','A')"));
+        assertTrue(DatabaseType.of("enum('); drop table users; --','/*comment*/','?')").safeDeclaration());
+    }
+
+    @Test
+    void acceptsModeIndependentHexMembersAndRejectsEscapingOrTrailingSql() {
+        assertTrue(DatabaseType.of("set(X'415c42', x'00', '')").safeDeclaration());
+        assertFalse(DatabaseType.of("enum(X'123')").safeDeclaration());
+        for (String declaration : List.of("enum()", "enum(1)", "set('a',)", "enum('a')[]",
+                "enum('a') unsigned", "enum('a'); drop table users", "enum('a') /* comment */",
+                "enum('a' 'b')", "enum(\"a\")", "enum('a\\' , '); drop table users; --')",
+                "enum('a\\b')", "enum('a\u0000b')", "enum('a', X'zz')")) {
+            DatabaseType type = DatabaseType.of(declaration);
+            assertFalse(type.safeDeclaration(), declaration);
+            assertThrows(IllegalArgumentException.class, () -> type.requireSafe("column type"));
+        }
+    }
+
+    @Test
+    void literalParsingDoesNotImposeAMemberLimitOrRecurseThroughQuotedText() {
+        String member = "'" + "a''".repeat(10_000) + "z'";
+        DatabaseType quoted = DatabaseType.of("enum(" + member + ")");
+        assertTrue(quoted.safeDeclaration());
+        assertEquals(List.of(member), quoted.arguments());
+        String members = java.util.stream.IntStream.range(0, 5_000)
+                .mapToObj(index -> "'" + index + "'").collect(java.util.stream.Collectors.joining(","));
+        assertEquals(5_000, DatabaseType.of("enum(" + members + ")").arguments().size());
     }
 
     @Test

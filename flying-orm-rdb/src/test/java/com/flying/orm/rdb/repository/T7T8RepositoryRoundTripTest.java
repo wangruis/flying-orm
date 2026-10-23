@@ -84,7 +84,7 @@ class T7T8RepositoryRoundTripTest {
                 case "nested" -> query.or(group -> group.where(property, Status.ACTIVE));
                 default -> throw new AssertionError(predicate);
             }
-            rows = query.execute().collectList().block(WAIT);
+            rows = query.fetch().collectList().block(WAIT);
         } else {
             var query = SyncEntityDmlOperator.create(db.clients.syncForms(), SQL, type).query();
             switch (predicate) {
@@ -95,7 +95,7 @@ class T7T8RepositoryRoundTripTest {
                 case "nested" -> query.or(group -> group.where(property, Status.ACTIVE));
                 default -> throw new AssertionError(predicate);
             }
-            rows = query.execute();
+            rows = query.fetch();
         }
         assertNotNull(rows);
         assertEquals(1, rows.size(), "condition must match the stored enum code");

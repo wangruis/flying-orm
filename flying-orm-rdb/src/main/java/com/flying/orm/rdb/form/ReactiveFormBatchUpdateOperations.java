@@ -6,16 +6,17 @@ import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchExecutionState;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
+import com.flying.orm.rdb.protection.ProtectedContainsLayout;
 import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
-import java.util.List;
 import java.util.Objects;
+import java.util.function.Function;
 import java.util.function.LongFunction;
 
 /**
- * 负责逐行乐观锁批量更新及其执行事实。
+ * 负责普通及乐观锁批量更新，并保留各自的影响行数契约。
  *
  * <p>具体行为从原客户端原样迁移，SQL、参数、Scope、执行保护和响应式订阅语义不变。</p>
  *
@@ -23,55 +24,23 @@ import java.util.function.LongFunction;
  * @date 2026-08-06
  * @version v1.0
  */
-final class ReactiveFormBatchUpdateOperations extends ReactiveFormOperationSupport {
+final class ReactiveFormBatchUpdateOperations {
 
-    ReactiveFormBatchUpdateOperations(ReactiveFormOperationSupport runtime) {
-        super(runtime);
+    private final ReactiveFormOperations runtime;
+
+    ReactiveFormBatchUpdateOperations(ReactiveFormOperations runtime) {
+        this.runtime = Objects.requireNonNull(runtime, "shared form runtime must not be null");
     }
+
+    /** 显式范围与客户端默认范围合并一次；各行条件和赋值独立规划，相邻同形行复用布局。 */
     Mono<BatchExecutionEvidence> updateBatch(DynamicForm form,
-                                              Publisher<BatchOptimisticUpdate> updates) {
-        return updateBatch(form, updates, DataScope.none(), defaultBatchWriteOptions, null);
-    }
-
-    Mono<BatchExecutionEvidence> updateBatch(DynamicForm form,
-                                              List<BatchOptimisticUpdate> updates) {
-        return updateBatch(form,
-                           Flux.fromIterable(Objects.requireNonNull(updates, "batch updates must not be null")));
-    }
-
-    Mono<BatchExecutionEvidence> updateBatch(DynamicForm form,
-                                              Publisher<BatchOptimisticUpdate> updates,
-                                              BatchWriteOptions options) {
-        return updateBatch(form, updates, DataScope.none(), options, null);
-    }
-
-    /**
-     * 显式数据范围会和客户端默认范围做 AND。整批复用同一份合并结果，字段校验和每条 SQL 不会出现范围偏差。
-     */
-    Mono<BatchExecutionEvidence> updateBatch(DynamicForm form,
-                                       Publisher<BatchOptimisticUpdate> updates,
-                                       DataScope scope,
-                                       BatchWriteOptions options) {
-        return updateBatch(form, updates, scope, options, null);
-    }
-
-    Mono<BatchExecutionEvidence> updateBatch(DynamicForm form,
-                                               Publisher<BatchOptimisticUpdate> updates,
-                                               DataScope scope,
-                                               BatchWriteOptions options,
-                                               LongFunction<? extends Publisher<Void>> rowCompleted) {
-        return executeBatch(form, updates, scope, options, rowCompleted);
-    }
-
-
-    private Mono<BatchExecutionEvidence> executeBatch(DynamicForm form,
-                                     Publisher<BatchOptimisticUpdate> updates,
-                                     DataScope scope,
-                                     BatchWriteOptions options,
-                                     LongFunction<? extends Publisher<Void>> rowCompleted) {
+                                             Publisher<BatchUpdate> updates,
+                                             DataScope scope,
+                                             BatchWriteOptions options,
+                                             LongFunction<? extends Publisher<Void>> rowCompleted) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
         BatchWriteOptions safeOptions = Objects.requireNonNull(options, "batch write options must not be null");
-        Flux<BatchOptimisticUpdate> source = Flux.from(Objects.requireNonNull(updates,
+        Flux<BatchUpdate> source = Flux.from(Objects.requireNonNull(updates,
                                                                              "batch updates must not be null"));
         return source.switchOnFirst((signal, replay) -> {
                 if (signal.isOnError()) {
@@ -80,61 +49,22 @@ final class ReactiveFormBatchUpdateOperations extends ReactiveFormOperationSuppo
                 if (!signal.hasValue()) {
                     return Mono.just(new BatchExecutionEvidence.Accumulator().snapshot(BatchExecutionState.SUCCESS, null));
                 }
-                BatchOptimisticUpdate sourceFirst = signal.get();
-                DataScope effectiveScope = scopes.effectiveScope(scope);
+                BatchUpdate sourceFirst = signal.get();
+                DataScope effectiveScope = runtime.scopes.effectiveScope(scope);
                 FieldUseGuard.approveBatchUpdate(
-                        renderer, safeForm, sourceFirst, effectiveScope, fieldUsePolicy);
-                boolean protectedOperation = ReactiveProtectionCpuBoundary.writesEncryptedField(
-                        safeForm, sourceFirst.ownedValues())
-                        || ReactiveProtectionCpuBoundary.usesEncryptedCondition(safeForm, sourceFirst.where())
-                        || ReactiveProtectionCpuBoundary.usesEncryptedScope(safeForm, effectiveScope);
-                Flux<BatchOptimisticUpdate> cpuUpdates = ReactiveProtectionCpuBoundary.batch(
-                        replay, protectedOperation, safeOptions.bufferSize());
-                return cpuUpdates.switchOnFirst((cpuSignal, cpuReplay) -> {
-                    FormProtectedBatchRows.BatchLayout protectionLayout =
-                            FormProtectedBatchRows.layout(safeForm, safeOptions);
-                    DynamicForm physicalForm = renderer.protection().physicalForm(safeForm);
-                    FormProtectionSqlSupport.WriteOperation protection = renderer.protection().writeOperation(
-                            safeForm, physicalForm, effectiveScope, protectionLayout.contains());
-                    FormScopeSupport.PreparedBatchScope batchScope = scopes.prepareBatchScope(
-                            safeForm, physicalForm, effectiveScope);
-                    FormScopeSupport.PreparedBatchUpdate first = scopes.prepareBatchUpdate(
-                            safeForm, physicalForm, sourceFirst, batchScope, protection);
-                    BatchUpdatePlan plan = renderer.optimisticUpdatePlan(first.form(),
-                                                                         first.values(),
-                                                                         first.where(),
-                                                                         first.lock(),
-                                                                         first.request());
-                    Flux<Object[]> parameters = cpuReplay.index()
-                                                      .map(indexed -> protectedParameters(
-                                                              safeForm, first, plan,
-                                                              indexed.getT2(), indexed.getT1(),
-                                                              protectionLayout, batchScope, protection));
-                    BatchWriteRequest request = plan.request(
-                            parameters, safeOptions);
-                    return FormProtectedBatchRows.requiresProtectedExecution(protectionLayout)
-                            ? executor.writeProtectedBatch(request, rowCompleted) : executor.writeBatch(request, rowCompleted);
-                });
+                        runtime.renderer, safeForm, sourceFirst, effectiveScope, runtime.fieldUsePolicy);
+                boolean protectedOperation = !safeForm.protections().encryptedFields().isEmpty();
+                Function<Flux<BatchUpdate>, Publisher<BatchExecutionEvidence>> execute = batchRows -> {
+                    ProtectedContainsLayout protectionLayout = ProtectedContainsLayout.resolve(safeForm).orElse(null);
+                    BatchWriteRequest request = FormProtectedBatchRows.updateRequest(runtime.renderer, runtime.scopes,
+                            safeForm, sourceFirst, effectiveScope, safeOptions, runtime.fieldUsePolicy,
+                            protectionLayout, runtime.executor.supportsBatchRowLayouts(),
+                            mapper -> batchRows.index().map(indexed -> mapper.map(indexed.getT2(), indexed.getT1())));
+                    return protectionLayout != null
+                            ? runtime.executor.writeProtectedBatch(request, rowCompleted) : runtime.executor.writeBatch(request, rowCompleted);
+                };
+                return protectedOperation ? ReactiveProtectionCpuBoundary.batch(replay, true, safeOptions.bufferSize())
+                        .switchOnFirst((cpuSignal, cpuReplay) -> execute.apply(cpuReplay)) : execute.apply(replay);
             }).single();
     }
-
-
-
-
-    private Object[] protectedParameters(DynamicForm form,
-                                         FormScopeSupport.PreparedBatchUpdate first,
-                                         BatchUpdatePlan plan,
-                                         BatchOptimisticUpdate update,
-                                         long index,
-                                         FormProtectedBatchRows.BatchLayout protectionLayout,
-                                         FormScopeSupport.PreparedBatchScope batchScope,
-                                         FormProtectionSqlSupport.WriteOperation protection) {
-        FormScopeSupport.PreparedBatchUpdate prepared = index == 0L
-                ? first : scopes.prepareBatchUpdate(
-                        form, first.form(), update, batchScope, protection);
-        Object[] parameters = plan.parameters(prepared.request(), index);
-        return FormProtectedBatchRows.update(
-                protection, prepared, parameters, protectionLayout);
-    }
-
 }

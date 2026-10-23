@@ -11,26 +11,11 @@ package com.flying.orm.rdb.observation;
 @FunctionalInterface
 public interface SqlExecutionLogSink {
 
-    /**
-     * 保留原来的单参数写入入口。老代码用 {@code messages::add} 之类的 Lambda 时仍然可以直接使用。
-     */
-    void write(String message);
+    /** 写入指定级别的日志；级别由执行事实和调用方筛选配置决定。 */
+    void write(SqlExecutionLogLevel level, String message);
 
-    /**
-     * 让上层在真正格式化 SQL 之前决定日志级别是否开启。
-     *
-     * <p>旧 sink 默认返回 {@code true}，这样不会改变原来“收到日志就写入”的行为；接入业务日志框架时，
-     * 可以按自己的 DEBUG/WARN/ERROR 配置覆盖这个方法。</p>
-     */
+    /** 格式化之前检查日志级别；无需筛选的出口默认接收全部级别。 */
     default boolean isEnabled(SqlExecutionLogLevel level) {
         return true;
-    }
-
-    /**
-     * 带级别的写入入口。旧 sink 默认回退到 {@link #write(String)}，新 sink 可以覆盖它来真正调用
-     * 上层对应级别的日志方法。
-     */
-    default void write(SqlExecutionLogLevel level, String message) {
-        write(message);
     }
 }

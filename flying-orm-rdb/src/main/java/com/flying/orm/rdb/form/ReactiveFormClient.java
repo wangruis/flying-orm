@@ -1,8 +1,7 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.QueryShapeLimits;
-import com.flying.orm.core.page.CursorPageQuery;
-import com.flying.orm.core.page.CursorPageResult;
+import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.page.KeysetPageQuery;
 import com.flying.orm.core.page.KeysetPageResult;
 import com.flying.orm.core.page.PageQuery;
@@ -17,7 +16,6 @@ import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.aggregate.AggregateRow;
 import com.flying.orm.rdb.aggregate.AggregateSpec;
-import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.form.spec.BatchSpec;
@@ -26,7 +24,6 @@ import com.flying.orm.rdb.form.spec.WriteSpec;
 import com.flying.orm.rdb.internal.InternalApi;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
 import com.flying.orm.rdb.mapping.RowMapper;
-import com.flying.orm.rdb.lock.LockingReadSpec;
 import com.flying.orm.rdb.operator.EntityDmlOperator;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
@@ -35,6 +32,7 @@ import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import java.util.Objects;
+import java.util.function.Function;
 
 /**
  * 动态表单响应式 CRUD 的稳定公开入口。
@@ -43,8 +41,8 @@ import java.util.Objects;
  * 由同包内部操作协作者完成，所以一个已经装配好的客户端可以安全复用给并发订阅。所有数据库 I/O 仍在
  * Reactor 订阅链内发生：这里不会调用 {@code block()} 或 {@code subscribe()}，也不会先收集整个输入流。</p>
  *
- * <p>同包内部的细粒度操作按职责放在 {@link ReactiveFormOperations} 管理的协作者中，同步门面直接复用这些
- * 协作者，因此 R2DBC、SQL、Scope、逻辑删除、乐观锁和执行保护始终只有一套实现。业务代码优先使用
+ * <p>同包内部的细粒度操作按职责放在 {@link ReactiveFormOperations} 管理的协作者中，同步和响应式执行
+ * 共享 SQL 规划、Scope 与结果解码，不通过阻塞响应式链实现同步调用。业务代码优先使用
  * QuerySpec、WriteSpec、BatchSpec 三类不可变规格，避免在调用点拼接 SQL。</p>
  *
  * @author wangr
@@ -58,22 +56,47 @@ public final class ReactiveFormClient {
     private final ReactiveFormOperations operations;
     private final FormDataSqlRenderer renderer;
     private final FormResultDecoder results;
-
-    private ReactiveFormClient(ReactiveSqlExecutor executor, FormDataSqlRenderer renderer) {
-        this(executor, defaults(renderer));
-    }
+    private final Function<QuerySpec, ? extends Publisher<QuerySpec>> queryPreparation;
 
     private ReactiveFormClient(ReactiveSqlExecutor executor, FormConfiguration configuration) {
+        this(executor, configuration, null);
+    }
+
+    private ReactiveFormClient(ReactiveSqlExecutor executor, FormConfiguration configuration,
+                                 Function<QuerySpec, ? extends Publisher<QuerySpec>> queryPreparation) {
         this.executor = Objects.requireNonNull(executor, "reactive sql executor must not be null");
         this.configuration = Objects.requireNonNull(configuration, "form configuration must not be null");
         this.operations = new ReactiveFormOperations(this.executor, configuration);
         this.renderer = configuration.renderer();
         this.results = operations.results;
+        this.queryPreparation = queryPreparation;
     }
 
     /** 创建动态表单响应式客户端。 */
     public static ReactiveFormClient create(ReactiveSqlExecutor executor, FormDataSqlRenderer renderer) {
-        return new ReactiveFormClient(executor, renderer);
+        return new ReactiveFormClient(executor, new FormConfiguration(renderer));
+    }
+
+    /** 统一客户端直接注入最终配置，避免逐项派生时重复创建操作组件。 */
+    @InternalApi
+    public static ReactiveFormClient create(ReactiveSqlExecutor executor, FormDataSqlRenderer renderer,
+                                            StructuredConditionResolver resolver, EntityModelRegistry models,
+                                            SqlExecutionOptions options) {
+        return new ReactiveFormClient(executor, new FormConfiguration(renderer, resolver, options, models));
+    }
+
+    /**
+     * 追加 QuerySpec 查询准备器，每次订阅按注册顺序执行并要求恰好返回一个规格。
+     * 查询、计数、分页与锁定读取共用；分页只准备一次。异常或取消不会继续执行 SQL。
+     * 不处理 JOIN、聚合、原生 SQL、写入或预览，不是全局权限拦截器；回调必须非阻塞且并发安全。
+     */
+    public ReactiveFormClient withQueryPreparation(Function<QuerySpec, ? extends Publisher<QuerySpec>> preparation) {
+        Function<QuerySpec, ? extends Publisher<QuerySpec>> next = Objects.requireNonNull(preparation,
+                "query preparation must not be null");
+        Function<QuerySpec, ? extends Publisher<QuerySpec>> previous = queryPreparation;
+        return new ReactiveFormClient(executor, configuration, previous == null ? next
+                : spec -> Flux.from(previous.apply(spec)).single()
+                        .flatMap(prepared -> Flux.from(next.apply(prepared)).single()));
     }
 
     /** 为前端结构化条件替换线程安全的解析器。 */
@@ -85,7 +108,7 @@ public final class ReactiveFormClient {
     public ReactiveFormClient withDefaultExecutionOptions(SqlExecutionOptions options) {
         SqlExecutionOptions safeOptions = Objects.requireNonNull(options, "sql execution options must not be null");
         return new ReactiveFormClient(
-                executor.withDefaultExecutionOptions(safeOptions), configuration.withExecutionOptions(safeOptions));
+                executor.withDefaultExecutionOptions(safeOptions), configuration.withExecutionOptions(safeOptions), queryPreparation);
     }
 
     /** 设置没有显式 options 时使用的批量策略。 */
@@ -188,7 +211,23 @@ public final class ReactiveFormClient {
 
     /** 执行不可变查询规格并返回紧凑动态行流。 */
     public Flux<DynamicRow> select(QuerySpec spec) {
-        return operations().selectSpec(spec);
+        return canPlanDirectly(spec) ? operations.selectSpec(spec) : prepare(spec).flatMapMany(operations::selectSpec);
+    }
+
+    /** 只读取首条逻辑结果，不查询总数；未排序时由数据库决定首行。 */
+    public Mono<DynamicRow> first(QuerySpec spec) {
+        return canPlanDirectly(spec) ? operations.firstSpec(spec) : prepare(spec).flatMap(operations::firstSpec);
+    }
+
+    /** 统计行数；存在分组时统计组数。忽略结果投影、排序和行锁，保留条件、Scope 与字段治理。 */
+    public Mono<Long> count(QuerySpec spec) {
+        return canPlanDirectly(spec) ? operations.countSpec(spec) : prepare(spec).flatMap(operations::countSpec);
+    }
+
+    /** 按既有实体映射规则读取首条结果；空查询返回空 Mono。 */
+    public <T> Mono<T> first(QuerySpec spec, Class<T> type) {
+        RowMapper<T> mapper = results.rowMapper(type, "form result type must not be null");
+        return first(spec).map(mapper::map);
     }
 
     /** DML operator 复用完整 Form 计划、保护改写和结果解码，但不复制整套客户端配置。 */
@@ -196,13 +235,16 @@ public final class ReactiveFormClient {
     public Flux<DynamicRow> selectGoverned(QuerySpec spec,
                                            FieldUsePolicy policy,
                                            QueryShapeLimits limits) {
-        return operations().selectSpecGoverned(spec, policy, limits);
+        return canPlanDirectly(spec) ? operations.selectSpecGoverned(spec, policy, limits)
+                : prepare(spec).flatMapMany(prepared -> operations.selectSpecGoverned(prepared, policy, limits));
     }
 
     /** 在订阅时执行带显式 SQL 锁语法的受控读取，不探测或改变调用方事务。 */
-    public Flux<DynamicRow> lockingRead(LockingReadSpec spec) {
-        return operations().lockingReadSpec(Objects.requireNonNull(
-                spec, "locking read spec must not be null"));
+    public Flux<DynamicRow> lockingRead(QuerySpec spec) {
+        Objects.requireNonNull(spec, "locking read spec must not be null");
+        return queryPreparation == null ? operations.lockingReadSpec(spec)
+                : prepare(spec).flatMapMany(prepared -> operations.lockingReadSpec(
+                        prepared));
     }
 
     /** 使用 JDBC/R2DBC 共用的计划和布局执行类型化聚合。 */
@@ -210,157 +252,171 @@ public final class ReactiveFormClient {
         return operations.aggregate(spec);
     }
 
+    /** 数据库端聚合分页；total 是 HAVING 后的分组数，不治理两次查询的事务隔离。 */
+    public Mono<PageResult<AggregateRow>> aggregatePage(AggregateSpec spec, PageQuery page) {
+        return operations.aggregatePage(spec, page);
+    }
+
     /** 执行查询规格并映射实体。 */
     public <T> Flux<T> select(QuerySpec spec, Class<T> type) {
         RowMapper<T> mapper = results.rowMapper(type, "form result type must not be null");
-        return FormResultMappingSupport.mapRows(select(spec), mapper);
+        return select(spec).map(mapper::map);
     }
 
     /** 执行一基页码分页。 */
     public Mono<PageResult<DynamicRow>> page(QuerySpec spec, PageQuery page) {
-        return operations().pageSpec(spec, page);
+        return page(spec, page, FormResultDecoder.IDENTITY);
     }
 
     /** 执行页码分页并映射实体。 */
     public <T> Mono<PageResult<T>> page(QuerySpec spec, PageQuery page, Class<T> type) {
-        return FormResultMappingSupport.mapPage(page(spec, page),
-                                                results.rowMapper(type, "page result type must not be null"));
+        RowMapper<T> mapper = results.rowMapper(type, "page result type must not be null");
+        return page(spec, page, mapper);
     }
 
-    /** 执行稳定游标分页，不额外执行 count SQL。 */
-    public Mono<CursorPageResult<DynamicRow>> cursorPage(QuerySpec spec, CursorPageQuery page) {
-        return operations().cursorPageSpec(spec, page);
-    }
-
-    /** 执行游标分页并映射实体。 */
-    public <T> Mono<CursorPageResult<T>> cursorPage(QuerySpec spec, CursorPageQuery page, Class<T> type) {
-        return FormResultMappingSupport.mapCursorPage(cursorPage(spec, page),
-                                                      results.rowMapper(type, "cursor page result type must not be null"));
+    private <T> Mono<PageResult<T>> page(QuerySpec spec, PageQuery page, RowMapper<T> mapper) {
+        return canPlanDirectly(spec) ? operations.pageSpec(spec, page, mapper)
+                : prepare(spec).flatMap(prepared -> operations.pageSpec(prepared, page, mapper));
     }
 
     /** 执行插入规格。 */
     public Mono<Long> insert(WriteSpec spec) {
-        return operations().insertSpec(spec);
+        ReactiveWriteInterceptor interceptor = writeInterceptor(spec.form());
+        return interceptor == null ? operations.insertSpec(spec)
+                : Mono.defer(() -> interceptor.write(spec, operations::insertSpec));
     }
 
     /** 执行轻量多表查询并返回显式投影组成的紧凑动态行。 */
     public Flux<DynamicRow> selectJoin(JoinQuerySpec spec) {
-        return operations().selectJoin(spec, null);
+        return operations.selectJoin(spec, null);
     }
 
     /** 使用本次显式执行保护执行轻量多表查询。 */
     public Flux<DynamicRow> selectJoin(JoinQuerySpec spec, SqlExecutionOptions options) {
-        return operations().selectJoin(spec, Objects.requireNonNull(
+        return operations.selectJoin(spec, Objects.requireNonNull(
                 options, "join execution options must not be null"));
     }
 
     /** 使用 JOIN AST 的同一 Scope/条件分别执行 count 与页数据查询。 */
     public Mono<PageResult<DynamicRow>> pageJoin(JoinQuerySpec spec, PageQuery page) {
-        return operations().pageJoin(spec, page, null);
+        return operations.pageJoin(spec, page, null);
     }
 
     /** 使用本次执行保护完成 JOIN 页码分页。 */
     public Mono<PageResult<DynamicRow>> pageJoin(JoinQuerySpec spec,
                                                  PageQuery page,
                                                  SqlExecutionOptions options) {
-        return operations().pageJoin(spec, page, Objects.requireNonNull(
+        return operations.pageJoin(spec, page, Objects.requireNonNull(
                 options, "join execution options must not be null"));
     }
 
     /** Repository 的数据库生成主键回填路径；不会改变动态表单 insert 的简洁返回值。 */
     @InternalApi
     public Mono<SqlWriteResult> insertReturningKeys(WriteSpec spec) {
-        return operations().insertReturningKeysSpec(spec);
+        ReactiveWriteInterceptor interceptor = writeInterceptor(spec.form());
+        return interceptor == null ? operations.insertReturningKeysSpec(spec)
+                : Mono.defer(() -> interceptor.write(spec, operations::insertReturningKeysSpec));
     }
 
     /** 执行更新规格。 */
     public Mono<Long> update(WriteSpec spec) {
-        return operations().updateSpec(spec);
+        ReactiveWriteInterceptor interceptor = writeInterceptor(spec.form());
+        return interceptor == null ? operations.updateSpec(spec)
+                : Mono.defer(() -> interceptor.write(spec, operations::updateSpec));
     }
 
     /** 执行逻辑删除优先的删除规格。 */
     public Mono<Long> delete(WriteSpec spec) {
-        return operations().deleteSpec(spec);
+        ReactiveWriteInterceptor interceptor = writeInterceptor(spec.form());
+        return interceptor == null ? operations.deleteSpec(spec)
+                : Mono.defer(() -> interceptor.write(spec, operations::deleteSpec));
     }
 
     /** 执行明确的物理删除。 */
     public Mono<Long> physicalDelete(WriteSpec spec) {
-        return operations().physicalDeleteSpec(spec);
+        ReactiveWriteInterceptor interceptor = writeInterceptor(spec.form());
+        return interceptor == null ? operations.physicalDeleteSpec(spec)
+                : Mono.defer(() -> interceptor.write(spec, operations::physicalDeleteSpec));
     }
 
-    /** 执行流式 insert、upsert 或逐行乐观更新批量规格。 */
+    /** 执行流式 insert、upsert 或普通/乐观锁 update 批量规格。 */
     public Mono<BatchExecutionEvidence> writeBatch(BatchSpec spec) {
         return writeBatch(spec, null);
     }
 
     /** 执行锁定读取并复用当前实体映射。 */
-    public <T> Flux<T> lockingRead(LockingReadSpec spec, Class<T> type) {
+    public <T> Flux<T> lockingRead(QuerySpec spec, Class<T> type) {
         RowMapper<T> mapper = results.rowMapper(
                 type, "locking read result type must not be null");
-        return FormResultMappingSupport.mapRows(lockingRead(spec), mapper);
+        return lockingRead(spec).map(mapper::map);
     }
 
     /** 执行 nullable、复合排序的稳定 keyset 分页，不执行 count SQL。 */
     public Mono<KeysetPageResult<DynamicRow>> keysetPage(QuerySpec spec, KeysetPageQuery page) {
-        return operations().keysetPageSpec(spec, page);
+        return keysetPage(spec, page, FormResultDecoder.IDENTITY);
     }
 
     /** 执行 keyset 分页并在隐藏游标列剥离后映射实体。 */
     public <T> Mono<KeysetPageResult<T>> keysetPage(
             QuerySpec spec, KeysetPageQuery page, Class<T> type) {
-        return FormResultMappingSupport.mapKeysetPage(
-                keysetPage(spec, page),
-                results.rowMapper(type, "keyset page result type must not be null"));
+        RowMapper<T> mapper = results.rowMapper(type, "keyset page result type must not be null");
+        return keysetPage(spec, page, mapper);
+    }
+
+    private <T> Mono<KeysetPageResult<T>> keysetPage(QuerySpec spec, KeysetPageQuery page, RowMapper<T> mapper) {
+        return canPlanDirectly(spec) ? operations.keysetPageSpec(spec, page, mapper)
+                : prepare(spec).flatMap(prepared -> operations.keysetPageSpec(prepared, page, mapper));
     }
 
     /** 在一条查询中组合稳定 keyset 与受控 SQL 锁，不执行 count。 */
     public Mono<KeysetPageResult<DynamicRow>> lockingRead(
-            LockingReadSpec spec,
+            QuerySpec spec,
             KeysetPageQuery page) {
-        return operations().lockingReadSpec(
-                Objects.requireNonNull(spec, "locking read spec must not be null"),
-                Objects.requireNonNull(page, "keyset page query must not be null"));
+        return lockingRead(spec, page, FormResultDecoder.IDENTITY);
+    }
+
+    private <T> Mono<KeysetPageResult<T>> lockingRead(QuerySpec spec, KeysetPageQuery page, RowMapper<T> mapper) {
+        Objects.requireNonNull(spec, "locking read spec must not be null");
+        Objects.requireNonNull(page, "keyset page query must not be null");
+        return queryPreparation == null ? operations.lockingReadSpec(spec, page, mapper)
+                : prepare(spec).flatMap(prepared -> operations.lockingReadSpec(
+                        prepared, page, mapper));
     }
 
     /** 锁定 keyset 的类型化结果入口。 */
     public <T> Mono<KeysetPageResult<T>> lockingRead(
-            LockingReadSpec spec,
+            QuerySpec spec,
             KeysetPageQuery page,
             Class<T> type) {
-        return FormResultMappingSupport.mapKeysetPage(
-                lockingRead(spec, page),
-                results.rowMapper(type, "locking keyset result type must not be null"));
+        RowMapper<T> mapper = results.rowMapper(type, "locking keyset result type must not be null");
+        return lockingRead(spec, page, mapper);
     }
 
     /** 执行批量并按绝对输入位置组合内部行完成回调。 */
     @com.flying.orm.rdb.internal.InternalApi
     public Mono<BatchExecutionEvidence> writeBatch(
             BatchSpec spec, java.util.function.LongFunction<? extends Publisher<Void>> rowCompleted) {
-        return operations().writeBatchSpec(spec, rowCompleted);
+        ReactiveWriteInterceptor interceptor = writeInterceptor(spec.form());
+        return interceptor == null ? operations.writeBatchSpec(spec, rowCompleted)
+                : Mono.defer(() -> interceptor.batch(spec, prepared -> operations.writeBatchSpec(prepared, rowCompleted)));
     }
 
-    public Mono<BatchExecutionEvidence> writeBatchEvidence(BatchSpec spec) {
-        return writeBatch(spec);
-    }
-
-
-    /** 同包同步门面和实体入口复用这条已经装配好的内部操作链。 */
-    ReactiveFormOperations operations() {
-        return operations;
+    private static ReactiveWriteInterceptor writeInterceptor(DynamicForm form) {
+        return form.features().features().isEmpty() ? null
+                : (ReactiveWriteInterceptor) form.features().find(ReactiveWriteInterceptor.ID).orElse(null);
     }
 
     private ReactiveFormClient configured(FormConfiguration configured) {
-        return new ReactiveFormClient(executor, configured);
+        return new ReactiveFormClient(executor, configured, queryPreparation);
     }
 
-    private static FormConfiguration defaults(FormDataSqlRenderer renderer) {
-        FormDataSqlRenderer safeRenderer = Objects.requireNonNull(
-                renderer, "form data sql renderer must not be null");
-        return new FormConfiguration(
-                safeRenderer, StructuredConditionResolver.defaults(safeRenderer.valueCodecs()), DataScope.none(),
-                SqlExecutionOptions.safeDefaults(), BatchWriteOptions.defaults(),
-                EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults()), FieldUsePolicy.unrestricted(),
-                QueryShapeLimits.defaults());
+    private Mono<QuerySpec> prepare(QuerySpec spec) {
+        return queryPreparation == null ? Mono.just(spec)
+                : Mono.defer(() -> Flux.from(queryPreparation.apply(spec)).single());
+    }
+
+    private boolean canPlanDirectly(QuerySpec spec) {
+        return queryPreparation == null && spec.form().relations().isEmpty();
     }
 
 }

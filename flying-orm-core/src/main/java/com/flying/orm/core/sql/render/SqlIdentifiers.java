@@ -2,8 +2,6 @@ package com.flying.orm.core.sql.render;
 
 import com.flying.orm.core.internal.Names;
 
-import java.util.regex.Pattern;
-
 /**
  * SQL 里的表名、列名只接受普通标识符。值可以使用占位符绑定，标识符却不能，因此这里是防止
  * 前端字段名、动态表名和排序字段混入 SQL 表达式的最后一道基础校验。
@@ -17,8 +15,6 @@ import java.util.regex.Pattern;
  */
 public final class SqlIdentifiers {
 
-    private static final Pattern PART = Pattern.compile("[A-Za-z_][A-Za-z0-9_]*");
-
     private SqlIdentifiers() {
     }
 
@@ -26,10 +22,9 @@ public final class SqlIdentifiers {
      * 校验普通或点分限定标识符。每一段都必须以字母或下划线开头。
      *
      * @param value 待校验的表名、列名或别名
-     * @param fieldName 兼容保留的诊断标签；公开异常始终使用固定分类，不回显该输入
      * @return 原始标识符文本
      */
-    public static String requireIdentifier(String value, String fieldName) {
+    public static String requireIdentifier(String value) {
         return requirePlainIdentifier(value, "sql identifier");
     }
 
@@ -37,10 +32,9 @@ public final class SqlIdentifiers {
      * 校验 select 投影。这里只比普通标识符额外允许 {@code *} 和 {@code alias.*}，不接受任意表达式。
      *
      * @param value 投影文本
-     * @param fieldName 兼容保留的诊断标签；公开异常始终使用固定分类，不回显该输入
      * @return 校验后的投影文本
      */
-    public static String requireProjection(String value, String fieldName) {
+    public static String requireProjection(String value) {
         String text = Names.requireText(value, "sql projection");
         if ("*".equals(text)) {
             return text;
@@ -53,11 +47,22 @@ public final class SqlIdentifiers {
 
     private static String requirePlainIdentifier(String value, String category) {
         String text = Names.requireText(value, category);
-        String[] parts = text.split("\\.", -1);
-        for (String part : parts) {
-            if (!PART.matcher(part).matches()) {
+        boolean segmentStart = true;
+        for (int index = 0; index < text.length(); index++) {
+            char character = text.charAt(index);
+            if (character == '.' && !segmentStart) {
+                segmentStart = true;
+            } else if (character >= 'A' && character <= 'Z'
+                    || character >= 'a' && character <= 'z'
+                    || character == '_'
+                    || !segmentStart && character >= '0' && character <= '9') {
+                segmentStart = false;
+            } else {
                 throw new IllegalArgumentException(category + " must be a plain identifier");
             }
+        }
+        if (segmentStart) {
+            throw new IllegalArgumentException(category + " must be a plain identifier");
         }
         return text;
     }

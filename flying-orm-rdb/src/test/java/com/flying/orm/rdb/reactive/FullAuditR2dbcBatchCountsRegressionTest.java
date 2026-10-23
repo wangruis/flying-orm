@@ -217,7 +217,7 @@ class FullAuditR2dbcBatchCountsRegressionTest {
 
         private BatchExecutionEvidenceException writeFailure() {
             return assertThrows(BatchExecutionEvidenceException.class,
-                    () -> executor.writeBatchEvidence(request()).block(TEST_WAIT));
+                    () -> executor.writeBatch(request()).block(TEST_WAIT));
         }
     }
 }

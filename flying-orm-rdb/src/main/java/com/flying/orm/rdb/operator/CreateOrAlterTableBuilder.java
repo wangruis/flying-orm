@@ -1,16 +1,16 @@
 package com.flying.orm.rdb.operator;
 
+import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.rdb.metadata.ReactiveFormMetadataReader;
 import com.flying.orm.rdb.schema.ReactiveSchemaClient;
-import com.flying.orm.rdb.schema.ReviewedSchemaMigrationPlan;
-import com.flying.orm.rdb.schema.SchemaMigrationExecutionOptions;
-import com.flying.orm.rdb.schema.SchemaMigrationOptions;
 import com.flying.orm.rdb.schema.SchemaMigrationPlan;
-import com.flying.orm.rdb.schema.SchemaMigrationReviewPolicy;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.schema.SchemaMigrationOptions;
 import com.flying.orm.rdb.schema.SchemaMigrationResult;
 import reactor.core.publisher.Mono;
 
 import java.util.Objects;
+import java.util.function.Consumer;
 
 /**
  * createOrAlter 的链式入口。它先读当前表结构，再按安全策略生成并执行差异计划。
@@ -41,8 +41,27 @@ public final class CreateOrAlterTableBuilder {
      *
      * @return 新的列构建器
      */
-    public ColumnBuilder addColumn() {
-        return new ColumnBuilder(this);
+    public ColumnBuilder<CreateOrAlterTableBuilder> addColumn() {
+        return new ColumnBuilder<>(this, draft);
+    }
+
+    /** 开始描述具名列，等价于 addColumn().name(name)。 */
+    public ColumnBuilder<CreateOrAlterTableBuilder> addColumn(String name) {
+        return addColumn().name(name);
+    }
+
+    /** 配置并添加一列，回调中无需 commit；返回时冻结列定义，不触发数据库操作。 */
+    public CreateOrAlterTableBuilder addColumn(
+            String name, Consumer<? super ColumnBuilder<CreateOrAlterTableBuilder>> definition) {
+        ColumnBuilder<CreateOrAlterTableBuilder> column = addColumn(name);
+        Objects.requireNonNull(definition, "column configuration must not be null").accept(column);
+        return column.commit();
+    }
+
+    /** 直接复用完整动态字段，包括类型、精度、可空性、唯一性和生成策略。 */
+    public CreateOrAlterTableBuilder addColumn(DynamicField field) {
+        draft.addColumn(field);
+        return this;
     }
 
     /**
@@ -51,18 +70,18 @@ public final class CreateOrAlterTableBuilder {
      * @param name 索引名
      * @return 新的索引构建器
      */
-    public IndexBuilder addIndex(String name) {
-        return new IndexBuilder(this, name);
+    public IndexBuilder<CreateOrAlterTableBuilder> addIndex(String name) {
+        return new IndexBuilder<>(this, draft, name);
     }
 
     /**
-     * 开始描述一个外键。安全计划会把高风险关系变化留给上层明确审核。
+     * 开始描述一个外键。不能生成正确 SQL 的关系变化会明确列入计划。
      *
      * @param name 外键名
      * @return 新的外键构建器
      */
-    public ForeignKeyBuilder addForeignKey(String name) {
-        return new ForeignKeyBuilder(this, name);
+    public ForeignKeyBuilder<CreateOrAlterTableBuilder> addForeignKey(String name) {
+        return new ForeignKeyBuilder<>(this, draft, name);
     }
 
     /**
@@ -77,7 +96,7 @@ public final class CreateOrAlterTableBuilder {
     }
 
     /**
-     * 执行安全迁移，只返回所有已执行 DDL 的累计影响行数。
+     * 按显式迁移选项执行，只返回所有已执行 DDL 的累计影响行数。
      *
      * @return 惰性的迁移结果
      */
@@ -86,7 +105,7 @@ public final class CreateOrAlterTableBuilder {
     }
 
     /**
-     * 执行安全迁移并保留完整计划、跳过项和影响行数。只有执行成功才会精确清理本表元数据缓存。
+     * 按显式迁移选项执行并保留完整计划、跳过项和影响行数，执行后失效相关表元数据缓存。
      *
      * @return 惰性的详细迁移结果
      */
@@ -105,27 +124,15 @@ public final class CreateOrAlterTableBuilder {
                 draft.form(), draft.indexes(), draft.foreignKeys(), metadataReader, draft.options());
     }
 
-    /**
-     * 生成带风险等级、回滚缺口和在线 DDL 判断的审核结果，不执行 SQL。危险 options 应先走这里，
-     * 把结果展示或记录后再生成精确批准。
-     */
-    public Mono<ReviewedSchemaMigrationPlan> review(SchemaMigrationReviewPolicy policy) {
-        return schemaClient.reviewCreateOrAlter(
-                draft.form(), draft.indexes(), draft.foreignKeys(), metadataReader, draft.options(), policy);
-    }
-
-    /**
-     * 执行已经审核过的确定计划。执行内容来自 reviewedPlan，不会重新读取当前可变 builder，
-     * 因此审批指纹和真正下发的 SQL 始终对应同一份计划。
-     */
-    public Mono<SchemaMigrationResult> executeReviewed(ReviewedSchemaMigrationPlan reviewedPlan,
-                                                       SchemaMigrationExecutionOptions executionOptions) {
-        return schemaClient.executeReviewed(reviewedPlan, metadataReader, executionOptions);
+    /** 执行冻结的结构计划，不重新读取当前可变 builder。 */
+    public Mono<SchemaMigrationResult> execute(SchemaMigrationPlan plan,
+                                                       SqlExecutionOptions executionOptions) {
+        return schemaClient.execute(plan, metadataReader, executionOptions);
     }
 
     /** 使用 DatabaseOperator 或 SchemaClient 装配时统一设置的默认执行保护。 */
-    public Mono<SchemaMigrationResult> executeReviewed(ReviewedSchemaMigrationPlan reviewedPlan) {
-        return schemaClient.executeReviewed(reviewedPlan, metadataReader);
+    public Mono<SchemaMigrationResult> execute(SchemaMigrationPlan plan) {
+        return schemaClient.execute(plan, metadataReader);
     }
 
     DdlStructureDraft draft() {

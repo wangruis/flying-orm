@@ -1,8 +1,11 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.rdb.execution.SqlExecutionSequenceException;
 import com.flying.orm.rdb.execution.ConnectionAccessTestSupport;
 
 import com.flying.orm.core.metadata.RelationalTableDefinition;
+import com.flying.orm.core.metadata.ColumnDefault;
+import com.flying.orm.core.metadata.ColumnDefinition;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.DatabaseDescriptor;
 import com.flying.orm.rdb.dialect.RdbDialect;
@@ -30,18 +33,93 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SchemaPartialAndUnknownOutcomeTest {
 
     @Test
+    void reportsDefaultReplacementFailureWithoutPretendingTheDropWasRolledBack() {
+        RdbDialect dialect = RdbDialect.sqlServer();
+        RelationalTableDefinition before = SchemaExecutionFixtures.table(
+                ColumnDefinition.builder("note", "VARCHAR").length(32)
+                        .defaultValue(ColumnDefault.literal("old")).defaultConstraintName("DF_note").build());
+        RelationalTableDefinition afterDrop = SchemaExecutionFixtures.table(
+                ColumnDefinition.builder("note", "VARCHAR").length(32).build());
+        RelationalTableDefinition desired = SchemaExecutionFixtures.table(
+                ColumnDefinition.builder("note", "VARCHAR").length(32)
+                        .defaultValue(ColumnDefault.literal("new")).defaultConstraintName("DF_note").build());
+        for (boolean reactive : List.of(false, true)) {
+            AtomicReference<SchemaSnapshot> snapshot = new AtomicReference<>(SchemaSnapshot.present(before));
+            SchemaMigrationPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
+                    DatabaseDescriptor.of("SQL Server", "test", dialect), desired, snapshot.get(),
+                    SchemaSnapshotCoverage.complete(), SchemaCompatibilityMode.EXACT);
+            assertEquals(2, plan.requests().size());
+            List<SqlRequest> attempts = new ArrayList<>();
+            java.util.function.Function<SqlRequest, Long> execute = request -> {
+                attempts.add(request);
+                if (attempts.size() == 1) {
+                    snapshot.set(SchemaSnapshot.present(afterDrop));
+                    return 0L;
+                }
+                throw new IllegalStateException("add default failed");
+            };
+            SqlExecutionOptions options = SqlExecutionOptions.unlimited()
+                    ;
+            SqlExecutionSequenceException failure = assertThrows(SqlExecutionSequenceException.class,
+                    () -> { if (reactive) SchemaExecutionFixtures.executeReactive(plan,
+                            new SchemaExecutionFixtures.ReactiveExecutor(request -> Mono.fromSupplier(() -> execute.apply(request))), () -> {}, options).block();
+                    else SchemaExecutionFixtures.executeJdbc(plan, new SchemaExecutionFixtures.SyncExecutor(execute), () -> {}, options); });
+            assertEquals(plan.requests(), attempts);
+            assertEquals(1, failure.stepIndex());
+            assertEquals(List.of(plan.requests().getFirst()),
+                    failure.completedWorkSteps().stream().map(step -> step.request()).toList());
+        }
+    }
+
+    @Test
+    void combinedColumnChangeKeepsCompletedTypeStepWhenNullabilityFails() {
+        RdbDialect dialect = RdbDialect.postgresql();
+        RelationalTableDefinition before = SchemaExecutionFixtures.table(
+                ColumnDefinition.builder("note", "VARCHAR").length(32).nullable(false).build());
+        RelationalTableDefinition afterType = SchemaExecutionFixtures.table(
+                ColumnDefinition.builder("note", "VARCHAR").length(64).nullable(false).build());
+        RelationalTableDefinition desired = SchemaExecutionFixtures.table(
+                ColumnDefinition.builder("note", "VARCHAR").length(64).nullable(true).build());
+        for (boolean reactive : List.of(false, true)) {
+            AtomicReference<SchemaSnapshot> snapshot = new AtomicReference<>(SchemaSnapshot.present(before));
+            SchemaMigrationPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
+                    DatabaseDescriptor.of("PostgreSQL", "16", dialect), desired, snapshot.get(),
+                    SchemaSnapshotCoverage.complete(), SchemaCompatibilityMode.EXACT);
+            assertEquals(2, plan.requests().size());
+            List<SqlRequest> attempts = new ArrayList<>();
+            java.util.function.Function<SqlRequest, Long> execute = request -> {
+                attempts.add(request);
+                if (attempts.size() == 1) {
+                    snapshot.set(SchemaSnapshot.present(afterType));
+                    return 0L;
+                }
+                throw new IllegalStateException("second DDL failed");
+            };
+            SqlExecutionOptions options = SqlExecutionOptions.unlimited()
+                    ;
+            SqlExecutionSequenceException failure = assertThrows(SqlExecutionSequenceException.class,
+                    () -> { if (reactive) SchemaExecutionFixtures.executeReactive(plan,
+                            new SchemaExecutionFixtures.ReactiveExecutor(request -> Mono.fromSupplier(() -> execute.apply(request))), () -> {}, options).block();
+                    else SchemaExecutionFixtures.executeJdbc(plan, new SchemaExecutionFixtures.SyncExecutor(execute), () -> {}, options); });
+            assertEquals(plan.requests(), attempts);
+            assertEquals(1, failure.stepIndex());
+            assertEquals(List.of(plan.requests().getFirst()),
+                    failure.completedWorkSteps().stream().map(step -> step.request()).toList());
+        }
+    }
+
+    @Test
     void sqlSentRecordsAnAttemptEvenWhenConnectionAcquisitionFails() {
-        SchemaSnapshot snapshot = SchemaSnapshot.present(VerifiedSchemaPlanFixtures.table(VerifiedSchemaPlanFixtures.ID));
-        ReviewedSchemaPlan plan = VerifiedSchemaPlanFixtures.plan(snapshot,
-                VerifiedSchemaPlanFixtures.table(VerifiedSchemaPlanFixtures.ID, VerifiedSchemaPlanFixtures.NOTE),
+        SchemaSnapshot snapshot = SchemaSnapshot.present(SchemaExecutionFixtures.table(SchemaExecutionFixtures.ID));
+        SchemaMigrationPlan plan = SchemaExecutionFixtures.plan(snapshot,
+                SchemaExecutionFixtures.table(SchemaExecutionFixtures.ID, SchemaExecutionFixtures.NOTE),
                 new SqlRequest("alter table accounts add column note varchar(80)", List.of()));
         AtomicInteger acquisitions = new AtomicInteger();
         JdbcConnectionAccess jdbc = new JdbcConnectionAccess() {
@@ -53,9 +131,8 @@ class SchemaPartialAndUnknownOutcomeTest {
                 throw new AssertionError("unacquired connection must not be released");
             }
         };
-        SchemaExecutionReport sync = VerifiedSchemaPlanExecutor.executeJdbc(plan,
-                JdbcSqlExecutor.create(jdbc, RdbDialect.h2()), () -> snapshot,
-                SchemaSnapshotCoverage::complete, () -> {}, SqlExecutionOptions.safeDefaults());
+        assertThrows(SqlExecutionSequenceException.class, () -> SchemaExecutionFixtures.executeJdbc(plan,
+                JdbcSqlExecutor.create(jdbc, RdbDialect.h2()), () -> {}, SqlExecutionOptions.unlimited()));
         assertEquals(1, acquisitions.get());
 
         acquisitions.set(0);
@@ -71,128 +148,50 @@ class SchemaPartialAndUnknownOutcomeTest {
                         throw new AssertionError("unacquired connection must not be released");
                     }
                 };
-        SchemaExecutionReport async = VerifiedSchemaPlanExecutor.executeReactive(plan,
-                R2dbcSqlExecutor.create(reactive, RdbDialect.h2()), () -> Mono.just(snapshot),
-                SchemaSnapshotCoverage::complete, () -> {}, SqlExecutionOptions.safeDefaults()).block();
+        assertThrows(SqlExecutionSequenceException.class, () -> SchemaExecutionFixtures.executeReactive(plan,
+                R2dbcSqlExecutor.create(reactive, RdbDialect.h2()), () -> {}, SqlExecutionOptions.unlimited()).block());
         assertEquals(1, acquisitions.get());
-        for (SchemaExecutionReport report : List.of(sync, async)) {
-            assertEquals(SchemaExecutionStatus.UNKNOWN, report.status());
-            assertTrue(report.steps().getFirst().sqlSent());
-            assertFalse(report.steps().getFirst().rowsUpdated().isPresent());
-            assertFalse(report.successful());
-        }
+
     }
 
-    @Test
-    void reportsCompletedPrefixAndRedactsTheAmbiguousFailure() {
-        RelationalTableDefinition before = VerifiedSchemaPlanFixtures.table(
-                VerifiedSchemaPlanFixtures.ID);
-        RelationalTableDefinition afterFirst = VerifiedSchemaPlanFixtures.table(
-                VerifiedSchemaPlanFixtures.ID, VerifiedSchemaPlanFixtures.NOTE);
-        RelationalTableDefinition desired = VerifiedSchemaPlanFixtures.table(
-                VerifiedSchemaPlanFixtures.ID,
-                VerifiedSchemaPlanFixtures.NOTE,
-                VerifiedSchemaPlanFixtures.TAG);
-        AtomicReference<SchemaSnapshot> snapshot = new AtomicReference<>(SchemaSnapshot.present(before));
-        ReviewedSchemaPlan plan = VerifiedSchemaPlanFixtures.plan(
-                snapshot.get(),
-                desired,
-                new SqlRequest("alter table accounts add column note varchar(80)", List.of()),
-                new SqlRequest("alter table accounts add column tag varchar(40)", List.of()));
-        VerifiedSchemaPlanFixtures.SyncExecutor executor =
-                new VerifiedSchemaPlanFixtures.SyncExecutor(request -> {
-                    if (request.sql().contains("note")) {
-                        snapshot.set(SchemaSnapshot.present(afterFirst));
-                        return 1L;
-                    }
-                    throw new IllegalStateException(
-                            "password=secret; alter table accounts add column tag varchar(40)");
-                });
 
-        SchemaExecutionReport report = VerifiedSchemaPlanExecutor.executeJdbc(
-                plan, executor, snapshot::get, SchemaSnapshotCoverage::complete, () -> {
-                }, SqlExecutionOptions.safeDefaults());
 
-        assertEquals(SchemaExecutionStatus.PARTIAL, report.status());
-        assertEquals(SchemaExecutionStatus.SUCCESS, report.steps().get(0).status());
-        assertEquals(SchemaExecutionStatus.UNKNOWN, report.steps().get(1).status());
-        assertEquals("IllegalStateException",
-                     report.steps().get(1).failureSummary().orElseThrow());
-        assertFalse(report.steps().get(1).failureSummary().orElseThrow().contains("secret"));
-    }
 
-    @Test
-    void reportsUnknownWhenTheFirstSentStatementHasNoCertainOutcome() {
-        RelationalTableDefinition before = VerifiedSchemaPlanFixtures.table(
-                VerifiedSchemaPlanFixtures.ID);
-        RelationalTableDefinition desired = VerifiedSchemaPlanFixtures.table(
-                VerifiedSchemaPlanFixtures.ID, VerifiedSchemaPlanFixtures.NOTE);
-        SchemaSnapshot snapshot = SchemaSnapshot.present(before);
-        ReviewedSchemaPlan plan = VerifiedSchemaPlanFixtures.plan(
-                snapshot, desired,
-                new SqlRequest("alter table accounts add column note varchar(80)", List.of()));
-        VerifiedSchemaPlanFixtures.SyncExecutor executor =
-                new VerifiedSchemaPlanFixtures.SyncExecutor(request -> {
-                    throw new IllegalStateException("connection lost after send");
-                });
-
-        SchemaExecutionReport report = VerifiedSchemaPlanExecutor.executeJdbc(
-                plan, executor, () -> snapshot, SchemaSnapshotCoverage::complete, () -> {
-                }, SqlExecutionOptions.safeDefaults());
-
-        assertEquals(SchemaExecutionStatus.UNKNOWN, report.status());
-        assertEquals(SchemaExecutionStatus.UNKNOWN, report.steps().getFirst().status());
-        assertEquals(1, executor.requests.size());
-    }
 
     @Test
     void reactiveStatementFailurePreservesTheCompletedSchemaStep() {
         ReactiveFailureFixture fixture = new ReactiveFailureFixture(false);
-
-        SchemaExecutionReport report = fixture.execute();
-
-        assertEquals(SchemaExecutionStatus.PARTIAL, report.status());
-        assertEquals(2, report.steps().size());
-        assertEquals(SchemaExecutionStatus.SUCCESS, report.steps().getFirst().status());
-        assertEquals(1L, report.steps().getFirst().rowsUpdated().orElseThrow());
-        assertEquals(SchemaExecutionStatus.UNKNOWN, report.steps().get(1).status());
-        assertTrue(report.steps().get(1).sqlSent());
-        assertEquals("IllegalStateException", report.steps().get(1).failureSummary().orElseThrow());
-        assertFalse(report.verification().orElseThrow().compatible());
+        SqlExecutionSequenceException failure = assertThrows(SqlExecutionSequenceException.class, fixture::execute);
+        assertEquals(1, failure.stepIndex());
+        assertEquals(1, failure.completedWorkSteps().size());
+        assertEquals(1L, failure.completedWorkSteps().getFirst().rowsUpdated());
+        assertEquals("connection lost after send", failure.getCause().getMessage());
         fixture.assertResourcesReleased();
     }
 
     @Test
     void reactiveInvalidationFailurePreservesEveryCompletedSchemaStep() {
         ReactiveFailureFixture fixture = new ReactiveFailureFixture(true);
-
-        SchemaExecutionReport report = fixture.execute();
-
-        assertEquals(SchemaExecutionStatus.UNKNOWN, report.status());
-        assertEquals(2, report.steps().size());
-        for (SchemaExecutionReport.StepResult step : report.steps()) {
-            assertEquals(SchemaExecutionStatus.SUCCESS, step.status());
-            assertEquals(1L, step.rowsUpdated().orElseThrow());
-            assertTrue(step.sqlSent());
-        }
-        assertTrue(report.verification().orElseThrow().compatible());
+        SqlExecutionSequenceException failure = assertThrows(SqlExecutionSequenceException.class, fixture::execute);
+        assertEquals("metadata invalidation failed", failure.getCause().getCause().getMessage());
+        assertEquals(2, failure.completedWorkSteps().size());
         fixture.assertResourcesReleased();
     }
 
     private static final class ReactiveFailureFixture {
 
         private final boolean invalidationFails;
-        private final RelationalTableDefinition afterFirst = VerifiedSchemaPlanFixtures.table(
-                VerifiedSchemaPlanFixtures.ID, VerifiedSchemaPlanFixtures.NOTE);
-        private final RelationalTableDefinition desired = VerifiedSchemaPlanFixtures.table(
-                VerifiedSchemaPlanFixtures.ID, VerifiedSchemaPlanFixtures.NOTE, VerifiedSchemaPlanFixtures.TAG);
+        private final RelationalTableDefinition afterFirst = SchemaExecutionFixtures.table(
+                SchemaExecutionFixtures.ID, SchemaExecutionFixtures.NOTE);
+        private final RelationalTableDefinition desired = SchemaExecutionFixtures.table(
+                SchemaExecutionFixtures.ID, SchemaExecutionFixtures.NOTE, SchemaExecutionFixtures.TAG);
         private final AtomicReference<SchemaSnapshot> snapshot = new AtomicReference<>(SchemaSnapshot.present(
-                VerifiedSchemaPlanFixtures.table(VerifiedSchemaPlanFixtures.ID)));
+                SchemaExecutionFixtures.table(SchemaExecutionFixtures.ID)));
         private final List<String> executed = new ArrayList<>();
         private final AtomicInteger acquisitions = new AtomicInteger();
         private final AtomicInteger closes = new AtomicInteger();
         private final AtomicInteger invalidations = new AtomicInteger();
-        private final ReviewedSchemaPlan plan;
+        private final SchemaMigrationPlan plan;
 
         private ReactiveFailureFixture(boolean invalidationFails) {
             this.invalidationFails = invalidationFails;
@@ -201,18 +200,16 @@ class SchemaPartialAndUnknownOutcomeTest {
                     DatabaseDescriptor.of("PostgreSQL", "16", dialect), desired, snapshot.get(),
                     SchemaSnapshotCoverage.complete(), SchemaCompatibilityMode.EXACT);
             assertEquals(2, plan.steps().size());
-            assertFalse(plan.requiresManualAction());
         }
 
-        private SchemaExecutionReport execute() {
-            SchemaExecutionReport report = VerifiedSchemaPlanExecutor.executeReactive(
-                            plan, R2dbcSqlExecutor.create(ConnectionAccessTestSupport.reactive(factory()), RdbDialect.postgresql()), () -> Mono.just(snapshot.get()),
-                            SchemaSnapshotCoverage::complete, () -> {
+        private SchemaMigrationResult execute() {
+            SchemaMigrationResult report = SchemaExecutionFixtures.executeReactive(
+                            plan, R2dbcSqlExecutor.create(ConnectionAccessTestSupport.reactive(factory()), RdbDialect.postgresql()), () -> {
                                 invalidations.incrementAndGet();
                                 if (invalidationFails) {
                                     throw new IllegalStateException("metadata invalidation failed");
                                 }
-                            }, SchemaMigrationExecutionOptions.defaults())
+                            }, SqlExecutionOptions.unlimited())
                     .block();
             assertNotNull(report);
             return report;

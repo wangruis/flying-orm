@@ -4,15 +4,17 @@ import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
+import com.flying.orm.core.page.CursorDirection;
+import com.flying.orm.core.page.NullOrder;
 import com.flying.orm.core.page.KeysetPageQuery;
 import com.flying.orm.core.page.KeysetSort;
 
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Function;
+import java.util.function.Predicate;
 
 /**
  * 把调用方 keyset 请求规范成包含可靠关系键的稳定排序。
@@ -56,10 +58,10 @@ final class KeysetPageNormalizer {
                          stableKey);
     }
 
-    private static NormalizedKeysetPage normalize(KeysetPageQuery page,
-                                                   FieldResolver fields,
-                                                   NullableResolver nullableFields,
-                                                   List<String> stableKey) {
+    static NormalizedKeysetPage normalize(KeysetPageQuery page,
+                                           Function<String, String> fields,
+                                           Predicate<String> nullableFields,
+                                           List<String> stableKey) {
         KeysetPageQuery safePage = Objects.requireNonNull(page, "keyset page must not be null");
         if (stableKey.isEmpty()) {
             throw new IllegalArgumentException(
@@ -68,7 +70,7 @@ final class KeysetPageNormalizer {
 
         Map<String, KeysetSort> normalized = new LinkedHashMap<>();
         for (KeysetSort sort : safePage.sorts()) {
-            String field = fields.resolve(sort.field());
+            String field = fields.apply(sort.field());
             KeysetSort canonical = new KeysetSort(field, sort.direction(), sort.nullOrder());
             KeysetSort previous = normalized.putIfAbsent(canonical.field(), canonical);
             if (previous != null && !previous.equals(canonical)) {
@@ -81,14 +83,12 @@ final class KeysetPageNormalizer {
                 .reduce((left, right) -> right)
                 .orElseThrow(() -> new IllegalArgumentException(
                         "keyset pagination requires at least one sort field"));
-        List<String> hiddenTieBreakers = new ArrayList<>(stableKey.size());
         for (String stableField : stableKey) {
-            String field = fields.resolve(stableField);
+            String field = fields.apply(stableField);
             if (!normalized.containsKey(com.flying.orm.core.field.FieldIdentity.of(field).key())) {
                 KeysetSort appended = new KeysetSort(
                         field, lastCallerSort.direction(), lastCallerSort.nullOrder());
                 normalized.put(appended.field(), appended);
-                hiddenTieBreakers.add(appended.field());
             }
         }
 
@@ -101,16 +101,16 @@ final class KeysetPageNormalizer {
                     "keyset cursor position must match the final stable sort");
         }
         List<Boolean> nullableSorts = sorts.stream()
-                .map(sort -> nullableFields.nullable(sort.field()))
+                .map(sort -> nullableFields.test(sort.field()))
                 .toList();
         NormalizedKeysetPage normalizedPage = new NormalizedKeysetPage(
-                safePage.size(), sorts, positionValues, hiddenTieBreakers, nullableSorts,
+                safePage.size(), sorts, positionValues, nullableSorts,
                 callerSortCount);
         requireValidNullPositions(normalizedPage);
         return normalizedPage;
     }
 
-    private static List<String> dynamicStableKey(DynamicForm form) {
+    static List<String> dynamicStableKey(DynamicForm form) {
         List<String> primaryKey = form.fields().stream()
                 .filter(DynamicField::primaryKey)
                 .map(DynamicField::name)
@@ -151,73 +151,17 @@ final class KeysetPageNormalizer {
         }
     }
 
-    @FunctionalInterface
-    private interface FieldResolver {
-        String resolve(String field);
-    }
-
-    @FunctionalInterface
-    private interface NullableResolver {
-        boolean nullable(String field);
-    }
-
-    /** 一次调用内使用的只读规范化结果，不进入跨调用的动态权限缓存。 */
-    static final class NormalizedKeysetPage {
-
-        private final int size;
-        private final List<KeysetSort> sorts;
-        private final List<Object> positionValues;
-        private final List<String> hiddenTieBreakers;
-        private final List<Boolean> nullableSorts;
-        private final int callerSortCount;
-
-        private NormalizedKeysetPage(int size,
-                                     List<KeysetSort> sorts,
-                                     List<Object> positionValues,
-                                     List<String> hiddenTieBreakers,
-                                     List<Boolean> nullableSorts,
-                                     int callerSortCount) {
-            this.size = size;
-            this.sorts = sorts;
-            this.positionValues = Objects.requireNonNull(
-                    positionValues, "keyset position values must not be null");
-            this.hiddenTieBreakers = Collections.unmodifiableList(hiddenTieBreakers);
-            this.nullableSorts = nullableSorts;
-            this.callerSortCount = callerSortCount;
-            if (this.nullableSorts.size() != this.sorts.size()) {
-                throw new IllegalArgumentException("keyset nullability must match stable sorts");
-            }
-            if (callerSortCount < 1 || callerSortCount > this.sorts.size()) {
-                throw new IllegalArgumentException("keyset caller sort count must match stable sorts");
-            }
-        }
-
-        int size() {
-            return size;
-        }
-
-        List<KeysetSort> sorts() {
-            return sorts;
-        }
-
-        List<Object> positionValues() {
-            return positionValues;
-        }
-
-        List<String> hiddenTieBreakers() {
-            return hiddenTieBreakers;
-        }
-
-        boolean firstPage() {
-            return positionValues.isEmpty();
-        }
-
-        boolean nullable(int index) {
-            return nullableSorts.get(index);
-        }
-
-        int callerSortCount() {
-            return callerSortCount;
-        }
+    /** 规范化器拥有这些已冻结的列表；执行端只读取本次调用的排序与位置。 */
+    record NormalizedKeysetPage(int size,
+                                List<KeysetSort> sorts,
+                                List<Object> positionValues,
+                                List<Boolean> nullableSorts,
+                                int callerSortCount) {
+        public boolean firstPage() { return positionValues().isEmpty(); }
+        public int sortCount() { return sorts.size(); }
+        public String field(int index) { return sorts.get(index).field(); }
+        public CursorDirection direction(int index) { return sorts.get(index).direction(); }
+        public NullOrder nullOrder(int index) { return sorts.get(index).nullOrder(); }
+        public boolean nullable(int index) { return nullableSorts.get(index); }
     }
 }

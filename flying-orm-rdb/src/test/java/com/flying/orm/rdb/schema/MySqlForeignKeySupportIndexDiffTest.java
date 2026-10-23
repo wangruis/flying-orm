@@ -25,15 +25,10 @@ class MySqlForeignKeySupportIndexDiffTest {
         RelationalTableDefinition actual = table(true, supportIndex("fk_child_parent", "parent_id"));
 
         SchemaCompatibilityReport mysql = diff(desired, actual, RdbDialect.mysql());
-        SchemaCompatibilityReport mysqlInstance = new SchemaDiffer().compare(
-                desired, SchemaSnapshot.present(actual), RdbDialect.mysql().capabilities(),
-                SchemaCompatibilityMode.EXACT);
         SchemaCompatibilityReport postgresql = diff(desired, actual, RdbDialect.postgresql());
 
         assertTrue(mysql.compatible());
         assertTrue(mysql.operations().isEmpty());
-        assertTrue(mysqlInstance.compatible());
-        assertTrue(mysqlInstance.operations().isEmpty());
         assertFalse(postgresql.compatible());
         assertEquals(List.of(SchemaOperation.Kind.DROP_INDEX),
                      postgresql.operations().stream().map(SchemaOperation::kind).toList());

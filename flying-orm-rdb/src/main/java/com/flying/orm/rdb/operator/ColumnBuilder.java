@@ -1,5 +1,11 @@
 package com.flying.orm.rdb.operator;
 
+import com.flying.orm.core.form.DynamicField;
+import com.flying.orm.core.metadata.ColumnDefinition;
+import com.flying.orm.core.metadata.ValueGeneration;
+
+import java.util.Objects;
+
 /**
  * 一次新增列操作的可变构建器。
  *
@@ -10,14 +16,24 @@ package com.flying.orm.rdb.operator;
  * @date 2026-07-27
  * @version v1.0
  */
-public final class ColumnBuilder {
+public final class ColumnBuilder<T> {
 
-    private final CreateOrAlterTableBuilder table;
-    private final DdlStructureDraft.ColumnDraft column;
+    private final T table;
+    private final DdlStructureDraft draft;
+    private String name;
+    private String dataType;
+    private boolean primaryKey;
+    private boolean nullable = true;
+    private boolean unique;
+    private Integer length;
+    private Integer precision;
+    private Integer scale;
+    private String comment;
+    private ValueGeneration generation = ValueGeneration.none();
 
-    ColumnBuilder(CreateOrAlterTableBuilder table) {
+    ColumnBuilder(T table, DdlStructureDraft draft) {
         this.table = table;
-        this.column = table.draft().column();
+        this.draft = draft;
     }
 
     /**
@@ -26,8 +42,8 @@ public final class ColumnBuilder {
      * @param name 物理列名
      * @return 当前列构建器
      */
-    public ColumnBuilder name(String name) {
-        column.name(name);
+    public ColumnBuilder<T> name(String name) {
+        this.name = DdlStructureDraft.requireText(name, "column name");
         return this;
     }
 
@@ -37,8 +53,48 @@ public final class ColumnBuilder {
      * @param precision 十进制总位数，必须大于零
      * @return 当前列构建器
      */
-    public ColumnBuilder number(int precision) {
-        column.number(precision);
+    public ColumnBuilder<T> number(int precision) {
+        if (precision < 1) {
+            throw new IllegalArgumentException("number precision must be positive");
+        }
+        type(precision <= 10 ? "INTEGER" : precision <= 19 ? "BIGINT" : "DECIMAL");
+        this.precision = "DECIMAL".equals(dataType) ? precision : null;
+        scale = this.precision == null ? null : 0;
+        return this;
+    }
+
+    /** 声明 DECIMAL 的总位数和小数位数，字段规则在 commit 时统一校验。 */
+    public ColumnBuilder<T> number(int precision, int scale) {
+        type("DECIMAL");
+        this.precision = precision;
+        this.scale = scale;
+        return this;
+    }
+
+    /** 设置受控类型声明，如 TIMESTAMP(6)、BOOLEAN；替换类型时清除之前的长度和精度。 */
+    public ColumnBuilder<T> type(String type) {
+        dataType = DdlStructureDraft.requireText(type, "column data type");
+        length = null;
+        precision = null;
+        scale = null;
+        return this;
+    }
+
+    /** 设置可空性；主键始终不可空。 */
+    public ColumnBuilder<T> nullable(boolean nullable) {
+        this.nullable = nullable;
+        return this;
+    }
+
+    /** 设置是否生成单列唯一索引。 */
+    public ColumnBuilder<T> unique(boolean unique) {
+        this.unique = unique;
+        return this;
+    }
+
+    /** 使用现有值生成模型设置标识列或序列，具体语法由方言决定。 */
+    public ColumnBuilder<T> generation(ValueGeneration generation) {
+        this.generation = Objects.requireNonNull(generation, "value generation must not be null");
         return this;
     }
 
@@ -48,8 +104,12 @@ public final class ColumnBuilder {
      * @param length 最大字符数，必须大于零
      * @return 当前列构建器
      */
-    public ColumnBuilder varchar(int length) {
-        column.varchar(length);
+    public ColumnBuilder<T> varchar(int length) {
+        if (length < 1) {
+            throw new IllegalArgumentException("varchar length must be positive");
+        }
+        type("VARCHAR");
+        this.length = length;
         return this;
     }
 
@@ -58,8 +118,8 @@ public final class ColumnBuilder {
      *
      * @return 当前列构建器
      */
-    public ColumnBuilder primaryKey() {
-        column.primaryKey();
+    public ColumnBuilder<T> primaryKey() {
+        primaryKey = true;
         return this;
     }
 
@@ -69,8 +129,8 @@ public final class ColumnBuilder {
      * @param comment 非空列注释
      * @return 当前列构建器
      */
-    public ColumnBuilder comment(String comment) {
-        column.comment(comment);
+    public ColumnBuilder<T> comment(String comment) {
+        this.comment = DdlStructureDraft.requireText(comment, "column comment");
         return this;
     }
 
@@ -79,8 +139,13 @@ public final class ColumnBuilder {
      *
      * @return 所属表的构建器
      */
-    public CreateOrAlterTableBuilder commit() {
-        column.commit();
+    public T commit() {
+        ColumnDefinition column = ColumnDefinition.builder(
+                        DdlStructureDraft.requireText(name, "column name"),
+                        DdlStructureDraft.requireText(dataType, "column data type"))
+                .nullable(!primaryKey && nullable).length(length).precision(precision).scale(scale)
+                .comment(comment).generation(generation).build();
+        draft.addColumn(new DynamicField(column, primaryKey, unique));
         return table;
     }
 }

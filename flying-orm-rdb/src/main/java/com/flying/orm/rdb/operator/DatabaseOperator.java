@@ -11,7 +11,7 @@ import com.flying.orm.rdb.metadata.ReactiveFormMetadataReaders;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.schema.ReactiveSchemaClient;
 import com.flying.orm.rdb.schema.SchemaMigrationObserver;
-import com.flying.orm.rdb.schema.SchemaMigrationExecutionOptions;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.template.SqlTemplateEngine;
 import com.flying.orm.rdb.template.SqlTemplateParameterProvider;
 import com.flying.orm.rdb.template.SqlTemplateRegistry;
@@ -43,7 +43,6 @@ public final class DatabaseOperator {
     private final DataScope defaultDataScope;
     /** 原生命名参数要在编译时生成当前驱动的参数标记，因此门面需要保留装配时已经确定的方言。 */
     private final RdbDialect dialect;
-    private final SqlTemplateRegistry sqlTemplates;
     private final SqlTemplateParameterProvider sqlTemplateParameters;
     private final SqlTemplateEngine sqlTemplateEngine;
 
@@ -65,10 +64,9 @@ public final class DatabaseOperator {
         this.metadataReader = Objects.requireNonNull(metadataReader, "reactive form metadata reader must not be null");
         this.defaultDataScope = Objects.requireNonNull(defaultDataScope, "default data scope must not be null");
         this.dialect = safeDialect;
-        this.sqlTemplates = Objects.requireNonNull(sqlTemplates, "SQL template registry must not be null");
         this.sqlTemplateParameters = Objects.requireNonNull(
                 sqlTemplateParameters, "SQL template parameter provider must not be null");
-        this.sqlTemplateEngine = SqlTemplateEngine.create(this.sqlTemplates,
+        this.sqlTemplateEngine = SqlTemplateEngine.create(sqlTemplates,
                                                           this.dialect,
                                                           this.renderer.valueCodecs());
     }
@@ -85,7 +83,6 @@ public final class DatabaseOperator {
         this.metadataReader = source.metadataReader;
         this.defaultDataScope = defaultDataScope;
         this.dialect = source.dialect;
-        this.sqlTemplates = source.sqlTemplates;
         this.sqlTemplateParameters = source.sqlTemplateParameters;
         this.sqlTemplateEngine = source.sqlTemplateEngine;
     }
@@ -175,8 +172,7 @@ public final class DatabaseOperator {
     }
 
     /**
-     * 给 DDL 审核执行挂迁移级 observer。返回新门面，DML、元数据 reader、scope 和方言保持原样；
-     * observer 只接收计划指纹、风险、步骤进度和错误分类，不包含参数值。
+     * 给 DDL 执行挂迁移级 observer。返回新门面，DML、元数据 reader、scope 和方言保持原样。
      */
     public DatabaseOperator withSchemaMigrationObserver(SchemaMigrationObserver observer) {
         return new DatabaseOperator(this,
@@ -186,14 +182,26 @@ public final class DatabaseOperator {
     }
 
     /**
-     * 给审核后 DDL 设置统一的结果容量保护和可选精确批准。调用方仍可在单次执行时显式覆盖。
+     * 设置 DDL 默认执行选项。调用方仍可在单次执行时显式覆盖。
      */
-    public DatabaseOperator withDefaultSchemaMigrationExecutionOptions(SchemaMigrationExecutionOptions options) {
+    public DatabaseOperator withDefaultSchemaMigrationExecutionOptions(SqlExecutionOptions options) {
         return new DatabaseOperator(this,
                                     schemaClient.withDefaultMigrationExecutionOptions(options),
                                     formClient,
                                     defaultDataScope);
     }
+
+    /** 返回 DML 使用的同一表单客户端，包含当前门面的默认配置。 */
+    public ReactiveFormClient forms() { return formClient; }
+
+    /** 返回 DDL 使用的同一结构客户端，包含当前门面的默认配置。 */
+    public ReactiveSchemaClient schema() { return schemaClient; }
+
+    /** 返回已装配的响应式执行端口，不获取连接。 */
+    public ReactiveSqlExecutor executor() { return executor; }
+
+    /** 返回已装配的结构读取器，不创建新的读取器或缓存。 */
+    public ReactiveFormMetadataReader metadataReader() { return metadataReader; }
 
     /**
      * 创建动态 DDL 入口。每次调用都返回新的轻量对象，不会复制连接池或缓存。
@@ -211,7 +219,7 @@ public final class DatabaseOperator {
      * @return 响应式 DML operator
      */
     public DmlOperator dml() {
-        return new DmlOperator(formClient, executor, renderer, defaultDataScope);
+        return new DmlOperator(formClient, executor, renderer, defaultDataScope, dialect);
     }
 
     /**
@@ -284,7 +292,6 @@ public final class DatabaseOperator {
                                        formClient.entityModels(),
                                        sqlTemplateEngine,
                                        templateId,
-                                       sqlTemplates.serverParameters(templateId),
                                        sqlTemplateParameters);
     }
 

@@ -5,7 +5,10 @@ import com.flying.orm.core.condition.ConditionNode;
 import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.condition.TermRegistry;
+import com.flying.orm.core.expression.ValueExpression;
+import com.flying.orm.core.field.FieldIdentity;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
 import com.flying.orm.core.scope.DataScope;
@@ -27,6 +30,7 @@ import com.flying.orm.rdb.internal.mapping.RepositoryUpsertValues;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.dialect.DialectCapabilities;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -45,12 +49,12 @@ final class FieldUseGuard {
     private FieldUseGuard() {
     }
 
-    /** 默认 singleton 组合就是 legacy 快路，不创建 requirements、budget 或 envelope。 */
+    /** 无限制配置使用普通路径，不因等值副本创建 requirements、budget 或 envelope。 */
     static boolean governed(FieldUsePolicy policy, QueryShapeLimits limits) {
         return Objects.requireNonNull(policy, "field use policy must not be null")
                        != FieldUsePolicy.unrestricted()
-                || Objects.requireNonNull(limits, "query shape limits must not be null")
-                       != QueryShapeLimits.defaults();
+                || !Objects.requireNonNull(limits, "query shape limits must not be null")
+                       .equals(QueryShapeLimits.defaults());
     }
 
     static <T> GovernedPlanEnvelope<T> query(T plan,
@@ -75,7 +79,13 @@ final class FieldUseGuard {
         }
         FieldUseRequirements.Builder requirements = FieldUseRequirements.builder();
         for (String field : safeOutputFields) {
-            requirements.require(field, FieldUse.PROJECT);
+            ValueExpression expression = safeSpec.expressions().isEmpty() ? null
+                    : safeSpec.expressions().get(FieldIdentity.of(field).key());
+            if (expression == null) requirements.require(field, FieldUse.PROJECT);
+            else expression.forEachField(source -> {
+                requirements.require(source.identity().name(), FieldUse.PROJECT);
+                requirements.require(source.identity().name(), FieldUse.FULL_VALUE);
+            });
         }
         safeSpec.groups().forEach(field -> requirements.require(field, FieldUse.GROUP));
         for (int index = 0; index < safeSortFields.size(); index++) {
@@ -84,11 +94,12 @@ final class FieldUseGuard {
                 // legacy cursor 直接公开排序值，不是上层签名或加密后的不透明令牌。
                 requirements.require(field, FieldUse.PROJECT, FieldUseOrigin.CALLER);
             }
-            requirements.require(
-                    field,
-                    FieldUse.SORT,
-                    index < callerSortCount
-                            ? FieldUseOrigin.CALLER : FieldUseOrigin.INTERNAL_TIE_BREAKER);
+            FieldUseOrigin origin = index < callerSortCount
+                    ? FieldUseOrigin.CALLER : FieldUseOrigin.INTERNAL_TIE_BREAKER;
+            ValueExpression expression = safeSpec.expressions().isEmpty() ? null
+                    : safeSpec.expressions().get(FieldIdentity.of(field).key());
+            if (expression == null) requirements.require(field, FieldUse.SORT, origin);
+            else expression.forEachField(source -> requirements.require(source.identity().name(), FieldUse.SORT, origin));
         }
         collectCondition(businessWhere, FieldUse.FILTER, FieldUseOrigin.CALLER, requirements,
                          renderer.conditionRenderer().terms(), renderer.dialectCapabilities());
@@ -96,6 +107,17 @@ final class FieldUseGuard {
         FieldUseSnapshot snapshot = approve(
                 safeSpec.form().id(), requirements.build(), scope.fields(), policy,
                 safeSpec.projections().isEmpty());
+        if (!safeSpec.expressions().isEmpty() && !snapshot.isUnrestricted()) {
+            List<FieldDecision> decisions = new ArrayList<>(snapshot.decisions());
+            for (String field : safeOutputFields) {
+                if (safeSpec.expressions().containsKey(FieldIdentity.of(field).key())) {
+                    // 别名来自已获准 PROJECT/FULL_VALUE 的全部来源，不把别名当作实体字段授权。
+                    decisions.add(new FieldDecision(field, FieldUse.PROJECT, FieldUseOrigin.CALLER, true,
+                            FieldVisibility.FULL));
+                }
+            }
+            snapshot = FieldUseSnapshot.of(decisions);
+        }
         if (publishesCursor) {
             requireFullCursorVisibility(safeSpec.form().id(), safeSortFields, snapshot);
         }
@@ -132,6 +154,7 @@ final class FieldUseGuard {
         };
         if (use != null) {
             safeSpec.ownedValues().keySet().forEach(field -> requirements.require(field, use));
+            FormUpdateExpressions.sources(safeSpec.ownedValues(), field -> requirements.require(field, FieldUse.FULL_VALUE));
         }
         collectCondition(safeSpec.where(), FieldUse.FILTER, FieldUseOrigin.CALLER, requirements,
                          renderer.conditionRenderer().terms(), renderer.dialectCapabilities());
@@ -148,12 +171,9 @@ final class FieldUseGuard {
         return new GovernedPlanEnvelope<>(plan, snapshot);
     }
 
-    /** 批量 insert/upsert 只审批首行已经固定的共享字段布局；后续行必须匹配同一布局。 */
-    static void approveBatchInsert(DynamicForm form,
-                                   Map<String, Object> firstRow,
-                                   DataScope scope,
-                                   boolean upsert,
-                                   FieldUsePolicy policy) {
+    /** 批量 insert/upsert 在首行及字段布局切换时审批，未变化的布局复用审批结果。 */
+    static void approveBatchInsert(DynamicForm form, Map<String, Object> firstRow, DataScope scope,
+                                   boolean upsert, FieldUsePolicy policy, List<String> conflictFields) {
         DynamicForm safeForm = Objects.requireNonNull(form, "batch form must not be null");
         Map<String, Object> safeRow = Objects.requireNonNull(firstRow, "batch first row must not be null");
         DataScope safeScope = Objects.requireNonNull(scope, "batch data scope must not be null");
@@ -165,7 +185,9 @@ final class FieldUseGuard {
         if (upsert) {
             Map<String, Object> updates = staged == null ? safeRow : staged.updateValues();
             updates.keySet().forEach(field -> {
-                if (UpsertFieldPlan.updateCandidate(safeForm, safeForm.field(field), staged != null)) {
+                DynamicField definition = safeForm.field(field);
+                if (!conflictFields.contains(definition.normalizedName())
+                        && UpsertFieldPlan.updateCandidate(safeForm, definition, staged != null)) {
                     requirements.require(field, FieldUse.UPDATE);
                 }
             });
@@ -173,24 +195,42 @@ final class FieldUseGuard {
         approve(safeForm.id(), requirements.build(), safeScope.fields(), policy, false);
     }
 
-    /** 批量 update 的共享布局、条件与版本字段在第一行编译 SQL 前一次审批。 */
+    /** 固定的 UPSERT 业务条件只检查一次，不作为可信 Scope 绕过字段用途。 */
+    static void approveUpsertCondition(FormDataSqlRenderer renderer, DynamicForm form, ConditionGroup condition,
+                                       DataScope scope, FieldUsePolicy policy) {
+        if (condition.children().isEmpty() || policy == FieldUsePolicy.unrestricted()
+                && renderer.conditionRenderer().terms() == TermRegistry.standard()
+                && scope.fields().unrestrictedRead()) return;
+        FieldUseRequirements.Builder requirements = FieldUseRequirements.builder();
+        collectCondition(condition, FieldUse.FILTER, FieldUseOrigin.CALLER, requirements,
+                renderer.conditionRenderer().terms(), renderer.dialectCapabilities());
+        approve(form.id(), requirements.build(), scope.fields(), policy, false);
+    }
+
+    /** 每行独立审批 SET、条件与版本字段；未配置治理时不分配审批结构。 */
     static void approveBatchUpdate(FormDataSqlRenderer renderer,
                                    DynamicForm form,
-                                   BatchOptimisticUpdate firstUpdate,
+                                   BatchUpdate firstUpdate,
                                    DataScope scope,
                                    FieldUsePolicy policy) {
         FormDataSqlRenderer safeRenderer = Objects.requireNonNull(
                 renderer, "form data SQL renderer must not be null");
         DynamicForm safeForm = Objects.requireNonNull(form, "batch form must not be null");
-        BatchOptimisticUpdate safeUpdate = Objects.requireNonNull(
+        BatchUpdate safeUpdate = Objects.requireNonNull(
                 firstUpdate, "batch first update must not be null");
         DataScope safeScope = Objects.requireNonNull(scope, "batch data scope must not be null");
+        if (policy == FieldUsePolicy.unrestricted()
+                && safeRenderer.conditionRenderer().terms() == TermRegistry.standard()
+                && safeScope.fields().unrestrictedRead() && safeScope.fields().unrestrictedWrite()) return;
         FieldUseRequirements.Builder requirements = FieldUseRequirements.builder();
         safeUpdate.ownedValues().keySet().forEach(field -> requirements.require(field, FieldUse.UPDATE));
+        FormUpdateExpressions.sources(safeUpdate.ownedValues(), field -> requirements.require(field, FieldUse.FULL_VALUE));
         collectCondition(safeUpdate.where(), FieldUse.FILTER, FieldUseOrigin.CALLER, requirements,
                          safeRenderer.conditionRenderer().terms(), safeRenderer.dialectCapabilities());
-        requirements.require(safeUpdate.lock().field(), FieldUse.FILTER, FieldUseOrigin.INTERNAL_VERSION);
-        requirements.require(safeUpdate.lock().field(), FieldUse.UPDATE, FieldUseOrigin.INTERNAL_VERSION);
+        if (safeUpdate.lock() != null) {
+            requirements.require(safeUpdate.lock().field(), FieldUse.FILTER, FieldUseOrigin.INTERNAL_VERSION);
+            requirements.require(safeUpdate.lock().field(), FieldUse.UPDATE, FieldUseOrigin.INTERNAL_VERSION);
+        }
         approve(safeForm.id(), requirements.build(), safeScope.fields(), policy, false);
     }
 
@@ -205,61 +245,9 @@ final class FieldUseGuard {
             SqlRequest request,
             FieldUsePolicy policy,
             QueryShapeBudget budget) {
-        QuerySpec safeSpec = Objects.requireNonNull(spec, "query spec must not be null");
-        List<String> safeOutputFields = Objects.requireNonNull(
-                outputFields, "keyset output fields must not be null");
-        FieldUseRequirements.Builder requirements = FieldUseRequirements.builder();
-        safeOutputFields.forEach(field -> requirements.require(field, FieldUse.PROJECT));
-        collectKeysetCursorRequirements(requirements, page);
-        collectCondition(businessWhere, FieldUse.FILTER, FieldUseOrigin.CALLER, requirements,
-                         renderer.conditionRenderer().terms(), renderer.dialectCapabilities());
-        accountRenderedRequest(budget, request);
-        FieldUseSnapshot snapshot = approve(
-                safeSpec.form().id(), requirements.build(), scope.fields(), policy,
-                safeSpec.projections().isEmpty());
-        requireFullKeysetCursorVisibility(safeSpec.form().id(), page, snapshot);
-        return new GovernedPlanEnvelope<>(plan, snapshot);
-    }
-
-    private static void collectKeysetCursorRequirements(
-            FieldUseRequirements.Builder requirements,
-            KeysetPageNormalizer.NormalizedKeysetPage page) {
-        for (int index = 0; index < page.sorts().size(); index++) {
-            String field = page.sorts().get(index).field();
-            // CursorPosition 直接发布排序值，因此 SORT 之外还要按 caller PROJECT 审批明文可见性。
-            requirements.require(field, FieldUse.PROJECT, FieldUseOrigin.CALLER);
-            requirements.require(
-                    field,
-                    FieldUse.SORT,
-                    index < page.callerSortCount()
-                            ? FieldUseOrigin.CALLER : FieldUseOrigin.INTERNAL_TIE_BREAKER);
-        }
-    }
-
-    private static void requireFullKeysetCursorVisibility(
-            String resource,
-            KeysetPageNormalizer.NormalizedKeysetPage page,
-            FieldUseSnapshot snapshot) {
-        for (var sort : page.sorts()) {
-            String field = sort.field();
-            if (snapshot.visibility(field) != FieldVisibility.FULL) {
-                throw new ScopeAccessException(
-                        ScopeErrorCode.FIELD_NOT_READABLE,
-                        resource,
-                        field,
-                        "keyset cursor field [" + field + "] requires FULL visibility");
-            }
-        }
-    }
-
-    static FieldUseSnapshot approveCollected(String resource,
-                                             FieldUseRequirements requirements,
-                                             FieldScope scope,
-                                             SqlRequest request,
-                                             FieldUsePolicy policy,
-                                             QueryShapeBudget budget) {
-        accountRenderedRequest(budget, request);
-        return approve(resource, requirements, scope, policy, false);
+        return query(plan, renderer, spec, businessWhere, outputFields,
+                page.sorts().stream().map(com.flying.orm.core.page.KeysetSort::field).toList(),
+                page.callerSortCount(), true, scope, request, policy, budget);
     }
 
     /**
@@ -293,6 +281,13 @@ final class FieldUseGuard {
                                       DynamicRow row,
                                       FieldUseSnapshot snapshot) {
         return FieldVisibilityPublisher.publish(renderer, form, row, snapshot);
+    }
+
+    /** 按同一读取计划发布普通字段或关联别名，执行终端不再分别判断来源。 */
+    static DynamicRow applyVisibility(FormDataSqlRenderer renderer, FormReadPlanner.RowReadPlan plan,
+                                      DynamicRow row, FieldUseSnapshot snapshot) {
+        return plan.joinSpec() == null ? applyVisibility(renderer, plan.form(), row, snapshot)
+                : applyJoinVisibility(renderer, plan.joinSpec(), row, snapshot);
     }
 
     /** 在规划边界按策略来源选择基础显示模式；Scope 审批快照不能证明启用了显式显示授权。 */
@@ -360,6 +355,7 @@ final class FieldUseGuard {
                     .toList();
             snapshot = FieldUseSnapshot.of(effective);
         }
+        if (snapshot.allowed()) return snapshot;
         for (FieldDecision decision : snapshot.deniedDecisions()) {
             boolean write = decision.use().write();
             throw new ScopeAccessException(

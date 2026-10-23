@@ -20,6 +20,25 @@ class SqlFailureCategoryTraversalTest {
         assertEquals(1, middle.causeReads());
     }
 
+    @Test
+    void doesNotDiscardKnownFailureBeyondAnArbitraryCauseDepth() {
+        Throwable failure = new RdbException(
+                RdbErrorKind.DEADLOCK, "deadlock", "40001", 1213, new IllegalStateException("driver"));
+        for (int index = 0; index < 100; index++) {
+            failure = new IllegalStateException("application context", failure);
+        }
+        assertEquals(SqlFailureCategory.DEADLOCK, SqlFailureCategory.classify(failure));
+    }
+
+    @Test
+    void aCauseCycleWithoutDatabaseFactsRemainsUnknown() {
+        java.util.concurrent.CompletionException first = new java.util.concurrent.CompletionException("first", null) {
+            @Override public synchronized Throwable getCause() { return second; }
+            private final Throwable second = new java.util.concurrent.CompletionException(this);
+        };
+        assertEquals(SqlFailureCategory.UNKNOWN, SqlFailureCategory.classify(first));
+    }
+
     private static final class CountingFailure extends RuntimeException {
         private int causeReads;
 

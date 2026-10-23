@@ -19,7 +19,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class MySqlRelationalSchemaReplacementTest {
 
@@ -88,12 +87,11 @@ class MySqlRelationalSchemaReplacementTest {
     @Test
     void reviewsSingleStatementCandidateReplacementAfterSupportedWidening() {
         RdbDialect dialect = RdbDialect.mysql();
-        ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
+        SchemaMigrationPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
                 DatabaseDescriptor.of("MySQL", "8.4", dialect), table(64, true),
                 SchemaSnapshot.present(table(32, false)), SchemaSnapshotCoverage.complete(),
                 SchemaCompatibilityMode.EXACT);
 
-        assertFalse(plan.requiresManualAction());
         assertEquals(List.of(
                 "alter table `app`.`accounts` modify column `code` VARCHAR(64) not null",
                 "alter table `app`.`accounts` drop primary key,"

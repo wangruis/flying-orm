@@ -1,32 +1,43 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
+import com.flying.orm.core.form.DynamicField;
+import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.sql.expression.SqlExpressionCompiler;
+import com.flying.orm.core.type.LogicalType;
+import com.flying.orm.rdb.internal.value.ExpressionFieldValue;
 import com.flying.orm.core.condition.LogicalOperator;
 import com.flying.orm.core.join.JoinClause;
+import com.flying.orm.core.join.JoinCondition;
 import com.flying.orm.core.join.JoinFieldRef;
-import com.flying.orm.core.join.JoinFieldPair;
 import com.flying.orm.core.join.JoinOrder;
 import com.flying.orm.core.join.JoinProjection;
 import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.join.JoinSource;
+import com.flying.orm.core.join.JoinType;
 import com.flying.orm.core.page.PageQuery;
+import com.flying.orm.core.page.KeysetSort;
 import com.flying.orm.core.sql.render.SqlFragment;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.core.internal.value.OwnedBindableValues;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.dialect.PaginationDialect;
+import com.flying.orm.rdb.dialect.DialectCapabilityId;
+import com.flying.orm.rdb.lock.LockingReadDialect;
+import com.flying.orm.rdb.lock.ReadLock;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.StringJoiner;
+import java.util.ArrayDeque;
 
 /**
  * 把不可变 JOIN AST 渲染为四库共享的参数化查询请求。
  *
  * <p>内部别名只由源序号生成。源级租户、DataScope 和逻辑删除保护先进入受控派生关系，
- * 因而 LEFT/RIGHT 链不会被最终 WHERE 意外收紧；调用方业务条件仍保留在 JOIN 之后。</p>
+ * 因而外连接不会被最终 WHERE 意外收紧；调用方业务条件仍保留在 JOIN 之后。</p>
  *
  * @author wangr
  * @date 2026-08-09
@@ -44,98 +55,174 @@ final class JoinQuerySqlRenderer {
         this.pagination = Objects.requireNonNull(pagination, "join pagination dialect must not be null");
     }
 
-    SqlRequest select(JoinQuerySpec spec,
-                      Map<JoinSource, com.flying.orm.core.form.DynamicForm> physicalForms,
-                      Map<JoinSource, ConditionGroup> protections,
-                      Map<JoinSource, ConditionGroup> businessConditions) {
-        return render(spec, physicalForms, protections, businessConditions, false, true);
-    }
-
     SqlRequest select(JoinQuerySpec spec, Map<JoinSource, ConditionGroup> protections) {
-        JoinInputs inputs = logicalInputs(spec, protections);
-        return select(spec, inputs.forms(), inputs.protections(), inputs.businessConditions());
+        Map<JoinSource, com.flying.orm.core.form.DynamicForm> forms = new java.util.LinkedHashMap<>();
+        spec.sources().forEach(source -> forms.put(source, source.form()));
+        return select(spec, relation(spec, forms, protections, Map.of()));
     }
 
-    SqlRequest select(JoinQuerySpec spec,
-                      Map<JoinSource, com.flying.orm.core.form.DynamicForm> physicalForms,
-                      Map<JoinSource, ConditionGroup> protections,
-                      Map<JoinSource, ConditionGroup> businessConditions,
-                      PageQuery page) {
-        PageQuery safePage = requireJoinPage(spec, page);
-        SqlRequest request = render(spec, physicalForms, protections, businessConditions, false, false);
-        SqlRequest paginated = pagination.paginate(
-                request.sql(), OwnedBindableValues.ownedValues(request.parameters()), safePage);
-        return support.compiledRequest(
-                paginated.sql(), OwnedBindableValues.ownedValues(paginated.parameters()));
+    SqlRequest select(JoinQuerySpec spec, SqlFragment relation) {
+        return select(spec, relation, new SqlFragment(projections(spec.projections()), List.of()));
     }
 
-    SqlRequest select(JoinQuerySpec spec,
-                      Map<JoinSource, ConditionGroup> protections,
-                      PageQuery page) {
-        JoinInputs inputs = logicalInputs(spec, protections);
-        return select(spec, inputs.forms(), inputs.protections(), inputs.businessConditions(), page);
+    SqlRequest select(JoinQuerySpec spec, SqlFragment relation, SqlFragment columns) {
+        return select(spec, relation, columns, null, null, null, null);
     }
 
-    SqlRequest count(JoinQuerySpec spec,
-                     Map<JoinSource, com.flying.orm.core.form.DynamicForm> physicalForms,
-                     Map<JoinSource, ConditionGroup> protections,
-                     Map<JoinSource, ConditionGroup> businessConditions) {
-        return render(spec, physicalForms, protections, businessConditions, true, true);
+    SqlRequest select(JoinQuerySpec spec, SqlFragment relation, SqlFragment columns, PageQuery page,
+                      LockingReadDialect locking, ReadLock lock, DynamicForm physicalRoot) {
+        List<Object> parameters = parameters(spec, columns, relation);
+        String sql = selectSql(spec, relation, columns.sql(), parameters);
+        if (page != null) {
+            SqlRequest paginated = pagination.paginate(sql, parameters, page);
+            sql = paginated.sql();
+            parameters = OwnedBindableValues.ownedValues(paginated.parameters());
+        }
+        if (lock != null) sql += lockingSuffix(spec.root(), physicalRoot, locking, lock);
+        return support.compiledRequest(sql, parameters);
     }
 
-    SqlRequest count(JoinQuerySpec spec, Map<JoinSource, ConditionGroup> protections) {
-        JoinInputs inputs = logicalInputs(spec, protections);
-        return count(spec, inputs.forms(), inputs.protections(), inputs.businessConditions());
+    SqlRequest select(JoinQuerySpec spec, SqlFragment relation, PageQuery page, SqlFragment columns) {
+        return select(spec, relation, columns, requireJoinPage(spec, page), null, null, null);
     }
 
-    private SqlRequest render(JoinQuerySpec spec,
-                              Map<JoinSource, com.flying.orm.core.form.DynamicForm> physicalForms,
-                              Map<JoinSource, ConditionGroup> protections,
-                              Map<JoinSource, ConditionGroup> businessConditions,
-                              boolean count,
-                              boolean compile) {
+    SqlRequest selectKeyset(JoinQuerySpec spec, JoinQueryPlanner.PreparedSources sources, SqlFragment columns,
+            KeysetPageNormalizer.NormalizedKeysetPage page, Map<String, JoinFieldRef> fields,
+            LockingReadDialect locking, ReadLock lock) {
+        if (lock != null && !locking.supportsPagination(lock)) {
+            throw new UnsupportedOperationException("locking keyset pagination is not supported by this database descriptor");
+        }
+        for (KeysetSort sort : page.sorts()) {
+            JoinFieldRef field = fields.get(sort.field());
+            support.requireStableOffsetTimeOrdering(field.source().form().field(field.field()));
+        }
+        SqlFragment cursor = FormKeysetSqlRenderer.cursorPredicate(page, name -> field(fields.get(name)), (name, value) -> {
+            JoinFieldRef field = fields.get(name);
+            return support.writeValue(field.source().form().field(field.field()), value);
+        });
+        SqlFragment relation = relation(spec, sources.physicalForms(), sources.protections(), sources.valueConditions(),
+                locking, lock, cursor);
+        List<Object> parameters = parameters(spec, columns, relation);
+        String sql = "select " + columns.sql() + " " + relation.sql()
+                + FormKeysetSqlRenderer.orderBy(page, name -> field(fields.get(name)));
+        SqlRequest paginated = pagination.paginate(sql, parameters, PageQuery.of(1, Math.addExact(page.size(), 1)));
+        return support.compiledRequest(paginated.sql() + (lock == null ? ""
+                : lockingSuffix(spec.root(), sources.physicalForms().get(spec.root()), locking, lock)),
+                OwnedBindableValues.ownedValues(paginated.parameters()));
+    }
+
+    SqlRequest count(SqlFragment relation) {
+        String count = "sqlserver".equals(support.dialectName) ? "count_big" : "count";
+        return support.compiledRequest("select " + count + "(*) as total " + relation.sql(),
+                OwnedBindableValues.ownedValues(relation.parameters()));
+    }
+
+    SqlRequest count(JoinQuerySpec spec, SqlFragment relation) {
+        if (spec.groups().isEmpty()) return count(relation);
+        StringBuilder grouped = new StringBuilder("from (select 1 as grouped_value ").append(relation.sql());
+        appendGroups(grouped, spec.groups());
+        return count(new SqlFragment(grouped.append(") grouped_query").toString(), relation.parameters()));
+    }
+
+    private static List<Object> parameters(JoinQuerySpec spec, SqlFragment columns, SqlFragment relation) {
+        List<Object> relationParameters = OwnedBindableValues.ownedValues(relation.parameters());
+        if (columns.parameters().isEmpty() && spec.orders().stream().noneMatch(order -> order.expression() != null)) {
+            return relationParameters;
+        }
+        List<Object> parameters = new ArrayList<>(columns.parameters());
+        parameters.addAll(relationParameters);
+        return parameters;
+    }
+
+    private String selectSql(JoinQuerySpec spec, SqlFragment relation, String columns, List<Object> parameters) {
+        StringBuilder sql = new StringBuilder("select ").append(columns)
+                .append(' ').append(relation.sql());
+        appendGroups(sql, spec.groups());
+        appendOrder(sql, spec.orders(), parameters);
+        return sql.toString();
+    }
+
+    private void appendGroups(StringBuilder sql, List<JoinFieldRef> groups) {
+        if (groups.isEmpty()) return;
+        StringJoiner grouped = new StringJoiner(", ", " group by ", "");
+        for (JoinFieldRef group : groups) grouped.add(field(group));
+        sql.append(grouped);
+    }
+
+    /** 来源保护、ON 和业务 WHERE 的共同关系输入；不包含投影、排序或分页。 */
+    SqlFragment relation(JoinQuerySpec spec,
+                         Map<JoinSource, com.flying.orm.core.form.DynamicForm> physicalForms,
+                         Map<JoinSource, ConditionGroup> protections,
+                         Map<JoinCondition.Values, ConditionGroup> valueConditions) {
+        return relation(spec, physicalForms, protections, valueConditions, null, null);
+    }
+
+    SqlFragment relation(JoinQuerySpec spec, Map<JoinSource, DynamicForm> physicalForms,
+                         Map<JoinSource, ConditionGroup> protections,
+                         Map<JoinCondition.Values, ConditionGroup> valueConditions,
+                         LockingReadDialect locking, ReadLock lock) {
+        return relation(spec, physicalForms, protections, valueConditions, locking, lock, null);
+    }
+
+    private SqlFragment relation(JoinQuerySpec spec, Map<JoinSource, DynamicForm> physicalForms,
+                         Map<JoinSource, ConditionGroup> protections,
+                         Map<JoinCondition.Values, ConditionGroup> valueConditions,
+                         LockingReadDialect locking, ReadLock lock, SqlFragment cursor) {
         JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
         Map<JoinSource, com.flying.orm.core.form.DynamicForm> safeForms = Objects.requireNonNull(
                 physicalForms, "join physical forms must not be null");
         Map<JoinSource, ConditionGroup> safeProtections = Objects.requireNonNull(
                 protections, "join source protections must not be null");
-        Map<JoinSource, ConditionGroup> safeBusiness = Objects.requireNonNull(
-                businessConditions, "join business conditions must not be null");
         if (!safeSpec.sources().containsAll(safeProtections.keySet())
-                || !safeSpec.sources().containsAll(safeForms.keySet())
-                || !safeSpec.sources().containsAll(safeBusiness.keySet())) {
+                || !safeSpec.sources().containsAll(safeForms.keySet())) {
             throw new IllegalArgumentException("join protection source is not part of the query");
         }
 
         List<Object> parameters = new ArrayList<>();
-        String projection = count
-                ? ("sqlserver".equals(support.dialectName) ? "count_big" : "count") + "(*) as total"
-                : projections(safeSpec.projections());
-        StringBuilder sql = new StringBuilder("select ").append(projection)
-                                                           .append(" from ")
-                                                           .append(relation(
-                                                                   safeSpec.root(),
-                                                                   form(safeForms, safeSpec.root()),
-                                                                   protection(safeProtections, safeSpec.root()),
-                                                                   parameters));
+        StringBuilder sql = new StringBuilder("from ").append(lock != null
+                ? support.identifier(safeSpec.root().form()) + " " + alias(safeSpec.root()) + locking.tableHint(lock)
+                : relation(
+                safeSpec.root(), form(safeForms, safeSpec.root()),
+                protection(safeProtections, safeSpec.root()), parameters));
         for (JoinClause join : safeSpec.joins()) {
+            if (lock != null && (join.type() == JoinType.RIGHT || join.type() == JoinType.FULL)) {
+                throw new UnsupportedOperationException("locking read requires a non-nullable root source");
+            }
             sql.append(' ').append(keyword(join)).append(' ')
                .append(relation(join.source(),
                                         form(safeForms, join.source()),
                                         protection(safeProtections, join.source()),
                                         parameters))
-               .append(" on ").append(on(join));
+               .append(" on ").append(condition(join.condition(), safeForms, valueConditions, parameters));
         }
-        appendBusinessWhere(sql, safeSpec, safeForms, safeBusiness, parameters);
-        if (!count) {
-            appendOrder(sql, safeSpec.orders());
+        SqlFragment rootFilter = lock == null ? null : condition(safeSpec.root(), form(safeForms, safeSpec.root()),
+                protection(safeProtections, safeSpec.root()), true);
+        boolean filteredRoot = rootFilter != null && !rootFilter.sql().isBlank();
+        if (filteredRoot) {
+            sql.append(" where (").append(rootFilter.sql()).append(')');
+            parameters.addAll(OwnedBindableValues.ownedValues(rootFilter.parameters()));
         }
-        return compile
-                ? support.compiledRequest(sql.toString(), parameters)
-                : new SqlRequest(sql.toString(), parameters);
+        if (safeSpec.where() != null) {
+            String where = condition(safeSpec.where(), safeForms, valueConditions, parameters);
+            sql.append(filteredRoot ? " and (" + where + ")"
+                    : cursor != null ? " where (" + where + ")" : " where " + where);
+        }
+        if (cursor != null && !cursor.sql().isBlank()) {
+            sql.append(filteredRoot || safeSpec.where() != null ? " and (" : " where (")
+                    .append(cursor.sql()).append(')');
+            parameters.addAll(cursor.parameters());
+        }
+        return new SqlFragment(sql.toString(), parameters);
     }
 
-    private static PageQuery requireJoinPage(JoinQuerySpec spec, PageQuery page) {
+    /** 普通查询的锁只落在根来源；列目标方言同样锁整行，不锁计算投影。 */
+    private String lockingSuffix(JoinSource root, DynamicForm physicalRoot, LockingReadDialect dialect, ReadLock lock) {
+        String target = alias(root);
+        if ("oracle".equals(support.dialectName)) target += "." + support.identifier(physicalRoot.fields().getFirst().name());
+        return dialect.suffix(lock, target);
+    }
+
+    static PageQuery requireJoinPage(JoinQuerySpec spec, PageQuery page) {
         JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
         PageQuery safePage = Objects.requireNonNull(page, "join page query must not be null");
         if (!safePage.sorts().isEmpty()) {
@@ -147,29 +234,12 @@ final class JoinQuerySqlRenderer {
         return safePage;
     }
 
-    private static JoinInputs logicalInputs(JoinQuerySpec spec,
-                                            Map<JoinSource, ConditionGroup> protections) {
-        JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
-        Map<JoinSource, com.flying.orm.core.form.DynamicForm> forms = new java.util.LinkedHashMap<>();
-        Map<JoinSource, ConditionGroup> business = new java.util.LinkedHashMap<>();
-        safeSpec.sources().forEach(source -> {
-            forms.put(source, source.form());
-            business.put(source, safeSpec.where(source));
-        });
-        return new JoinInputs(forms, protections, business);
-    }
-
-    private record JoinInputs(Map<JoinSource, com.flying.orm.core.form.DynamicForm> forms,
-                              Map<JoinSource, ConditionGroup> protections,
-                              Map<JoinSource, ConditionGroup> businessConditions) {
-    }
-
     private String alias(JoinSource source) {
         return support.identifier("t" + Objects.requireNonNull(
                 source, "join source must not be null").ordinal());
     }
 
-    private String field(JoinFieldRef field) {
+    String field(JoinFieldRef field) {
         JoinFieldRef safeField = Objects.requireNonNull(field, "join field must not be null");
         return alias(safeField.source()) + "." + support.identifier(safeField.field());
     }
@@ -180,7 +250,7 @@ final class JoinQuerySqlRenderer {
                 safeField.source().form().field(safeField.field()));
     }
 
-    private String aliasIdentifier(String alias) {
+    String aliasIdentifier(String alias) {
         // JoinProjection 已验证为单段别名；H2 的普通标识符折叠不能改变结果绑定身份。
         return "h2".equals(support.dialectName) ? '"' + alias + '"' : support.identifier(alias);
     }
@@ -220,14 +290,14 @@ final class JoinQuerySqlRenderer {
             return qualified
                     ? alias(safeSource) + "." + support.identifier(sourceField)
                     : support.identifier(sourceField);
-        });
+        }, safeForm::field);
         if (!renderer.hasCorrelatedTerms()) {
             return renderer.renderWhere(safeCondition);
         }
         String qualifier = qualified ? alias(safeSource) : support.identifier(safeForm);
         return renderer.renderWhere(
                 safeCondition,
-                name -> qualifier + "." + support.identifier(safeForm.field(name).name()),
+                name -> qualifier + "." + support.identifier(FormSqlRenderSupport.correlatedField(safeForm, name)),
                 name -> qualifier);
     }
 
@@ -239,44 +309,82 @@ final class JoinQuerySqlRenderer {
         return selected.toString();
     }
 
-    private String on(JoinClause join) {
-        StringJoiner conditions = new StringJoiner(" and ");
-        for (JoinFieldPair pair : join.on()) {
-            conditions.add(field(pair.left()) + " = " + field(pair.right()));
-        }
-        return conditions.toString();
-    }
-
-    private void appendBusinessWhere(StringBuilder sql,
-                                     JoinQuerySpec spec,
-                                     Map<JoinSource, com.flying.orm.core.form.DynamicForm> physicalForms,
-                                     Map<JoinSource, ConditionGroup> businessConditions,
-                                     List<Object> parameters) {
-        StringJoiner where = new StringJoiner(" and ");
-        for (JoinSource source : spec.sources()) {
-            ConditionGroup condition = businessConditions.get(source);
-            SqlFragment fragment = businessCondition(
-                    source, form(physicalForms, source), condition);
-            if (!fragment.sql().isBlank()) {
-                where.add(condition.operator() == LogicalOperator.OR && condition.children().size() > 1
-                                  ? "(" + fragment.sql() + ")"
-                                  : fragment.sql());
+    private String condition(JoinCondition condition,
+                               Map<JoinSource, com.flying.orm.core.form.DynamicForm> physicalForms,
+                               Map<JoinCondition.Values, ConditionGroup> prepared,
+                               List<Object> parameters) {
+        StringBuilder sql = new StringBuilder();
+        ArrayDeque<ConditionFrame> frames = new ArrayDeque<>();
+        frames.addLast(new ConditionFrame(List.of(condition), "", false));
+        while (!frames.isEmpty()) {
+            ConditionFrame frame = frames.getLast();
+            if (frame.index == frame.children.size()) {
+                if (frame.grouped) sql.append(')');
+                frames.removeLast();
+                continue;
+            }
+            if (frame.index > 0) sql.append(frame.separator);
+            JoinCondition node = frame.children.get(frame.index++);
+            if (node instanceof JoinCondition.Group group) {
+                sql.append('(');
+                frames.addLast(new ConditionFrame(group.children(),
+                        group.operator() == LogicalOperator.AND ? " and " : " or ", true));
+            } else if (node instanceof JoinCondition.Comparison comparison) {
+                if (!comparison.operator().equals("=") && !comparison.operator().equals("<>")) {
+                    requireStableOffsetTimeOrdering(comparison.left());
+                    requireStableOffsetTimeOrdering(comparison.right());
+                }
+                sql.append(field(comparison.left())).append(' ').append(comparison.operator())
+                        .append(' ').append(field(comparison.right()));
+            } else if (node instanceof JoinCondition.Values values) {
+                SqlFragment fragment = businessCondition(values.source(), form(physicalForms, values.source()),
+                        prepared.getOrDefault(values, values.condition()));
+                sql.append('(').append(fragment.sql().isBlank() ? "1 = 1" : fragment.sql()).append(')');
                 parameters.addAll(OwnedBindableValues.ownedValues(fragment.parameters()));
             }
         }
-        if (where.length() > 0) {
-            sql.append(" where ").append(where);
+        return sql.toString();
+    }
+
+    private static final class ConditionFrame {
+        private final List<JoinCondition> children;
+        private final String separator;
+        private final boolean grouped;
+        private int index;
+
+        private ConditionFrame(List<JoinCondition> children, String separator, boolean grouped) {
+            this.children = children;
+            this.separator = separator;
+            this.grouped = grouped;
         }
     }
 
-    private void appendOrder(StringBuilder sql, List<JoinOrder> orders) {
+    private void appendOrder(StringBuilder sql, List<JoinOrder> orders, List<Object> parameters) {
         if (orders.isEmpty()) {
             return;
         }
         StringJoiner order = new StringJoiner(", ", " order by ", "");
         for (JoinOrder item : orders) {
-            requireStableOffsetTimeOrdering(item.field());
-            order.add(field(item.field()) + " " + item.direction().name().toLowerCase(java.util.Locale.ROOT));
+            String ordered;
+            if (item.expression() == null) {
+                requireStableOffsetTimeOrdering(item.field());
+                ordered = field(item.field());
+            } else {
+                SqlExpressionCompiler.Operand compiled = support.expression(ExpressionFieldValue.bindPriorities(
+                        item.expression(), reference -> reference.source().form().field(reference.identity().name())), reference -> {
+                    DynamicField source = reference.source().form().field(reference.identity().name());
+                    FormUpdateExpressions.requirePlain(reference.source().form(), source);
+                    return new SqlExpressionCompiler.Operand(new SqlFragment(field(
+                            new JoinFieldRef(reference.source(), source.name())), List.of()),
+                            source.databaseType().isArray() ? LogicalType.OTHER : source.databaseType().logicalType());
+                });
+                if (compiled.type() == LogicalType.OFFSET_TIME) {
+                    support.requireStableOffsetTimeOrdering(FormDataSqlRenderer.expressionField("ordering", compiled.type()));
+                }
+                ordered = compiled.fragment().sql();
+                parameters.addAll(compiled.fragment().parameters());
+            }
+            order.add(ordered + " " + item.direction().name().toLowerCase(java.util.Locale.ROOT));
         }
         sql.append(order);
     }
@@ -291,11 +399,18 @@ final class JoinQuerySqlRenderer {
         return Objects.requireNonNull(forms.get(source), "join physical form is missing");
     }
 
-    private static String keyword(JoinClause join) {
+    private String keyword(JoinClause join) {
         return switch (join.type()) {
             case INNER -> "inner join";
             case LEFT -> "left outer join";
             case RIGHT -> "right outer join";
+            case FULL -> {
+                if (!support.dialectCapabilities.supports(DialectCapabilityId.FULL_OUTER_JOIN)) {
+                    throw new IllegalArgumentException("dialect does not declare FULL OUTER JOIN support: "
+                            + support.dialectName);
+                }
+                yield "full outer join";
+            }
         };
     }
 }

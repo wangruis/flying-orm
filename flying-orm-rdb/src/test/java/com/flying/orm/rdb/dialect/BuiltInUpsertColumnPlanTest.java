@@ -8,8 +8,48 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class BuiltInUpsertColumnPlanTest {
+
+    @Test
+    void mysqlNullBusinessKeyCannotApproveConflictOnAnotherUniqueConstraint() {
+        String sql = UpsertDialect.mysql().render("items", List.of("id", "email", "name"),
+                List.of("email"), List.of("name"));
+        assertTrue(sql.contains("email = if(email = values(email), email,"), sql);
+        assertFalse(sql.contains("<=>"), sql);
+    }
+
+    @Test
+    void mergePredicatesFollowSqlServerAndOracleUniqueNullSemantics() throws Exception {
+        for (boolean oracle : List.of(false, true)) {
+            UpsertDialect dialect = oracle ? UpsertDialect.oracle() : UpsertDialect.sqlServer();
+            String sql = dialect.render("items", List.of("a", "b", "name"), List.of("a", "b"), List.of("name"));
+            String predicate = sql.substring(sql.indexOf(" on ") + 4, sql.indexOf(" when matched"));
+            org.h2.jdbcx.JdbcDataSource source = new org.h2.jdbcx.JdbcDataSource();
+            source.setURL("jdbc:h2:mem:unique_null_predicate_" + oracle);
+            try (java.sql.Connection connection = source.getConnection();
+                 java.sql.PreparedStatement query = connection.prepareStatement(
+                         "select case when " + predicate + " then 1 else 0 end "
+                                 + "from (values (cast(? as int), cast(? as int))) target(a,b) "
+                                 + "cross join (values (cast(? as int), cast(? as int))) source(a,b)")) {
+                List<Integer> values = Arrays.asList(null, 1, 2);
+                for (Integer a : values) for (Integer b : values) {
+                    for (Integer x : values) for (Integer y : values) {
+                        query.setObject(1, a); query.setObject(2, b);
+                        query.setObject(3, x); query.setObject(4, y);
+                        try (java.sql.ResultSet result = query.executeQuery()) {
+                            assertTrue(result.next());
+                            boolean expected = java.util.Objects.equals(a, x) && java.util.Objects.equals(b, y)
+                                    && (!oracle || a != null || b != null);
+                            assertEquals(expected ? 1 : 0, result.getInt(1), oracle + ": " + Arrays.asList(a, b, x, y));
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     @Test
     void preservesIndependentStageOrderAndExpressionsAcrossAllBuiltInDialects() {
@@ -22,14 +62,15 @@ class BuiltInUpsertColumnPlanTest {
                 "insert into items (shared, id, created) values (lower(?), cast(? as bigint), trim(?)) "
                         + "on conflict (id) do update set updated = upper(?), shared = excluded.shared",
                 "insert into items (shared, id, created) values (lower(?), cast(? as bigint), trim(?)) "
-                        + "on duplicate key update id = if(id <=> values(id), id, "
+                        + "on duplicate key update id = if(id = values(id), id, "
                         + "(select null union all select null)), updated = upper(?), shared = values(shared)",
                 "merge into items target using (select cast(? as bigint) as id, upper(?) as updated, "
                         + "lower(?) as shared, trim(?) as created from dual) source on (target.id = source.id) "
                         + "when matched then update set target.updated = source.updated, target.shared = source.shared "
                         + "when not matched then insert (shared, id, created) values (source.shared, source.id, source.created)",
                 "merge into items with (holdlock) as target using (values (cast(? as bigint), upper(?), "
-                        + "lower(?), trim(?))) as source (id, updated, shared, created) on target.id = source.id "
+                        + "lower(?), trim(?))) as source (id, updated, shared, created) "
+                        + "on (target.id = source.id or (target.id is null and source.id is null)) "
                         + "when matched then update set target.updated = source.updated, target.shared = source.shared "
                         + "when not matched then insert (shared, id, created) values (source.shared, source.id, source.created);",
                 "merge into items target using (values (cast(? as bigint), upper(?), lower(?), trim(?))) "
@@ -49,12 +90,12 @@ class BuiltInUpsertColumnPlanTest {
                 "insert into items (id, name, name) values (?, lower(?), lower(?)) on conflict (id) "
                         + "do update set name = excluded.name",
                 "insert into items (id, name, name) values (?, lower(?), lower(?)) on duplicate key update "
-                        + "id = if(id <=> values(id), id, (select null union all select null)), name = values(name)",
+                        + "id = if(id = values(id), id, (select null union all select null)), name = values(name)",
                 "merge into items target using (select ? as id, lower(?) as name, upper(?) as name from dual) "
                         + "source on (target.id = source.id) when matched then update set target.name = source.name "
                         + "when not matched then insert (id, name, name) values (source.id, source.name, source.name)",
                 "merge into items with (holdlock) as target using (values (?, lower(?), upper(?))) "
-                        + "as source (id, name, name) on target.id = source.id "
+                        + "as source (id, name, name) on (target.id = source.id or (target.id is null and source.id is null)) "
                         + "when matched then update set target.name = source.name "
                         + "when not matched then insert (id, name, name) values (source.id, source.name, source.name);",
                 "merge into items target using (values (?, lower(?), upper(?))) source (id, name, name) "
@@ -71,11 +112,12 @@ class BuiltInUpsertColumnPlanTest {
         assertEquals(List.of(
                 "insert into items (id) values (?) on conflict (id) do nothing",
                 "insert into items (id) values (?) on duplicate key update "
-                        + "id = if(id <=> values(id), id, (select null union all select null))",
+                        + "id = if(id = values(id), id, (select null union all select null))",
                 "merge into items target using (select ? as id from dual) source on (target.id = source.id) "
                         + "when not matched then insert (id) values (source.id)",
                 "merge into items with (holdlock) as target using (values (?)) as source (id) "
-                        + "on target.id = source.id when not matched then insert (id) values (source.id);",
+                        + "on (target.id = source.id or (target.id is null and source.id is null)) "
+                        + "when not matched then insert (id) values (source.id);",
                 "merge into items target using (values (?)) source (id) on target.id = source.id "
                         + "when not matched then insert (id) values (source.id)"
         ), actual);

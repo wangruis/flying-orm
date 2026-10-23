@@ -16,13 +16,17 @@ import java.util.Objects;
 public final class IndexDefinition {
 
     private final String name;
+    private final String normalizedName;
     private final boolean unique;
     private final List<IndexKeyPart> keys;
+    private final List<String> columns;
 
     private IndexDefinition(String name, boolean unique, List<IndexKeyPart> keys) {
         this.name = name;
+        this.normalizedName = Names.key(name, "index name");
         this.unique = unique;
         this.keys = List.copyOf(keys);
+        this.columns = this.keys.stream().map(IndexKeyPart::column).toList();
         // 排序方向不同也不能让同一物理列成为两个索引键；在元数据边界拒绝，避免生成方言相关的坏 DDL。
         HashSet<String> columns = new HashSet<>();
         for (IndexKeyPart key : this.keys) {
@@ -38,6 +42,16 @@ public final class IndexDefinition {
 
     public String name() {
         return name;
+    }
+
+    /** 返回名称的兼容查找键；物理身份仍由 name 保留。 */
+    public String normalizedName() {
+        return normalizedName;
+    }
+
+    /** 返回声明顺序的只读列名；排序方向保存在 keys 中。 */
+    public List<String> columns() {
+        return columns;
     }
 
     public boolean unique() {
@@ -68,6 +82,11 @@ public final class IndexDefinition {
         public Builder unique(boolean unique) {
             this.unique = unique;
             return this;
+        }
+
+        /** 添加默认升序的索引列。 */
+        public Builder addColumn(String columnName) {
+            return addKey(IndexKeyPart.asc(columnName));
         }
 
         /** 添加一个结构化索引键；调用顺序就是复合索引顺序。 */

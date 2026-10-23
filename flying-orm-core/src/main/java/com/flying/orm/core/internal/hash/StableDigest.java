@@ -21,16 +21,6 @@ public final class StableDigest {
         return new Domain(name);
     }
 
-    /**
-     * 创建一次性摘要编码器。相同数据用于不同用途时，域名会让摘要保持隔离。
-     *
-     * @param domain 稳定、非空的用途和协议版本，例如 {@code batch-payload/v1}
-     * @return 新编码器
-     */
-    static StableEncoder sha256(String domain) {
-        return sha256(domain(domain));
-    }
-
     /** 使用预初始化用途域创建一次性编码器。 */
     public static StableEncoder sha256(Domain domain) {
         return new StableEncoder(Objects.requireNonNull(domain, "stable digest domain must not be null")

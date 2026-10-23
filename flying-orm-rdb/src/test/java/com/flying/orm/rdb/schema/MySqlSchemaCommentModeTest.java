@@ -34,7 +34,7 @@ class MySqlSchemaCommentModeTest {
 
         SchemaMigrationRejectedException failure = assertThrows(
                 SchemaMigrationRejectedException.class,
-                () -> jdbcExecutor(sqlExecutor).execute(List.of(GUARDED_DDL), SqlExecutionOptions.safeDefaults()));
+                () -> jdbcExecutor(sqlExecutor).execute(List.of(GUARDED_DDL), SqlExecutionOptions.unlimited()));
 
         assertEquals(SchemaMigrationFailureCode.EXECUTOR_CAPABILITY_REQUIRED, failure.failureCode());
         assertTrue(failure.getMessage().contains("NO_BACKSLASH_ESCAPES"));
@@ -66,7 +66,7 @@ class MySqlSchemaCommentModeTest {
                 "STRICT_TRANS_TABLES,NO_BACKSLASH_ESCAPES", modeQueries, ddlExecutions);
 
         long rows = jdbcExecutor(sqlExecutor).execute(
-                List.of(GUARDED_DDL, GUARDED_DDL), SqlExecutionOptions.safeDefaults());
+                List.of(GUARDED_DDL, GUARDED_DDL), SqlExecutionOptions.unlimited());
 
         assertEquals(0L, rows);
         assertEquals(1, modeQueries.get());
@@ -91,7 +91,7 @@ class MySqlSchemaCommentModeTest {
     void ordinaryMysqlDdlDoesNotQueryTheSessionMode() {
         SqlRequest ordinaryDdl = new SqlRequest("create table paths (value varchar(32) comment 'plain')", List.of());
         AtomicInteger jdbcExecutions = new AtomicInteger();
-        SyncSqlExecutor jdbc = new SyncSqlExecutor() {
+        SyncSqlExecutor jdbc = new com.flying.orm.rdb.support.ListQueryFixture() {
             @Override
             public List<DynamicRow> query(SqlRequest request) {
                 throw new AssertionError("ordinary MySQL DDL must not query sql_mode");
@@ -105,7 +105,7 @@ class MySqlSchemaCommentModeTest {
 
             @Override
             public com.flying.orm.rdb.execution.SqlWriteResult rowsUpdatedReturningKeys(
-                    SqlRequest request, SqlExecutionOptions options) {
+                    SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                 throw new AssertionError("generated keys must not be requested");
             }
         };
@@ -123,7 +123,7 @@ class MySqlSchemaCommentModeTest {
             }
         };
 
-        jdbcExecutor(jdbc).execute(List.of(ordinaryDdl), SqlExecutionOptions.safeDefaults());
+        jdbcExecutor(jdbc).execute(List.of(ordinaryDdl), SqlExecutionOptions.unlimited());
         reactiveExecutor(reactive).execute(List.of(ordinaryDdl)).block();
 
         assertEquals(1, jdbcExecutions.get());
@@ -132,7 +132,7 @@ class MySqlSchemaCommentModeTest {
 
     private static SyncSqlExecutor syncExecutor(
             String modes, AtomicInteger modeQueries, AtomicInteger ddlExecutions) {
-        return new SyncSqlExecutor() {
+        return new com.flying.orm.rdb.support.ListQueryFixture() {
             private boolean inScope;
 
             @Override
@@ -165,7 +165,7 @@ class MySqlSchemaCommentModeTest {
 
             @Override
             public com.flying.orm.rdb.execution.SqlWriteResult rowsUpdatedReturningKeys(
-                    SqlRequest request, SqlExecutionOptions options) {
+                    SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                 throw new AssertionError("generated keys must not be requested");
             }
         };
@@ -207,8 +207,7 @@ class MySqlSchemaCommentModeTest {
     private static JdbcSchemaMigrationExecutor jdbcExecutor(SyncSqlExecutor executor) {
         return new JdbcSchemaMigrationExecutor(
                 executor,
-                SchemaMigrationObserver.noop(),
-                ignored -> { });
+                SchemaMigrationObserver.noop());
     }
 
     private static SchemaMigrationExecutor reactiveExecutor(ReactiveSqlExecutor executor) {

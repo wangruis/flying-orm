@@ -2,6 +2,9 @@ package com.flying.orm.rdb.form.spec;
 
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.scope.DataScope;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
+import com.flying.orm.rdb.lock.OptimisticLockOptions;
 import org.junit.jupiter.api.Test;
 
 import java.lang.reflect.Method;
@@ -19,6 +22,27 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 /** 单条写入规格必须在发布时冻结标准可绑定值，而不只冻结 Map 和数组容器。 */
 class WriteSpecValueSnapshotTest {
+
+    @Test
+    void unchangedWriteSettingsReuseThePublishedSpecAndItsOwnedSnapshot() {
+        byte[] source = {1, 2};
+        WriteSpec spec = WriteSpec.insert(form(), Map.of("payload", source));
+        assertSame(spec, spec.withScope(DataScope.none()));
+        assertThrows(NullPointerException.class, () -> spec.withLock(null));
+        assertThrows(NullPointerException.class, () -> spec.withExecutionOptions(null));
+        SqlExecutionOptions options = SqlExecutionOptions.unlimited();
+        OptimisticLockOptions lock = OptimisticLockOptions.increment("id", 1L);
+        WriteSpec configured = spec.withScope(DataScope.tenant("id", 7L))
+                .withLock(lock).withExecutionOptions(options);
+        assertNotSame(spec, configured);
+        assertSame(configured, configured.withScope(configured.scope()));
+        assertSame(configured, configured.withLock(lock));
+        assertSame(configured, configured.withExecutionOptions(options));
+        assertSame(ownedValues(spec), ownedValues(configured));
+        source[0] = 9;
+        assertEquals(1, ((byte[]) configured.values().get("payload"))[0]);
+        assertThrows(NullPointerException.class, () -> configured.withScope(null));
+    }
 
     @Test
     void freezesByteBufferAtSpecCreationAndDoesNotExposeMutableContent() {

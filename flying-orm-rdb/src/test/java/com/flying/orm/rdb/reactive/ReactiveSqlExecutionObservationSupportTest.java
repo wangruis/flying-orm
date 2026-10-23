@@ -34,7 +34,7 @@ class ReactiveSqlExecutionObservationSupportTest {
         Flux<Integer> rows = Flux.just(1);
 
         assertSame(rows, ReactiveSqlExecutionProtection.protectRows(
-                rows, "select value from samples", SqlExecutionOptions.safeDefaults(), null));
+                rows, "select value from samples", SqlExecutionOptions.unlimited(), null));
     }
 
     @Test
@@ -45,7 +45,7 @@ class ReactiveSqlExecutionObservationSupportTest {
                      () -> ReactiveSqlExecutionProtection.protectRows(
                                      rows,
                                      "select value from samples",
-                                     SqlExecutionOptions.safeDefaults().withMaxRows(1),
+                                     SqlExecutionOptions.unlimited().withMaxRows(1),
                                      null)
                              .collectList()
                              .block());
@@ -59,10 +59,32 @@ class ReactiveSqlExecutionObservationSupportTest {
                      () -> ReactiveSqlExecutionProtection.protectRows(
                                      rows,
                                      "select value from samples",
-                                     SqlExecutionOptions.safeDefaults().withMaxResultBytes(1),
+                                     SqlExecutionOptions.unlimited().withMaxResultBytes(1),
                                      ignored -> 2L)
                              .collectList()
                              .block());
+    }
+
+    @Test
+    void resultEstimationFailureKeepsItsOriginalCauseInsteadOfReportingAnExceededBudget() {
+        IllegalStateException failure = new IllegalStateException("result value cannot be inspected");
+        java.math.BigDecimal value = new java.math.BigDecimal("1") {
+            @Override
+            public int precision() { throw failure; }
+        };
+        DynamicRow row = DynamicRow.copyOf(java.util.Map.of("value", value));
+        ReactiveSqlExecutor executor = new ReactiveSqlExecutor() {
+            @Override
+            public Flux<DynamicRow> query(SqlRequest request) { return Flux.just(row); }
+            @Override
+            public Mono<Long> rowsUpdated(SqlRequest request) { throw new AssertionError("unexpected write"); }
+        };
+        SqlRequest request = new SqlRequest("select value from samples", List.of());
+
+        assertSame(failure, assertThrows(IllegalStateException.class,
+                () -> executor.query(request, SqlExecutionOptions.unlimited().withMaxResultBytes(1024))
+                        .collectList().block()));
+        assertEquals(List.of(row), executor.query(request, SqlExecutionOptions.unlimited()).collectList().block());
     }
 
     @Test

@@ -1,7 +1,6 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.join.JoinProjection;
-import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.join.JoinSource;
 import com.flying.orm.core.protection.MaskedFieldDefinition;
 import com.flying.orm.core.protection.SensitiveDisplayMode;
@@ -33,16 +32,17 @@ final class JoinResultProtector {
         this.renderer = Objects.requireNonNull(renderer, "form data sql renderer must not be null");
     }
 
-    ResultPlan plan(JoinQuerySpec spec,
+    ResultPlan plan(List<JoinProjection> selected,
                     Map<JoinSource, DataScope> scopes,
                     SensitiveDisplayMode displayMode) {
-        JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
+        Objects.requireNonNull(selected, "join result projections must not be null");
         Map<JoinSource, DataScope> safeScopes = Objects.requireNonNull(
                 scopes, "join scopes must not be null");
         SensitiveDisplayMode safeDisplayMode = Objects.requireNonNull(
                 displayMode, "sensitive display mode must not be null");
         Map<JoinSource, List<JoinProjection>> projectionsBySource = new LinkedHashMap<>();
-        for (JoinProjection projection : safeSpec.projections()) {
+        for (JoinProjection projection : selected) {
+            if (projection.expression() != null) continue;
             projectionsBySource.computeIfAbsent(projection.field().source(), ignored -> new ArrayList<>())
                                .add(projection);
         }
@@ -51,7 +51,7 @@ final class JoinResultProtector {
             if (requiresTransform(source, projections, safeDisplayMode)) {
                 DataScope sourceScope = safeScopes.getOrDefault(source, DataScope.none());
                 protectedSources.add(new SourcePlan(
-                        source, projections, safeSpec.projections(),
+                        source, projections, selected,
                         renderer.protection().resultOperation(
                                 source.form(), sourceScope, safeDisplayMode),
                         projectsEncryptedField(source, projections)));
@@ -181,7 +181,7 @@ final class JoinResultProtector {
             for (int index = 0; index < allProjections.size(); index++) {
                 JoinProjection projection = allProjections.get(index);
                 String target = ignoredColumn(index);
-                if (projection.field().source().equals(source)
+                if (projection.field() != null && projection.field().source().equals(source)
                         && primaryAliases.putIfAbsent(
                                 projection.field().field(), projection.alias()) == null) {
                     target = projection.field().field();

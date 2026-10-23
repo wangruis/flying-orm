@@ -24,8 +24,8 @@ import java.time.OffsetDateTime;
 import java.time.ZoneOffset;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RelationalSchemaDialectConvergenceTest {
 
@@ -103,14 +103,13 @@ class RelationalSchemaDialectConvergenceTest {
                 .build();
 
         RdbDialect mysql = RdbDialect.mysql();
-        ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(mysql).review(
+        SchemaMigrationPlan plan = RelationalSchemaPlanReviewer.create(mysql).review(
                 DatabaseDescriptor.of("mysql", "8.4", mysql), desired,
                 SchemaSnapshot.present(actual), SchemaSnapshotCoverage.complete(),
                 SchemaCompatibilityMode.EXACT);
 
         assertEquals(1, plan.operations().size());
         assertEquals(SchemaOperation.Kind.CHANGE_INDEX, plan.operations().getFirst().kind());
-        assertFalse(plan.requiresManualAction());
         assertEquals(java.util.List.of("alter table `accounts` drop index `uk_accounts_login`,"
                         + " add unique index `uk_accounts_login` (`login_name` asc)"),
                 plan.requests().stream().map(request -> request.sql()).toList());
@@ -186,12 +185,10 @@ class RelationalSchemaDialectConvergenceTest {
         RdbDialect mysql = RdbDialect.mysql();
         RelationalTableDefinition unsupported = table(ColumnDefinition.builder("id", "BIGINT")
                 .generation(ValueGeneration.identity(7, 1, 64)).build());
-        ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(mysql).review(
+        assertThrows(UnsupportedOperationException.class, () -> RelationalSchemaPlanReviewer.create(mysql).review(
                 DatabaseDescriptor.of("mysql", "8.4", mysql), unsupported,
                 SchemaSnapshot.absent(unsupported.identity()), SchemaSnapshotCoverage.complete(),
-                SchemaCompatibilityMode.EXACT);
-        assertTrue(plan.requiresManualAction());
-        assertTrue(plan.requests().isEmpty());
+                SchemaCompatibilityMode.EXACT));
     }
 
     @Test
@@ -199,37 +196,34 @@ class RelationalSchemaDialectConvergenceTest {
         RdbDialect h2 = RdbDialect.h2();
         RelationalTableDefinition desired = table(ColumnDefinition.builder("id", "BIGINT")
                 .generation(ValueGeneration.identity(3, 2, 64)).build());
-        ReviewedSchemaPlan create = RelationalSchemaPlanReviewer.create(h2).review(
+        SchemaMigrationPlan create = RelationalSchemaPlanReviewer.create(h2).review(
                 DatabaseDescriptor.of("h2", "2.3", h2), desired,
                 SchemaSnapshot.absent(desired.identity()), SchemaSnapshotCoverage.complete(),
                 SchemaCompatibilityMode.EXACT);
-        assertFalse(create.requiresManualAction());
         assertTrue(create.requests().getFirst().sql().toLowerCase().contains("cache 64"));
         assertConverged(h2, desired, desired);
     }
 
     @Test
-    void oraclePersistsNamedSequenceIdentityAndRejectsAnUnverifiableStart() {
+    void oraclePersistsNamedSequenceIdentityWithCallerDeclaredStart() {
         RdbDialect oracle = RdbDialect.oracle();
         RelationalTableDefinition desired = table(ColumnDefinition.builder("id", "BIGINT")
                 .generation(ValueGeneration.sequence("sample_seq")).build());
-        ReviewedSchemaPlan create = RelationalSchemaPlanReviewer.create(oracle).review(
+        SchemaMigrationPlan create = RelationalSchemaPlanReviewer.create(oracle).review(
                 DatabaseDescriptor.of("oracle", "19c", oracle), desired,
                 SchemaSnapshot.absent(desired.identity()), SchemaSnapshotCoverage.complete(),
                 SchemaCompatibilityMode.EXACT);
 
-        assertFalse(create.requiresManualAction());
         assertTrue(create.requests().stream().map(request -> request.sql().toLowerCase())
                          .anyMatch(sql -> sql.contains("[[flying-orm:v1:sequence:sample_seq]]")));
 
-        RelationalTableDefinition unsupported = table(ColumnDefinition.builder("id", "BIGINT")
+        RelationalTableDefinition configured = table(ColumnDefinition.builder("id", "BIGINT")
                 .generation(ValueGeneration.sequence("sample_seq", 7, 1, 100)).build());
-        ReviewedSchemaPlan manual = RelationalSchemaPlanReviewer.create(oracle).review(
-                DatabaseDescriptor.of("oracle", "19c", oracle), unsupported,
-                SchemaSnapshot.absent(unsupported.identity()), SchemaSnapshotCoverage.complete(),
+        SchemaMigrationPlan configuredCreation = RelationalSchemaPlanReviewer.create(oracle).review(
+                DatabaseDescriptor.of("oracle", "19c", oracle), configured,
+                SchemaSnapshot.absent(configured.identity()), SchemaSnapshotCoverage.complete(),
                 SchemaCompatibilityMode.EXACT);
-        assertTrue(manual.requiresManualAction());
-        assertTrue(manual.requests().isEmpty());
+        assertTrue(configuredCreation.requests().getFirst().sql().contains("start with 7"));
     }
 
     @Test
@@ -248,12 +242,11 @@ class RelationalSchemaDialectConvergenceTest {
         RelationalTableDefinition desired = tableWithForeignKeyActions(
                 ReferentialAction.SET_DEFAULT, ReferentialAction.SET_DEFAULT);
 
-        ReviewedSchemaPlan create = RelationalSchemaPlanReviewer.create(dialect).review(
+        SchemaMigrationPlan create = RelationalSchemaPlanReviewer.create(dialect).review(
                 DatabaseDescriptor.of(dialect.name(), "test", dialect), desired,
                 SchemaSnapshot.absent(desired.identity()), SchemaSnapshotCoverage.complete(),
                 SchemaCompatibilityMode.EXACT);
 
-        assertFalse(create.requiresManualAction());
         assertTrue(create.requests().getFirst().sql().toLowerCase(java.util.Locale.ROOT)
                 .contains("on delete set default"));
         assertTrue(create.requests().getFirst().sql().toLowerCase(java.util.Locale.ROOT)
@@ -263,7 +256,7 @@ class RelationalSchemaDialectConvergenceTest {
     private static void assertConverged(RdbDialect dialect,
                                         RelationalTableDefinition desired,
                                         RelationalTableDefinition actual) {
-        ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
+        SchemaMigrationPlan plan = RelationalSchemaPlanReviewer.create(dialect).review(
                 DatabaseDescriptor.of(dialect.name(), "test", dialect),
                 desired,
                 SchemaSnapshot.present(actual),
@@ -285,22 +278,18 @@ class RelationalSchemaDialectConvergenceTest {
                                                           ReferentialAction onDelete,
                                                           ReferentialAction onUpdate) {
         RelationalTableDefinition desired = tableWithForeignKeyActions(onDelete, onUpdate);
-        ReviewedSchemaPlan create = RelationalSchemaPlanReviewer.create(dialect).review(
+        assertThrows(UnsupportedOperationException.class, () -> RelationalSchemaPlanReviewer.create(dialect).review(
                 DatabaseDescriptor.of(dialect.name(), "test", dialect), desired,
                 SchemaSnapshot.absent(desired.identity()), SchemaSnapshotCoverage.complete(),
-                SchemaCompatibilityMode.EXACT);
-        assertTrue(create.requiresManualAction(), dialect.name());
-        assertTrue(create.requests().isEmpty(), dialect.name());
+                SchemaCompatibilityMode.EXACT), dialect.name());
 
         RelationalTableDefinition withoutForeignKey = table(
                 ColumnDefinition.builder("id", "BIGINT").nullable(false).build(),
                 ColumnDefinition.builder("parent_id", "BIGINT").build());
-        ReviewedSchemaPlan alter = RelationalSchemaPlanReviewer.create(dialect).review(
+        assertThrows(UnsupportedOperationException.class, () -> RelationalSchemaPlanReviewer.create(dialect).review(
                 DatabaseDescriptor.of(dialect.name(), "test", dialect), desired,
                 SchemaSnapshot.present(withoutForeignKey), SchemaSnapshotCoverage.complete(),
-                SchemaCompatibilityMode.EXACT);
-        assertTrue(alter.requiresManualAction(), dialect.name());
-        assertTrue(alter.requests().isEmpty(), dialect.name());
+                SchemaCompatibilityMode.EXACT), dialect.name());
     }
 
     private static RelationalTableDefinition tableWithForeignKeyActions(ReferentialAction onDelete,

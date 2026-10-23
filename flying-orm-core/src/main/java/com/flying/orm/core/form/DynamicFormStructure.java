@@ -54,6 +54,7 @@ final class DynamicFormStructure {
     }
 
     static String fingerprint(RelationIdentity identity,
+                              String namingSource,
                               List<DynamicField> fields,
                               LogicDeleteDefinition logicDelete,
                               TenantDefinition tenant,
@@ -63,16 +64,9 @@ final class DynamicFormStructure {
         identity.catalog().ifPresent(value -> shape.text("CATALOG", value));
         identity.schema().ifPresent(value -> shape.text("SCHEMA", value));
         shape.text("TABLE", identity.table());
-        return fingerprint(shape, fields, logicDelete, tenant, protections);
-    }
-
-    static String fingerprint(String table,
-                              List<DynamicField> fields,
-                              LogicDeleteDefinition logicDelete,
-                              TenantDefinition tenant,
-                              FieldProtectionRegistry protections) {
-        StableEncoder shape = StableDigest.sha256(STRUCTURE_DOMAIN)
-                                          .text("TABLE", table);
+        if (!protections.encryptedFields().isEmpty() || fields.stream().anyMatch(DynamicField::unique)) {
+            shape.text("PHYSICAL_NAMING_SOURCE", namingSource);
+        }
         return fingerprint(shape, fields, logicDelete, tenant, protections);
     }
 

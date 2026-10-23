@@ -2,6 +2,7 @@ package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.join.JoinCondition;
 import com.flying.orm.rdb.internal.condition.ConditionNodes;
 import org.reactivestreams.Publisher;
 import reactor.core.publisher.Flux;
@@ -68,6 +69,11 @@ final class ReactiveProtectionCpuBoundary {
         }
         return ConditionNodes.anyTerm(safeWhere, term -> safeForm.findField(term.field())
                 .flatMap(found -> safeForm.protections().encrypted(found.name())).isPresent());
+    }
+
+    static boolean usesEncryptedCondition(JoinCondition condition) {
+        return condition != null && condition.anyLeaf(leaf -> leaf instanceof JoinCondition.Values values
+                && usesEncryptedCondition(values.source().form(), values.condition()));
     }
 
     static boolean usesEncryptedScope(DynamicForm form, com.flying.orm.core.scope.DataScope scope) {

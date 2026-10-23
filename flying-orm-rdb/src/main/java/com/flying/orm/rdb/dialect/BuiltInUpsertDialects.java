@@ -19,7 +19,7 @@ final class BuiltInUpsertDialects {
     static UpsertDialect h2() {
         return dialect((table, stage, scope) -> "merge into " + table + " target using (values ("
                 + stage.parameterExpressions() + ")) source (" + join(stage.parameterColumns()) + ") "
-                + mergeBody(stage, false, scope), false);
+                + mergeBody(stage, false, false, scope), false);
     }
 
     static UpsertDialect mysql() {
@@ -53,8 +53,8 @@ final class BuiltInUpsertDialects {
                         : stage.expression(column);
                 sets.add(column + " = " + value);
             }
-            return sql + "do update set " + sets + (scope == null ? "" : " where " + scopeAssertion(scope, stage));
-        }, false);
+            return sql + "do update set " + sets + (scope == null ? "" : " where " + scope);
+        }, false, true);
     }
 
     static UpsertDialect oracle() {
@@ -65,7 +65,7 @@ final class BuiltInUpsertDialects {
                                           + " as " + stage.parameterColumns().get(index));
             }
             return "merge into " + table + " target using (select " + sourceColumns + " from dual) source "
-                    + mergeBody(stage, true, scope);
+                    + mergeBody(stage, true, stage.conflictColumns().size() > 1, scope);
         }, false);
     }
 
@@ -73,7 +73,7 @@ final class BuiltInUpsertDialects {
         return dialect((table, stage, scope) -> "merge into " + table
                 + " with (holdlock) as target using (values (" + stage.parameterExpressions()
                 + ")) as source (" + join(stage.parameterColumns()) + ") "
-                + mergeBody(stage, false, scope) + ";", false);
+                + mergeBody(stage, false, true, scope) + ";", false);
     }
 
     static List<String> markers(int count) {
@@ -85,7 +85,24 @@ final class BuiltInUpsertDialects {
     }
 
     private static UpsertDialect dialect(StagedRenderer renderer, boolean mysql) {
+        return dialect(renderer, mysql, false);
+    }
+
+    private static UpsertDialect dialect(StagedRenderer renderer, boolean mysql, boolean batchRowIndex) {
         return new StagedUpsertDialect() {
+            @Override
+            public boolean supportsBatchRowIndex() { return batchRowIndex; }
+
+            @Override
+            public String renderIgnoreConflicts(String table, List<String> columns,
+                                                List<String> conflictColumns, List<String> valueExpressions) {
+                if (mysql) {
+                    return StagedUpsertDialect.super.renderIgnoreConflicts(
+                            table, columns, conflictColumns, valueExpressions);
+                }
+                return render(table, columns, conflictColumns, List.of(), valueExpressions);
+            }
+
             @Override
             public String render(String table,
                                  List<String> columns,
@@ -124,7 +141,30 @@ final class BuiltInUpsertDialects {
                 Stage stage = Stage.create(insertColumns, conflictColumns, updateColumns,
                                            parameterColumns, valueExpressions);
                 String scope = Objects.requireNonNull(targetPredicate, "upsert target predicate must not be null");
-                return renderer.render(table, stage, stage.updateColumns().isEmpty() ? null : scope);
+                return renderer.render(table, stage, stage.updateColumns().isEmpty() ? null
+                        : mysql ? scope : scopeAssertion(scope, stage));
+            }
+
+            @Override
+            public String renderConditional(String table, List<String> insertColumns, List<String> conflictColumns,
+                                            List<String> updateColumns, List<String> parameterColumns,
+                                            List<String> valueExpressions, String scopePredicate, String updatePredicate) {
+                if (updateColumns.isEmpty()) {
+                    return renderStaged(table, insertColumns, conflictColumns, updateColumns,
+                            parameterColumns, valueExpressions);
+                }
+                if (mysql) {
+                    throw new UnsupportedOperationException("MySQL upsert does not support conditional updates");
+                }
+                Stage stage = Stage.create(insertColumns, conflictColumns, updateColumns,
+                        parameterColumns, valueExpressions);
+                String predicate = Objects.requireNonNull(updatePredicate, "upsert update predicate must not be null");
+                // CASE 固定 Scope 检查先于业务条件；不能用 AND 让优化器跳过范围校验。
+                if (scopePredicate != null) {
+                    predicate = "case when " + scopeAssertion(scopePredicate, stage)
+                            + " then case when (" + predicate + ") then 1 else 0 end else 0 end = 1";
+                }
+                return renderer.render(table, stage, predicate);
             }
 
             @Override
@@ -139,10 +179,18 @@ final class BuiltInUpsertDialects {
         };
     }
 
-    private static String mergeBody(Stage stage, boolean oracle, String scope) {
+    private static String mergeBody(Stage stage, boolean oracle, boolean nullsEqual, String scope) {
         StringJoiner predicates = new StringJoiner(" and ");
         for (String column : stage.conflictColumns()) {
-            predicates.add("target." + column + " = source." + column);
+            String equal = "target." + column + " = source." + column;
+            predicates.add(nullsEqual ? "(" + equal + " or (target." + column
+                    + " is null and source." + column + " is null))" : equal);
+        }
+        if (oracle && nullsEqual) {
+            // Oracle 复合唯一键的部分 NULL 可以冲突，但全 NULL 不进入唯一索引。
+            StringJoiner present = new StringJoiner(" or ", "(", ")");
+            stage.conflictColumns().forEach(column -> present.add("source." + column + " is not null"));
+            predicates.add(present.toString());
         }
         String predicate = oracle ? "(" + predicates + ")" : predicates.toString();
         StringBuilder body = new StringBuilder("on ").append(predicate);
@@ -153,11 +201,11 @@ final class BuiltInUpsertDialects {
             }
             body.append(" when matched");
             if (scope != null && !oracle) {
-                body.append(" and ").append(scopeAssertion(scope, stage));
+                body.append(" and ").append(scope);
             }
             body.append(" then update set ").append(sets);
             if (scope != null && oracle) {
-                body.append(" where ").append(scopeAssertion(scope, stage));
+                body.append(" where ").append(scope);
             }
         }
         StringJoiner sourceValues = new StringJoiner(", ");
@@ -184,7 +232,8 @@ final class BuiltInUpsertDialects {
     private static void addMySqlIdentityGuard(StringJoiner sets, List<String> conflictColumns, String scope) {
         StringJoiner identity = new StringJoiner(" and ");
         for (String column : conflictColumns) {
-            identity.add(column + " <=> values(" + column + ")");
+            // MySQL UNIQUE 中的 NULL 不构成键冲突，不能用空值相等放行其他约束命中的行。
+            identity.add(column + " = values(" + column + ")");
         }
         if (scope != null) {
             identity.add("(" + scope + ")");

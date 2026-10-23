@@ -21,7 +21,7 @@ class OracleNumericPrecisionMetadataTest {
 
     @Test
     void physicalCharacterProjectionPreservesDeclaredLengthUnits() throws Exception {
-        for (InformationSchemaFormMetadataReader.Queries queries : profiles()) {
+        for (MetadataQueryProfile.Queries queries : profiles()) {
             String sql = queries.columnQuery().create(null, "items").sql();
             int start = sql.indexOf("end as DATA_TYPE,") + "end as DATA_TYPE,".length();
             String expression = sql.substring(start, sql.indexOf("as PHYSICAL_DATA_TYPE", start));
@@ -45,7 +45,7 @@ class OracleNumericPrecisionMetadataTest {
 
     @Test
     void resolvesOracleStarPrecisionForBothMetadataProfilesAndModels() throws Exception {
-        for (InformationSchemaFormMetadataReader.Queries queries : profiles()) {
+        for (MetadataQueryProfile.Queries queries : profiles()) {
             for (int scale : List.of(0, 2)) {
                 Integer precision = projectPrecision(queries, "NUMBER", null, scale);
                 assertEquals(38, precision);
@@ -58,7 +58,7 @@ class OracleNumericPrecisionMetadataTest {
                 row.put("NULLABLE", true);
 
                 DynamicForm form = FormMetadataRowConverter.toDynamicForm(
-                        "amounts", "amounts", List.of(row), queries.typeMapper());
+                        "amounts", com.flying.orm.core.metadata.RelationIdentity.parse("amounts"), List.of(row), queries.typeMapper());
                 assertEquals(38, form.field("amount").precision());
                 assertEquals(scale, form.field("amount").scale());
                 ColumnDefinition column = FormMetadataRowConverter.toCompleteSchemaSnapshot(
@@ -75,7 +75,7 @@ class OracleNumericPrecisionMetadataTest {
 
     @Test
     void keepsUnconstrainedNumbersExplicitPrecisionAndOtherTypesUnchanged() throws Exception {
-        for (InformationSchemaFormMetadataReader.Queries queries : profiles()) {
+        for (MetadataQueryProfile.Queries queries : profiles()) {
             assertNull(projectPrecision(queries, "NUMBER", null, null));
             assertEquals(8, projectPrecision(queries, "NUMBER", 8, 2));
             assertEquals(126, projectPrecision(queries, "FLOAT", 126, null));
@@ -83,11 +83,11 @@ class OracleNumericPrecisionMetadataTest {
         }
     }
 
-    private static List<InformationSchemaFormMetadataReader.Queries> profiles() {
+    private static List<MetadataQueryProfile.Queries> profiles() {
         return List.of(OracleMetadataQueries.queries(), OracleMetadataQueries.queries12c());
     }
 
-    private static Integer projectPrecision(InformationSchemaFormMetadataReader.Queries queries,
+    private static Integer projectPrecision(MetadataQueryProfile.Queries queries,
                                             String type, Integer precision, Integer scale) throws Exception {
         String sql = queries.columnQuery().create(null, "amounts").sql();
         String precedingColumn = "as CHARACTER_MAXIMUM_LENGTH,";

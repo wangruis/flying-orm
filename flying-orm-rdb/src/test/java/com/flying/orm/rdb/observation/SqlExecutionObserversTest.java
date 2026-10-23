@@ -11,6 +11,35 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SqlExecutionObserversTest {
+    @Test
+    void logSinkOnlyExposesTheLevelAwareWriteContract() throws Exception {
+        assertThrows(NoSuchMethodException.class, () -> SqlExecutionLogSink.class.getMethod("write", String.class));
+        assertTrue(java.lang.reflect.Modifier.isAbstract(SqlExecutionLogSink.class
+                .getMethod("write", SqlExecutionLogLevel.class, String.class).getModifiers()));
+        org.junit.jupiter.api.Assertions.assertEquals(1, SqlExecutionLogOptions.class.getDeclaredConstructors().length);
+        org.junit.jupiter.api.Assertions.assertEquals(1,
+                com.flying.orm.rdb.bootstrap.FlyingOrmConfiguration.SqlLog.class.getDeclaredConstructors().length);
+    }
+
+
+    @Test
+    void logSinkReceivesTheExecutionLevelWithoutAnAdapter() {
+        java.util.List<SqlExecutionLogLevel> levels = new java.util.ArrayList<>();
+        SqlExecutionLogObserver.create(SqlExecutionLogOptions.defaults(), (level, message) -> levels.add(level))
+                .onExecution(successObservation());
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.List.of(SqlExecutionLogLevel.DEBUG), levels);
+    }
+
+    @Test
+    void disabledLevelDoesNotPublishALog() {
+        SqlExecutionLogSink sink = new SqlExecutionLogSink() {
+            public boolean isEnabled(SqlExecutionLogLevel level) { return false; }
+            public void write(SqlExecutionLogLevel level, String message) {
+                throw new AssertionError("disabled level must not be written");
+            }
+        };
+        SqlExecutionLogObserver.create(SqlExecutionLogOptions.defaults(), sink).onExecution(successObservation());
+    }
 
     @Test
     void safeIsIdempotentAndPreservesObserverCapabilities() {
@@ -35,7 +64,7 @@ class SqlExecutionObserversTest {
     @Test
     void doesNotWrapTheAlreadyIsolatedLogObserverAgain() {
         SqlExecutionLogObserver observer = SqlExecutionLogObserver.create(
-                SqlExecutionLogOptions.defaults(), ignored -> {
+                SqlExecutionLogOptions.defaults(), (level, message) -> {
                     // The real log observer owns its sink/formatter isolation.
                 });
 
@@ -70,7 +99,7 @@ class SqlExecutionObserversTest {
         CompletionException wrapped = new CompletionException(
                 new SyntheticVirtualMachineError());
         SqlExecutionLogObserver wrappedSink = SqlExecutionLogObserver.create(
-                SqlExecutionLogOptions.defaults(), ignored -> {
+                SqlExecutionLogOptions.defaults(), (level, message) -> {
                     throw wrapped;
                 });
 
@@ -78,7 +107,7 @@ class SqlExecutionObserversTest {
 
         AssertionError direct = new AssertionError("direct sink failure");
         SqlExecutionLogObserver directSink = SqlExecutionLogObserver.create(
-                SqlExecutionLogOptions.defaults(), ignored -> {
+                SqlExecutionLogOptions.defaults(), (level, message) -> {
                     throw direct;
                 });
 

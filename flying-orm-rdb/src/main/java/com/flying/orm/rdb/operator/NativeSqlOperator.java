@@ -50,7 +50,7 @@ public final class NativeSqlOperator {
         ValueCodecRegistry safeValueCodecs = Objects.requireNonNull(valueCodecs, "value codec registry must not be null");
         this.valueCodecs = safeValueCodecs;
         this.entityModels = Objects.requireNonNull(entityModels, "entity model registry must not be null");
-        this.state = new NativeSqlExecutionState(safeValueCodecs, dialect, sql);
+        this.state = new NativeSqlExecutionState(safeValueCodecs, dialect, sql, false);
     }
 
     /**

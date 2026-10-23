@@ -6,9 +6,7 @@ import com.flying.orm.core.metadata.ForeignKeyDefinition;
 import com.flying.orm.core.metadata.IndexDefinition;
 import com.flying.orm.core.metadata.PrimaryKeyDefinition;
 import com.flying.orm.core.metadata.RelationIdentity;
-import com.flying.orm.core.metadata.RelationalMetadataAdapter;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
-import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.metadata.TablePartitionDefinition;
 import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 
@@ -154,21 +152,20 @@ public final class SchemaSnapshot {
     }
 
     /**
-     * 把旧字段/索引/外键读取结果升级成诚实的部分快照。旧模型没有的信息继续标 UNKNOWN，
+     * 把字段/索引/外键读取结果发布为部分快照。未读取的信息继续标 UNKNOWN，
      * 因此该方法不会把合成主键名、默认值或外键动作冒充成数据库事实。
      */
-    public static SchemaSnapshot fromLegacy(RelationIdentity identity, TableMetadata metadata) {
-        return fromLegacy(identity, metadata, false, false);
+    public static SchemaSnapshot fromPartial(RelationalTableDefinition metadata) {
+        return fromPartial(metadata, false, false);
     }
 
-    /** 与 {@link #fromLegacy(RelationIdentity, TableMetadata)} 相同，并明确哪些附属字典查询真正执行过。 */
-    public static SchemaSnapshot fromLegacy(RelationIdentity identity,
-                                            TableMetadata metadata,
+    /** 与 {@link #fromPartial(RelationalTableDefinition)} 相同，并明确哪些附属字典查询真正执行过。 */
+    public static SchemaSnapshot fromPartial(RelationalTableDefinition metadata,
                                             boolean indexesObserved,
                                             boolean foreignKeysObserved) {
-        RelationalTableDefinition known = RelationalMetadataAdapter.from(Objects.requireNonNull(
-                metadata, "table metadata must not be null"));
-        Builder builder = builder(identity)
+        RelationalTableDefinition known = Objects.requireNonNull(
+                metadata, "table metadata must not be null");
+        Builder builder = builder(known.identity())
                 .tablePresent()
                 .columns(known.columns())
                 .unknown(UnknownAttribute.PRIMARY_KEY_NAME,
@@ -182,11 +179,14 @@ public final class SchemaSnapshot {
         if (indexesObserved) {
             builder.indexes(known.indexes());
         }
+        if (known.comment() != null) {
+            builder.tableComment(known.comment());
+        }
         if (foreignKeysObserved) {
             builder.foreignKeys(known.foreignKeys());
         }
         known.primaryKey().ifPresentOrElse(builder::primaryKey, builder::primaryKeyAbsent);
-        // 旧模型无法区分唯一索引和唯一约束，也没有 CHECK，因此这两项保留默认 UNKNOWN。
+        // 部分读取没有观察唯一约束和 CHECK，因此这两项保留默认 UNKNOWN。
         return builder.build();
     }
 

@@ -22,19 +22,13 @@ public final class SyncEntityDmlOperator<T> {
     private final SyncFormClient client;
     private final SqlRenderer renderer;
     private final EntityDmlModel<T> model;
-    private SyncEntityDmlOperator(SyncFormClient client, SqlRenderer renderer, Class<T> type) {
-        this(client, renderer, null, type);
-    }
-
     private SyncEntityDmlOperator(SyncFormClient client,
                                   SqlRenderer renderer,
                                   DynamicForm form,
                                   Class<T> type) {
         this.client = Objects.requireNonNull(client, "sync form client must not be null");
         this.renderer = Objects.requireNonNull(renderer, "sql renderer must not be null");
-        var metadata = client.entityModels().metadata(Objects.requireNonNull(type, "entity type must not be null"));
-        this.model = new EntityDmlModel<>(metadata, form == null ? metadata.toDynamicForm() : form,
-                metadata.hasEnumConditionValues() ? client.entityModels().entityValues(type) : null);
+        this.model = new EntityDmlModel<>(client.entityModels(), form, type);
     }
 
     /**
@@ -44,7 +38,7 @@ public final class SyncEntityDmlOperator<T> {
      * renderer 只负责把已经验证的实体字段与条件渲染成统一 SQL。</p>
      */
     public static <T> SyncEntityDmlOperator<T> create(SyncFormClient client, SqlRenderer renderer, Class<T> type) {
-        return new SyncEntityDmlOperator<>(client, renderer, type);
+        return new SyncEntityDmlOperator<>(client, renderer, null, type);
     }
 
     /** Repository 内部使用显式表单时，实体字段映射不应偷偷换回注解生成的表单。 */
@@ -60,16 +54,16 @@ public final class SyncEntityDmlOperator<T> {
     /** @return 当前实体的新同步查询命令 */
     public SyncEntityDmlQueryOperator<T> query() {
         return new SyncEntityDmlQueryOperator<>(client,
-                new EntityQueryCommand<>(model.newState(renderer), client.defaultFieldScope()));
+                model, renderer);
     }
 
     /** @return 当前实体的新同步更新命令 */
     public SyncEntityDmlUpdateOperator<T> update() {
-        return new SyncEntityDmlUpdateOperator<>(client, new EntityUpdateCommand<>(model.newState(renderer)));
+        return new SyncEntityDmlUpdateOperator<>(client, model, renderer);
     }
 
     /** @return 当前实体的新同步删除命令 */
     public SyncEntityDmlDeleteOperator<T> delete() {
-        return new SyncEntityDmlDeleteOperator<>(client, new EntityDeleteCommand<>(model.newState(renderer)));
+        return new SyncEntityDmlDeleteOperator<>(client, model, renderer);
     }
 }

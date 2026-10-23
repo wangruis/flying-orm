@@ -1,20 +1,18 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.core.metadata.RelationalTableDefinition;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.ColumnDefinition;
-import com.flying.orm.core.metadata.RelationIdentity;
-import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.rdb.dialect.DatabaseDescriptor;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.metadata.ReactiveFormMetadataReader;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Mono;
-
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
-
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class SchemaLargeReviewedPlanExecutionTest {
@@ -34,7 +32,7 @@ class SchemaLargeReviewedPlanExecutionTest {
         AtomicReference<SchemaSnapshot> current = new AtomicReference<>(SchemaSnapshot.present(before));
         AtomicInteger writes = new AtomicInteger();
         AtomicInteger reads = new AtomicInteger();
-        VerifiedSchemaPlanFixtures.ReactiveExecutor executor = new VerifiedSchemaPlanFixtures.ReactiveExecutor(
+        SchemaExecutionFixtures.ReactiveExecutor executor = new SchemaExecutionFixtures.ReactiveExecutor(
                 request -> {
                     if (writes.incrementAndGet() == additions) {
                         current.set(SchemaSnapshot.present(desired));
@@ -48,7 +46,7 @@ class SchemaLargeReviewedPlanExecutionTest {
             }
 
             @Override
-            public Mono<SchemaSnapshot> readSnapshot(String table) {
+            public Mono<SchemaSnapshot> readSnapshot(RelationIdentity relation) {
                 return Mono.fromSupplier(() -> {
                     reads.incrementAndGet();
                     return current.get();
@@ -56,41 +54,40 @@ class SchemaLargeReviewedPlanExecutionTest {
             }
 
             @Override
-            public Mono<DynamicForm> readForm(String formId, String table) {
+            public Mono<DynamicForm> readForm(String formId, RelationIdentity relation) {
                 return Mono.error(new UnsupportedOperationException());
             }
 
             @Override
-            public Mono<DynamicForm> readForm(String formId, String schema, String table) {
-                return Mono.error(new UnsupportedOperationException());
+            public Mono<RelationalTableDefinition> readTable(RelationIdentity relation) {
+                return readForm(relation.table(), relation).map(form -> form.toTableDefinition(relation));
             }
+
         };
         ReactiveSchemaClient client = ReactiveSchemaClient.create(executor, dialect);
-        ReviewedSchemaPlan plan = client.reviewRelational(
+        SchemaMigrationPlan plan = client.reviewRelational(
                 DatabaseDescriptor.of("PostgreSQL", "17", dialect), desired, reader,
                 SchemaCompatibilityMode.EXACT).block();
 
-        assertFalse(plan.requiresManualAction());
         assertEquals(additions, plan.steps().size());
         assertEquals(additions, plan.requests().size());
         assertTrue(plan.steps().stream().allMatch(
                 step -> step.operation().kind() == SchemaOperation.Kind.ADD_COLUMN));
-        Mono<SchemaExecutionReport> execution = client.executeReviewed(plan, reader);
+        Mono<SchemaMigrationResult> execution = client.execute(plan, reader);
         assertTrue(executor.requests.isEmpty());
 
-        SchemaExecutionReport report = execution.block();
+        SchemaMigrationResult report = execution.block();
 
-        assertEquals(SchemaExecutionStatus.SUCCESS, report.status());
+        assertNotNull(report);
         assertEquals(plan.requests(), executor.requests);
         assertEquals(additions, writes.get());
-        assertEquals(3, reads.get());
+        assertEquals(1, reads.get());
         assertEquals(additions, report.steps().size());
         for (int index = 0; index < additions; index++) {
-            SchemaExecutionReport.StepResult step = report.steps().get(index);
-            assertEquals(plan.steps().get(index).order(), step.order());
-            assertEquals(SchemaExecutionStatus.SUCCESS, step.status());
-            assertTrue(step.sqlSent());
-            assertEquals(0L, step.rowsUpdated().orElseThrow());
+            com.flying.orm.rdb.execution.SqlExecutionStepResult step = report.steps().get(index);
+            assertEquals(index, step.stepIndex());
+            assertEquals(plan.requests().get(index), step.request());
+            assertEquals(0L, step.rowsUpdated());
         }
     }
 }

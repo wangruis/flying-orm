@@ -23,11 +23,26 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CompleteSchemaMetadataReaderParityTest {
 
     @Test
-    void mysqlSeparatesRawDefaultsFromGenerationAndUnsupportedExpressions() {
+    void bothReadersRetainNativeDefaultsWithoutTreatingThemAsLiteralValues() {
+        RowsSyncExecutor jdbc = new RowsSyncExecutor();
+        RowsReactiveExecutor reactive = new RowsReactiveExecutor();
+        jdbc.nativeDefault = "gen_random_uuid()";
+        reactive.nativeDefault = jdbc.nativeDefault;
+        SchemaSnapshot sync = new DefaultJdbcFormMetadataReader(jdbc, new MetadataQueryProfile(PostgreSqlMetadataQueries.queries()), com.flying.orm.rdb.cache.CacheRegionPolicy.disabled(), MetadataCacheInvalidator.none()).readSnapshot("orders");
+        SchemaSnapshot async = new InformationSchemaFormMetadataReader(reactive, new MetadataQueryProfile(PostgreSqlMetadataQueries.queries())).readSnapshot("orders").block();
+        assertEquals(com.flying.orm.core.metadata.ColumnDefault.nativeExpression(jdbc.nativeDefault),
+                sync.completeTable().orElseThrow().columns().getLast().defaultValue());
+        assertEquals(RelationalMetadataFingerprint.of(sync.completeTable().orElseThrow()),
+                RelationalMetadataFingerprint.of(async.completeTable().orElseThrow()));
+    }
+
+    @Test
+    void mysqlSeparatesNativeDefaultsFromGenerationAndLiterals() {
         String columns = MySqlMetadataQueries.queries().columnQuery().create("app", "orders").sql();
         assertTrue(columns.contains("null as GENERATION_EXPRESSION"));
-        assertTrue(columns.contains("lower(c.EXTRA) not like '%default_generated%'"));
-        assertTrue(columns.contains("then 'default expression'"));
+        assertTrue(columns.contains("lower(c.EXTRA) like '%default_generated%'"));
+        assertTrue(columns.contains("as NATIVE_DEFAULT_EXPRESSION"));
+        assertFalse(columns.contains("then 'default expression'"));
         assertTrue(columns.contains("lower(c.DATA_TYPE) in ('timestamp', 'datetime')"));
         assertTrue(columns.contains("'^current_timestamp([(][0-6]?[)])?$'"));
         assertTrue(columns.contains("lower(c.DATA_TYPE) = 'date'"));
@@ -40,27 +55,28 @@ class CompleteSchemaMetadataReaderParityTest {
     void mysqlKeepsDroppedDefaultRepresentableWhenGeneratedMarkerLingers() {
         String columns = MySqlMetadataQueries.queries().columnQuery().create("app", "events").sql();
 
-        assertTrue(columns.contains("c.COLUMN_DEFAULT is null"));
+        String representable = columns.substring(columns.indexOf("case when lower(c.EXTRA)"),
+                columns.indexOf("as COLUMN_REPRESENTABLE"));
+        assertFalse(representable.contains("default_generated"));
     }
 
     @Test
     void everyBuiltInDialectPublishesCompleteRelationalSnapshotCoverage() {
-        for (InformationSchemaFormMetadataReader.Queries queries : List.of(
+        for (MetadataQueryProfile.Queries queries : List.of(
                 PostgreSqlMetadataQueries.queries(),
                 MySqlMetadataQueries.queries(),
                 H2MetadataQueries.queries(),
                 OracleMetadataQueries.queries(),
                 SqlServerMetadataQueries.queries())) {
-            assertTrue(InformationSchemaFormMetadataReader.coverage(queries).isComplete());
+            assertTrue(new MetadataQueryProfile(queries).coverage().isComplete());
         }
     }
 
     @Test
     void jdbcAndReactiveReadersExecuteTheSameCompletePostgresqlContract() {
-        InformationSchemaFormMetadataReader.Queries queries = PostgreSqlMetadataQueries.queries();
-        JdbcFormMetadataReader jdbc = new JdbcFormMetadataReader(new RowsSyncExecutor(), queries);
-        ReactiveFormMetadataReader reactive = new InformationSchemaFormMetadataReader(
-                new RowsReactiveExecutor(), PostgreSqlMetadataQueries.queries());
+        MetadataQueryProfile.Queries queries = PostgreSqlMetadataQueries.queries();
+        JdbcFormMetadataReader jdbc = new DefaultJdbcFormMetadataReader(new RowsSyncExecutor(), new MetadataQueryProfile(queries), com.flying.orm.rdb.cache.CacheRegionPolicy.disabled(), MetadataCacheInvalidator.none());
+        ReactiveFormMetadataReader reactive = new InformationSchemaFormMetadataReader(new RowsReactiveExecutor(), new MetadataQueryProfile(PostgreSqlMetadataQueries.queries()));
 
         SchemaSnapshot jdbcSnapshot = jdbc.readSnapshot("orders");
         SchemaSnapshot reactiveSnapshot = reactive.readSnapshot("orders").block();
@@ -74,10 +90,10 @@ class CompleteSchemaMetadataReaderParityTest {
 
     @Test
     void completeQueriesKeepAllNamesBoundAndProjectEveryRequiredFact() {
-        for (InformationSchemaFormMetadataReader.Queries queries : List.of(
+        for (MetadataQueryProfile.Queries queries : List.of(
                 PostgreSqlMetadataQueries.queries(),
                 MySqlMetadataQueries.queries())) {
-            assertTrue(InformationSchemaFormMetadataReader.coverage(queries).isComplete());
+            assertTrue(new MetadataQueryProfile(queries).coverage().isComplete());
             assertEquals(List.of("orders"), queries.tableQuery().create(null, "orders").parameters());
             assertEquals(List.of("orders", "app"),
                          queries.checkConstraintQuery().create("app", "orders").parameters());
@@ -93,7 +109,7 @@ class CompleteSchemaMetadataReaderParityTest {
             assertTrue(queries.tableQuery().create("app", "orders").sql().contains("TABLE_REPRESENTABLE"));
         }
 
-        InformationSchemaFormMetadataReader.Queries postgresql =
+        MetadataQueryProfile.Queries postgresql =
                 PostgreSqlMetadataQueries.queries();
         assertTrue(postgresql.primaryKeyQuery().create("app", "orders").sql()
                                      .contains("CONSTRAINT_REPRESENTABLE"));
@@ -116,7 +132,7 @@ class CompleteSchemaMetadataReaderParityTest {
             assertTrue(constraintSql.contains("indcollation"));
         }
 
-        InformationSchemaFormMetadataReader.Queries mysql = MySqlMetadataQueries.queries();
+        MetadataQueryProfile.Queries mysql = MySqlMetadataQueries.queries();
         assertTrue(mysql.primaryKeyQuery().create("app", "orders").sql()
                               .contains("CONSTRAINT_REPRESENTABLE"));
         String mysqlUnique = mysql.uniqueConstraintQuery().create("app", "orders").sql();
@@ -137,10 +153,8 @@ class CompleteSchemaMetadataReaderParityTest {
         syncExecutor.checkExpression = expression;
         RowsReactiveExecutor reactiveExecutor = new RowsReactiveExecutor();
         reactiveExecutor.checkExpression = expression;
-        SchemaSnapshot sync = new JdbcFormMetadataReader(
-                syncExecutor, PostgreSqlMetadataQueries.queries()).readSnapshot("orders");
-        SchemaSnapshot reactive = new InformationSchemaFormMetadataReader(
-                reactiveExecutor, PostgreSqlMetadataQueries.queries()).readSnapshot("orders").block();
+        SchemaSnapshot sync = new DefaultJdbcFormMetadataReader(syncExecutor, new MetadataQueryProfile(PostgreSqlMetadataQueries.queries()), com.flying.orm.rdb.cache.CacheRegionPolicy.disabled(), MetadataCacheInvalidator.none()).readSnapshot("orders");
+        SchemaSnapshot reactive = new InformationSchemaFormMetadataReader(reactiveExecutor, new MetadataQueryProfile(PostgreSqlMetadataQueries.queries())).readSnapshot("orders").block();
 
         assertEquals(CheckPredicate.in("val", List.of("a", "b")),
                      sync.completeTable().orElseThrow().checks().getFirst().predicate());
@@ -148,7 +162,7 @@ class CompleteSchemaMetadataReaderParityTest {
                      RelationalMetadataFingerprint.of(reactive.completeTable().orElseThrow()));
     }
 
-    private static List<DynamicRow> rows(SqlRequest request, String checkExpression) {
+    private static List<DynamicRow> rows(SqlRequest request, String checkExpression, String nativeDefault) {
         String sql = request.sql();
         if (sql.contains("information_schema.columns")) {
             List<DynamicRow> columns = new java.util.ArrayList<>(List.of(dynamicRow(
@@ -165,6 +179,11 @@ class CompleteSchemaMetadataReaderParityTest {
                         "PHYSICAL_DATA_TYPE", "character varying",
                         "PHYSICAL_TYPE_SCHEMA", "pg_catalog", "PHYSICAL_TYPE_NAME", "varchar",
                         "PHYSICAL_ARRAY", false, "NULLABLE", true));
+            }
+            if (nativeDefault != null) {
+                columns.add(dynamicRow("COLUMN_NAME", "token", "DATA_TYPE", "uuid",
+                        "PHYSICAL_DATA_TYPE", "uuid", "PHYSICAL_TYPE_SCHEMA", "pg_catalog",
+                        "PHYSICAL_TYPE_NAME", "uuid", "NULLABLE", true, "COLUMN_DEFAULT", nativeDefault));
             }
             return columns;
         }
@@ -189,12 +208,13 @@ class CompleteSchemaMetadataReaderParityTest {
         return DynamicRow.copyOf(row);
     }
 
-    private static final class RowsSyncExecutor implements SyncSqlExecutor {
+    private static final class RowsSyncExecutor implements com.flying.orm.rdb.support.ListQueryFixture {
         private String checkExpression;
+        private String nativeDefault;
 
         @Override
         public List<DynamicRow> query(SqlRequest request) {
-            return rows(request, checkExpression);
+            return rows(request, checkExpression, nativeDefault);
         }
 
         @Override
@@ -203,17 +223,18 @@ class CompleteSchemaMetadataReaderParityTest {
         }
 
         @Override
-        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+        public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
             throw new UnsupportedOperationException();
         }
     }
 
     private static final class RowsReactiveExecutor implements ReactiveSqlExecutor {
         private String checkExpression;
+        private String nativeDefault;
 
         @Override
         public Flux<DynamicRow> query(SqlRequest request) {
-            return Flux.fromIterable(rows(request, checkExpression));
+            return Flux.fromIterable(rows(request, checkExpression, nativeDefault));
         }
 
         @Override

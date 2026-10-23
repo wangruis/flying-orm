@@ -9,7 +9,6 @@ import com.flying.orm.rdb.batch.BatchMemoryBudget;
 import com.flying.orm.rdb.aggregate.AggregateRow;
 import com.flying.orm.rdb.codec.LargeObjectValueCodec;
 import com.flying.orm.rdb.codec.ArrayValueCodec;
-import com.flying.orm.rdb.codec.OffsetTimeValueCodec;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlResultMemoryLimitExceededException;
 import com.flying.orm.rdb.json.JsonValueCodec;
@@ -26,6 +25,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Function;
+import java.util.function.IntFunction;
 import java.util.function.UnaryOperator;
 
 /**
@@ -39,6 +40,8 @@ import java.util.function.UnaryOperator;
  * 所有真正可能读取 LOB 的工作仍在 Reactor 链内发生，这里不会提前阻塞或订阅。</p>
  */
 final class FormResultDecoder {
+
+    static final RowMapper<DynamicRow> IDENTITY = row -> Objects.requireNonNull(row, "form row must not be null");
 
     private static final DatabaseType PROTECTED_BINARY_TYPE = DatabaseType.of("PROTECTED_BINARY");
 
@@ -77,6 +80,63 @@ final class FormResultDecoder {
         return entityModels.decodedRowMapper(Objects.requireNonNull(type, nullMessage), renderer.valueCodecs());
     }
 
+    /** JDBC 类型化结果把字段解码与布局映射一次绑定；需要行级保护或预算时沿用普通行链。 */
+    <T> RowMapper<T> rowMapper(FormReadPlanner.RowReadPlan plan, RowMapper<T> mapper) {
+        RowMapper<DynamicRow> decode = rowDecoder(plan);
+        if (decode == IDENTITY) return mapper;
+        return new RowMapper<>() {
+            @Override
+            public T map(DynamicRow row) {
+                return mapper.map(decode.map(row));
+            }
+
+            @Override
+            public Function<IntFunction<Object>, T> bindColumns(DynamicRow columns) {
+                if (!plan.form().protections().isEmpty() || plan.options().maxResultBytes() != 0L
+                        || plan.joinResultPlan() != null && !plan.joinResultPlan().direct()) return null;
+                Function<IntFunction<Object>, T> bound = mapper.bindColumns(columns);
+                if (bound == null) return null;
+                FormFieldDecodingPlan active = plan.resultDecodingPlan() == null
+                        ? decodingPlan(plan.form()) : plan.resultDecodingPlan();
+                List<BoundField> fields = bindFields(plan.form(), active, columns);
+                if (fields.isEmpty()) return bound;
+                Object[] decoded = new Object[columns.columnCount()];
+                IntFunction<Object> reader = index -> decoded[index];
+                return values -> {
+                    for (int index = 0; index < decoded.length; index++) decoded[index] = values.apply(index);
+                    for (BoundField field : fields) {
+                        Object value = decoded[field.index()];
+                        if (value != null) decoded[field.index()] = decodeMaterializedValue(field.field(), field.decoding(), value);
+                    }
+                    return bound.apply(reader);
+                };
+            }
+        };
+    }
+
+    /** 普通行和关联行共用解码入口；只有已声明的关联保护才增加转换阶段。 */
+    RowMapper<DynamicRow> rowDecoder(FormReadPlanner.RowReadPlan plan) {
+        RowMapper<DynamicRow> decode = rowDecoder(plan.form(), plan.options(), plan.scope(),
+                plan.displayMode(), plan.resultDecodingPlan());
+        JoinResultProtector.ResultPlan joined = plan.joinResultPlan();
+        if (joined == null || joined.direct()) return decode;
+        if (plan.options().maxResultBytes() == 0L) {
+            return row -> joined.transform(decode.map(row));
+        }
+        DecodedResultBudget budget = new DecodedResultBudget(plan.options().maxResultBytes());
+        return row -> budget.accept(joined.transform(decode.map(row)));
+    }
+
+    Flux<DynamicRow> decodeRows(FormReadPlanner.RowReadPlan plan, Flux<DynamicRow> rows) {
+        Flux<DynamicRow> decoded = decodeRows(plan.form(), rows, plan.options(), plan.scope(),
+                plan.displayMode(), plan.decodingFields(), plan.resultDecodingPlan());
+        JoinResultProtector.ResultPlan joined = plan.joinResultPlan();
+        if (joined == null || joined.direct()) return decoded;
+        return protectDecodedRows(ReactiveProtectionCpuBoundary.sequence(decoded,
+                joined.requiresCpuBoundary(), ReactiveProtectionCpuBoundary.QUERY_PREFETCH)
+                .map(joined::transform), plan.options());
+    }
+
     /**
      * 创建一次同步查询专用的逐行解码器。计划、累计内存和行号都绑定本次查询，调用方必须按结果顺序单线程使用。
      */
@@ -98,9 +158,13 @@ final class FormResultDecoder {
                                              DataScope scope,
                                              SensitiveDisplayMode displayMode,
                                              FormFieldDecodingPlan decodingPlan) {
-        boolean needsDecoding = !form.protections().isEmpty() || !decodingPlan.isEmpty();
+        FormFieldDecodingPlan activePlan = decodingPlan == null ? decodingPlan(form) : decodingPlan;
+        boolean needsDecoding = !form.protections().isEmpty() || !activePlan.isEmpty();
         if (!needsDecoding) {
-            return row -> Objects.requireNonNull(row, "form row must not be null");
+            return IDENTITY;
+        }
+        if (form.protections().isEmpty() && options.maxResultBytes() == 0L) {
+            return row -> decodeMaterializedRow(form, activePlan, row);
         }
         UnaryOperator<DynamicRow> protection = protection(form, scope, displayMode);
         return new RowMapper<>() {
@@ -109,8 +173,8 @@ final class FormResultDecoder {
             @Override
             public DynamicRow map(DynamicRow source) {
                 DynamicRow row = Objects.requireNonNull(source, "form row must not be null");
-                if (!decodingPlan.isEmpty()) {
-                    row = decodeMaterializedRow(form, decodingPlan, row);
+                if (!activePlan.isEmpty()) {
+                    row = decodeMaterializedRow(form, activePlan, row);
                 }
                 row = protection.apply(row);
                 return budget.accept(row);
@@ -144,9 +208,15 @@ final class FormResultDecoder {
                                 DataScope scope,
                                 SensitiveDisplayMode displayMode,
                                 List<String> projectedFields) {
+        return decodeRows(form, rows, options, scope, displayMode, projectedFields, null);
+    }
+
+    Flux<DynamicRow> decodeRows(DynamicForm form, Flux<DynamicRow> rows, SqlExecutionOptions options,
+                                DataScope scope, SensitiveDisplayMode displayMode, List<String> projectedFields,
+                                FormFieldDecodingPlan projectionPlan) {
         DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        FormFieldDecodingPlan projectedPlan = decodingPlan(safeForm).projected(
-                safeForm, projectedFields);
+        FormFieldDecodingPlan projectedPlan = projectionPlan == null
+                ? decodingPlan(safeForm).projected(safeForm, projectedFields) : projectionPlan;
         return decodeRows(safeForm, rows, options, scope, displayMode, projectedPlan);
     }
 
@@ -182,43 +252,6 @@ final class FormResultDecoder {
             decodedRows = protectedRows.map(protection);
         }
         return protectDecodedRows(decodedRows, safeOptions);
-    }
-
-    /**
-     * 解码 JDBC 已经物化好的结果行，不创建 Publisher，也不经过 Reactor。
-     *
-     * <p>JDBC 执行器已经把 Blob/Clob 在 ResultSet 生命周期内读成 byte[]/String，这里只做字段声明对应的
-     * JSON、数组、向量、时间和标量转换。转换后再次检查结果内存，是因为 JSON 文本变成对象树后可能明显变大。</p>
-     */
-    List<DynamicRow> decodeRows(DynamicForm form,
-                                List<DynamicRow> rows,
-                                SqlExecutionOptions options) {
-        return decodeRows(form, rows, options, DataScope.none(), SensitiveDisplayMode.DECLARED);
-    }
-
-    List<DynamicRow> decodeRows(DynamicForm form,
-                                List<DynamicRow> rows,
-                                SqlExecutionOptions options,
-                                DataScope scope,
-                                SensitiveDisplayMode displayMode) {
-        DynamicForm safeForm = Objects.requireNonNull(form, "dynamic form must not be null");
-        List<DynamicRow> safeRows = Objects.requireNonNull(rows, "form rows must not be null");
-        SqlExecutionOptions safeOptions = Objects.requireNonNull(options, "sql execution options must not be null");
-        FormFieldDecodingPlan decodingPlan = decodingPlan(safeForm);
-        boolean needsFieldDecoding = !safeForm.protections().isEmpty() || !decodingPlan.isEmpty();
-        if (!needsFieldDecoding) {
-            return safeRows;
-        }
-        DataScope safeScope = Objects.requireNonNull(scope, "data scope must not be null");
-        SensitiveDisplayMode safeDisplayMode = Objects.requireNonNull(
-                displayMode, "sensitive display mode must not be null");
-        RowMapper<DynamicRow> decoder = rowDecoder(
-                safeForm, safeOptions, safeScope, safeDisplayMode, decodingPlan);
-        java.util.ArrayList<DynamicRow> decoded = new java.util.ArrayList<>(safeRows.size());
-        for (DynamicRow row : safeRows) {
-            decoded.add(decoder.map(row));
-        }
-        return List.copyOf(decoded);
     }
 
     /**
@@ -296,15 +329,20 @@ final class FormResultDecoder {
         if (fields.isEmpty()) {
             return safeRow;
         }
-        Map<Integer, Object> replacements = new HashMap<>(fields.size());
+        Map<Integer, Object> replacements = null;
         for (BoundField bound : fields) {
             Object rawValue = safeRow.value(bound.index());
             if (rawValue != null) {
-                replacements.put(bound.index(), decodeMaterializedValue(
-                        bound.field(), bound.decoding(), rawValue));
+                Object decoded = decodeMaterializedValue(bound.field(), bound.decoding(), rawValue);
+                if (decoded != rawValue) {
+                    if (replacements == null) {
+                        replacements = new HashMap<>(fields.size());
+                    }
+                    replacements.put(bound.index(), decoded);
+                }
             }
         }
-        return safeRow.withValues(replacements);
+        return replacements == null ? safeRow : safeRow.withValues(replacements);
     }
 
     private List<BoundField> boundFields(DynamicForm form,
@@ -336,7 +374,6 @@ final class FormResultDecoder {
             case ARRAY -> ArrayValueCodec.readList(
                     rawValue, decoding.arrayType().getComponentType(), renderer.valueCodecs());
             case VECTOR -> VectorValueCodec.read(rawValue, field.length());
-            case OFFSET_TIME -> OffsetTimeValueCodec.read(rawValue);
             case SCALAR -> decoding.scalar().read(rawValue);
             case LARGE_OBJECT -> LargeObjectValueCodec.read(rawValue, field.databaseType());
             case CUSTOM -> decodeCustom(decoding, rawValue);
@@ -371,7 +408,7 @@ final class FormResultDecoder {
                             bound.index(), decodeCustom(bound.decoding(), value)));
             // 解码结果允许是 Java null，例如数据库返回 JSON 文本 "null"。把 null 放进包装对象，
             // 不能让 Mono.fromSupplier(null) 把它误解成“这一列无需替换”。
-            case JSON, ARRAY, VECTOR, OFFSET_TIME, SCALAR, CUSTOM -> Mono.fromSupplier(
+            case JSON, ARRAY, VECTOR, SCALAR, CUSTOM -> Mono.fromSupplier(
                     () -> new DecodedFieldValue(bound.index(), decodeMaterializedValue(
                             bound.field(), bound.decoding(), rawValue)));
         };

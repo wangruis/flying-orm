@@ -28,10 +28,8 @@ class PostgreSqlPartitionMetadataReaderTest {
     void jdbcAndR2dbcReadTheSameRangeParentWithoutAnotherCatalogQuery() {
         CountingSyncExecutor syncExecutor = new CountingSyncExecutor(partitionedTable());
         CountingReactiveExecutor reactiveExecutor = new CountingReactiveExecutor(partitionedTable());
-        JdbcFormMetadataReader jdbc = new JdbcFormMetadataReader(
-                syncExecutor, PostgreSqlMetadataQueries.queries());
-        ReactiveFormMetadataReader reactive = new InformationSchemaFormMetadataReader(
-                reactiveExecutor, PostgreSqlMetadataQueries.queries());
+        JdbcFormMetadataReader jdbc = new DefaultJdbcFormMetadataReader(syncExecutor, new MetadataQueryProfile(PostgreSqlMetadataQueries.queries()), com.flying.orm.rdb.cache.CacheRegionPolicy.disabled(), MetadataCacheInvalidator.none());
+        ReactiveFormMetadataReader reactive = new InformationSchemaFormMetadataReader(reactiveExecutor, new MetadataQueryProfile(PostgreSqlMetadataQueries.queries()));
 
         SchemaSnapshot jdbcSnapshot = jdbc.readSnapshot("jobs", "job_events");
         SchemaSnapshot reactiveSnapshot = reactive.readSnapshot("jobs", "job_events").block();
@@ -71,10 +69,8 @@ class PostgreSqlPartitionMetadataReaderTest {
         }
         Map<String, Object> table = tableRow("TABLE_REPRESENTABLE", false,
                 "UNSUPPORTED_TABLE_REASON", "exclusion constraint", "TABLE_PARTITIONED", false);
-        JdbcFormMetadataReader jdbc = new JdbcFormMetadataReader(
-                new CountingSyncExecutor(table), PostgreSqlMetadataQueries.queries());
-        ReactiveFormMetadataReader reactive = new InformationSchemaFormMetadataReader(
-                new CountingReactiveExecutor(table), PostgreSqlMetadataQueries.queries());
+        JdbcFormMetadataReader jdbc = new DefaultJdbcFormMetadataReader(new CountingSyncExecutor(table), new MetadataQueryProfile(PostgreSqlMetadataQueries.queries()), com.flying.orm.rdb.cache.CacheRegionPolicy.disabled(), MetadataCacheInvalidator.none());
+        ReactiveFormMetadataReader reactive = new InformationSchemaFormMetadataReader(new CountingReactiveExecutor(table), new MetadataQueryProfile(PostgreSqlMetadataQueries.queries()));
 
         assertThrows(IllegalStateException.class, () -> jdbc.readSnapshot("jobs", "job_events"));
         assertThrows(IllegalStateException.class, () -> reactive.readSnapshot("jobs", "job_events").block());
@@ -141,7 +137,7 @@ class PostgreSqlPartitionMetadataReaderTest {
                 List.of(),
                 List.of(),
                 value -> value,
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL);
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL);
     }
 
     private static Map<String, Object> partitionedTable() {
@@ -190,7 +186,7 @@ class PostgreSqlPartitionMetadataReaderTest {
         return row;
     }
 
-    private static final class CountingSyncExecutor implements SyncSqlExecutor {
+    private static final class CountingSyncExecutor implements com.flying.orm.rdb.support.ListQueryFixture {
         private final Map<String, Object> tableRow;
         private final List<SqlRequest> queries = new ArrayList<>();
 
@@ -211,7 +207,7 @@ class PostgreSqlPartitionMetadataReaderTest {
 
         @Override
         public SqlWriteResult rowsUpdatedReturningKeys(
-                SqlRequest request, SqlExecutionOptions options) {
+                SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
             throw new UnsupportedOperationException();
         }
     }

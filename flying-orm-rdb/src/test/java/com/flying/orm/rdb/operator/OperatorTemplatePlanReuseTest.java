@@ -6,12 +6,13 @@ import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.bootstrap.FlyingOrmClients;
-import com.flying.orm.rdb.schema.SchemaMigrationExecutionOptions;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.schema.SchemaMigrationObserver;
 import com.flying.orm.rdb.template.SqlTemplate;
 import com.flying.orm.rdb.template.SqlTemplateEngine;
 import com.flying.orm.rdb.template.SqlTemplateParameterProvider;
 import com.flying.orm.rdb.template.SqlTemplateRegistry;
+import com.flying.orm.rdb.template.SyncSqlTemplateParameterProvider;
 import io.r2dbc.spi.Connection;
 import io.r2dbc.spi.ConnectionFactory;
 import io.r2dbc.spi.ConnectionFactoryMetadata;
@@ -62,7 +63,7 @@ class OperatorTemplatePlanReuseTest {
     @Test
     void schemaExecutionOptionDerivationReusesBothBackendTemplatePlans() throws Exception {
         assertDerivationReusesPlans(clients -> clients.withDefaultSchemaMigrationExecutionOptions(
-                SchemaMigrationExecutionOptions.defaults()));
+                SqlExecutionOptions.unlimited()));
     }
 
     @Test
@@ -90,6 +91,15 @@ class OperatorTemplatePlanReuseTest {
             assertNotSame(originalReactive, reconfiguredEngine);
             assertEquals(reactiveSql("archived_events"),
                          reconfiguredEngine.render("lookup0", FIRST_VALUES, Map.of()).sql());
+            SyncDatabaseOperator syncReconfigured = original.syncOperator().withSqlTemplates(
+                    changedRegistry, SyncSqlTemplateParameterProvider.none());
+            SqlTemplateEngine syncReconfiguredEngine = engine(syncReconfigured, "templateEngine");
+            assertNotSame(originalJdbc, syncReconfiguredEngine);
+            assertRenderedRequests(reconfiguredEngine, syncReconfiguredEngine, "archived_events");
+            assertSame(syncReconfiguredEngine, engine(syncReconfigured
+                    .withDefaultDataScope(DataScope.tenant("tenant_id", 7))
+                    .withDefaultBatchWriteOptions(BatchWriteOptions.of(2))
+                    .withSchemaObserver(SchemaMigrationObserver.noop()), "templateEngine"));
             assertRenderedRequests(originalReactive, originalJdbc, "events");
         }
         assertEquals(0, connections.totalRequests());

@@ -42,6 +42,24 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class FormOptimisticConditionRegressionTest {
 
+    @Test
+    void unversionedProtectedBatchRetainsEncryptionAndContainsOwnerLookup() {
+        try (ProtectedFieldRuntime runtime = runtime()) {
+            FormDataSqlRenderer renderer = renderer(runtime);
+            BatchUpdate update = new BatchUpdate(Map.of("secret", "updated secret"), businessWhere());
+            FormScopeSupport.PreparedBatchUpdate prepared = scopes(renderer)
+                    .prepareBatchUpdate(form(), update, DataScope.none());
+            assertNull(prepared.lock());
+            assertNotNull(prepared.ownerQuery());
+            assertSame(prepared.form(), prepared.ownerQuery().physicalForm());
+            assertEquals(LogicalOperator.OR, prepared.ownerQuery().where().operator());
+            assertEquals(List.of(1L, "external-1"), renderer.conditionRenderer()
+                    .renderWhere(prepared.ownerQuery().where()).parameters());
+            assertInstanceOf(byte[].class, prepared.values().get("secret"));
+            org.junit.jupiter.api.Assertions.assertFalse(prepared.request().sql().contains("version"));
+        }
+    }
+
     @TestFactory
     Stream<DynamicTest> optimisticWritesCannotMoveRowsOutsideTheirTenant() {
         return Stream.of(false, true).flatMap(declared -> Stream.of(
@@ -56,13 +74,13 @@ class FormOptimisticConditionRegressionTest {
                             FormScopeSupport scopes = new FormScopeSupport(
                                     renderer, StructuredConditionResolver.defaults(), tenant);
                             FormOperationPlanner planner = new FormOperationPlanner(
-                                    renderer, scopes, SqlExecutionOptions.safeDefaults());
+                                    renderer, scopes, SqlExecutionOptions.unlimited());
                             ConditionGroup where = ConditionGroup.and().where("id", "=", 1L).build();
                             ScopeAccessException failure = assertThrows(ScopeAccessException.class, () -> {
                                 switch (operation) {
                                     case "update" -> planner.update(WriteSpec.update(
                                             form, Map.of("name", "updated"), where).withLock(lock));
-                                    case "batch" -> scopes.prepareBatchUpdate(form, new BatchOptimisticUpdate(
+                                    case "batch" -> scopes.prepareBatchUpdate(form, new BatchUpdate(
                                             Map.of("name", "updated"), where, lock), tenant);
                                     case "logical-delete" -> planner.delete(WriteSpec.delete(form, where).withLock(lock));
                                     default -> throw new AssertionError(operation);
@@ -79,7 +97,7 @@ class FormOptimisticConditionRegressionTest {
                 SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql());
         FormScopeSupport scopes = new FormScopeSupport(renderer, StructuredConditionResolver.defaults(),
                 DataScope.tenant("tenant_id", 7L).withFields(FieldScope.writable("name")));
-        FormOperationPlanner planner = new FormOperationPlanner(renderer, scopes, SqlExecutionOptions.safeDefaults());
+        FormOperationPlanner planner = new FormOperationPlanner(renderer, scopes, SqlExecutionOptions.unlimited());
         ConditionGroup where = ConditionGroup.and().where("id", "=", 1L).build();
         WriteSpec update = WriteSpec.update(form, Map.of("name", "updated"), where);
 
@@ -106,7 +124,7 @@ class FormOptimisticConditionRegressionTest {
     void changingOnlyAnOrdinaryFieldDoesNotPrepareABatchOwnerQuery() {
         try (ProtectedFieldRuntime runtime = runtime()) {
             FormDataSqlRenderer renderer = renderer(runtime);
-            BatchOptimisticUpdate update = new BatchOptimisticUpdate(
+            BatchUpdate update = new BatchUpdate(
                     Map.of("external_id", "changed"), businessWhere(),
                     OptimisticLockOptions.increment("version", 7L));
 
@@ -177,7 +195,7 @@ class FormOptimisticConditionRegressionTest {
         try (ProtectedFieldRuntime runtime = runtime()) {
             FormDataSqlRenderer renderer = renderer(runtime);
             FormScopeSupport scopes = scopes(renderer);
-            BatchOptimisticUpdate update = new BatchOptimisticUpdate(
+            BatchUpdate update = new BatchUpdate(
                     Map.of("secret", "updated secret"), businessWhere(),
                     OptimisticLockOptions.increment("version", 7L));
 
@@ -196,7 +214,7 @@ class FormOptimisticConditionRegressionTest {
     void protectedBatchUpdateReusesOnePhysicalFormForThePreparedRow() {
         try (ProtectedFieldRuntime runtime = runtime()) {
             FormDataSqlRenderer renderer = renderer(runtime);
-            BatchOptimisticUpdate update = new BatchOptimisticUpdate(
+            BatchUpdate update = new BatchUpdate(
                     Map.of("secret", "updated secret"), businessWhere(),
                     OptimisticLockOptions.increment("version", 7L));
 
@@ -265,7 +283,7 @@ class FormOptimisticConditionRegressionTest {
     }
 
     private static FormOperationPlanner planner(FormDataSqlRenderer renderer) {
-        return new FormOperationPlanner(renderer, scopes(renderer), SqlExecutionOptions.safeDefaults());
+        return new FormOperationPlanner(renderer, scopes(renderer), SqlExecutionOptions.unlimited());
     }
 
     private static FormScopeSupport scopes(FormDataSqlRenderer renderer) {

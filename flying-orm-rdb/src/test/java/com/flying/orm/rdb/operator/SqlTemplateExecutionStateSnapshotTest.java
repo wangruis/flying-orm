@@ -41,6 +41,32 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class SqlTemplateExecutionStateSnapshotTest {
 
+    @Test
+    void templateAndNativeCallsIgnoreUnreferencedParametersOnBothBackends() {
+        Object[] unusedCycle = new Object[1];
+        unusedCycle[0] = unusedCycle;
+        Map<String, Object> values = Map.of("value", 7, "unrelated", unusedCycle);
+        SqlTemplateRegistry registry = SqlTemplateRegistry.builder()
+                .register(SqlTemplate.query("lookup", "select :value", Set.of())).build();
+        SqlTemplateEngine engine = SqlTemplateEngine.create(
+                registry, RdbDialect.postgresql(), ValueCodecRegistry.standard());
+        for (boolean jdbc : new boolean[]{false, true}) {
+            SqlTemplateExecutionState template = new SqlTemplateExecutionState(jdbc ? engine.forJdbc() : engine, "lookup");
+            template.bindAll(values);
+            template.bind("alsoUnused", unusedCycle);
+            assertEquals(Map.of("value", 7), template.snapshot().values());
+            SqlRequest templateRequest = template.render(template.snapshot(), Map.of());
+            NativeSqlExecutionState nativeSql = new NativeSqlExecutionState(
+                    ValueCodecRegistry.standard(), RdbDialect.postgresql(), "select :value", jdbc);
+            nativeSql.bindAll(values);
+            SqlRequest nativeRequest = nativeSql.request();
+            assertEquals(jdbc ? "select ?" : "select $1", templateRequest.sql());
+            assertEquals(templateRequest.sql(), nativeRequest.sql());
+            assertEquals(List.of(7), templateRequest.parameters());
+            assertEquals(templateRequest.parameters(), nativeRequest.parameters());
+        }
+    }
+
     private static final String REPEATED_SQL = "select :buffer, :bytes, :buffer, :bytes";
 
     @Test
@@ -101,7 +127,7 @@ class SqlTemplateExecutionStateSnapshotTest {
                 SqlTemplateRegistry.builder().register(template).build(),
                 RdbDialect.postgresql(), ValueCodecRegistry.standard());
         for (Object payload : List.of(new byte[64 * 1_024], ByteBuffer.allocate(64 * 1_024))) {
-            SqlTemplateExecutionState state = new SqlTemplateExecutionState(engine, "payload", Set.of());
+            SqlTemplateExecutionState state = new SqlTemplateExecutionState(engine, "payload");
             state.bind("payload", payload);
             SqlTemplateExecutionState.Snapshot snapshot = state.snapshot();
             for (int iteration = 0; iteration < 100; iteration++) {
@@ -124,7 +150,7 @@ class SqlTemplateExecutionStateSnapshotTest {
         SqlTemplateEngine reactive = SqlTemplateEngine.create(
                 codecRegistry(), RdbDialect.postgresql(), mutatingCodecs());
         for (SqlTemplateEngine engine : List.of(reactive, reactive.forJdbc())) {
-            SqlTemplateExecutionState state = new SqlTemplateExecutionState(engine, "payload", Set.of());
+            SqlTemplateExecutionState state = new SqlTemplateExecutionState(engine, "payload");
             ByteBuffer buffer = ByteBuffer.wrap(new byte[]{9, 1, 2, 3, 9}).position(1).limit(4);
             byte[] bytes = new byte[]{4, 5, 6};
             state.bindAll(Map.of("buffer", buffer, "bytes", bytes));
@@ -177,7 +203,7 @@ class SqlTemplateExecutionStateSnapshotTest {
     void nativeSqlStillRejectsMultipleStatementsWhenTheCallStateIsCreated() {
         assertThrows(IllegalArgumentException.class, () -> new NativeSqlExecutionState(
                 ValueCodecRegistry.standard(), RdbDialect.postgresql(),
-                "select 1; delete from accounts"));
+                "select 1; delete from accounts", false));
     }
 
     @Test
@@ -188,7 +214,7 @@ class SqlTemplateExecutionStateSnapshotTest {
                 codecRegistry(), RdbDialect.postgresql(), codecs).forJdbc();
         try (EntityModelRegistry models = EntityModelRegistry.create(CacheRegionPolicy.disabled())) {
             SyncSqlTemplateOperator query = new SyncSqlTemplateOperator(requests.sync(), codecs,
-                    models, engine, "payload", Set.of(), SyncSqlTemplateParameterProvider.none())
+                    models, engine, "payload", SyncSqlTemplateParameterProvider.none())
                     .bindAll(codecValues());
 
             query.query();
@@ -278,7 +304,7 @@ class SqlTemplateExecutionStateSnapshotTest {
         }
 
         private SyncSqlExecutor sync() {
-            return new SyncSqlExecutor() {
+            return new com.flying.orm.rdb.support.ListQueryFixture() {
                 @Override
                 public List<DynamicRow> query(SqlRequest request) {
                     requests.add(request);
@@ -291,7 +317,7 @@ class SqlTemplateExecutionStateSnapshotTest {
                 }
 
                 @Override
-                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+                public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                     throw new AssertionError("unexpected generated keys");
                 }
             };
@@ -312,7 +338,7 @@ class SqlTemplateExecutionStateSnapshotTest {
         SqlTemplateRegistry registry = SqlTemplateRegistry.builder().register(template).build();
         SqlTemplateEngine engine = SqlTemplateEngine.create(
                 registry, RdbDialect.postgresql(), ValueCodecRegistry.standard());
-        SqlTemplateExecutionState state = new SqlTemplateExecutionState(engine, template.id(), Set.of());
+        SqlTemplateExecutionState state = new SqlTemplateExecutionState(engine, template.id());
         ByteBuffer source = ByteBuffer.wrap(new byte[]{1});
 
         state.bind("payload", source);
@@ -345,7 +371,7 @@ class SqlTemplateExecutionStateSnapshotTest {
         SqlTemplateRegistry registry = SqlTemplateRegistry.builder().register(template).build();
         SqlTemplateEngine engine = SqlTemplateEngine.create(
                 registry, RdbDialect.postgresql(), ValueCodecRegistry.standard());
-        SqlTemplateExecutionState state = new SqlTemplateExecutionState(engine, template.id(), Set.of());
+        SqlTemplateExecutionState state = new SqlTemplateExecutionState(engine, template.id());
         state.bind("payload", ByteBuffer.wrap(new byte[]{1}));
         SqlTemplateExecutionState.Snapshot snapshot = state.snapshot();
 
@@ -360,10 +386,10 @@ class SqlTemplateExecutionStateSnapshotTest {
     @Test
     void providerValuesAreFrozenExactlyAtTheProviderBoundary() {
         SqlTemplate template = SqlTemplate.query("payload", "select :tenant, :payload", Set.of());
-        SqlTemplateRegistry registry = SqlTemplateRegistry.builder().register(template).build();
+        SqlTemplateRegistry registry = SqlTemplateRegistry.builder().register(template, Set.of("tenant")).build();
         SqlTemplateEngine engine = SqlTemplateEngine.create(
                 registry, RdbDialect.postgresql(), ValueCodecRegistry.standard());
-        SqlTemplateExecutionState state = new SqlTemplateExecutionState(engine, template.id(), Set.of("tenant"));
+        SqlTemplateExecutionState state = new SqlTemplateExecutionState(engine, template.id());
         state.bind("payload", 7);
         ByteBuffer source = ByteBuffer.wrap(new byte[]{1});
 
@@ -378,11 +404,11 @@ class SqlTemplateExecutionStateSnapshotTest {
 
     @Test
     void bindAllPublishesNothingWhenValueFreezingFails() {
-        SqlTemplate template = SqlTemplate.query("payload", "select :first", Set.of());
+        SqlTemplate template = SqlTemplate.query("payload", "select :first, :second", Set.of());
         SqlTemplateRegistry registry = SqlTemplateRegistry.builder().register(template).build();
         SqlTemplateEngine engine = SqlTemplateEngine.create(
                 registry, RdbDialect.postgresql(), ValueCodecRegistry.standard());
-        SqlTemplateExecutionState state = new SqlTemplateExecutionState(engine, template.id(), Set.of());
+        SqlTemplateExecutionState state = new SqlTemplateExecutionState(engine, template.id());
         Object[] cycle = new Object[1];
         cycle[0] = cycle;
         Map<String, Object> values = new LinkedHashMap<>();

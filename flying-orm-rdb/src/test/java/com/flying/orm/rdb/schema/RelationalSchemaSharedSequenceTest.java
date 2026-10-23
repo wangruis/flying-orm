@@ -9,7 +9,6 @@ import com.flying.orm.rdb.dialect.RdbDialect;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class RelationalSchemaSharedSequenceTest {
@@ -81,16 +80,15 @@ class RelationalSchemaSharedSequenceTest {
                 () -> review(desired, SchemaSnapshot.present(existing)));
     }
 
-    private static ReviewedSchemaPlan review(RelationalTableDefinition desired, SchemaSnapshot actual) {
-        ReviewedSchemaPlan plan = RelationalSchemaPlanReviewer.create(DIALECT).review(
+    private static SchemaMigrationPlan review(RelationalTableDefinition desired, SchemaSnapshot actual) {
+        SchemaMigrationPlan plan = RelationalSchemaPlanReviewer.create(DIALECT).review(
                 DatabaseDescriptor.of("PostgreSQL", "17", DIALECT), desired, actual,
                 SchemaSnapshotCoverage.complete(), SchemaCompatibilityMode.EXACT);
-        assertFalse(plan.requiresManualAction());
         return plan;
     }
 
-    private static long sequenceCreates(ReviewedSchemaPlan plan) {
-        return plan.steps().stream().flatMap(step -> step.request().stream())
+    private static long sequenceCreates(SchemaMigrationPlan plan) {
+        return plan.requests().stream()
                 .filter(request -> request.sql().startsWith("create sequence ")).count();
     }
 }

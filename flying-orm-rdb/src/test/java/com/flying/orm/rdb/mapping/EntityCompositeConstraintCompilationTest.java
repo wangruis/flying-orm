@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.mapping;
 
 import com.flying.orm.core.annotation.TableCheck;
+import com.flying.orm.core.annotation.TableColumn;
 import com.flying.orm.core.annotation.TableField;
 import com.flying.orm.core.annotation.TableForeignKey;
 import com.flying.orm.core.annotation.TableId;
@@ -26,6 +27,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class EntityCompositeConstraintCompilationTest {
 
     @Test
+    void foreignKeyNamesDoNotCompileUnreferencedTargetFields() {
+        ForeignKeyDefinition reference = EntitySchemaDescriptor.builder(ReferencingEntity.class)
+                .build().table().foreignKeys().getFirst();
+        assertEquals(RelationIdentity.of(null, "sales", "external_parent"), reference.reference());
+        assertEquals(List.of("parent_key"), reference.referenceColumns());
+    }
+
+    @Test
     void compilesCompositeConstraintsFromJavaPropertiesToPhysicalColumns() {
         RelationalTableDefinition table = EntitySchemaDescriptor.builder(OrderLine.class)
                                                                 .build()
@@ -44,7 +53,7 @@ class EntityCompositeConstraintCompilationTest {
         ForeignKeyDefinition foreignKey = table.foreignKeys().getFirst();
         assertEquals(List.of("tenant_key", "order_no"), foreignKey.columns());
         assertEquals(RelationIdentity.of(null, "sales", "order_headers"),
-                     foreignKey.referencedTable());
+                     foreignKey.reference());
         assertEquals(List.of("tenant_key", "order_no"), foreignKey.referenceColumns());
         assertEquals(ReferentialAction.RESTRICT, foreignKey.onUpdate());
         assertEquals(ReferentialAction.CASCADE, foreignKey.onDelete());
@@ -116,6 +125,20 @@ class EntityCompositeConstraintCompilationTest {
 
         @TableField("quantity_value")
         private Integer quantity;
+    }
+
+    @TableForeignKey(id = "fk_parent", localProperties = "parentId",
+            targetEntity = ExternalParent.class, targetProperties = "id")
+    private static final class ReferencingEntity {
+        private Long parentId;
+    }
+
+    @TableName(value = "external_parent", schema = "sales")
+    private static final class ExternalParent {
+        @TableId("parent_key")
+        private Long id;
+        @TableColumn(databaseTypeId = "application-payload")
+        private Object payload;
     }
 
     @TableName(value = "order_headers", schema = "sales")

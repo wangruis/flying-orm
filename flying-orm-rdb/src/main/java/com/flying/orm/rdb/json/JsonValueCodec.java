@@ -7,6 +7,7 @@ import com.flying.orm.rdb.internal.InternalApi;
 import tools.jackson.core.JacksonException;
 import tools.jackson.core.type.TypeReference;
 import tools.jackson.databind.JsonNode;
+import tools.jackson.databind.JavaType;
 import tools.jackson.databind.ObjectMapper;
 import tools.jackson.databind.ObjectReader;
 import tools.jackson.databind.cfg.JsonNodeFeature;
@@ -16,6 +17,7 @@ import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodType;
 import java.lang.reflect.Modifier;
+import java.lang.reflect.Type;
 import java.nio.charset.StandardCharsets;
 import java.util.Collection;
 import java.util.LinkedHashMap;
@@ -23,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Function;
 
 /**
  * JSON 字段的值转换器。ObjectMapper 完成初始化后只读复用，可以安全地被并发请求共享。
@@ -135,6 +138,15 @@ public final class JsonValueCodec {
         }
     }
 
+    /** 条件展开沿用写入端的精确数值解析，不经过普通读取的 Double 转换。 */
+    static JsonNode conditionTree(String json) {
+        try {
+            return WRITE_JSON_READER.readTree(json);
+        } catch (JacksonException error) {
+            throw new IllegalArgumentException("json condition value cannot be decoded", error);
+        }
+    }
+
     /**
      * 判断实体字段是不是可以直接接收结构化 JSON。
      */
@@ -181,6 +193,32 @@ public final class JsonValueCodec {
         } catch (JacksonException error) {
             throw new IllegalArgumentException("json value cannot be converted to " + safeType.getName(), error);
         }
+    }
+
+    /** 在映射计划创建时绑定成员泛型及继承上下文；逐行读取不再解析 Type。 */
+    @InternalApi
+    public static Function<Object, Object> bindReader(Type memberType, Class<?> entityType,
+                                                      Class<?> declaringType, boolean decoded) {
+        JavaType owner = MAPPER.constructType(entityType).findSuperType(declaringType);
+        JavaType target = MAPPER.getTypeFactory().resolveMemberType(memberType, owner.getBindings());
+        ObjectReader reader = MAPPER.readerFor(target);
+        boolean typedElements = target.getContentType() != null && !target.getContentType().isJavaLangObject()
+                || target.getKeyType() != null && !target.getKeyType().isJavaLangObject()
+                && !target.getKeyType().hasRawClass(String.class);
+        return value -> {
+            if (value == null) return null;
+            if (!typedElements && target.getRawClass().isInstance(value) && !isOracleJsonValue(value)) return value;
+            try {
+                if (decoded || !isOracleJsonValue(value)
+                        && (value instanceof Map<?, ?> || value instanceof Collection<?> || value instanceof JsonNode
+                        || value.getClass().isArray() && value.getClass() != byte[].class)) {
+                    return MAPPER.convertValue(value, target);
+                }
+                return reader.readValue(jsonText(value));
+            } catch (JacksonException error) {
+                throw new IllegalArgumentException("json value cannot be converted to " + target.toCanonical(), error);
+            }
+        };
     }
 
     /**

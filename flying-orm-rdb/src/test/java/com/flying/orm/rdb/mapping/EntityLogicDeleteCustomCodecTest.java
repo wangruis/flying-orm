@@ -6,10 +6,12 @@ import com.flying.orm.core.annotation.TableId;
 import com.flying.orm.core.annotation.TableLogic;
 import com.flying.orm.core.annotation.TableName;
 import com.flying.orm.core.codec.ValueCodec;
+import com.flying.orm.core.codec.ValueCodecRegistry;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.core.type.DatabaseType;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.form.FormDataSqlRenderer;
+import com.flying.orm.rdb.internal.mapping.EntityValues;
 import org.junit.jupiter.api.Test;
 
 import java.util.ArrayList;
@@ -19,8 +21,48 @@ import java.util.Locale;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 
 class EntityLogicDeleteCustomCodecTest {
+
+    @Test
+    void classDeclarationUsesTheSameMappedFieldAndCodecAsFieldDeclaration() {
+        EntityTypeMappingRegistry types = EntityTypeMappingRegistry.builder()
+                .register("deletion-state", DeletionState.class, DatabaseType.of("VARCHAR(16)"),
+                        new TrackingStateCodec()).build();
+        EntitySchemaDescriptor<ClassDeclaredRecord> descriptor = EntitySchemaDescriptor
+                .builder(ClassDeclaredRecord.class).typeMappings(types).build();
+        EntityFieldMetadata field = descriptor.metadata().logicDeleteField().orElseThrow();
+        assertEquals("deletion_state", field.columnName());
+        assertSame(DeletionState.ACTIVE, field.logicNotDeletedValue());
+        assertSame(DeletionState.DELETED, field.logicDeletedValue());
+        assertEquals("deletion_state", descriptor.form().logicDelete().orElseThrow().fieldName());
+    }
+
+    @TableLogic(field = "deletion_state", value = "active", delval = "deleted")
+    private static final class ClassDeclaredRecord {
+        @TableId
+        private Long id;
+        @TableColumn(databaseTypeId = "deletion-state")
+        private DeletionState deletionState;
+    }
+
+    @Test
+    void compiledFieldCarriesItsCodecIntoReadAndWritePlans() {
+        EntityTypeMappingRegistry types = EntityTypeMappingRegistry.builder()
+                .register("deletion-state", DeletionState.class, DatabaseType.of("VARCHAR(16)"),
+                        new TrackingStateCodec())
+                .build();
+        EntityMetadata<ManagedRecord> metadata = EntitySchemaDescriptor.builder(ManagedRecord.class)
+                .typeMappings(types).build().metadata();
+        ManagedRecord source = new ManagedRecord();
+        source.deletionState = DeletionState.ACTIVE;
+        assertSame(DeletionState.ACTIVE, EntityValues.createUncached(ManagedRecord.class, metadata)
+                .readForInsert(source).get("deletion_state"));
+        ManagedRecord result = MappingPlan.createUncached(ManagedRecord.class, metadata, ValueCodecRegistry.standard())
+                .map(Map.of("deletion_state", "deleted"));
+        assertSame(DeletionState.DELETED, result.deletionState);
+    }
 
     @Test
     void decodesLogicDeleteLiteralsBeforeTheValueIsBoundOnce() {
@@ -42,7 +84,7 @@ class EntityLogicDeleteCustomCodecTest {
 
         FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
                 SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.h2())
-                .withEntityFieldCodecs(descriptor.customFieldCodecs());
+                .withEntityModels(java.util.List.of(descriptor.metadata()));
         Map<String, Object> values = new LinkedHashMap<>();
         values.put("id", 1L);
         values.put("deletion_state", logicDelete.logicDeletedValue());

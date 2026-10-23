@@ -39,7 +39,7 @@ class SqlTemplateLiteralBoundaryRegressionTest {
     void directH2SqlUsesTheSameLiteralBoundary() {
         SqlRequest request = SqlTemplateEngine.prepareNative(
                 "SELECT $$:v $$ AS txt, :v AS n",
-                RdbDialect.h2(), ValueCodecRegistry.standard(), true).render(Map.of("v", 7));
+                RdbDialect.h2(), ValueCodecRegistry.standard(), true).render(Map.of("v", 7), Map.of());
 
         assertRequest(request, "SELECT $$:v $$ AS txt, ? AS n");
     }

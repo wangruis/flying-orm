@@ -26,6 +26,7 @@ final class R2dbcBatchEvidenceCounts {
     private boolean strictUnknown;
     private boolean businessInFlight;
     private boolean lastRowMatchesPolicy;
+    private BitSet zeroRows;
     // Complete row-local work; LOB cleanup remains a separate publication gate.
     private int readyPrefix;
     private BitSet sparseReady;
@@ -49,11 +50,19 @@ final class R2dbcBatchEvidenceCounts {
         else unitAffected = Math.addExact(unitAffected, count);
     }
 
-    synchronized void recordRowCount(long count) { record(count); }
+    synchronized void requireKnownRowCount() {
+        if (!observed || !unitKnown) {
+            throw new IllegalStateException("driver cannot identify rows inserted by conflict ignore");
+        }
+    }
 
     synchronized void completeRow(long ignored) {
         boolean rowKnown = observed && unitKnown;
         long count = unitAffected;
+        if (rowKnown && count == 0) {
+            if (zeroRows == null) zeroRows = new BitSet(size);
+            zeroRows.set(completed);
+        }
         lastRowMatchesPolicy = !strict || rowKnown && count == 1;
         commitUnit();
         if (strict && rowKnown && count != 1) {
@@ -72,6 +81,16 @@ final class R2dbcBatchEvidenceCounts {
         completed = count;
     }
 
+    synchronized void completeReturnedRows(BitSet written) {
+        int count = written.cardinality();
+        record(count);
+        if (count < size) {
+            written.flip(0, size);
+            zeroRows = written;
+        }
+        completeBusinessRows(size);
+    }
+
     private void commitUnit() {
         if (!observed || !unitKnown) known = false;
         else affected = Math.addExact(affected, unitAffected);
@@ -82,6 +101,13 @@ final class R2dbcBatchEvidenceCounts {
     }
 
     synchronized boolean hasConflicts() { return !conflicts.isEmpty() || strictUnknown; }
+
+    synchronized boolean hasNoAffectedRows() {
+        return known && !businessInFlight && completed == size && affected == 0;
+    }
+
+    /** Borrowed read-only after main execution; aggregate driver counts never populate row identities. */
+    synchronized BitSet zeroRows() { return zeroRows; }
 
     boolean tracksReadyRows() { return trackReadyRows; }
 

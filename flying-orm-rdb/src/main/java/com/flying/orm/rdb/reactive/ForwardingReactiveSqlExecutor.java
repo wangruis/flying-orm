@@ -33,13 +33,16 @@ abstract class ForwardingReactiveSqlExecutor implements ReactiveSqlExecutor {
         return delegate;
     }
 
+    @Override
+    public boolean supportsBatchRowLayouts() { return delegate.supportsBatchRowLayouts(); }
+
     /** Rebuilds one logical policy layer around a new delegate. Structural wrappers never enter this hook. */
     ForwardingReactiveSqlExecutor redecoratePolicy(ReactiveSqlExecutor delegate) {
         return new ForwardingReactiveSqlExecutor(delegate) { };
     }
 
     /**
-     * Removes every occurrence of one policy while rebuilding the remaining logical chain once. This keeps policy
+     * Removes every occurrence of one policy, rebuilding only layers whose delegate changes. This keeps policy
      * replacement independent of decorator order and avoids pair-wise unwrapping branches in every factory.
      */
     static ReactiveSqlExecutor withoutPolicy(
@@ -63,11 +66,14 @@ abstract class ForwardingReactiveSqlExecutor implements ReactiveSqlExecutor {
         if (decorator == null) {
             return executor;
         }
-        ReactiveSqlExecutor rebuiltDelegate = withoutPolicy0(
-                logicalDelegate(executor, decorator), policyType, removedPolicy);
+        ReactiveSqlExecutor originalDelegate = logicalDelegate(executor, decorator);
+        ReactiveSqlExecutor rebuiltDelegate = withoutPolicy0(originalDelegate, policyType, removedPolicy);
         if (policyType.isInstance(decorator)) {
             removedPolicy.accept(decorator);
             return rebuiltDelegate;
+        }
+        if (rebuiltDelegate == originalDelegate) {
+            return executor;
         }
         return preservingScopedCapability(
                 rebuiltDelegate, decorator.redecoratePolicy(rebuiltDelegate));
@@ -123,11 +129,6 @@ abstract class ForwardingReactiveSqlExecutor implements ReactiveSqlExecutor {
     @Override
     public Mono<Long> rowsUpdated(SqlRequest request, SqlExecutionOptions options) {
         return delegate.rowsUpdated(request, options);
-    }
-
-    @Override
-    public Mono<SqlWriteResult> rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
-        return delegate.rowsUpdatedReturningKeys(request, options);
     }
 
     @Override

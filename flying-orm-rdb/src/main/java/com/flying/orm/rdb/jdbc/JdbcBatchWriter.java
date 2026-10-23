@@ -30,11 +30,12 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
     private final RdbDialect dialect;
     private final JdbcBatchExecutionObservationSupport observations;
     private final JdbcExecutionObservationSupport cleanupObservations;
-    private final JdbcBatchChunkExecutor executor = new JdbcBatchChunkExecutor();
+    private final JdbcBatchChunkExecutor executor;
 
     private JdbcBatchWriter(JdbcConnectionAccess connections, RdbDialect dialect, BatchExecutionObserver observer) {
         this.connections = Objects.requireNonNull(connections, "jdbc connection access must not be null");
         this.dialect = Objects.requireNonNull(dialect, "RDB dialect must not be null");
+        this.executor = new JdbcBatchChunkExecutor(dialect.name());
         this.observations = JdbcBatchExecutionObservationSupport.create(observer);
         this.cleanupObservations = JdbcExecutionObservationSupport.create(
                 observer instanceof SqlExecutionObserver sql ? sql : SqlExecutionObserver.noop());
@@ -47,6 +48,10 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
     public JdbcBatchWriter withBatchObserver(BatchExecutionObserver observer) {
         return new JdbcBatchWriter(connections, dialect, Objects.requireNonNull(observer, "batch observer must not be null"));
     }
+
+    @InternalApi
+    @Override
+    public boolean supportsBatchRowLayouts() { return true; }
 
     @InternalApi
     @Override
@@ -89,12 +94,16 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
                 boolean sequential = buffer.size() > 1 && buffer.stream().anyMatch(row -> row.work() != null
                         && row.work().kind() == com.flying.orm.rdb.execution.ProtectedWriteWork.Kind.UPDATE);
                 for (int from = 0; from < buffer.size();) {
-                    List<ProtectedBatchRows.RowView> window = sequential ? buffer.subList(from, from + 1) : buffer;
+                    int end = sequential ? from + 1 : ProtectedBatchRows.windowEnd(buffer, from);
+                    List<ProtectedBatchRows.RowView> window = from == 0 && end == buffer.size()
+                            ? buffer : buffer.subList(from, end);
+                    BatchWriteRequest windowRequest = window.getFirst().request(request);
+                    if (windowRequest != request) SqlExecutionStatements.canonical(windowRequest.statement(), dialect.name());
                     var counts = new JdbcBatchEvidenceSupport.Counts(offset, window.size(), request.rowCountPolicy());
                     boolean successful = false;
                     Throwable executionFailure = null;
                     try {
-                        executor.execute(connection, request, offset, window, counts);
+                        executor.execute(connection, windowRequest, offset, window, counts);
                         successful = true;
                     } catch (Throwable error) {
                         executionFailure = error;
@@ -134,10 +143,8 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
             return result;
         }
         JdbcBatchSupport.rethrowTryWithResourcesVirtualMachineError(failure);
-        BatchExecutionEvidence before = evidence.snapshot(BatchExecutionState.UNKNOWN, null);
-        BatchExecutionEvidence result = evidence.snapshot(
-                JdbcBatchEvidenceSupport.failureState(failure, before.successfulCount() > 0, unconfirmedExecution),
-                BatchExecutionEvidence.Failure.from(failure));
+        BatchExecutionEvidence result = evidence.failure(
+                BatchExecutionEvidence.Failure.from(failure), unconfirmedExecution);
         observation.completed(result);
         if (failure instanceof EntityPostWriteException post) {
             com.flying.orm.core.internal.error.ThrowableGraph.addSuppressedIfAcyclic(post,
@@ -145,7 +152,8 @@ public final class JdbcBatchWriter implements SyncBatchExecutor {
             throw post;
         }
         if (failure instanceof Error error) throw error;
-        throw new BatchExecutionEvidenceException("jdbc batch execution failed", failure, result);
+        throw new BatchExecutionEvidenceException("jdbc batch execution failed",
+                dialect.mapException(failure), result);
     }
 
     private static void completeRows(LongConsumer callback, long offset, int count,

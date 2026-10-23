@@ -1,10 +1,9 @@
 package com.flying.orm.rdb.schema;
 
+import com.flying.orm.core.metadata.RelationalTableDefinition;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.metadata.ColumnDefinition;
-import com.flying.orm.core.metadata.RelationIdentity;
-import com.flying.orm.core.metadata.RelationalTableDefinition;
-import com.flying.orm.core.metadata.TableMetadata;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.DatabaseDescriptor;
 import com.flying.orm.rdb.dialect.RdbDialect;
@@ -16,11 +15,10 @@ import com.flying.orm.rdb.result.DynamicRow;
 import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
-
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
-
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -52,13 +50,13 @@ class SchemaQualifiedTargetInvalidationTest {
         };
         ReactiveSchemaClient client = ReactiveSchemaClient.create(
                 executor, RdbDialect.postgresql());
-        ReviewedSchemaPlan plan = absentPlan(TARGET, PRESENT);
+        SchemaMigrationPlan plan = absentPlan(TARGET, PRESENT);
 
-        SchemaExecutionReport report = client.executeReviewed(
-                plan, reader, SchemaMigrationApproval.approve(plan, "test")).block();
+        SchemaMigrationResult report = client.execute(
+                plan, reader).block();
 
-        assertTrue(report.successful());
-        assertEquals(List.of(TARGET, TARGET), reader.readTargets);
+        assertNotNull(report);
+        assertTrue(reader.readTargets.isEmpty());
         assertEquals(List.of(TARGET), reader.invalidatedTargets);
         assertTrue(reader.segmented.isEmpty());
         assertTrue(reader.flat.isEmpty());
@@ -87,34 +85,33 @@ class SchemaQualifiedTargetInvalidationTest {
         };
         ReactiveSchemaClient client = ReactiveSchemaClient.create(
                 executor, RdbDialect.postgresql());
-        ReviewedSchemaPlan plan = absentPlan(target, present);
+        SchemaMigrationPlan plan = absentPlan(target, present);
 
-        SchemaExecutionReport report = client.executeReviewed(
-                plan, reader, SchemaMigrationApproval.approve(plan, "test")).block();
+        SchemaMigrationResult report = client.execute(
+                plan, reader).block();
 
-        assertTrue(report.successful());
-        assertEquals(List.of(target, target), reader.readTargets);
+        assertNotNull(report);
+        assertTrue(reader.readTargets.isEmpty());
         assertEquals(List.of(target), reader.invalidatedTargets);
         assertTrue(reader.segmented.isEmpty());
         assertTrue(reader.flat.isEmpty());
     }
 
     @Test
-    void unqualifiedIdentityAndLegacyConsumerKeepTheirOneSegmentContract() {
-        List<String> invalidated = new ArrayList<>();
+    void relationConsumerKeepsItsSegmentedIdentity() {
+        List<RelationIdentity> invalidated = new ArrayList<>();
         SchemaCacheInvalidationCoordinator coordinator =
                 SchemaCacheInvalidationCoordinator.from(ignored -> { })
                         .with(new Object(), invalidated::add);
 
         coordinator.invalidate(RelationIdentity.table("accounts.v2"));
 
-        assertEquals(List.of("accounts.v2"), invalidated);
+        assertEquals(List.of(RelationIdentity.table("accounts.v2")), invalidated);
     }
 
-    private static ReviewedSchemaPlan absentPlan(RelationIdentity target,
+    private static SchemaMigrationPlan absentPlan(RelationIdentity target,
                                                  RelationalTableDefinition present) {
         SchemaSnapshot actual = SchemaSnapshot.present(present);
-        String actualFingerprint = SchemaSnapshotFingerprint.of(actual);
         SchemaOperation operation = SchemaOperation.of(
                 SchemaOperation.Kind.DROP_TABLE,
                 target,
@@ -122,18 +119,11 @@ class SchemaQualifiedTargetInvalidationTest {
                 present,
                 null,
                 SchemaOperation.Compatibility.REQUIRES_REVIEW);
-        return ReviewedSchemaPlan.builder(DatabaseDescriptor.of(
+        return SchemaMigrationPlan.builder(DatabaseDescriptor.of(
                         "PostgreSQL", "17", RdbDialect.postgresql()))
                 .compatibilityMode(SchemaCompatibilityMode.EXACT)
                 .desiredAbsent(target)
-                .desiredFingerprint(SchemaSnapshotFingerprint.of(SchemaSnapshot.absent(target)))
-                .actualFingerprint(actualFingerprint)
-                .addStep(SchemaPlanStep.executable(
-                        0,
-                        operation,
-                        new SqlRequest("drop table target", List.of()),
-                        SchemaMigrationRiskLevel.CRITICAL,
-                        List.of(SchemaPlanPrecondition.actualSnapshot(actualFingerprint))))
+                .addStep(new SchemaPlanStep(operation, List.of(new SqlRequest("drop table target", List.of()))))
                 .build();
     }
 
@@ -159,11 +149,6 @@ class SchemaQualifiedTargetInvalidationTest {
         }
 
         @Override
-        public Mono<SchemaSnapshot> readSnapshot(String schema, String table) {
-            return Mono.error(new AssertionError("segmented string metadata read must not execute"));
-        }
-
-        @Override
         public Mono<SchemaSnapshot> readSnapshot(RelationIdentity relation) {
             assertEquals(expected, relation);
             readTargets.add(relation);
@@ -171,17 +156,12 @@ class SchemaQualifiedTargetInvalidationTest {
         }
 
         @Override
-        public Mono<DynamicForm> readForm(String formId, String table) {
+        public Mono<DynamicForm> readForm(String formId, RelationIdentity relation) {
             return Mono.error(new AssertionError("unqualified metadata read must not execute"));
         }
 
         @Override
-        public Mono<DynamicForm> readForm(String formId, String schema, String table) {
-            return Mono.error(new AssertionError("form metadata read must not execute"));
-        }
-
-        @Override
-        public Mono<TableMetadata> readTable(String table) {
+        public Mono<RelationalTableDefinition> readTable(RelationIdentity relation) {
             return Mono.error(new AssertionError("table metadata read must not execute"));
         }
 

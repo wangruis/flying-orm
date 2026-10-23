@@ -132,7 +132,7 @@ class RepositoryPageSortPrecedenceTest {
         }
 
         private SyncSqlExecutor sync() {
-            return new SyncSqlExecutor() {
+            return new com.flying.orm.rdb.support.ListQueryFixture() {
                 @Override public List<DynamicRow> query(SqlRequest request) {
                     return rows(request);
                 }
@@ -140,7 +140,7 @@ class RepositoryPageSortPrecedenceTest {
                     throw new UnsupportedOperationException();
                 }
                 @Override public SqlWriteResult rowsUpdatedReturningKeys(
-                        SqlRequest request, SqlExecutionOptions options) {
+                        SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                     throw new UnsupportedOperationException();
                 }
             };

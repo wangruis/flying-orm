@@ -141,7 +141,7 @@ public final class DataScope {
      * @return 新 DataScope，原对象保持不变
      */
     public DataScope withFields(FieldScope fieldScope) {
-        return new DataScope(condition, intersect(fields, fieldScope), tenantScopes);
+        return new DataScope(condition, FieldScope.intersect(fields, fieldScope), tenantScopes);
     }
 
     /**
@@ -150,8 +150,14 @@ public final class DataScope {
      */
     public DataScope and(DataScope other) {
         DataScope safeOther = Objects.requireNonNull(other, "other data scope must not be null");
+        if (empty()) {
+            return safeOther;
+        }
+        if (safeOther.empty()) {
+            return this;
+        }
         ConditionGroup merged = merge(condition, safeOther.condition);
-        FieldScope mergedFields = intersect(fields, safeOther.fields);
+        FieldScope mergedFields = FieldScope.intersect(fields, safeOther.fields);
         List<TenantScope> mergedTenantScopes = new ArrayList<>(tenantScopes.size() + safeOther.tenantScopes.size());
         mergedTenantScopes.addAll(tenantScopes);
         mergedTenantScopes.addAll(safeOther.tenantScopes);
@@ -191,33 +197,12 @@ public final class DataScope {
             if (!scope.field().equalsIgnoreCase(safeField)) {
                 continue;
             }
-            if (result != null && !tenantValuesEqual(result.ownedValue(), scope.ownedValue())) {
+            if (result != null && !result.matches(scope.ownedValue())) {
                 throw new IllegalArgumentException("conflicting tenant scope values");
             }
             result = scope;
         }
         return Optional.ofNullable(result);
-    }
-
-    private static boolean tenantValuesEqual(Object left, Object right) {
-        String leftText = canonicalText(left);
-        String rightText = canonicalText(right);
-        return leftText != null && rightText != null
-                ? leftText.equals(rightText)
-                : Objects.deepEquals(left, right);
-    }
-
-    private static String canonicalText(Object value) {
-        if (value instanceof CharSequence text) {
-            return text.toString();
-        }
-        if (value instanceof Character character) {
-            return character.toString();
-        }
-        if (value instanceof char[] characters) {
-            return new String(characters);
-        }
-        return null;
     }
 
     private static ConditionGroup merge(ConditionGroup left, ConditionGroup right) {
@@ -228,10 +213,6 @@ public final class DataScope {
             return left;
         }
         return ConditionGroups.and(left, right);
-    }
-
-    private static FieldScope intersect(FieldScope left, FieldScope right) {
-        return FieldScope.intersect(left, right);
     }
 
     private static DataScope preset(String field, String operator, Object value, String valueName) {

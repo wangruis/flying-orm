@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.function.Consumer;
 
 /**
@@ -101,6 +102,17 @@ public final class ConditionGroup implements ConditionNode {
         if (current != null) {
             return current;
         }
+        for (int index = 0; index < children.size(); index++) {
+            if (children.get(index) instanceof ConditionGroup group && group.executionView == null) {
+                return compileExecutionTree();
+            }
+        }
+        // 扁平条件或已预热的子组不需要树遍历栈；发布仍复用同一编译和同步边界。
+        publishExecutionView();
+        return executionView;
+    }
+
+    private ConditionExecutionView compileExecutionTree() {
         // 后序预热子组，编译当前组时只读取已发布的子视图；深度不再占用调用栈。
         ArrayDeque<ExecutionFrame> pending = new ArrayDeque<>();
         pending.addLast(new ExecutionFrame(this));
@@ -243,6 +255,16 @@ public final class ConditionGroup implements ConditionNode {
             return this;
         }
 
+        /** 添加受信原值条件，不清理文本或省略空值；已注册多值 term 在此取得集合快照。 */
+        public Builder add(String field, String operator, Object value) {
+            String normalized = Names.key(operator, "condition operator");
+            ConditionValueShape shape = terms.find(normalized).map(TermHandler::shape)
+                    .orElse(ConditionValueShape.SCALAR);
+            children.add(TermCondition.owned(FieldIdentity.of(field), normalized,
+                    TermCondition.snapshotValue(normalized, value, shape)));
+            return this;
+        }
+
         /**
          * 构建只读条件组。
          *
@@ -272,16 +294,16 @@ public final class ConditionGroup implements ConditionNode {
                                 Object value,
                                 ConditionValuePolicy policy) {
             String normalizedOperator = Names.key(operator, "condition operator");
-            ConditionValueShape shape = TermRegistry.standard()
-                                             .find(normalizedOperator)
-                                             .or(() -> terms.find(normalizedOperator))
-                                             .map(TermHandler::shape)
-                                             .orElse(ConditionValueShape.SCALAR);
+            Optional<TermHandler> standard = TermRegistry.standard().find(normalizedOperator);
+            boolean standardOperator = standard.isPresent();
+            ConditionValueShape shape = standard.or(() -> terms.find(normalizedOperator))
+                                               .map(TermHandler::shape)
+                                               .orElse(ConditionValueShape.SCALAR);
             ConditionValueNormalizer.Result result = ConditionValueNormalizer.normalize(
                     shape,
                     value,
                     policy,
-                    (scalar, index) -> TermCondition.snapshotScalar(normalizedOperator, scalar),
+                    TermCondition.snapshotConverter(standardOperator),
                     Integer.MAX_VALUE,
                     Integer.MAX_VALUE);
             if (result.present()) {

@@ -13,10 +13,17 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 
 class MetadataExecutionBoundaryTest {
+
+    @Test
+    void tableNameEnumerationIsAvailableAtBothPublicBoundaries() {
+        assertDoesNotThrow(() -> JdbcFormMetadataReader.class.getMethod("readTableNames", String.class));
+        assertDoesNotThrow(() -> ReactiveFormMetadataReader.class.getMethod("readTableNames", String.class));
+    }
 
     @Test
     void cachedBuiltInReaderUsesOnlySqlAndNeverProbesTransactionState() {
@@ -40,8 +47,7 @@ class MetadataExecutionBoundaryTest {
                     });
                 });
         ReactiveFormMetadataCache reader = ReactiveFormMetadataReaders.cached(
-                new InformationSchemaFormMetadataReader(executor,
-                        (schema, table) -> new SqlRequest("select columns", List.of()), type -> type));
+                new InformationSchemaFormMetadataReader(executor, new MetadataQueryProfile(new MetadataQueryProfile.Queries((schema, table) -> new SqlRequest("select columns", List.of()), null, null, type -> type))));
 
         var first = reader.readForm("customers", "customers")
                 .contextWrite(context -> context.put("metadata-test", "caller-context")).block();

@@ -24,6 +24,26 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ProtectedContainsResultSupportTest {
+    @Test
+    void incrementalFinisherFiltersMasksAndKeepsPreviouslyPublishedRowsStable() {
+        DynamicForm form = protectedForm();
+        try (ProtectedFieldRuntime runtime = ProtectedFieldRuntime.create(
+                ProtectedFieldKeyRing.single("v1", new byte[32]))) {
+            ProtectedContainsResultSupport support = new ProtectedContainsResultSupport(
+                    FormDataSqlRenderer.create(SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql())
+                            .withProtectedFields(runtime));
+            java.util.function.UnaryOperator<DynamicRow> finish = support.rowFinisher(
+                    form, query(form), List.of("secret", "id"), SensitiveDisplayMode.MASKED,
+                    SqlExecutionOptions.unlimited());
+            DynamicRow first = finish.apply(row(1L, "alphabet soup", "first"));
+            org.junit.jupiter.api.Assertions.assertNull(finish.apply(row(2L, "goodbye", "second")));
+            DynamicRow third = finish.apply(row(3L, "alphabet", "third"));
+            assertEquals(1L, first.get("id"));
+            assertEquals(3L, third.get("id"));
+            assertEquals("*************", first.get("secret"));
+            assertEquals(List.of("secret", "id"), List.copyOf(third.keySet()));
+        }
+    }
 
     @Test
     void doesNotSnapshotTrustedProjectionForEveryVerifiedRow() {
@@ -36,10 +56,10 @@ class ProtectedContainsResultSupportTest {
                             SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql())
                             .withProtectedFields(runtime));
 
-            List<DynamicRow> verified = support.finish(
-                    form, query(form),
-                    List.of(row(1L, "alphabet soup", "first"), row(2L, "alphabet", "second")),
-                    projection, SensitiveDisplayMode.FULL, SqlExecutionOptions.safeDefaults());
+            List<DynamicRow> verified = List.of(row(1L, "alphabet soup", "first"), row(2L, "alphabet", "second"))
+                    .stream().map(support.rowFinisher(form, query(form), projection,
+                            SensitiveDisplayMode.FULL, SqlExecutionOptions.unlimited()))
+                    .filter(java.util.Objects::nonNull).toList();
 
             assertEquals(2, verified.size());
             assertEquals(0, projection.toArrayCalls);
@@ -59,9 +79,9 @@ class ProtectedContainsResultSupportTest {
                     row(1L, "alphabet soup", "first"),
                     row(2L, "goodbye", "second"));
 
-            List<DynamicRow> verified = support.finish(
-                    form, query(form), candidates, List.of("secret", "id"), SensitiveDisplayMode.MASKED,
-                    SqlExecutionOptions.safeDefaults());
+            List<DynamicRow> verified = candidates.stream().map(support.rowFinisher(
+                    form, query(form), List.of("secret", "id"), SensitiveDisplayMode.MASKED,
+                    SqlExecutionOptions.unlimited())).filter(java.util.Objects::nonNull).toList();
 
             assertEquals(1, verified.size());
             assertEquals(List.of("secret", "id"), verified.getFirst().keySet().stream().toList());

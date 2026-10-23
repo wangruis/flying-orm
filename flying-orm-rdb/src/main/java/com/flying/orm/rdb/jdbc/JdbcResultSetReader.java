@@ -7,6 +7,7 @@ import com.flying.orm.rdb.execution.SqlRowLimitExceededException;
 import com.flying.orm.rdb.observation.SqlStatementType;
 import com.flying.orm.rdb.result.DynamicRow;
 import com.flying.orm.rdb.result.JdbcDynamicRowFactory;
+import com.flying.orm.rdb.mapping.RowMapper;
 
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -14,6 +15,9 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Predicate;
+import java.util.function.Function;
+import java.util.function.IntFunction;
 
 /**
  * JDBC 结果集的有界行读取协作器。
@@ -42,25 +46,8 @@ final class JdbcResultSetReader {
                  Objects.requireNonNull(statement, "jdbc statement must not be null"),
                  statementType,
                  options,
-                 result,
-                 0);
-    }
-
-    /**
-     * 读取终端判定所需的有限行数。终端行数只决定何时停止读取，不替代执行保护里的 maxRows。
-     */
-    static void readQueryRows(ResultSet resultSet,
-                              PreparedStatement statement,
-                              SqlStatementType statementType,
-                              SqlExecutionOptions options,
-                              List<DynamicRow> result,
-                              int rowLimit) throws SQLException {
-        readRows(resultSet,
-                 Objects.requireNonNull(statement, "jdbc statement must not be null"),
-                 statementType,
-                 options,
-                 result,
-                 rowLimit);
+                 row -> row,
+                 Objects.requireNonNull(result, "jdbc result must not be null")::add);
     }
 
     /**
@@ -72,26 +59,31 @@ final class JdbcResultSetReader {
             return List.of();
         }
         List<DynamicRow> result = new ArrayList<>();
-        readRows(resultSet, null, SqlStatementType.INSERT, options, result, 0);
+        readRows(resultSet, null, SqlStatementType.INSERT, options, row -> row, result::add);
         return result;
     }
 
-    private static void readRows(ResultSet resultSet,
+    static <T> void consumeQueryRows(ResultSet resultSet, PreparedStatement statement,
+                                  SqlStatementType type, SqlExecutionOptions options,
+                                  RowMapper<T> mapper, Predicate<? super T> consumer) throws SQLException {
+        readRows(resultSet, Objects.requireNonNull(statement, "jdbc statement must not be null"),
+                type, options, mapper, consumer);
+    }
+
+    private static <T> void readRows(ResultSet resultSet,
                                  PreparedStatement interruptibleStatement,
                                  SqlStatementType statementType,
                                  SqlExecutionOptions options,
-                                 List<DynamicRow> result,
-                                 int rowLimit) throws SQLException {
+                                 RowMapper<T> mapper,
+                                 Predicate<? super T> consumer) throws SQLException {
         ResultSet safeResultSet = Objects.requireNonNull(resultSet, "jdbc result set must not be null");
         SqlExecutionOptions safeOptions = Objects.requireNonNull(options, "sql execution options must not be null");
-        List<DynamicRow> safeResult = Objects.requireNonNull(result, "jdbc result must not be null");
-        if (rowLimit < 0) {
-            throw new IllegalArgumentException("mapped query row limit must not be negative");
-        }
+        Predicate<? super T> safeConsumer = Objects.requireNonNull(consumer, "row consumer must not be null");
         JdbcDynamicRowFactory rows = JdbcDynamicRowFactory.from(safeResultSet, safeOptions);
         long estimatedBytes = 0L;
         long rowIndex = 0L;
-        while (rowLimit == 0 || rowIndex < rowLimit) {
+        Function<IntFunction<Object>, T> bound = null;
+        while (true) {
             if (interruptibleStatement != null) {
                 JdbcStatementControl.requireNotInterrupted(interruptibleStatement);
             }
@@ -104,15 +96,23 @@ final class JdbcResultSetReader {
             if (safeOptions.maxRows() > 0 && rowIndex >= safeOptions.maxRows()) {
                 throw new SqlRowLimitExceededException(statementType, safeOptions.maxRows(), rowIndex);
             }
-            DynamicRow row = rows.readCurrentRow();
-            if (safeOptions.maxResultBytes() > 0) {
-                estimatedBytes = saturatedAdd(estimatedBytes, BatchMemoryBudget.estimateRowBytes(row));
-                if (estimatedBytes == Long.MAX_VALUE || estimatedBytes > safeOptions.maxResultBytes()) {
-                    throw new SqlResultMemoryLimitExceededException(
-                            statementType, safeOptions.maxResultBytes(), estimatedBytes, rowIndex);
+            T mapped;
+            if (bound != null) {
+                mapped = rows.readCurrentRow(bound);
+            } else {
+                DynamicRow row = rows.readCurrentRow();
+                if (safeOptions.maxResultBytes() > 0) {
+                    estimatedBytes = saturatedAdd(estimatedBytes, BatchMemoryBudget.estimateRowBytes(row));
+                    if (estimatedBytes == Long.MAX_VALUE || estimatedBytes > safeOptions.maxResultBytes()) {
+                        throw new SqlResultMemoryLimitExceededException(
+                                statementType, safeOptions.maxResultBytes(), estimatedBytes, rowIndex);
+                    }
+                } else if (rowIndex == 0) {
+                    bound = mapper.bindColumns(row);
                 }
+                mapped = bound == null ? mapper.map(row) : bound.apply(row);
             }
-            safeResult.add(row);
+            if (!safeConsumer.test(mapped)) break;
             rowIndex++;
         }
     }

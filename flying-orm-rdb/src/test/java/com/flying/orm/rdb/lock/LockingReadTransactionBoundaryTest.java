@@ -32,7 +32,7 @@ class LockingReadTransactionBoundaryTest {
             assertFalse(Arrays.stream(type.getMethods())
                     .anyMatch(method -> method.getName().toLowerCase().contains("transaction")), type.getName());
         }
-        for (Class<?> type : List.of(LockingReadSpec.class, LockingReadPlan.class)) {
+        for (Class<?> type : List.of(QuerySpec.class, SqlRequest.class)) {
             assertFalse(Arrays.stream(type.getDeclaredMethods())
                     .anyMatch(method -> method.getName().equals("routingIntent")), type.getName());
             assertFalse(Arrays.stream(type.getDeclaredFields())
@@ -102,10 +102,10 @@ class LockingReadTransactionBoundaryTest {
         assertLockAndParameters(request.get());
     }
 
-    private static LockingReadSpec spec() {
-        return LockingReadSpec.of(QuerySpec.of(LockingReadTestSupport.form(),
+    private static QuerySpec spec() {
+        return QuerySpec.of(LockingReadTestSupport.form(),
                 ConditionGroup.and().where("id", ">", 7L).build())
-                .withProjection(List.of("id"), List.of()), ReadLock.updateSkipLocked());
+                .withProjection(List.of("id"), List.of()).withLock(ReadLock.updateSkipLocked());
     }
 
     private static KeysetPageQuery page() {

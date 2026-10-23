@@ -50,8 +50,16 @@ class R2dbcBatchSymmetryTest {
         BatchWriteRequest request = new BatchWriteRequest(main.statement(), List.of(String.class, Long.class),
                 Flux.<Object[]>just(ProtectedBatchRows.extend(main.parameters().toArray(), work)),
                 BatchWriteOptions.of(1), BatchRowCountPolicy.ANY, BatchGeneratedKeys.none());
-        assertThrows(BatchExecutionEvidenceException.class, () -> h.executor().writeProtectedBatch(request).block());
+        BatchExecutionEvidence result = h.executor().writeProtectedBatch(request).block();
+        assertNotNull(result);
+        assertEquals(BatchExecutionState.SUCCESS, result.state());
+        assertEquals(1, result.inputCount());
+        assertEquals(1, result.successfulCount());
+        assertTrue(result.affectedRows().isKnown());
+        assertEquals(0, result.affectedRows().value());
+        assertEquals(1, h.sql.size());
         assertTrue(h.sql.getFirst().startsWith("select"));
+        assertTrue(h.sql.getFirst().contains(owner.sql()));
         assertSame(owner, h.acquired);
         assertEquals(List.of(17L), h.acquired.parameters());
         assertEquals(1, h.released);

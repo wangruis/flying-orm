@@ -31,7 +31,7 @@ class R2dbcLargeObjectRowsTest {
         AtomicInteger scopesCreated = new AtomicInteger();
         R2dbcLargeObjectRows.Mapper mapper = R2dbcLargeObjectRows.mapper(
                 metadata(),
-                SqlExecutionOptions.safeDefaults(),
+                SqlExecutionOptions.unlimited(),
                 () -> {
                     scopesCreated.incrementAndGet();
                     return new R2dbcLargeObjectScope();
@@ -47,7 +47,7 @@ class R2dbcLargeObjectRowsTest {
     void createsAPlainMapperHolderForEachSubscription() {
         AtomicInteger subscriptions = new AtomicInteger();
         Flux<DynamicRow> rows = Flux.from(R2dbcLargeObjectRows.map(
-                result(subscriptions), SqlExecutionOptions.safeDefaults(), R2dbcLargeObjectScope::new));
+                result(subscriptions), SqlExecutionOptions.unlimited(), R2dbcLargeObjectScope::new));
 
         DynamicRow first = rows.single().block();
         DynamicRow second = rows.single().block();
@@ -62,7 +62,7 @@ class R2dbcLargeObjectRowsTest {
         AtomicLong largestRequest = new AtomicLong();
         Flux<DynamicRow> rows = Flux.from(R2dbcLargeObjectRows.map(
                 demandAwareResult(metadata(), largestRequest),
-                SqlExecutionOptions.safeDefaults(),
+                SqlExecutionOptions.unlimited(),
                 R2dbcLargeObjectScope::new));
 
         List<DynamicRow> actual = rows.collectList().block();
@@ -77,7 +77,7 @@ class R2dbcLargeObjectRowsTest {
         AtomicLong largestRequest = new AtomicLong();
         Flux<DynamicRow> rows = Flux.from(R2dbcLargeObjectRows.map(
                 demandAwareResult(metadata(R2dbcType.BLOB, "content"), largestRequest),
-                SqlExecutionOptions.safeDefaults(),
+                SqlExecutionOptions.unlimited(),
                 R2dbcLargeObjectScope::new));
 
         assertEquals(4, rows.collectList().block().size());
@@ -90,7 +90,7 @@ class R2dbcLargeObjectRowsTest {
         RowMetadata metadata = metadata(R2dbcType.CLOB, "content");
         R2dbcLargeObjectRows.Mapper mapper = R2dbcLargeObjectRows.mapper(
                 metadata,
-                SqlExecutionOptions.safeDefaults().withMaxLargeObjectChars(3),
+                SqlExecutionOptions.unlimited().withMaxLargeObjectChars(3),
                 R2dbcLargeObjectScope::new);
 
         SqlLargeObjectLimitExceededException failure = assertThrows(
@@ -109,7 +109,7 @@ class R2dbcLargeObjectRowsTest {
                 column(R2dbcType.CLOB, "content"));
         R2dbcLargeObjectRows.Mapper mapper = R2dbcLargeObjectRows.mapper(
                 metadata,
-                SqlExecutionOptions.safeDefaults().withMaxLargeObjectChars(3),
+                SqlExecutionOptions.unlimited().withMaxLargeObjectChars(3),
                 R2dbcLargeObjectScope::new);
 
         DynamicRow actual = mapper.map(row(new Object[]{"ordinary text", null}, metadata)).block();
@@ -122,7 +122,7 @@ class R2dbcLargeObjectRowsTest {
         RowMetadata metadata = metadata(R2dbcType.BLOB, "content");
         R2dbcLargeObjectRows.Mapper mapper = R2dbcLargeObjectRows.mapper(
                 metadata,
-                SqlExecutionOptions.safeDefaults().withMaxLargeObjectBytes(3),
+                SqlExecutionOptions.unlimited().withMaxLargeObjectBytes(3),
                 R2dbcLargeObjectScope::new);
 
         SqlLargeObjectLimitExceededException failure = assertThrows(

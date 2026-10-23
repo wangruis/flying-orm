@@ -38,10 +38,10 @@ class SqlServerCompleteSchemaMetadataTest {
 
     @Test
     void declaresEveryCompleteSnapshotQueryAndRepresentabilityBoundary() {
-        InformationSchemaFormMetadataReader.Queries queries = SqlServerMetadataQueries.queries();
+        MetadataQueryProfile.Queries queries = SqlServerMetadataQueries.queries();
 
-        assertTrue(InformationSchemaFormMetadataReader.coverage(queries).isComplete());
-        assertEquals(InformationSchemaFormMetadataReader.SnapshotDialect.SQL_SERVER,
+        assertTrue(new MetadataQueryProfile(queries).coverage().isComplete());
+        assertEquals(MetadataQueryProfile.SnapshotDialect.SQL_SERVER,
                      queries.snapshotDialect());
         assertProjection(queries.tableQuery().create("app", "orders"),
                          "TABLE_COMMENT", "TABLE_REPRESENTABLE");
@@ -72,8 +72,7 @@ class SqlServerCompleteSchemaMetadataTest {
     @Test
     void assemblesCapturedSqlServerRowsIntoAnExactCompleteSnapshot() {
         CapturedSqlServerExecutor executor = new CapturedSqlServerExecutor(false);
-        SchemaSnapshot snapshot = new InformationSchemaFormMetadataReader(
-                executor, SqlServerMetadataQueries.queries())
+        SchemaSnapshot snapshot = new InformationSchemaFormMetadataReader(executor, new MetadataQueryProfile(SqlServerMetadataQueries.queries()))
                 .readSnapshot("app", "orders")
                 .block();
 
@@ -87,8 +86,7 @@ class SqlServerCompleteSchemaMetadataTest {
         CapturedSqlServerExecutor executor = new CapturedSqlServerExecutor(true);
 
         IllegalStateException error = assertThrows(IllegalStateException.class,
-                () -> new InformationSchemaFormMetadataReader(
-                        executor, SqlServerMetadataQueries.queries())
+                () -> new InformationSchemaFormMetadataReader(executor, new MetadataQueryProfile(SqlServerMetadataQueries.queries()))
                         .readSnapshot("app", "orders")
                         .block());
 

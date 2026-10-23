@@ -1,9 +1,13 @@
 package com.flying.orm.rdb.form;
 
+import com.flying.orm.rdb.internal.batch.BatchPublishers;
+
 import org.junit.jupiter.api.Test;
 import org.reactivestreams.Publisher;
 import org.reactivestreams.Subscriber;
 import org.reactivestreams.Subscription;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.FluxSink;
 
 import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -44,9 +48,11 @@ class SyncBatchHeadTerminalSerializationTest {
 
     private static void assertSerializedFirstReplay(boolean mapped, Throwable expectedFailure)
             throws Exception {
-        SyncBatchHeadState<String> state = new SyncBatchHeadState<>();
-        // The original upstream onNext has returned before its asynchronous terminal signal.
-        state.onNext("first");
+        AtomicReference<FluxSink<String>> upstream = new AtomicReference<>();
+        SyncBatchHead<String> head = SyncBatchHead.open(Flux.create(sink -> {
+            upstream.set(sink);
+            sink.next("first");
+        }));
         CountDownLatch firstEntered = new CountDownLatch(1);
         CountDownLatch releaseFirst = new CountDownLatch(1);
         ConcurrentLinkedQueue<String> events = new ConcurrentLinkedQueue<>();
@@ -57,7 +63,7 @@ class SyncBatchHeadTerminalSerializationTest {
         AtomicInteger completions = new AtomicInteger();
         AtomicInteger failures = new AtomicInteger();
 
-        Publisher<String> source = state::subscribe;
+        Publisher<String> source = head.rows();
         Publisher<String> result = mapped
                 ? BatchPublishers.mapIndexed(source, (row, index) -> {
                     firstEntered.countDown();
@@ -105,9 +111,9 @@ class SyncBatchHeadTerminalSerializationTest {
             assertTrue(firstEntered.await(10, TimeUnit.SECONDS), "cached first row did not enter its callback");
             Future<?> terminal = executor.submit(() -> {
                 if (expectedFailure == null) {
-                    state.onComplete();
+                    upstream.get().complete();
                 } else {
-                    state.onError(expectedFailure);
+                    upstream.get().error(expectedFailure);
                 }
             });
             try {
@@ -135,7 +141,7 @@ class SyncBatchHeadTerminalSerializationTest {
                     () -> assertSame(expectedFailure, observedFailure.get()));
         } finally {
             releaseFirst.countDown();
-            state.close();
+            head.close();
             executor.shutdownNow();
             assertTrue(executor.awaitTermination(10, TimeUnit.SECONDS), "signal workers did not terminate");
         }

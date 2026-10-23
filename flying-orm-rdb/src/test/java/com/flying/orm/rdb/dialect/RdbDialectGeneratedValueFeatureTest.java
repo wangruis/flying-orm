@@ -9,11 +9,11 @@ class RdbDialectGeneratedValueFeatureTest {
 
     @Test
     void reportsGeneratedValueFeaturesThatBuiltInDialectsActuallyRender() {
-        assertTrue(RdbDialect.h2().supports(DialectFeature.IDENTITY_COLUMNS));
-        assertTrue(RdbDialect.h2().supports(DialectFeature.SEQUENCES));
-        assertTrue(RdbDialect.mysql().supports(DialectFeature.IDENTITY_COLUMNS));
-        assertFalse(RdbDialect.mysql().supports(DialectFeature.SEQUENCES));
-        assertTrue(RdbDialect.postgresql().supports(DialectFeature.IDENTITY_COLUMNS));
-        assertTrue(RdbDialect.postgresql().supports(DialectFeature.SEQUENCES));
+        assertTrue(RdbDialect.h2().supports(DialectCapabilityId.IDENTITY_COLUMNS));
+        assertTrue(RdbDialect.h2().supports(DialectCapabilityId.SEQUENCES));
+        assertTrue(RdbDialect.mysql().supports(DialectCapabilityId.IDENTITY_COLUMNS));
+        assertFalse(RdbDialect.mysql().supports(DialectCapabilityId.SEQUENCES));
+        assertTrue(RdbDialect.postgresql().supports(DialectCapabilityId.IDENTITY_COLUMNS));
+        assertTrue(RdbDialect.postgresql().supports(DialectCapabilityId.SEQUENCES));
     }
 }

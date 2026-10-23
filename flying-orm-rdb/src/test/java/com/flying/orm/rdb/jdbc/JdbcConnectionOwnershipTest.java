@@ -49,10 +49,10 @@ class JdbcConnectionOwnershipTest {
     }
 
     @Test void defaultCustomScopeFailsBeforeWork() {
-        SyncSqlExecutor executor = new SyncSqlExecutor() {
+        SyncSqlExecutor executor = new com.flying.orm.rdb.support.ListQueryFixture() {
             public List<com.flying.orm.rdb.result.DynamicRow> query(SqlRequest r) { return List.of(); }
             public long rowsUpdated(SqlRequest r) { return 1; }
-            public com.flying.orm.rdb.execution.SqlWriteResult rowsUpdatedReturningKeys(SqlRequest r, SqlExecutionOptions o) {
+            public com.flying.orm.rdb.execution.SqlWriteResult rowsUpdatedReturningKeys(SqlRequest r, SqlExecutionOptions o, String generatedKeyColumn) {
                 return new com.flying.orm.rdb.execution.SqlWriteResult(1,List.of());
             }
         };

@@ -129,13 +129,13 @@ class ReactiveIndependentBatchLifecycleTest {
     }
 
     @Test
-    void preRunsBeforeParametersAreReadOnBothEntryNames() {
-        for (boolean evidence : new boolean[]{false, true}) try (R2dbcFixture fixture = new R2dbcFixture()) {
+    void preRunsBeforeBatchParametersAreRead() {
+        try (R2dbcFixture fixture = new R2dbcFixture()) {
             var repository = fixture.repository(GeneratedEntity.class).withListener(event -> {
                 if (event.phase() == EntityLifecyclePhase.PRE_PERSIST) event.entity().name = "prepared";
                 return Mono.empty();
             });
-            execute(repository, Operation.INSERT, evidence, Flux.just(new GeneratedEntity(1)), options())
+            execute(repository, Operation.INSERT, Flux.just(new GeneratedEntity(1)), options())
                     .block(Duration.ofSeconds(3));
             assertTrue(fixture.boundValues.contains("prepared"));
             org.junit.jupiter.api.Assertions.assertFalse(fixture.boundValues.contains("generated-1"));
@@ -143,8 +143,8 @@ class ReactiveIndependentBatchLifecycleTest {
     }
 
     @Test
-    void ordinaryAndEvidenceShareBoundedPrePostForEveryOperation() {
-        for (Operation operation : Operation.values()) for (boolean evidence : new boolean[]{false, true}) {
+    void publicBatchKeepsBoundedPrePostForEveryOperation() {
+        for (Operation operation : Operation.values()) {
             try (R2dbcFixture fixture = new R2dbcFixture()) {
                 List<Long> posts = new ArrayList<>();
                 var repository = fixture.repository(PayloadEntity.class).withListener(event -> {
@@ -160,7 +160,7 @@ class ReactiveIndependentBatchLifecycleTest {
                     fixture.inputs++;
                     return new PayloadEntity(index);
                 });
-                var result = execute(repository, operation, evidence, rows, options()).block(Duration.ofSeconds(3));
+                var result = execute(repository, operation, rows, options()).block(Duration.ofSeconds(3));
                 assertEquals(16, result.successfulCount());
                 assertEquals(16, posts.size());
                 fixture.assertClosed(1, 0, 0);
@@ -169,10 +169,10 @@ class ReactiveIndependentBatchLifecycleTest {
     }
 
     @Test
-    void generatedKeysHaveOrdinaryEvidenceParityAndDoNotAccumulateRetention() {
-        for (boolean evidence : new boolean[]{false, true}) try (R2dbcFixture fixture = new R2dbcFixture()) {
+    void generatedKeysAreReturnedWithoutAccumulatingRetention() {
+        try (R2dbcFixture fixture = new R2dbcFixture()) {
             List<GeneratedEntity> entities = IntStream.rangeClosed(1, 16).mapToObj(GeneratedEntity::new).toList();
-            var result = execute(fixture.repository(GeneratedEntity.class), Operation.INSERT, evidence,
+            var result = execute(fixture.repository(GeneratedEntity.class), Operation.INSERT,
                     Flux.fromIterable(entities), options()).block(Duration.ofSeconds(3));
             assertEquals(16, result.successfulCount());
             assertEquals(IntStream.rangeClosed(1, 16).mapToObj(id -> 1_000L + id).toList(),
@@ -183,7 +183,7 @@ class ReactiveIndependentBatchLifecycleTest {
 
     @Test
     void postFailureKeepsPrimaryCauseKeysAndOtherCompletedCallbacks() {
-        for (boolean evidence : new boolean[]{false, true}) try (R2dbcFixture fixture = new R2dbcFixture()) {
+        try (R2dbcFixture fixture = new R2dbcFixture()) {
             List<GeneratedEntity> entities = List.of(new GeneratedEntity(1), new GeneratedEntity(2), new GeneratedEntity(3));
             List<Long> posts = new ArrayList<>();
             IllegalStateException cause = new IllegalStateException("POST failed");
@@ -195,7 +195,7 @@ class ReactiveIndependentBatchLifecycleTest {
                 return Mono.empty();
             });
             EntityPostWriteException failure = assertThrows(EntityPostWriteException.class,
-                    () -> execute(repository, Operation.INSERT, evidence, Flux.fromIterable(entities),
+                    () -> execute(repository, Operation.INSERT, Flux.fromIterable(entities),
                             BatchWriteOptions.of(2)).block(Duration.ofSeconds(3)));
             assertSame(cause, failure.getCause());
             assertEquals(EntityLifecyclePhase.POST_PERSIST, failure.phase());
@@ -220,7 +220,7 @@ class ReactiveIndependentBatchLifecycleTest {
                 }
                 return Mono.empty();
             });
-            Disposable subscription = RepositoryBatchEvidenceAccess.reactive(repository).insertEvidence(Flux.just(entity), options()).subscribe();
+            Disposable subscription = repository.insertBatch(Flux.just(entity), options()).subscribe();
             assertTrue(postStarted.get());
             subscription.dispose();
             assertEquals(1_001L, entity.id);
@@ -232,7 +232,7 @@ class ReactiveIndependentBatchLifecycleTest {
     void batchIsColdAndCreatesNewTrackerForEachSubscription() {
         try (R2dbcFixture fixture = new R2dbcFixture()) {
             var repository = fixture.repository(PayloadEntity.class);
-            Mono<com.flying.orm.rdb.batch.BatchExecutionEvidence> work = RepositoryBatchEvidenceAccess.reactive(repository).insertEvidence(
+            Mono<com.flying.orm.rdb.batch.BatchExecutionEvidence> work = repository.insertBatch(
                     Flux.just(new PayloadEntity(1)), options());
             assertEquals(0, fixture.acquired);
             assertEquals(1, work.block(Duration.ofSeconds(3)).successfulCount());
@@ -242,12 +242,12 @@ class ReactiveIndependentBatchLifecycleTest {
     }
 
     private static <T> Mono<com.flying.orm.rdb.batch.BatchExecutionEvidence> execute(
-            ReactiveFormRepository<T> repository, Operation operation, boolean evidence,
+            ReactiveFormRepository<T> repository, Operation operation,
             Flux<T> rows, BatchWriteOptions options) {
         return switch (operation) {
-            case INSERT -> evidence ? RepositoryBatchEvidenceAccess.reactive(repository).insertEvidence(rows, options) : repository.insertBatch(rows, options);
-            case UPDATE -> evidence ? RepositoryBatchEvidenceAccess.reactive(repository).updateEvidence(rows, options) : repository.updateBatch(rows, options);
-            case UPSERT -> evidence ? RepositoryBatchEvidenceAccess.reactive(repository).upsertEvidence(rows, options) : repository.upsertBatch(rows, options);
+            case INSERT -> repository.insertBatch(rows, options);
+            case UPDATE -> repository.updateBatch(rows, options);
+            case UPSERT -> repository.upsertBatch(rows, options);
         };
     }
 

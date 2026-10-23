@@ -15,6 +15,7 @@ import io.r2dbc.spi.ConnectionFactoryMetadata;
 import org.junit.jupiter.api.Test;
 import org.reactivestreams.Publisher;
 import reactor.core.Disposable;
+import reactor.core.Scannable;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -29,12 +30,66 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class R2dbcConnectionLeaseCleanupTest {
+
+    @Test
+    void successfulReleaseDoesNotProbeTheObserver() {
+        AtomicInteger closes = new AtomicInteger();
+        SqlExecutionObserver observer = new SqlExecutionObserver() {
+            @Override
+            public boolean enabled() {
+                throw new IllegalStateException("observer unavailable");
+            }
+
+            @Override
+            public void onExecution(SqlExecutionObservation observation) { }
+        };
+
+        assertDoesNotThrow(() -> session(observer).release(resources(connection(closes, Mono.empty())),
+                SqlExecutionOperation.UPDATE, reactor.core.publisher.SignalType.ON_COMPLETE, null).block());
+
+        assertEquals(1, closes.get(), "successful release must not depend on observation availability");
+    }
+
+    @Test
+    void scalarSuccessDelegatesReleaseWithoutMaterializingCleanupSignals() {
+        AtomicInteger closes = new AtomicInteger();
+        R2dbcExecutionSession.Resources lease = resources(connection(closes, Mono.empty()));
+        Mono<Void> release = session(SqlExecutionObserver.noop()).release(
+                lease, SqlExecutionOperation.UPDATE, reactor.core.publisher.SignalType.ON_COMPLETE, null);
+
+        assertEquals(0, closes.get(), "the upper release port must stay lazy");
+        assertNull(Scannable.from(release).scan(Scannable.Attr.PARENT),
+                "the built-in noop observer needs no release-error observation operator");
+        assertFalse(Scannable.from(release).parents()
+                .anyMatch(parent -> parent.stepName().equals("materialize")),
+                "ordinary scalar success does not need cleanup Signal wrappers");
+        release.block();
+        assertEquals(1, closes.get());
+        assertNull(lease.largeObjectsIfCreated());
+    }
+
+    @Test
+    void noopObserverPreservesReleaseFailureAndColdSubscriptions() {
+        AtomicInteger closes = new AtomicInteger();
+        IllegalStateException failure = new IllegalStateException("release failed");
+        Mono<Void> release = session(SqlExecutionObserver.noop()).release(
+                resources(connection(closes, Mono.error(failure))), SqlExecutionOperation.UPDATE,
+                reactor.core.publisher.SignalType.ON_COMPLETE, null);
+
+        assertEquals(0, closes.get());
+        for (int subscription = 0; subscription < 2; subscription++) {
+            assertSame(failure, assertThrows(IllegalStateException.class, release::block));
+        }
+        assertEquals(2, closes.get());
+    }
 
     @Test
     void disabledObserverSkipsCleanupEventsAcrossSuccessAndError() {
@@ -93,7 +148,7 @@ class R2dbcConnectionLeaseCleanupTest {
             }
         };
         lease.largeObjects().materialize(
-                DynamicRow.copyOf(Map.of("payload", blob)), SqlExecutionOptions.safeDefaults());
+                DynamicRow.copyOf(Map.of("payload", blob)), SqlExecutionOptions.unlimited());
 
         cleanup.release(lease, SqlExecutionOperation.QUERY, reactor.core.publisher.SignalType.ON_ERROR, failure).block();
 

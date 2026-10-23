@@ -2,15 +2,16 @@ package com.flying.orm.rdb.batch;
 
 /**
  * Input-buffer and accepted-row limits for one sequential batch execution.
+ * {@link Long#MAX_VALUE} leaves that byte budget unbounded; row-count chunking remains active.
  *
  * @author wangr
  * @version v4.1.0
  */
 public record BatchWriteOptions(int bufferSize, long maxRows, long maxBufferedBytes, long maxRowBytes) {
     public static final int DEFAULT_BUFFER_SIZE = 500;
-    /** 默认只约束每个输入窗口的内存；总行数由调用方按需限制。 */
+    /** 总行数和输入窗口内存由调用方按需限制；分块大小不限制总量。 */
     public static final long DEFAULT_MAX_ROWS = 0L;
-    public static final long DEFAULT_MAX_BUFFERED_BYTES = 32L * 1024 * 1024;
+    public static final long DEFAULT_MAX_BUFFERED_BYTES = Long.MAX_VALUE;
 
     public BatchWriteOptions {
         if (bufferSize <= 0) throw new IllegalArgumentException("batch buffer size must be greater than zero");
@@ -44,6 +45,7 @@ public record BatchWriteOptions(int bufferSize, long maxRows, long maxBufferedBy
     }
 
     private static long defaultMaxRowBytes(int bufferSize, long maxBufferedBytes) {
+        if (maxBufferedBytes == Long.MAX_VALUE) return Long.MAX_VALUE;
         return Math.max(1L, maxBufferedBytes / (bufferSize == 1 ? 1 : 2));
     }
 }

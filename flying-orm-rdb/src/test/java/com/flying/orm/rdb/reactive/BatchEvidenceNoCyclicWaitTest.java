@@ -42,7 +42,7 @@ class BatchEvidenceNoCyclicWaitTest {
         ReactiveSqlExecutor forwarding = new ForwardingReactiveSqlExecutor(delegate) {
         };
 
-        BatchExecutionEvidence evidence = forwarding.writeBatchEvidence(request())
+        BatchExecutionEvidence evidence = forwarding.writeBatch(request())
                 .block(Duration.ofSeconds(2));
 
         assertEquals(1, evidence.successfulCount());
@@ -64,7 +64,7 @@ class BatchEvidenceNoCyclicWaitTest {
             }
         };
 
-        delegate.withBatchObserver(observer).writeBatchEvidence(request()).block(Duration.ofSeconds(2));
+        delegate.withBatchObserver(observer).writeBatch(request()).block(Duration.ofSeconds(2));
 
         assertEquals(1, observations.get());
     }
@@ -76,7 +76,7 @@ class BatchEvidenceNoCyclicWaitTest {
                 new BatchMemoryLimits(1, 1L));
 
         assertThrows(BatchMemoryLimitExceededException.class,
-                () -> limited.writeBatchEvidence(request()).block(Duration.ofSeconds(2)));
+                () -> limited.writeBatch(request()).block(Duration.ofSeconds(2)));
         assertEquals(0, delegate.evidenceCalls.get());
     }
 

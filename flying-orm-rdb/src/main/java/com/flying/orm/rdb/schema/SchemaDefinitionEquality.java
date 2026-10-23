@@ -13,6 +13,7 @@ import com.flying.orm.core.metadata.UniqueNullPolicy;
 import com.flying.orm.core.metadata.TablePartitionDefinition;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.core.type.DatabaseType;
+import com.flying.orm.rdb.internal.template.SchemaDefaultExpressions;
 
 import java.util.List;
 import java.util.Locale;
@@ -38,7 +39,13 @@ final class SchemaDefinitionEquality {
                               boolean physicalActualTypes) {
         return sameName(left.name(), right.name(), schemaDialect)
                 && sameColumnType(left, right, schemaDialect, physicalActualTypes)
-                && left.nullable() == right.nullable()
+                && sameColumnAttributes(left, right, schemaDialect, relation);
+    }
+
+    /** 类型已解析、改名已规划后，复用相同的列属性比较。 */
+    static boolean sameColumnAttributes(ColumnDefinition left, ColumnDefinition right,
+                                        SchemaDialect schemaDialect, RelationIdentity relation) {
+        return left.nullable() == right.nullable()
                 && sameDefault(left.defaultValue(), right.defaultValue(), schemaDialect)
                 && Objects.equals(left.comment(), right.comment())
                 && sameGeneration(left.generation(), right.generation(), schemaDialect, relation)
@@ -155,13 +162,9 @@ final class SchemaDefinitionEquality {
                     && Objects.equals(left.scale(), right.scale())
                     && Objects.equals(left.temporalPrecision(), right.temporalPrecision());
         }
-        String actual = actualColumnType(schemaDialect, left);
+        String actual = observedColumnType(schemaDialect, left);
         return schemaDialect.sameDataType(actual, SchemaTypeMapping.preserveCharacterLengthUnit(
                 schemaDialect, actual, desiredColumnType(schemaDialect, right)));
-    }
-
-    static String actualColumnType(SchemaDialect dialect, ColumnDefinition column) {
-        return observedColumnType(dialect, column);
     }
 
     static String actualColumnDdlType(SchemaDialect dialect,
@@ -172,7 +175,7 @@ final class SchemaDefinitionEquality {
     }
 
     static String actualColumnDdlType(SchemaDialect dialect, ColumnDefinition column) {
-        String actual = actualColumnType(dialect, column);
+        String actual = observedColumnType(dialect, column);
         if (dialect.generatedValueStyle() != SchemaDialect.GeneratedValueStyle.POSTGRESQL) {
             return actual;
         }
@@ -190,14 +193,14 @@ final class SchemaDefinitionEquality {
     }
 
     static String observedColumnType(SchemaDialect dialect, ColumnDefinition column) {
-        Integer precision = column.databaseType().isTemporal()
+        Integer precision = column.databaseType().logicalType().temporal()
                 ? column.temporalPrecision() : column.precision();
         return dialect.physicalDataType(
                 column.databaseType().declaration(), column.length(), precision, column.scale());
     }
 
     static String desiredColumnType(SchemaDialect dialect, ColumnDefinition column) {
-        Integer precision = column.databaseType().isTemporal()
+        Integer precision = column.databaseType().logicalType().temporal()
                 ? column.temporalPrecision() : column.precision();
         return dialect.dataType(
                 column.databaseType().declaration(), column.length(), precision, column.scale());
@@ -207,22 +210,9 @@ final class SchemaDefinitionEquality {
                                           ValueGeneration desired,
                                           SchemaDialect schemaDialect,
                                           RelationIdentity relation) {
-        if (actual.strategy() != desired.strategy()
-                || actual.startWith() != desired.startWith()
-                || actual.incrementBy() != desired.incrementBy()
-                || !sameSequenceName(actual.sequenceName(), desired.sequenceName(), schemaDialect, relation)) {
-            return false;
-        }
-        if (desired.cacheSize() == 0) {
-            return true;
-        }
-        if (schemaDialect != null
-                && desired.strategy() == ValueGeneration.Strategy.IDENTITY
-                && (schemaDialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.MYSQL
-                    || schemaDialect.generatedValueStyle() == SchemaDialect.GeneratedValueStyle.SQL_SERVER)) {
-            return desired.cacheSize() == 100;
-        }
-        return actual.cacheSize() == desired.cacheSize();
+        return sameSequenceName(actual.sequenceName(), desired.sequenceName(), schemaDialect, relation)
+                && SchemaGeneratedValueComparison.sameOptions(actual, desired,
+                        schemaDialect == null ? null : schemaDialect.generatedValueStyle());
     }
 
     private static boolean sameSequenceName(String actual, String desired,
@@ -245,6 +235,15 @@ final class SchemaDefinitionEquality {
     static boolean sameDefault(ColumnDefault left, ColumnDefault right, SchemaDialect dialect) {
         if (left.kind() != right.kind()) {
             return false;
+        }
+        if (left.kind() == ColumnDefault.Kind.NATIVE_EXPRESSION) {
+            if (dialect == null) {
+                return left.equals(right);
+            }
+            return SchemaDefaultExpressions.normalize(
+                    (String) left.value().orElseThrow(), dialect.generatedValueStyle().name()).equals(
+                    SchemaDefaultExpressions.normalize(
+                            (String) right.value().orElseThrow(), dialect.generatedValueStyle().name()));
         }
         return left.kind() != ColumnDefault.Kind.LITERAL
                 || SchemaPredicateEquality.sameLiteral(left.value().orElseThrow(), right.value().orElseThrow(), dialect);

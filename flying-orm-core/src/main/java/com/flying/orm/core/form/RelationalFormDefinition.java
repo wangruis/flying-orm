@@ -1,9 +1,10 @@
 package com.flying.orm.core.form;
 
 import com.flying.orm.core.metadata.CheckConstraintDefinition;
-import com.flying.orm.core.metadata.ColumnDefinition;
 import com.flying.orm.core.metadata.ForeignKeyDefinition;
+import com.flying.orm.core.metadata.FeatureRegistry;
 import com.flying.orm.core.metadata.IndexDefinition;
+import com.flying.orm.core.metadata.IndexKeyPart;
 import com.flying.orm.core.metadata.PrimaryKeyDefinition;
 import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
@@ -57,7 +58,7 @@ public final class RelationalFormDefinition {
     }
 
     /**
-     * 构建器只在完整元数据入口工作。字段与列在加入时校验一次，build 不再重复解析类型或扫描名称。
+     * 字段简写和命名约束在构建时合为一份事实，CRUD 与 Schema 从中发布一致视图。
      */
     public static final class Builder {
 
@@ -65,7 +66,8 @@ public final class RelationalFormDefinition {
 
         private final RelationIdentity identity;
 
-        private final List<FieldColumnPair> fields = new ArrayList<>();
+        private final List<DynamicField> fields = new ArrayList<>();
+        private FeatureRegistry features = FeatureRegistry.empty();
 
         private PrimaryKeyDefinition primaryKey;
 
@@ -82,21 +84,19 @@ public final class RelationalFormDefinition {
             this.identity = Objects.requireNonNull(identity, "relation identity must not be null");
         }
 
-        /**
-         * 同时加入一个 CRUD 字段和它的规范列定义。
-         *
-         * <p>两者共同表达的物理属性必须一致。codec、默认值、字符集和排序规则等只有关系模型才表达的
-         * 属性不在这里伪造旧模型状态。</p>
-         */
-        public Builder addField(DynamicField field, ColumnDefinition column) {
-            DynamicField safeField = Objects.requireNonNull(field, "dynamic field must not be null");
-            ColumnDefinition safeColumn = Objects.requireNonNull(column, "column definition must not be null");
-            requireAligned(safeField, safeColumn);
-            fields.add(new FieldColumnPair(safeField, safeColumn));
+        /** 逻辑表单的扩展配置，不写入数据库结构。 */
+        public Builder features(FeatureRegistry features) {
+            this.features = Objects.requireNonNull(features, "form features");
             return this;
         }
 
-        /** @return 当前构建器 */
+        /** 加入唯一字段声明；CRUD 和 Schema 使用其中同一份列定义。 */
+        public Builder addField(DynamicField field) {
+            fields.add(Objects.requireNonNull(field, "dynamic field must not be null"));
+            return this;
+        }
+
+        /** 声明完整主键及列顺序；未声明时从字段的主键标记生成。 */
         public Builder primaryKey(PrimaryKeyDefinition definition) {
             this.primaryKey = Objects.requireNonNull(definition, "primary key must not be null");
             return this;
@@ -132,82 +132,43 @@ public final class RelationalFormDefinition {
          * @return 完整表单定义
          */
         public RelationalFormDefinition build() {
-            DynamicForm.Builder formBuilder = DynamicForm.relationalBuilder(formId, identity);
+            DynamicForm.Builder formBuilder = DynamicForm.relationalBuilder(formId, identity).features(features);
             RelationalTableDefinition.Builder tableBuilder = RelationalTableDefinition.builder(identity);
-            for (FieldColumnPair pair : fields) {
-                formBuilder.addField(pair.field());
-                tableBuilder.addColumn(pair.column());
+            List<String> keyColumns = primaryKey == null
+                    ? fields.stream().filter(DynamicField::primaryKey).map(DynamicField::name).toList()
+                    : primaryKey.columns();
+            Set<String> keys = new HashSet<>(keyColumns);
+            Set<String> uniqueColumns = new HashSet<>();
+            uniqueConstraints.stream().filter(unique -> unique.columns().size() == 1)
+                    .forEach(unique -> uniqueColumns.add(unique.columns().getFirst()));
+            indexes.stream().filter(IndexDefinition::unique).filter(index -> index.keys().size() == 1)
+                    .forEach(index -> uniqueColumns.add(index.keys().getFirst().column()));
+            for (DynamicField field : fields) {
+                if (field.unique() && uniqueColumns.add(field.name())) {
+                    tableBuilder.addIndex(IndexDefinition.builder(
+                            DynamicFormStructure.uniqueIndexName(identity.table(), field.name()))
+                            .unique().addKey(IndexKeyPart.asc(field.name())).build());
+                }
+                boolean primary = keys.contains(field.name());
+                boolean unique = uniqueColumns.contains(field.name());
+                DynamicField projected = primary == field.primaryKey() && unique == field.unique() ? field
+                        : new DynamicField(field.column(), primary, unique, field.runtimeDefault(), field.features());
+                formBuilder.addField(projected);
+                tableBuilder.addColumn(projected.column());
             }
-            if (primaryKey != null) {
-                tableBuilder.primaryKey(primaryKey);
+            if (!keyColumns.isEmpty()) {
+                tableBuilder.primaryKey(primaryKey == null
+                        ? PrimaryKeyDefinition.of("pk_" + identity.table(), keyColumns.toArray(String[]::new))
+                        : primaryKey);
             }
             uniqueConstraints.forEach(tableBuilder::addUnique);
             indexes.forEach(tableBuilder::addIndex);
             foreignKeys.forEach(tableBuilder::addForeignKey);
             checks.forEach(tableBuilder::addCheck);
 
-            DynamicForm builtForm = formBuilder.build();
             RelationalTableDefinition builtTable = tableBuilder.build();
-            requireProjectionAligned(builtForm, builtTable);
-            return new RelationalFormDefinition(builtForm, builtTable);
-        }
-
-        private static void requireAligned(DynamicField field, ColumnDefinition column) {
-            Integer columnPrecision = field.databaseType().isTemporal()
-                    ? column.temporalPrecision()
-                    : column.precision();
-            boolean aligned = field.name().equals(column.name())
-                    && field.databaseType().equals(column.databaseType())
-                    && field.nullable() == column.nullable()
-                    && Objects.equals(field.length(), column.length())
-                    && Objects.equals(field.precision(), columnPrecision)
-                    && Objects.equals(field.scale(), column.scale())
-                    && Objects.equals(field.comment(), column.comment())
-                    && field.generation().equals(column.generation());
-            if (!aligned) {
-                throw new IllegalArgumentException("dynamic field and relational column must describe the same column");
-            }
-        }
-
-        private static void requireProjectionAligned(DynamicForm form, RelationalTableDefinition table) {
-            List<String> formKeys = form.fields().stream()
-                    .filter(DynamicField::primaryKey)
-                    .map(DynamicField::name)
-                    .toList();
-            List<String> tableKeys = table.primaryKey()
-                    .map(PrimaryKeyDefinition::columns)
-                    .orElseGet(List::of);
-            if (!samePhysicalColumns(formKeys, tableKeys)) {
-                throw new IllegalArgumentException("dynamic form and relational table must declare the same primary key");
-            }
-
-            Set<String> formUniqueColumns = new HashSet<>();
-            form.fields().stream()
-                    .filter(DynamicField::unique)
-                    .map(DynamicField::name)
-                    .forEach(formUniqueColumns::add);
-            Set<String> tableUniqueColumns = new HashSet<>();
-            table.uniqueConstraints().stream()
-                    .filter(unique -> unique.columns().size() == 1)
-                    .map(unique -> unique.columns().getFirst())
-                    .forEach(tableUniqueColumns::add);
-            table.indexes().stream()
-                    .filter(IndexDefinition::unique)
-                    .filter(index -> index.keys().size() == 1)
-                    .map(index -> index.keys().getFirst().column())
-                    .forEach(tableUniqueColumns::add);
-            if (!formUniqueColumns.equals(tableUniqueColumns)) {
-                throw new IllegalArgumentException(
-                        "dynamic form and relational table must declare the same single-column unique keys");
-            }
-        }
-
-        private static boolean samePhysicalColumns(List<String> first, List<String> second) {
-            return first.size() == second.size() && new HashSet<>(first).equals(new HashSet<>(second));
+            return new RelationalFormDefinition(formBuilder.build(), builtTable);
         }
     }
 
-    /** 字段与列只在构建器里成对保存，发布后不再保留这层中间对象。 */
-    private record FieldColumnPair(DynamicField field, ColumnDefinition column) {
-    }
 }

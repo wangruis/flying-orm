@@ -6,14 +6,14 @@ import java.util.List;
 import java.util.function.Consumer;
 
 /** 响应式 Schema 执行的缓存失效生命周期。 */
-final class ReactiveSchemaInvalidationScope {
+final class ReactiveSchemaInvalidationScope<T> {
 
-    private final Consumer<String> metadataInvalidator;
-    private final List<String> tables;
+    private final Consumer<T> metadataInvalidator;
+    private final List<T> tables;
     private volatile boolean executionStarted;
     private volatile Throwable executionFailure;
 
-    ReactiveSchemaInvalidationScope(Consumer<String> metadataInvalidator, List<String> tables) {
+    ReactiveSchemaInvalidationScope(Consumer<T> metadataInvalidator, List<T> tables) {
         this.metadataInvalidator = metadataInvalidator;
         this.tables = tables;
     }
@@ -27,27 +27,8 @@ final class ReactiveSchemaInvalidationScope {
     }
 
     void publisherTerminated() {
-        invalidatePreservingPrimary();
-    }
-
-    private void invalidatePreservingPrimary() {
-        try {
-            invalidate();
-        } catch (RuntimeException invalidationFailure) {
-            Throwable primary = executionFailure;
-            if (primary == null) {
-                throw invalidationFailure;
-            }
-            if (primary != invalidationFailure) {
-                primary.addSuppressed(invalidationFailure);
-            }
+        if (executionStarted) {
+            SchemaCacheInvalidationCoordinator.invalidateTables(metadataInvalidator, tables, executionFailure);
         }
-    }
-
-    private void invalidate() {
-        if (!executionStarted) {
-            return;
-        }
-        SchemaCacheInvalidationCoordinator.invalidateTables(metadataInvalidator, tables);
     }
 }

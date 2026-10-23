@@ -40,7 +40,7 @@ public final class BatchGeneratedKeys {
      * @return 生成键配置
      */
     public static BatchGeneratedKeys required(String columnName, BatchGeneratedKeyConsumer consumer) {
-        String safeColumn = SqlIdentifiers.requireIdentifier(columnName, "generated key column");
+        String safeColumn = SqlIdentifiers.requireIdentifier(columnName);
         return new BatchGeneratedKeys(safeColumn,
                                       Objects.requireNonNull(consumer, "generated key consumer must not be null"));
     }

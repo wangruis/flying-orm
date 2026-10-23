@@ -62,8 +62,11 @@ class ProtectedFieldRuntimeOwnershipTest {
 
         try (ProtectedFieldRuntime runtime = ProtectedFieldRuntime.create(
                 ProtectedFieldKeyRing.single("v1", new byte[32]))) {
-            TermCondition first = firstTerm(runtime.prepareQuery(form, form, where, DataScope.none(), codecs));
-            TermCondition second = firstTerm(runtime.prepareQuery(form, form, where, DataScope.none(), codecs));
+            DynamicForm physical = ProtectedFormLayout.physical(form);
+            TermCondition first = firstTerm(runtime.prepareQuery(
+                    form, physical, where, DataScope.none(), codecs, List.of("id", "phone")));
+            TermCondition second = firstTerm(runtime.prepareQuery(
+                    form, physical, where, DataScope.none(), codecs, List.of("id", "phone")));
 
             assertArrayEquals(firstToken(first), firstToken(second));
         }

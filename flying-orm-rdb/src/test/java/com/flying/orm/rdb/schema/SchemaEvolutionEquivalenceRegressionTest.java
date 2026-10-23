@@ -21,33 +21,29 @@ class SchemaEvolutionEquivalenceRegressionTest {
         var actual = numeric(false, new BigDecimal("1.00"));
         var desired = numeric(true, 1);
         var plan = review(actual, desired);
-        assertFalse(plan.requiresManualAction(), plan.operations().toString());
         assertEquals(1, plan.requests().size());
         assertTrue(plan.requests().getFirst().sql().toLowerCase().contains("drop not null"));
     }
 
     @Test void unspecifiedSequenceCacheDoesNotBecomeAGenerationChange() {
         var plan = review(sequence(false, 20), sequence(true, 0));
-        assertFalse(plan.requiresManualAction(), plan.operations().toString());
         assertEquals(1, plan.requests().size());
         assertTrue(plan.requests().getFirst().sql().toLowerCase().contains("drop not null"));
     }
 
-    @Test void actualDefaultAndNullableChangesRemainManual() {
+    @Test void defaultAndNullableChangesShareTheColumnEvolutionPlan() {
         var plan = review(numeric(false, 1), numeric(true, 2));
-        assertTrue(plan.requiresManualAction());
-        assertTrue(plan.requests().isEmpty());
+        assertEquals(List.of("alter table \"t\" alter column \"n\" drop not null",
+                "alter table \"t\" alter column \"n\" set default 2"), plan.sqlTexts());
     }
 
-    @Test void explicitSequenceCacheChangeRemainsManual() {
-        var plan = review(sequence(false, 20), sequence(true, 30));
-        assertTrue(plan.requiresManualAction());
-        assertTrue(plan.requests().isEmpty());
+    @Test void explicitSequenceCacheChangeIsUnsupported() {
+        assertThrows(UnsupportedOperationException.class,
+                () -> review(sequence(false, 20), sequence(true, 30)));
     }
 
     @Test void genuineDefaultOnlyChangeStillRenders() {
         var plan = review(numeric(true, 1), numeric(true, 2));
-        assertFalse(plan.requiresManualAction());
         assertEquals(1, plan.requests().size());
         assertTrue(plan.requests().getFirst().sql().toLowerCase().contains("set default 2"));
     }
@@ -62,7 +58,7 @@ class SchemaEvolutionEquivalenceRegressionTest {
                 .generation(ValueGeneration.sequence("seq_t_n", 1, 1, cache)).build();
     }
 
-    private static ReviewedSchemaPlan review(ColumnDefinition actual, ColumnDefinition desired) {
+    private static SchemaMigrationPlan review(ColumnDefinition actual, ColumnDefinition desired) {
         var snapshot = SchemaSnapshot.builder(TABLE).tablePresent().tableCommentAbsent().primaryKeyAbsent()
                 .uniqueConstraints(List.of()).indexes(List.of()).foreignKeys(List.of()).checks(List.of())
                 .partitionAbsent().physicalColumns(List.of(actual), Map.of("n", actual.databaseType()))

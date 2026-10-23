@@ -31,7 +31,17 @@ class RelationalObjectNameGeneratorTest {
 
         assertThrows(IllegalArgumentException.class, () -> names.table("accounts_table"));
         assertThrows(IllegalArgumentException.class, () -> names.column("account_identifier"));
-        assertThrows(IllegalStateException.class,
-                     () -> new RelationalObjectNameGenerator(0).table("accounts"));
+    }
+
+    @Test
+    void unknownDatabaseLimitDoesNotImposeAnOrmLimit() {
+        RelationalObjectNameGenerator names = new RelationalObjectNameGenerator(0);
+        String table = "accounts".repeat(40);
+        assertEquals(table, names.table(table));
+        assertEquals("idx_" + table + "_id",
+                names.generate(RelationalObjectNameGenerator.Kind.INDEX, table, "id"));
+        String qualified = names.generate(RelationalObjectNameGenerator.Kind.INDEX, "app.accounts", "id");
+        assertTrue(qualified.startsWith("idx_app_accounts_id_"));
+        assertTrue(qualified.matches(".*_[0-9a-f]{12}"));
     }
 }

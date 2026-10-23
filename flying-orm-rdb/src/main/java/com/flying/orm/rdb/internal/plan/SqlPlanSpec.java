@@ -1,6 +1,7 @@
 package com.flying.orm.rdb.internal.plan;
 
 import com.flying.orm.core.sql.render.SqlBindMarkerStyle;
+import com.flying.orm.core.metadata.RelationIdentity;
 
 import java.util.List;
 import java.util.Locale;
@@ -15,7 +16,7 @@ import java.util.Objects;
  * @param dialect 数据库方言名称
  * @param bindMarkerStyle 参数标记风格
  * @param formFingerprint DynamicForm 结构指纹
- * @param table 表名缓存标签；完整关系身份由 formFingerprint 隔离，不把标签重新解释成 SQL
+ * @param table 分段物理关系身份，不把展示名重新解析成关系
  * @param operation select、insert、update 等操作
  * @param fields 写入字段或投影字段的稳定顺序
  * @param conditionShape 条件 AST 形状，不包含条件值
@@ -29,7 +30,7 @@ import java.util.Objects;
 public record SqlPlanSpec(String dialect,
                           SqlBindMarkerStyle bindMarkerStyle,
                           String formFingerprint,
-                          String table,
+                          RelationIdentity table,
                           String operation,
                           List<String> fields,
                           String conditionShape,
@@ -42,42 +43,25 @@ public record SqlPlanSpec(String dialect,
         dialect = requireText(dialect, "sql plan dialect").toLowerCase(Locale.ROOT);
         bindMarkerStyle = Objects.requireNonNull(bindMarkerStyle, "sql plan bind marker style must not be null");
         formFingerprint = requireText(formFingerprint, "sql plan form fingerprint");
-        table = normalizeTable(table);
+        table = Objects.requireNonNull(table, "sql plan relation must not be null");
         operation = requireText(operation, "sql plan operation").toLowerCase(Locale.ROOT);
         fields = List.copyOf(Objects.requireNonNull(fields, "sql plan fields must not be null"));
-        if (fields.stream().anyMatch(String::isBlank)) {
-            throw new IllegalArgumentException("sql plan fields must not contain blank values");
+        for (int index = 0; index < fields.size(); index++) {
+            if (fields.get(index).isBlank()) {
+                throw new IllegalArgumentException("sql plan fields must not contain blank values");
+            }
         }
-        conditionShape = requireNonNullShape(conditionShape, "condition");
-        groupShape = requireNonNullShape(groupShape, "group");
-        sortShape = requireNonNullShape(sortShape, "sort");
-        pageShape = requireNonNullShape(pageShape, "page");
-    }
-
-    /** @return 规范化 schema；无 schema 时返回空字符串。 */
-    String schema() {
-        int separator = table.indexOf('.');
-        return separator < 0 ? "" : table.substring(0, separator);
-    }
-
-    /** @return 不带 schema 的规范化物理表名。 */
-    String physicalTable() {
-        int separator = table.indexOf('.');
-        return separator < 0 ? table : table.substring(separator + 1);
-    }
-
-    static String normalizeTable(String table) {
-        // 此处只保存缓存标签，不生成 SQL。点号也可能是分段关系身份中表名的字面内容；
-        // SQL 标识符校验和逐段引用由最终方言负责，不能在缓存边界再次套用旧字符串路径规则。
-        return requireText(table, "sql plan table");
-    }
-
-    private static String requireNonNullShape(String shape, String name) {
-        return Objects.requireNonNull(shape, "sql plan " + name + " shape must not be null");
+        conditionShape = Objects.requireNonNull(conditionShape, "sql plan condition shape must not be null");
+        groupShape = Objects.requireNonNull(groupShape, "sql plan group shape must not be null");
+        sortShape = Objects.requireNonNull(sortShape, "sql plan sort shape must not be null");
+        pageShape = Objects.requireNonNull(pageShape, "sql plan page shape must not be null");
     }
 
     private static String requireText(String text, String name) {
-        String safeText = Objects.requireNonNull(text, name + " must not be null").trim();
+        if (text == null) {
+            throw new NullPointerException(name + " must not be null");
+        }
+        String safeText = text.trim();
         if (safeText.isEmpty()) {
             throw new IllegalArgumentException(name + " must not be blank");
         }

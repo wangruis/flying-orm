@@ -2,8 +2,7 @@ package com.flying.orm.rdb.schema;
 
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.ColumnMetadata;
-import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import org.junit.jupiter.api.Test;
 
@@ -17,15 +16,15 @@ class SchemaSafeWideningTest {
 
     @Test
     void vectorDimensionGrowthRequiresExplicitColumnChangeApproval() {
-        TableMetadata current = TableMetadata.builder("embeddings")
-                .addColumn(ColumnMetadata.of("embedding", "VECTOR").withLength(3)).build();
+        RelationalTableDefinition current = RelationalTableDefinition.builder("embeddings")
+                .addColumn(DynamicField.of("embedding", "VECTOR").withLength(3).column()).build();
         DynamicForm target = DynamicForm.builder("embeddings", "embeddings")
                 .addField(DynamicField.of("embedding", "VECTOR").withLength(4)).build();
         FormSchemaSqlRenderer renderer = FormSchemaSqlRenderer.create(RdbDialect.postgresql().schema());
 
         SchemaMigrationPlan safe = renderer.migrateSafelyPlan(current, target, List.of());
         assertFalse(safe.hasExecutableSql());
-        assertTrue(safe.requiresManualReview());
+        assertTrue(safe.hasSkippedChanges());
         assertEquals(List.of(SkippedSchemaChange.Kind.CHANGE_COLUMN),
                 safe.skippedChanges().stream().map(SkippedSchemaChange::kind).toList());
 

@@ -46,7 +46,7 @@ class JdbcBatchEvidenceInterruptionTest {
                 .doOnCancel(cancelled::incrementAndGet);
 
         BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
-                () -> JdbcBatchWriter.create(com.flying.orm.rdb.execution.ConnectionAccessTestSupport.jdbc(dataSource),com.flying.orm.rdb.dialect.RdbDialect.h2()).writeBatchEvidence(
+                () -> JdbcBatchWriter.create(com.flying.orm.rdb.execution.ConnectionAccessTestSupport.jdbc(dataSource),com.flying.orm.rdb.dialect.RdbDialect.h2()).writeBatch(
                         JdbcBatchEvidenceTestSupport.request(input, 1)));
 
         assertSame(acquisitionFailure, failure.getCause());
@@ -66,7 +66,7 @@ class JdbcBatchEvidenceInterruptionTest {
             executing.set(Thread.currentThread());
             BatchExecutionEvidenceException failure = assertThrows(
                     BatchExecutionEvidenceException.class,
-                    () -> state.writer().writeBatchEvidence(
+                    () -> state.writer().writeBatch(
                             JdbcBatchEvidenceTestSupport.request(input, 2)));
             interrupted.set(Thread.currentThread().isInterrupted());
             return failure;

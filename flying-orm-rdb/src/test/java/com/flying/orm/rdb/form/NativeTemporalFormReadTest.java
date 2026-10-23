@@ -7,9 +7,10 @@ import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.join.JoinSource;
-import com.flying.orm.core.page.CursorPageQuery;
-import com.flying.orm.core.page.CursorSort;
+import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetSort;
 import com.flying.orm.core.page.PageSort;
+import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.dialect.OracleVersion;
 import com.flying.orm.rdb.dialect.RdbDialect;
@@ -27,11 +28,26 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /** 方言感知的表单时间读取、比较和排序边界。 */
 class NativeTemporalFormReadTest {
+
+    @Test
+    void preparedUntypedReadersPreserveDriverValuesAndNulls() {
+        FormAggregateReadSupport reads = new FormAggregateReadSupport(renderer(RdbDialect.postgresql()),
+                new FormScopeSupport(renderer(RdbDialect.postgresql()), StructuredConditionResolver.defaults(), DataScope.none()));
+        Object value = new Object();
+        for (String type : List.of("VARCHAR(32)", "JSONB", "INTEGER[]", "BIT(1)", "INTERVAL")) {
+            java.util.function.UnaryOperator<Object> reader = reads.decoder(DynamicField.of("value", type), null);
+            assertSame(value, reader.apply(value), type);
+            assertNull(reader.apply(null), type);
+        }
+        assertEquals("42", reads.decoder(DynamicField.of("value", "VARCHAR(32)"), String.class).apply(42));
+    }
 
     @Test
     void compilesJoinSqlAtTheTrustedRenderingBoundary() {
@@ -59,7 +75,7 @@ class NativeTemporalFormReadTest {
         assertEquals(Object.class,
                      postgresql.batchRenderer.insertPlan(
                              bitForm, Map.of("value", "1")).parameterTypes().getFirst());
-        assertEquals("1", postgresql.readScalarValue(bitForm.field("value"), "1"));
+        assertEquals("1", readScalarValue(postgresql, bitForm.field("value"), "1"));
 
         FormDataSqlRenderer mysql = FormDataSqlRenderer.create(
                 SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.mysql());
@@ -67,7 +83,7 @@ class NativeTemporalFormReadTest {
         assertEquals(Boolean.class,
                      mysql.batchRenderer.insertPlan(
                              bitForm, Map.of("value", 1)).parameterTypes().getFirst());
-        assertEquals(Boolean.TRUE, mysql.readScalarValue(bitForm.field("value"), 1));
+        assertEquals(Boolean.TRUE, readScalarValue(mysql, bitForm.field("value"), 1));
     }
 
     @Test
@@ -77,7 +93,7 @@ class NativeTemporalFormReadTest {
         DynamicField field = DynamicField.of("attempts", "TINYINT(1)");
 
         assertThrows(IllegalArgumentException.class,
-                     () -> renderer.readScalarValue(field, Boolean.TRUE));
+                     () -> readScalarValue(renderer, field, Boolean.TRUE));
     }
 
     @Test
@@ -86,7 +102,7 @@ class NativeTemporalFormReadTest {
                 SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.mysql());
         LocalDateTime driverValue = LocalDateTime.of(2026, 8, 21, 3, 4, 5, 123456000);
 
-        Object decoded = renderer.readScalarValue(DynamicField.of("created_at", "TIMESTAMPTZ"), driverValue);
+        Object decoded = readScalarValue(renderer, DynamicField.of("created_at", "TIMESTAMPTZ"), driverValue);
 
         assertEquals(driverValue.atOffset(ZoneOffset.UTC), decoded);
     }
@@ -114,7 +130,7 @@ class NativeTemporalFormReadTest {
         FormDataSqlRenderer renderer = FormDataSqlRenderer.create(sqlRenderer, RdbDialect.mysql());
         LocalDateTime driverValue = LocalDateTime.of(2026, 8, 21, 3, 4, 5, 123456000);
 
-        Object decoded = renderer.readScalarValue(DynamicField.of("created_at", "TIMESTAMPTZ"), driverValue);
+        Object decoded = readScalarValue(renderer, DynamicField.of("created_at", "TIMESTAMPTZ"), driverValue);
 
         assertEquals(driverValue.atOffset(ZoneOffset.UTC).plusSeconds(1), decoded);
         assertEquals(1, reads.get());
@@ -126,7 +142,7 @@ class NativeTemporalFormReadTest {
                 SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.mysql());
         LocalDateTime driverValue = LocalDateTime.of(2026, 8, 21, 3, 4, 5, 123456000);
 
-        Object decoded = renderer.readScalarValue(DynamicField.of("created_at", "TIMESTAMPTZ(6)"), driverValue);
+        Object decoded = readScalarValue(renderer, DynamicField.of("created_at", "TIMESTAMPTZ(6)"), driverValue);
 
         assertEquals(driverValue.atOffset(ZoneOffset.UTC), decoded);
     }
@@ -137,7 +153,7 @@ class NativeTemporalFormReadTest {
                 SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.mysql());
         LocalDateTime driverValue = LocalDateTime.of(2026, 8, 21, 3, 4, 5, 123456000);
 
-        Object decoded = renderer.readScalarValue(
+        Object decoded = readScalarValue(renderer,
                 DynamicField.of("created_at", "TIMESTAMP(6) WITH TIME ZONE"), driverValue);
 
         assertEquals(driverValue.atOffset(ZoneOffset.UTC), decoded);
@@ -149,9 +165,9 @@ class NativeTemporalFormReadTest {
                 SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.oracle(OracleVersion.V19C));
         LocalDateTime expected = LocalDateTime.of(2026, 8, 22, 14, 30, 45);
 
-        Object decoded = renderer.readScalarValue(
+        Object decoded = readScalarValue(renderer,
                 DynamicField.of("legacy_created_at", "ORACLE_DATE"), Timestamp.valueOf(expected));
-        Object reactiveDecoded = renderer.readScalarValue(
+        Object reactiveDecoded = readScalarValue(renderer,
                 DynamicField.of("legacy_created_at", "ORACLE_DATE"), expected);
 
         assertEquals(expected, decoded);
@@ -164,7 +180,7 @@ class NativeTemporalFormReadTest {
                 SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.oracle(OracleVersion.V19C));
         LocalDateTime expected = LocalDateTime.of(2026, 8, 22, 14, 30, 45, 123_456_000);
 
-        Object decoded = renderer.readScalarValue(
+        Object decoded = readScalarValue(renderer,
                 DynamicField.of("session_at", "TIMESTAMP(6) WITH LOCAL TIME ZONE"), expected);
 
         assertEquals(expected, decoded);
@@ -176,9 +192,9 @@ class NativeTemporalFormReadTest {
                 SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.oracle(OracleVersion.V19C));
         LocalTime expected = LocalTime.of(23, 59, 59, 999_999_999);
 
-        Object decoded = renderer.readScalarValue(
+        Object decoded = readScalarValue(renderer,
                 DynamicField.of("business_time", "TIME"), expected.toString());
-        Object precisionDecoded = renderer.readScalarValue(
+        Object precisionDecoded = readScalarValue(renderer,
                 DynamicField.of("business_time", "TIME(9) WITHOUT TIME ZONE"), expected.toString());
 
         assertEquals(expected, decoded);
@@ -211,7 +227,7 @@ class NativeTemporalFormReadTest {
     void rejectsEveryOrderingPathForTextBackedOffsetTime() {
         DynamicForm form = offsetTimeForm();
         ConditionGroup empty = ConditionGroup.and().build();
-        CursorPageQuery cursor = CursorPageQuery.first(20, CursorSort.asc("remote_time"));
+        KeysetPageQuery cursor = KeysetPageQuery.first(20, KeysetSort.asc("remote_time", com.flying.orm.core.page.NullOrder.LAST));
 
         for (RdbDialect dialect : textBackedOffsetTimeDialects()) {
             FormDataSqlRenderer renderer = renderer(dialect);
@@ -257,6 +273,12 @@ class NativeTemporalFormReadTest {
             assertDoesNotThrow(() -> renderer.select(form, exact));
             assertDoesNotThrow(() -> renderer.select(form, membership));
         }
+    }
+
+    private static Object readScalarValue(FormDataSqlRenderer renderer, DynamicField field, Object value) {
+        return new FormAggregateReadSupport(renderer,
+                new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()))
+                .decoder(field, null).apply(value);
     }
 
     private static FormDataSqlRenderer renderer(RdbDialect dialect) {

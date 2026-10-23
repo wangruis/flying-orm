@@ -20,8 +20,7 @@ class HarpySchemaAcceptanceRegressionTest {
     void h2CatalogAliasesParticipateInSafeWideningInBothDirections() {
         for (String actualType : List.of("VARCHAR", "CHARACTER VARYING")) {
             for (String desiredType : List.of("VARCHAR", "CHARACTER VARYING")) {
-                ReviewedSchemaPlan plan = review(RdbDialect.h2(), column(actualType, 32), column(desiredType, 64));
-                assertFalse(plan.requiresManualAction(), actualType + " -> " + desiredType);
+                SchemaMigrationPlan plan = review(RdbDialect.h2(), column(actualType, 32), column(desiredType, 64));
                 assertEquals(1, plan.requests().size());
                 assertTrue(plan.requests().getFirst().sql().contains("(64)"));
             }
@@ -29,12 +28,14 @@ class HarpySchemaAcceptanceRegressionTest {
     }
 
     @Test
-    void h2AliasNormalizationDoesNotAuthorizeNarrowingOrMixedChanges() {
-        assertTrue(review(RdbDialect.h2(), column("CHARACTER VARYING", 64),
-                column("VARCHAR", 32)).requiresManualAction());
-        assertTrue(review(RdbDialect.h2(), column("CHARACTER VARYING", 32),
-                ColumnDefinition.builder("code", "VARCHAR").length(64).nullable(true).build())
-                .requiresManualAction());
+    void h2AliasNormalizationPreservesNarrowingRejectionAndCombinedWidening() {
+        assertThrows(UnsupportedOperationException.class, () -> review(RdbDialect.h2(), column("CHARACTER VARYING", 64),
+                column("VARCHAR", 32)));
+        SchemaMigrationPlan widened = review(RdbDialect.h2(), column("CHARACTER VARYING", 32),
+                ColumnDefinition.builder("code", "VARCHAR").length(64).nullable(true).build());
+        assertEquals(List.of("alter table options alter column code set data type VARCHAR(64)",
+                        "alter table options alter column code drop not null"),
+                widened.requests().stream().map(request -> request.sql()).toList());
         assertTrue(review(RdbDialect.h2(), column("CHARACTER VARYING", 32),
                 column("VARCHAR", 32)).steps().isEmpty());
     }
@@ -46,8 +47,7 @@ class HarpySchemaAcceptanceRegressionTest {
         for (boolean widen : List.of(true, false)) {
             ColumnDefinition desired = ColumnDefinition.builder("code", "NVARCHAR")
                     .length(widen ? 64 : 32).nullable(!widen).build();
-            ReviewedSchemaPlan plan = review(RdbDialect.sqlServer(), actual, desired);
-            assertFalse(plan.requiresManualAction());
+            SchemaMigrationPlan plan = review(RdbDialect.sqlServer(), actual, desired);
             assertEquals(List.of("alter table [options] alter column [code] NVARCHAR("
                     + (widen ? "64" : "32") + ") collate " + COLLATION + (widen ? " not null" : " null")),
                     plan.requests().stream().map(request -> request.sql()).toList());
@@ -70,7 +70,7 @@ class HarpySchemaAcceptanceRegressionTest {
         return ColumnDefinition.builder("code", type).length(length).nullable(false).build();
     }
 
-    private static ReviewedSchemaPlan review(RdbDialect dialect, ColumnDefinition actual, ColumnDefinition desired) {
+    private static SchemaMigrationPlan review(RdbDialect dialect, ColumnDefinition actual, ColumnDefinition desired) {
         return RelationalSchemaPlanReviewer.create(dialect).review(
                 DatabaseDescriptor.of(dialect.name(), "test", dialect),
                 RelationalTableDefinition.builder(TABLE).addColumn(desired).build(),

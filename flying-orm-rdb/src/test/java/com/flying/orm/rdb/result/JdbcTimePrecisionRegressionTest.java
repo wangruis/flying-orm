@@ -31,7 +31,7 @@ class JdbcTimePrecisionRegressionTest {
         ResultSet rows = rows(new int[]{Types.TIME}, new Object[][]{{PRECISE}}, counts, null);
         rows.next();
 
-        DynamicRow row = JdbcDynamicRowFactory.from(rows, SqlExecutionOptions.safeDefaults()).readCurrentRow();
+        DynamicRow row = JdbcDynamicRowFactory.from(rows, SqlExecutionOptions.unlimited()).readCurrentRow();
 
         assertEquals(PRECISE, RowMapper.of(TimeRow.class).map(row).c0());
         assertEquals(1, counts.typedReads.get());
@@ -44,7 +44,7 @@ class JdbcTimePrecisionRegressionTest {
         Counts counts = new Counts();
         ResultSet rows = rows(new int[]{Types.TIME},
                 new Object[][]{{null}, {LocalTime.of(1, 2, 3)}}, counts, null);
-        JdbcDynamicRowFactory factory = JdbcDynamicRowFactory.from(rows, SqlExecutionOptions.safeDefaults());
+        JdbcDynamicRowFactory factory = JdbcDynamicRowFactory.from(rows, SqlExecutionOptions.unlimited());
 
         rows.next();
         assertNull(factory.readCurrentRow().get("c0"));
@@ -60,7 +60,7 @@ class JdbcTimePrecisionRegressionTest {
                 new Object[][]{{17, binary}}, counts, null);
         rows.next();
 
-        DynamicRow row = JdbcDynamicRowFactory.from(rows, SqlExecutionOptions.safeDefaults()).readCurrentRow();
+        DynamicRow row = JdbcDynamicRowFactory.from(rows, SqlExecutionOptions.unlimited()).readCurrentRow();
 
         assertEquals(17, row.get("c0"));
         assertSame(binary, row.get("c1"));
@@ -123,7 +123,7 @@ class JdbcTimePrecisionRegressionTest {
     private static Object arrayRow(Array array) throws Exception {
         ResultSet rows = rows(new int[]{Types.ARRAY}, new Object[][]{{array}}, new Counts(), null);
         rows.next();
-        return JdbcDynamicRowFactory.from(rows, SqlExecutionOptions.safeDefaults()).readCurrentRow().get("c0");
+        return JdbcDynamicRowFactory.from(rows, SqlExecutionOptions.unlimited()).readCurrentRow().get("c0");
     }
 
     private static Array timeArray(LocalTime[] times, Counts counts, SQLException failure) {

@@ -7,6 +7,7 @@ import com.flying.orm.rdb.exception.RdbErrorKind;
 import com.flying.orm.rdb.exception.RdbException;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.execution.SqlExecutionPhase;
+import com.flying.orm.rdb.execution.SqlExecutionSequenceException;
 import com.flying.orm.rdb.execution.SqlWriteResult;
 import com.flying.orm.rdb.observation.SqlExecutionStatus;
 import com.flying.orm.rdb.result.DynamicRow;
@@ -24,6 +25,34 @@ import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class JdbcSchemaMigrationExecutorFailurePriorityTest {
+
+    @Test
+    void observesCleanupFailureAfterCompletedWorkInsteadOfPrematureSuccess() {
+        List<SchemaMigrationObservation> observations = new ArrayList<>();
+        SyncSqlExecutor sql = new com.flying.orm.rdb.support.ListQueryFixture() {
+            public List<DynamicRow> query(SqlRequest request) { throw new AssertionError("no reads"); }
+            public long rowsUpdated(SqlRequest request) { return 1L; }
+            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
+                throw new AssertionError("no keys");
+            }
+        };
+        JdbcSchemaMigrationExecutor executor = new JdbcSchemaMigrationExecutor(sql, observations::add);
+        SchemaMigrationPlan plan = reviewedPlan(List.of(new SqlRequest("alter table orders add note int", List.of())));
+
+        RuntimeException failure = assertThrows(RuntimeException.class,
+                () -> executor.execute(plan, List.of("orders"),
+                        ignored -> { throw new IllegalStateException("metadata invalidation failed"); },
+                        SqlExecutionOptions.unlimited()));
+
+        assertEquals(1, observations.size());
+        SchemaMigrationObservation observation = observations.getFirst();
+        assertEquals(SqlExecutionStatus.ERROR, observation.status());
+        assertEquals(SqlExecutionPhase.CLEANUP, observation.failedPhase());
+        assertEquals(1, observation.failedStepIndex());
+        assertEquals(1, observation.completedSteps());
+        assertEquals(1L, observation.rowsUpdated());
+        assertSame(failure, observation.error());
+    }
 
     @Test
     void keepsFirstWorkFailureWithNoopObserver() {
@@ -76,7 +105,7 @@ class JdbcSchemaMigrationExecutorFailurePriorityTest {
                 new SqlRequest("alter table orders add column note varchar(20)", List.of()),
                 new SqlRequest("alter table orders add column tag varchar(20)", List.of()));
         List<SqlRequest> calls = new ArrayList<>();
-        SyncSqlExecutor sqlExecutor = new SyncSqlExecutor() {
+        SyncSqlExecutor sqlExecutor = new com.flying.orm.rdb.support.ListQueryFixture() {
             @Override
             public List<DynamicRow> query(SqlRequest request) {
                 throw new AssertionError("query must not execute");
@@ -96,7 +125,7 @@ class JdbcSchemaMigrationExecutorFailurePriorityTest {
             }
 
             @Override
-            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options) {
+            public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
                 throw new AssertionError("generated keys must not execute");
             }
         };
@@ -104,21 +133,25 @@ class JdbcSchemaMigrationExecutorFailurePriorityTest {
         AtomicInteger invalidations = new AtomicInteger();
         JdbcSchemaMigrationExecutor executor = new JdbcSchemaMigrationExecutor(
                 sqlExecutor,
-                observe ? observations::add : SchemaMigrationObserver.noop(),
-                ignored -> {
+                observe ? observations::add : SchemaMigrationObserver.noop());
+        java.util.function.Consumer<String> invalidator = ignored -> {
                     invalidations.incrementAndGet();
                     if (invalidationAlsoFails) {
                         throw cleanup;
                     }
-                });
-        ReviewedSchemaMigrationPlan plan = reviewedPlan(work);
+                };
+        SchemaMigrationPlan plan = reviewedPlan(work);
 
-        RdbException failure = assertThrows(RdbException.class,
-                () -> executor.executeReviewed(plan, List.of("orders"),
-                        SchemaMigrationExecutionOptions.defaults()));
+        SqlExecutionSequenceException failure = assertThrows(SqlExecutionSequenceException.class,
+                () -> executor.execute(plan, List.of("orders"), invalidator,
+                        SqlExecutionOptions.unlimited()));
 
-        assertSame(primary, failure);
-        assertSame(driverFailure, failure.getCause());
+        assertSame(primary, failure.getCause());
+        assertSame(driverFailure, failure.getCause().getCause());
+        assertEquals(SqlExecutionPhase.WORK, failure.phase());
+        assertEquals(failedIndex, failure.stepIndex());
+        assertEquals(work.subList(0, failedIndex),
+                failure.completedWorkSteps().stream().map(step -> step.request()).toList());
         assertEquals(work.subList(0, failedIndex + 1), calls);
         assertEquals(invalidationAlsoFails ? 1 : 0, failure.getSuppressed().length);
         if (invalidationAlsoFails) {
@@ -128,7 +161,6 @@ class JdbcSchemaMigrationExecutorFailurePriorityTest {
         assertEquals(observe ? 1 : 0, observations.size());
         if (observe) {
             SchemaMigrationObservation observation = observations.getFirst();
-            assertEquals(plan.fingerprint(), observation.planFingerprint());
             assertEquals(SqlExecutionStatus.ERROR, observation.status());
             assertEquals(SqlExecutionPhase.WORK, observation.failedPhase());
             assertEquals(failedIndex, observation.failedStepIndex());
@@ -141,20 +173,14 @@ class JdbcSchemaMigrationExecutorFailurePriorityTest {
         assertEquals(1, invalidations.get());
     }
 
-    private static ReviewedSchemaMigrationPlan reviewedPlan(List<SqlRequest> requests) {
+    private static SchemaMigrationPlan reviewedPlan(List<SqlRequest> requests) {
         DynamicForm target = DynamicForm.builder("orders", "orders")
                                         .addField(DynamicField.primaryKey("id", "BIGINT"))
                                         .build();
         SchemaMigrationPlan migration = new SchemaMigrationPlan(
-                target,
-                List.of(),
-                List.of(),
-                true,
+                target.toTableDefinition(), true,
                 requests,
                 List.of());
-        return new ReviewedSchemaMigrationPlan(
-                migration,
-                new SchemaRollbackPlan(List.of(), List.of()),
-                new OnlineDdlReview(OnlineDdlMode.ALLOW_BLOCKING, List.of()));
+        return migration;
     }
 }

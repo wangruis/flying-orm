@@ -3,7 +3,7 @@ package com.flying.orm.rdb.form;
 import com.flying.orm.core.condition.ConditionNode;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.join.JoinClause;
-import com.flying.orm.core.join.JoinFieldPair;
+import com.flying.orm.core.join.JoinCondition;
 import com.flying.orm.core.join.JoinFieldRef;
 import com.flying.orm.core.join.JoinOrder;
 import com.flying.orm.core.join.JoinProjection;
@@ -28,59 +28,103 @@ final class JoinReadGuard {
     private JoinReadGuard() {
     }
 
-    static void validate(JoinQuerySpec spec, Map<JoinSource, DynamicForm> readableForms) {
-        validate(spec, readableForms, null, null, null);
-    }
-
-    /** 校验和字段用途/形状计费共用这一遍 JOIN AST 遍历。 */
-    static void validate(JoinQuerySpec spec,
-                         Map<JoinSource, DynamicForm> readableForms,
-                         FieldUseRequirements.Builder requirements,
-                         QueryShapeBudget budget,
-                         FormDataSqlRenderer renderer) {
+    /** 输出形状独立校验；聚合等消费者不必声明普通行的投影或排序用途。 */
+    static void validateOutput(JoinQuerySpec spec,
+                               Map<JoinSource, DynamicForm> readableForms,
+                               FieldUseRequirements.Builder requirements,
+                               QueryShapeBudget budget) {
         JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
         Map<JoinSource, DynamicForm> safeForms = Objects.requireNonNull(
                 readableForms, "join readable forms must not be null");
         if (budget != null) {
             budget.addProjections(safeSpec.projections().size());
             budget.addSorts(safeSpec.orders().size());
-            budget.addJoins(safeSpec.joins().size());
         }
         for (JoinProjection projection : safeSpec.projections()) {
-            requireField(projection.field(), safeForms);
-            require(requirements, projection.field(), FieldUse.PROJECT);
+            if (projection.expression() == null) {
+                requireGrouped(spec, projection.field());
+                requireField(projection.field(), safeForms);
+                require(requirements, projection.field(), FieldUse.PROJECT);
+            } else projection.expression().forEachField(source -> {
+                JoinFieldRef field = new JoinFieldRef(source.source(), source.identity().name());
+                requireGrouped(spec, field);
+                requireField(field, safeForms);
+                require(requirements, field, FieldUse.PROJECT);
+                require(requirements, field, FieldUse.FULL_VALUE);
+            });
         }
         for (JoinOrder order : safeSpec.orders()) {
-            requireField(order.field(), safeForms);
-            requireUnencrypted(order.field(), "encrypted field must not be used for join ordering");
-            require(requirements, order.field(), FieldUse.SORT);
+            if (order.expression() == null) requireSort(spec, order.field(), safeForms, requirements);
+            else order.expression().forEachField(reference -> requireSort(
+                    spec, new JoinFieldRef(reference.source(), reference.identity().name()), safeForms, requirements));
+        }
+    }
+
+    private static void requireGrouped(JoinQuerySpec spec, JoinFieldRef field) {
+        if (!spec.groups().isEmpty() && !spec.groups().contains(field)) {
+            throw new IllegalArgumentException("grouped join query requires grouped source fields");
+        }
+    }
+
+    private static void requireSort(JoinQuerySpec spec, JoinFieldRef field, Map<JoinSource, DynamicForm> forms,
+                                    FieldUseRequirements.Builder requirements) {
+        requireGrouped(spec, field);
+        requireField(field, forms);
+        requireUnencrypted(field, "encrypted field must not be used for join ordering");
+        require(requirements, field, FieldUse.SORT);
+    }
+
+    /** 校验和字段用途/形状计费共用这一遍关系输入遍历。 */
+    static void validateRelations(JoinQuerySpec spec,
+                                  Map<JoinSource, DynamicForm> readableForms,
+                                  FieldUseRequirements.Builder requirements,
+                                  QueryShapeBudget budget,
+                                  FormDataSqlRenderer renderer) {
+        JoinQuerySpec safeSpec = Objects.requireNonNull(spec, "join query spec must not be null");
+        Map<JoinSource, DynamicForm> safeForms = Objects.requireNonNull(
+                readableForms, "join readable forms must not be null");
+        if (budget != null) {
+            budget.addJoins(safeSpec.joins().size());
+            budget.addGroups(safeSpec.groups().size());
+        }
+        for (JoinFieldRef group : safeSpec.groups()) {
+            requireField(group, safeForms);
+            requireUnencrypted(group, "encrypted field must not be used for join grouping");
+            require(requirements, group, FieldUse.GROUP);
         }
         for (JoinClause join : safeSpec.joins()) {
-            for (JoinFieldPair pair : join.on()) {
-                requireField(pair.left(), safeForms);
-                requireField(pair.right(), safeForms);
-                requireUnencrypted(pair.left(), "encrypted field must not be used as a join key");
-                requireUnencrypted(pair.right(), "encrypted field must not be used as a join key");
-                require(requirements, pair.left(), FieldUse.JOIN);
-                require(requirements, pair.right(), FieldUse.JOIN);
+            join.condition().forEachLeaf(leaf -> {
+                if (leaf instanceof JoinCondition.Comparison comparison) {
+                    requireField(comparison.left(), safeForms);
+                    requireField(comparison.right(), safeForms);
+                    requireUnencrypted(comparison.left(), "encrypted field must not be used as a join key");
+                    requireUnencrypted(comparison.right(), "encrypted field must not be used as a join key");
+                    require(requirements, comparison.left(), FieldUse.JOIN);
+                    require(requirements, comparison.right(), FieldUse.JOIN);
+                } else if (leaf instanceof JoinCondition.Values values) {
+                    validateCondition(values.condition(), values.source(), safeForms, requirements, renderer, FieldUse.JOIN);
+                }
+            });
+        }
+        if (safeSpec.where() != null) safeSpec.where().forEachLeaf(leaf -> {
+            if (leaf instanceof JoinCondition.Values values) {
+                validateCondition(values.condition(), values.source(), safeForms, requirements, renderer, FieldUse.FILTER);
             }
-        }
-        for (JoinSource source : safeSpec.sources()) {
-            validateCondition(safeSpec.where(source), source, safeForms, requirements, renderer);
-        }
+        });
     }
 
     private static void validateCondition(ConditionNode node,
                                           JoinSource source,
                                           Map<JoinSource, DynamicForm> readableForms,
                                           FieldUseRequirements.Builder requirements,
-                                          FormDataSqlRenderer renderer) {
+                                          FormDataSqlRenderer renderer,
+                                          FieldUse use) {
         ConditionNodes.forEachTerm(node, term -> {
             JoinFieldRef field = new JoinFieldRef(source, term.field());
             requireField(field, readableForms);
-            require(requirements, field, FieldUse.FILTER);
+            require(requirements, field, use);
             if (renderer != null) {
-                FieldUseGuard.approveTermExtension(renderer, term, FieldUse.FILTER);
+                FieldUseGuard.approveTermExtension(renderer, term, use);
             }
         });
     }

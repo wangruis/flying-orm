@@ -2,7 +2,7 @@ package com.flying.orm.rdb.schema;
 
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.core.metadata.ValueGeneration;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.execution.ConnectionAccessTestSupport;
@@ -56,7 +56,7 @@ class LegacyGenerationReadbackTest {
             JdbcSchemaClient schema = JdbcSchemaClient.create(jdbc, dialect);
             schema.createTable(desired);
             DynamicForm form;
-            TableMetadata table;
+            RelationalTableDefinition table;
             SchemaMigrationPlan plan;
             if (reactive) {
                 ConnectionFactory factory = ConnectionFactories.get(ConnectionFactoryOptions.builder()

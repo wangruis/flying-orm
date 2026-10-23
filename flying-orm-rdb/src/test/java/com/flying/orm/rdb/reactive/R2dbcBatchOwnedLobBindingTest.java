@@ -88,7 +88,7 @@ class R2dbcBatchOwnedLobBindingTest {
                 }));
         R2dbcBindMarkers bindMarkers = R2dbcBindMarkers.from(RdbDialect.h2());
         R2dbcBatchWriterChunks chunks = new R2dbcBatchWriterChunks(bindMarkers);
-        R2dbcBatchWriterChunks.BatchChunk chunk = R2dbcBatchChunker.chunks(request).blockFirst();
+        R2dbcBatchWriterChunks.BatchChunk chunk = R2dbcBatchChunker.chunks(request, ignored -> { }).blockFirst();
         assertNotNull(chunk);
 
         BatchExecutionEvidenceException failure = assertThrows(
@@ -114,12 +114,13 @@ class R2dbcBatchOwnedLobBindingTest {
         AtomicInteger observedFirstByte = new AtomicInteger(-1);
         R2dbcBindMarkers bindMarkers = R2dbcBindMarkers.from(RdbDialect.h2());
         R2dbcBatchWriterChunks chunks = new R2dbcBatchWriterChunks(bindMarkers);
-        R2dbcBatchWriterChunks.BatchChunk chunk = R2dbcBatchChunker.chunks(request).blockFirst();
+        R2dbcBatchWriterChunks.BatchChunk chunk = R2dbcBatchChunker.chunks(request, ignored -> { }).blockFirst();
         assertNotNull(chunk);
 
         R2dbcBatchEvidenceCounts facts = new R2dbcBatchEvidenceCounts(1, 0, request.rowCountPolicy(), false);
         chunks.execute(connection(ownedPayload, observedFirstByte), request, chunk,
-                bindMarkers.adapt(request), R2dbcLargeObjectScope::new, facts).block();
+                bindMarkers.adapt(request), bindMarkers.insertBatch(request), bindMarkers.upsertBatch(request),
+                R2dbcLargeObjectScope::new, facts).block();
 
         assertEquals(9, observedFirstByte.get());
     }
@@ -128,10 +129,11 @@ class R2dbcBatchOwnedLobBindingTest {
                                            R2dbcExecutionSession.Resources handle) {
         R2dbcBindMarkers bindMarkers = R2dbcBindMarkers.from(RdbDialect.h2());
         R2dbcBatchWriterChunks chunks = new R2dbcBatchWriterChunks(bindMarkers);
-        R2dbcBatchWriterChunks.BatchChunk chunk = R2dbcBatchChunker.chunks(request).blockFirst();
+        R2dbcBatchWriterChunks.BatchChunk chunk = R2dbcBatchChunker.chunks(request, ignored -> { }).blockFirst();
         assertNotNull(chunk);
         chunks.execute(handle.connection(), request, chunk, bindMarkers.adapt(request),
-                handle::largeObjects, new R2dbcBatchEvidenceCounts(
+                bindMarkers.insertBatch(request), bindMarkers.upsertBatch(request), handle::largeObjects,
+                new R2dbcBatchEvidenceCounts(
                         chunk.rows().size(), chunk.startOffset(), request.rowCountPolicy(), false)).block();
     }
 

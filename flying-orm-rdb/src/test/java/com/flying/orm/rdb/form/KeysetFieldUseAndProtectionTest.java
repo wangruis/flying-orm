@@ -19,7 +19,6 @@ import com.flying.orm.core.scope.ScopeAccessException;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.form.spec.QuerySpec;
-import com.flying.orm.rdb.lock.LockingReadSpec;
 import com.flying.orm.rdb.lock.ReadLock;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.result.DynamicRow;
@@ -63,8 +62,7 @@ class KeysetFieldUseAndProtectionTest {
     void defaultLockingKeysetRejectsUnreadableAppendedKeysBeforeTransactionAccess() {
         AtomicInteger syncExecutions = new AtomicInteger();
         AtomicInteger reactiveExecutions = new AtomicInteger();
-        LockingReadSpec query = LockingReadSpec.of(
-                scopedQuery(FieldScope.readable("payload", "created_at")), ReadLock.update());
+        QuerySpec query = (scopedQuery(FieldScope.readable("payload", "created_at"))).withLock(ReadLock.update());
         KeysetPageQuery page = KeysetPageQuery.first(
                 1, KeysetSort.asc("created_at", NullOrder.LAST));
 
@@ -261,7 +259,7 @@ class KeysetFieldUseAndProtectionTest {
 
     private static SyncFormClient client(AtomicInteger executions, List<DynamicRow> rows) {
         SyncSqlExecutor executor = (SyncSqlExecutor) Proxy.newProxyInstance(
-                SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{SyncSqlExecutor.class},
+                SyncSqlExecutor.class.getClassLoader(), new Class<?>[]{com.flying.orm.rdb.support.ListQueryFixture.class},
                 (proxy, method, arguments) -> {
                     if (method.getName().equals("currentTransaction")) {
                         executions.incrementAndGet();
@@ -270,6 +268,9 @@ class KeysetFieldUseAndProtectionTest {
                     if (method.getName().equals("query")) {
                         executions.incrementAndGet();
                         return rows;
+                    }
+                    if (method.isDefault()) {
+                        return java.lang.reflect.InvocationHandler.invokeDefault(proxy, method, arguments);
                     }
                     throw new UnsupportedOperationException(method.toString());
                 });

@@ -59,19 +59,19 @@ final class MySqlSchemaCommentSupport {
     }
 
     static <T> T execute(SyncSqlExecutor executor, List<SqlRequest> requests,
-                         SqlExecutionOptions options, String planFingerprint,
+                         SqlExecutionOptions options,
                          Function<SyncSqlExecutor, T> work) {
         if (!requiresModeValidation(requests)) {
             return work.apply(executor);
         }
         return executor.withConnection(MODE_QUERY, bound -> {
-            requireConfigured(bound.query(MODE_QUERY, options), planFingerprint);
+            requireConfigured(bound.query(MODE_QUERY, options));
             return work.apply(bound);
         });
     }
 
     static <T> Mono<T> execute(ReactiveSqlExecutor executor, List<SqlRequest> requests,
-                               SqlExecutionOptions options, String planFingerprint,
+                               SqlExecutionOptions options,
                                Function<ReactiveSqlExecutor, Mono<T>> work) {
         return Mono.defer(() -> {
             if (!requiresModeValidation(requests)) {
@@ -81,13 +81,13 @@ final class MySqlSchemaCommentSupport {
                 Flux<DynamicRow> rows = options == null
                         ? bound.query(MODE_QUERY) : bound.query(MODE_QUERY, options);
                 return rows.take(2).collectList()
-                        .doOnNext(result -> requireConfigured(result, planFingerprint))
+                        .doOnNext(result -> requireConfigured(result))
                         .then(Mono.defer(() -> work.apply(bound)));
             });
         });
     }
 
-    static void requireConfigured(List<DynamicRow> rows, String planFingerprint) {
+    static void requireConfigured(List<DynamicRow> rows) {
         if (rows.size() == 1 && rows.getFirst().columnCount() > 0) {
             Object value = rows.getFirst().value(0);
             if (value instanceof CharSequence modes && containsRequiredMode(modes.toString())) {
@@ -96,7 +96,6 @@ final class MySqlSchemaCommentSupport {
         }
         throw new SchemaMigrationRejectedException(
                 SchemaMigrationFailureCode.EXECUTOR_CAPABILITY_REQUIRED,
-                planFingerprint,
                 "MySQL schema comments containing backslash require NO_BACKSLASH_ESCAPES on every schema "
                         + "connection; configure the upper connection provider because flying-orm does not "
                         + "modify session sql_mode");

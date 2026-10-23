@@ -24,7 +24,7 @@ class SchemaLogicalRangeRoundTripTest {
         CheckPredicate observed = RelationalMetadataValueParser.checkPredicate(
                 "(\"score\" > 1 and \"score\" <= 10)",
                 Map.of("score", DatabaseType.of("INTEGER")),
-                InformationSchemaFormMetadataReader.SnapshotDialect.POSTGRESQL);
+                MetadataQueryProfile.SnapshotDialect.POSTGRESQL);
         CheckPredicate desired = bounds(1, 10);
         assertTrue(equivalent(observed, desired));
         assertTrue(equivalent(desired, observed));

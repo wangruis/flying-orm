@@ -5,6 +5,7 @@ import com.flying.orm.core.condition.TermCondition;
 import com.flying.orm.core.condition.TermExtensionDescriptor;
 import com.flying.orm.core.internal.value.OwnedBindableValues;
 import com.flying.orm.core.internal.Names;
+import com.flying.orm.core.metadata.Feature;
 
 import java.util.List;
 import java.util.Objects;
@@ -17,7 +18,7 @@ import java.util.Optional;
  * @date 2026-07-21
  * @version v1.0
  */
-public interface SqlTermHandler {
+public interface SqlTermHandler extends Feature {
 
     /**
      * 返回 term id。
@@ -34,7 +35,7 @@ public interface SqlTermHandler {
     }
 
     /**
-     * 可配置外部查询需要的显式描述器。空值继续表示既有启动期可信 handler。
+     * 可选扩展描述器，声明能力、参数数量及复杂度；外部查询是否开放由条件策略决定。
      */
     default Optional<TermExtensionDescriptor> descriptor() {
         return Optional.empty();
@@ -260,7 +261,7 @@ public interface SqlTermHandler {
     }
 
     /**
-     * 创建带稳定治理契约的 SQL term。只有显式选择此工厂的扩展才能进入受治理的可配置查询路径。
+     * 创建带显式能力、参数和成本声明的 SQL term；普通扩展可直接使用名称和渲染函数工厂。
      */
     static SqlTermHandler of(TermExtensionDescriptor descriptor,
                              ConditionValueShape shape,

@@ -6,7 +6,7 @@ import com.flying.orm.rdb.batch.BatchExecutionEvidenceException;
 import com.flying.orm.rdb.batch.BatchExecutionState;
 import com.flying.orm.rdb.batch.BatchWriteRequest;
 import com.flying.orm.rdb.execution.ProtectedWriteWork;
-import com.flying.orm.rdb.exception.RdbErrorKind;
+import com.flying.orm.rdb.execution.ProtectedBatchRows;
 import com.flying.orm.rdb.lifecycle.EntityPostWriteException;
 import com.flying.orm.rdb.observation.BatchExecutionObservation;
 import com.flying.orm.rdb.observation.BatchExecutionObserver;
@@ -21,6 +21,8 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Objects;
 import java.util.function.LongFunction;
+import java.util.function.IntFunction;
+import java.util.function.Function;
 import static com.flying.orm.core.internal.error.ThrowableGraph.findVirtualMachineError;
 import static com.flying.orm.core.internal.error.ThrowableGraph.addSuppressedIfAcyclic;
 
@@ -31,13 +33,16 @@ final class R2dbcBatchWriter {
     private final R2dbcBatchWriterChunks statements;
     private final ReactiveBatchExecutionObservationSupport observations;
     private final BatchExecutionObserver observer;
+    private final Function<Throwable, Throwable> translate;
 
     R2dbcBatchWriter(R2dbcExecutionSession session, R2dbcBindMarkers markers,
-                     SqlExecutionObserver sqlObserver, BatchExecutionObserver batchObserver) {
+                     SqlExecutionObserver sqlObserver, BatchExecutionObserver batchObserver,
+                     Function<Throwable, Throwable> translate) {
         this.session = session;
         this.markers = markers;
         this.statements = new R2dbcBatchWriterChunks(markers);
         this.observer = BatchExecutionObserver.composite(BatchExecutionObserver.noop(), batchObserver);
+        this.translate = translate;
         this.observations = new ReactiveBatchExecutionObservationSupport(
                 ReactiveSqlExecutionObservationSupport.create(sqlObserver, BatchExecutionObserver.noop()), observer);
     }
@@ -48,6 +53,8 @@ final class R2dbcBatchWriter {
             BatchState state = new BatchState();
             long started = System.nanoTime();
             String sql = markers.adapt(request.sql(), request.parameterCount(), request.bindMarkerStyle());
+            IntFunction<String> insertSql = markers.insertBatch(request);
+            String upsertSql = markers.upsertBatch(request);
             Mono<BatchExecutionEvidence> execution = R2dbcBatchChunker.chunks(request, state::accept)
                     .switchOnFirst((first, windows) -> {
                 if (!first.hasValue()) return windows.then(Mono.fromSupplier(() ->
@@ -60,7 +67,7 @@ final class R2dbcBatchWriter {
                                 Arrays.asList(firstRow.row()).subList(0, firstRow.parameterCount()));
                 return session.withConnection(representative, resources ->
                         windows.concatMap(window -> executeWindow(resources, request, window, sql,
-                                state, rowCompleted, started), 0).then(Mono.fromSupplier(() ->
+                                insertSql, upsertSql, state, rowCompleted, started), 0).then(Mono.fromSupplier(() ->
                                 state.snapshot(BatchExecutionState.SUCCESS, null))),
                         SqlExecutionOperation.BATCH_WRITE);
             }).single().onErrorMap(error -> failure(state, error));
@@ -70,7 +77,29 @@ final class R2dbcBatchWriter {
     }
 
     private Mono<Void> executeWindow(R2dbcExecutionSession.Resources resources, BatchWriteRequest request,
-                                      R2dbcBatchWriterChunks.BatchChunk window, String sql, BatchState state,
+                                      R2dbcBatchWriterChunks.BatchChunk window, String sql,
+                                      IntFunction<String> insertSql, String upsertSql, BatchState state,
+                                      LongFunction<? extends Publisher<Void>> rowCompleted, long started) {
+        if (ProtectedBatchRows.windowEnd(window.rows(), 0) < window.rows().size()) {
+            return Flux.<R2dbcBatchWriterChunks.BatchChunk, Integer>generate(() -> 0, (from, sink) -> {
+                if (from == window.rows().size()) { sink.complete(); return from; }
+                int end = ProtectedBatchRows.windowEnd(window.rows(), from);
+                List<ProtectedBatchRows.RowView> rows = window.rows().subList(from, end);
+                sink.next(new R2dbcBatchWriterChunks.BatchChunk(window.startOffset() + from, rows));
+                return end;
+            }).concatMap(part -> executeWindow(resources, request, part, sql, insertSql, upsertSql,
+                    state, rowCompleted, started), 0).then();
+        }
+        BatchWriteRequest selected = window.rows().getFirst().request(request);
+        return executeLayout(resources, selected, window,
+                selected == request ? sql : markers.adapt(selected),
+                selected == request ? insertSql : markers.insertBatch(selected),
+                selected == request ? upsertSql : markers.upsertBatch(selected), state, rowCompleted, started);
+    }
+
+    private Mono<Void> executeLayout(R2dbcExecutionSession.Resources resources, BatchWriteRequest request,
+                                      R2dbcBatchWriterChunks.BatchChunk window, String sql,
+                                      IntFunction<String> insertSql, String upsertSql, BatchState state,
                                       LongFunction<? extends Publisher<Void>> rowCompleted, long started) {
         // Owner reads must observe every preceding row's completed business and side-index work.
         boolean sequential = window.rows().size() > 1 && window.rows().stream().anyMatch(row -> row.work() != null
@@ -78,16 +107,16 @@ final class R2dbcBatchWriter {
         if (sequential) {
             return Flux.range(0, window.rows().size()).concatMap(index -> {
                 var row = window.rows().get(index);
-                var single = new R2dbcBatchWriterChunks.BatchChunk(window.chunkIndex(), window.startOffset() + index,
-                        List.of(row), row.estimatedBytes());
-                return executeWindow(resources, request, single, sql, state, rowCompleted, started);
+                var single = new R2dbcBatchWriterChunks.BatchChunk(window.startOffset() + index,
+                        List.of(row));
+                return executeLayout(resources, request, single, sql, insertSql, upsertSql, state, rowCompleted, started);
             }, 0).then();
         }
         R2dbcBatchEvidenceCounts windowFacts = new R2dbcBatchEvidenceCounts(
                 window.rows().size(), window.startOffset(), request.rowCountPolicy(), rowCompleted != null);
         state.activate(windowFacts);
         Mono<Void> work = statements.execute(resources.connection(), request, window, sql,
-                        resources::largeObjects, windowFacts)
+                        insertSql, upsertSql, resources::largeObjects, windowFacts)
                 .then(Mono.defer(() -> resources.cleanupLargeObjects(SignalType.ON_COMPLETE, null)))
                 .doOnSuccess(ignored -> resources.clearCleanedLargeObjects());
         return work.onErrorResume(error -> {
@@ -138,23 +167,18 @@ final class R2dbcBatchWriter {
         });
     }
 
-    private static Throwable failure(BatchState batchState, Throwable original) {
+    private Throwable failure(BatchState batchState, Throwable original) {
         Throwable error = R2dbcExecutionSession.unwrapCleanupFailure(original);
         VirtualMachineError fatal = findVirtualMachineError(error);
         if (fatal != null) return fatal;
         BatchExecutionEvidence.Failure safeFailure = BatchExecutionEvidence.Failure.from(error);
-        BatchExecutionState executionState = switch (safeFailure.kind()) {
-            case CANCELLED -> BatchExecutionState.CANCELLED;
-            case TIMEOUT, LOCK_TIMEOUT -> BatchExecutionState.TIMED_OUT;
-            default -> BatchExecutionState.FAILED;
-        };
-        BatchExecutionEvidence evidence = batchState.terminal(executionState, safeFailure);
+        BatchExecutionEvidence evidence = batchState.terminal(BatchExecutionState.FAILED, safeFailure);
         if (error instanceof EntityPostWriteException) {
             addSuppressedIfAcyclic(error, new BatchExecutionEvidenceException(
                     "batch SQL execution evidence", null, evidence));
             return error;
         }
-        return new BatchExecutionEvidenceException("batch SQL execution failed", error, evidence);
+        return new BatchExecutionEvidenceException("batch SQL execution failed", translate.apply(error), evidence);
     }
 
     /** Coordinates the current window with terminal callbacks through one synchronization policy. */
@@ -193,15 +217,7 @@ final class R2dbcBatchWriter {
                 active.appendTo(facts, false);
                 active = null;
             }
-            BatchExecutionEvidence snapshot = facts.snapshot(state, failure);
-            if (state == BatchExecutionState.FAILED && snapshot.successfulCount() > 0) {
-                return facts.snapshot(BatchExecutionState.PARTIAL, failure);
-            }
-            if (state == BatchExecutionState.FAILED && unconfirmedExecution && failure != null
-                    && (failure.kind() == RdbErrorKind.CONNECTION || failure.kind() == RdbErrorKind.UNKNOWN)) {
-                return facts.snapshot(BatchExecutionState.UNKNOWN, failure);
-            }
-            return snapshot;
+            return failure == null ? facts.snapshot(state, null) : facts.failure(failure, unconfirmedExecution);
         }
     }
 

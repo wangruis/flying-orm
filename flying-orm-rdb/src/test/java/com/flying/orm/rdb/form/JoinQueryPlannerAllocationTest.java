@@ -59,7 +59,7 @@ class JoinQueryPlannerAllocationTest {
         return new JoinQueryPlanner(
                 renderer,
                 new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
-                SqlExecutionOptions.safeDefaults());
+                SqlExecutionOptions.unlimited());
     }
 
     private static JoinQuerySpec sixteenSourceSpec() {

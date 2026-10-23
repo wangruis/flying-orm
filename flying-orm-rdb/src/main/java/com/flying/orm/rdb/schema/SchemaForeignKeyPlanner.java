@@ -1,10 +1,13 @@
 package com.flying.orm.rdb.schema;
 
 import com.flying.orm.core.metadata.ForeignKeyDefinition;
-import com.flying.orm.core.metadata.ForeignKeyMetadata;
+import com.flying.orm.core.metadata.IndexDefinition;
+import com.flying.orm.core.metadata.PrimaryKeyDefinition;
+import com.flying.orm.core.metadata.RelationIdentity;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
-import com.flying.orm.core.metadata.TableMetadata;
+import com.flying.orm.core.metadata.UniqueConstraintDefinition;
 
+import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -13,10 +16,7 @@ import java.util.Set;
 import java.util.function.Predicate;
 
 /**
- * 只负责外键差异的报告。
- *
- * <p>外键变更目前不会直接生成执行 SQL，而是进入迁移计划供上层审核。这样能把历史数据、锁表和
- * 不同数据库的约束语法风险明确留在计划里，不会被普通字段迁移悄悄带过。</p>
+ * 适配增量外键的名称与改名事实；差异规则归 SchemaDiffer。
  */
 final class SchemaForeignKeyPlanner {
 
@@ -48,79 +48,59 @@ final class SchemaForeignKeyPlanner {
                 .toList();
     }
 
-    static void addChanges(List<SkippedSchemaChange> skipped,
-                           TableMetadata current,
-                           List<ForeignKeyMetadata> targetForeignKeys,
-                           Map<String, String> columnRenames) {
-        Set<String> matchedCurrentNames = new HashSet<>();
-        Set<String> targetPhysicalNames = new HashSet<>();
-        targetForeignKeys.forEach(foreignKey -> targetPhysicalNames.add(foreignKey.name()));
+    static Changes planChanges(RelationIdentity relation,
+                               RelationalTableDefinition current,
+                               List<ForeignKeyDefinition> targetForeignKeys,
+                               Map<String, String> columnRenames) {
+        List<SchemaOperation> operations = new ArrayList<>();
         Set<String> ambiguousTargetNames = SchemaMigrationSupport.ambiguousFoldedNames(
-                targetForeignKeys.stream().map(ForeignKeyMetadata::name).toList());
-        for (ForeignKeyMetadata target : targetForeignKeys) {
-            ForeignKeyMetadata currentForeignKey = SchemaMigrationSupport.exactForeignKey(current, target.name());
+                targetForeignKeys.stream().map(ForeignKeyDefinition::name).toList());
+        // 增量声明没有提到的外键继续保留，不提供删除候选；删除由完整目标替换表达。
+        SchemaDiffer.diffMatchedList(relation, targetForeignKeys, List.of(), ForeignKeyDefinition::name, target -> {
+            ForeignKeyDefinition currentForeignKey = SchemaMigrationSupport.exactForeignKey(current, target.name());
             if (currentForeignKey == null && !ambiguousTargetNames.contains(target.normalizedName())) {
                 currentForeignKey = current.findForeignKey(target.name()).orElse(null);
             }
-            if (currentForeignKey == null) {
-                skipped.add(add(target));
-            } else {
-                matchedCurrentNames.add(currentForeignKey.name());
-                if (!same(currentForeignKey, target, columnRenames)) {
-                    skipped.add(change(currentForeignKey, target));
-                }
+            return currentForeignKey;
+        }, (source, target) -> same(source, target, columnRenames, relation),
+                SchemaOperation.Kind.ADD_FOREIGN_KEY, SchemaOperation.Kind.CHANGE_FOREIGN_KEY,
+                SchemaOperation.Kind.DROP_FOREIGN_KEY, operations);
+        Set<String> replaced = new HashSet<>();
+        for (SchemaOperation operation : operations) {
+            if (operation.kind() == SchemaOperation.Kind.CHANGE_FOREIGN_KEY) {
+                replaced.add(((ForeignKeyDefinition) operation.actual()).name());
             }
         }
-        for (ForeignKeyMetadata currentForeignKey : current.foreignKeys()) {
-            boolean present = matchedCurrentNames.contains(currentForeignKey.name())
-                    || targetPhysicalNames.contains(currentForeignKey.name());
-            if (!present) {
-                skipped.add(drop(currentForeignKey));
+        return new Changes(operations, current.foreignKeys().stream()
+                .filter(key -> !replaced.contains(key.name())).toList());
+    }
+
+    record Changes(List<SchemaOperation> operations, List<ForeignKeyDefinition> retained) {
+    }
+
+    static List<String> removedCandidateKey(SchemaOperation operation) {
+        return switch (operation.kind()) {
+            case CHANGE_PRIMARY_KEY, DROP_PRIMARY_KEY -> ((PrimaryKeyDefinition) operation.actual()).columns();
+            case CHANGE_UNIQUE, DROP_UNIQUE -> ((UniqueConstraintDefinition) operation.actual()).columns();
+            case CHANGE_INDEX, DROP_INDEX -> {
+                IndexDefinition index = (IndexDefinition) operation.actual();
+                yield index.unique() ? index.columns() : null;
             }
-        }
+            default -> null;
+        };
     }
 
-    static SkippedSchemaChange addForeignKeyChange(ForeignKeyMetadata target) {
-        return new SkippedSchemaChange(SkippedSchemaChange.Kind.ADD_FOREIGN_KEY,
-                                       target.name(),
-                                       "foreign key changes are planned only",
-                                       Map.of("target", target),
-                                       suggestedSteps());
-    }
-
-    private static SkippedSchemaChange add(ForeignKeyMetadata target) {
-        return addForeignKeyChange(target);
-    }
-
-    private static SkippedSchemaChange change(ForeignKeyMetadata current, ForeignKeyMetadata target) {
-        return new SkippedSchemaChange(SkippedSchemaChange.Kind.CHANGE_FOREIGN_KEY,
-                                       target.name(),
-                                       "foreign key changes are planned only",
-                                       Map.of("current", current, "target", target),
-                                       suggestedSteps());
-    }
-
-    private static SkippedSchemaChange drop(ForeignKeyMetadata current) {
-        return new SkippedSchemaChange(SkippedSchemaChange.Kind.DROP_FOREIGN_KEY,
-                                       current.name(),
-                                       "foreign key changes are planned only",
-                                       Map.of("current", current),
-                                       suggestedSteps());
-    }
-
-    private static List<String> suggestedSteps() {
-        return List.of("review data that depends on this relationship",
-                       "write a checked migration script for the foreign key change",
-                       "run it from the upper layer in a controlled transaction or maintenance window",
-                       "read table metadata again after the migration");
-    }
-
-    private static boolean same(ForeignKeyMetadata current,
-                                ForeignKeyMetadata target,
-                                Map<String, String> columnRenames) {
+    private static boolean same(ForeignKeyDefinition current,
+                                ForeignKeyDefinition target,
+                                Map<String, String> columnRenames,
+                                RelationIdentity relation) {
         return current.name().equals(target.name())
                 && SchemaMigrationSupport.renamedNames(current.columns(), columnRenames).equals(target.columns())
-                && current.referenceTable().equals(target.referenceTable())
-                && current.referenceColumns().equals(target.referenceColumns());
+                && current.reference().equals(target.reference())
+                && current.onDelete() == target.onDelete()
+                && current.onUpdate() == target.onUpdate()
+                && (current.reference().equals(relation)
+                    ? SchemaMigrationSupport.renamedNames(current.referenceColumns(), columnRenames)
+                    : current.referenceColumns()).equals(target.referenceColumns());
     }
 }

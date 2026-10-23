@@ -4,6 +4,7 @@ import com.flying.orm.core.condition.QueryShapeLimits;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.scope.FieldUsePolicy;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
+import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
 
@@ -20,16 +21,16 @@ record FormConfiguration(FormDataSqlRenderer renderer,
                          QueryShapeLimits queryShapeLimits,
                          boolean explicitGovernance) {
 
-    FormConfiguration(FormDataSqlRenderer renderer,
-                      StructuredConditionResolver resolver,
-                      DataScope dataScope,
-                      SqlExecutionOptions executionOptions,
-                      BatchWriteOptions batchOptions,
-                      EntityModelRegistry entityModels,
-                      FieldUsePolicy fieldUsePolicy,
-                      QueryShapeLimits queryShapeLimits) {
-        this(renderer, resolver, dataScope, executionOptions, batchOptions, entityModels,
-             fieldUsePolicy, queryShapeLimits, false);
+    FormConfiguration(FormDataSqlRenderer renderer) {
+        this(renderer, StructuredConditionResolver.defaults(Objects.requireNonNull(
+                renderer, "form data sql renderer must not be null").valueCodecs()),
+                SqlExecutionOptions.unlimited(), EntityModelRegistry.create(CacheRegionPolicy.entityMappingDefaults()));
+    }
+
+    FormConfiguration(FormDataSqlRenderer renderer, StructuredConditionResolver resolver,
+                      SqlExecutionOptions executionOptions, EntityModelRegistry entityModels) {
+        this(renderer, resolver, DataScope.none(), executionOptions, BatchWriteOptions.defaults(), entityModels,
+                FieldUsePolicy.unrestricted(), QueryShapeLimits.defaults(), false);
     }
 
     FormConfiguration {

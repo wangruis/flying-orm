@@ -2,6 +2,7 @@ package com.flying.orm.core.page;
 
 import java.util.List;
 import java.util.Objects;
+import java.util.function.Function;
 
 /**
  * keyset 分页结果。
@@ -29,5 +30,11 @@ public record KeysetPageResult<T>(List<T> rows,
             throw new IllegalArgumentException(
                     "keyset next position must not be empty when the page has more rows");
         }
+    }
+
+    /** 映射当前页的行，保留完整的不可变游标位置，包括未投影到业务行的排序值。 */
+    public <R> KeysetPageResult<R> map(Function<? super T, ? extends R> mapper) {
+        Objects.requireNonNull(mapper, "keyset page row mapper must not be null");
+        return new KeysetPageResult<>(rows.stream().<R>map(mapper).toList(), nextPosition, hasMore);
     }
 }

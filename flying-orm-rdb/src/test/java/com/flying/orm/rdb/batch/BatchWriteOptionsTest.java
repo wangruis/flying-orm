@@ -5,12 +5,14 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class BatchWriteOptionsTest {
     @Test
-    void defaultsRetainBoundedBatchCapacity() {
+    void defaultsChunkRowsWithoutImposingApplicationCapacityLimits() {
         assertEquals(500, BatchWriteOptions.defaults().bufferSize());
         assertEquals(0, BatchWriteOptions.defaults().maxRows());
-        assertEquals(32L * 1024 * 1024, BatchWriteOptions.defaults().maxBufferedBytes());
-        assertEquals(10_000, BatchMemoryLimits.defaults().maxBufferSize());
-        assertEquals(256L * 1024 * 1024, BatchMemoryLimits.defaults().maxBufferedBytes());
+        assertEquals(Long.MAX_VALUE, BatchWriteOptions.defaults().maxBufferedBytes());
+        assertEquals(Long.MAX_VALUE, BatchWriteOptions.defaults().maxRowBytes());
+        assertEquals(Integer.MAX_VALUE, BatchMemoryLimits.defaults().maxBufferSize());
+        assertEquals(Long.MAX_VALUE, BatchMemoryLimits.defaults().maxBufferedBytes());
+        assertDoesNotThrow(() -> BatchMemoryLimits.defaults().check(BatchWriteOptions.of(10_001)));
     }
 
     @Test
@@ -35,7 +37,7 @@ class BatchWriteOptionsTest {
         assertEquals(512, BatchWriteOptions.of(500).withMemoryLimits(0, 1024).maxRowBytes());
         assertEquals(1024, BatchWriteOptions.of(1).withMemoryLimits(0, 1024).maxRowBytes());
         assertEquals(1, BatchWriteOptions.of(500).withMemoryLimits(0, 1).maxRowBytes());
-        assertEquals(Long.MAX_VALUE / 2, BatchWriteOptions.of(500)
+        assertEquals(Long.MAX_VALUE, BatchWriteOptions.of(500)
                 .withMemoryLimits(0, Long.MAX_VALUE).maxRowBytes());
     }
 

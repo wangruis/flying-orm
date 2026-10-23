@@ -20,13 +20,13 @@ class JdbcReactiveSchemaParityTest {
 
     @Test
     void jdbcAndReactiveExecutionPublishTheSameVerifiedFacts() throws Exception {
-        RelationalTableDefinition before = VerifiedSchemaPlanFixtures.table(
-                VerifiedSchemaPlanFixtures.ID);
-        RelationalTableDefinition desired = VerifiedSchemaPlanFixtures.table(
-                VerifiedSchemaPlanFixtures.ID, VerifiedSchemaPlanFixtures.NOTE);
+        RelationalTableDefinition before = SchemaExecutionFixtures.table(
+                SchemaExecutionFixtures.ID);
+        RelationalTableDefinition desired = SchemaExecutionFixtures.table(
+                SchemaExecutionFixtures.ID, SchemaExecutionFixtures.NOTE);
         SqlRequest request = new SqlRequest(
                 "alter table accounts add column note varchar(80)", List.of());
-        ReviewedSchemaPlan plan = VerifiedSchemaPlanFixtures.plan(
+        SchemaMigrationPlan plan = SchemaExecutionFixtures.plan(
                 SchemaSnapshot.present(before), desired, request);
         AtomicReference<SchemaSnapshot> jdbcSnapshot =
                 new AtomicReference<>(SchemaSnapshot.present(before));
@@ -34,45 +34,41 @@ class JdbcReactiveSchemaParityTest {
                 new AtomicReference<>(SchemaSnapshot.present(before));
         AtomicInteger jdbcInvalidations = new AtomicInteger();
         AtomicInteger reactiveInvalidations = new AtomicInteger();
-        VerifiedSchemaPlanFixtures.SyncExecutor jdbc =
-                new VerifiedSchemaPlanFixtures.SyncExecutor(ignored -> {
+        SchemaExecutionFixtures.SyncExecutor jdbc =
+                new SchemaExecutionFixtures.SyncExecutor(ignored -> {
                     jdbcSnapshot.set(SchemaSnapshot.present(desired));
                     return 1L;
                 });
-        VerifiedSchemaPlanFixtures.ReactiveExecutor reactive =
-                new VerifiedSchemaPlanFixtures.ReactiveExecutor(ignored -> Mono.fromSupplier(() -> {
+        SchemaExecutionFixtures.ReactiveExecutor reactive =
+                new SchemaExecutionFixtures.ReactiveExecutor(ignored -> Mono.fromSupplier(() -> {
                     reactiveSnapshot.set(SchemaSnapshot.present(desired));
                     return 1L;
                 }));
 
-        SchemaExecutionReport jdbcReport = VerifiedSchemaPlanExecutor.executeJdbc(
-                plan, jdbc, jdbcSnapshot::get, SchemaSnapshotCoverage::complete,
+        SchemaMigrationResult jdbcReport = SchemaExecutionFixtures.executeJdbc(
+                plan, jdbc,
                 jdbcInvalidations::incrementAndGet,
-                SqlExecutionOptions.safeDefaults());
-        SchemaExecutionReport reactiveReport = VerifiedSchemaPlanExecutor.executeReactive(
-                plan, reactive, () -> Mono.just(reactiveSnapshot.get()),
-                SchemaSnapshotCoverage::complete,
+                SqlExecutionOptions.unlimited());
+        SchemaMigrationResult reactiveReport = SchemaExecutionFixtures.executeReactive(
+                plan, reactive,
                 reactiveInvalidations::incrementAndGet,
-                SqlExecutionOptions.safeDefaults()).block();
+                SqlExecutionOptions.unlimited()).block();
 
         assertNotNull(reactiveReport);
-        assertEquals(jdbcReport.status(), reactiveReport.status());
-        assertEquals(jdbcReport.steps().getFirst().status(),
-                     reactiveReport.steps().getFirst().status());
-        assertEquals(jdbcReport.steps().getFirst().rowsUpdated(),
-                     reactiveReport.steps().getFirst().rowsUpdated());
-        assertEquals(jdbcReport.verification().orElseThrow().status(),
-                     reactiveReport.verification().orElseThrow().status());
+        assertEquals(List.of(request), jdbcReport.steps().stream().map(step -> step.request()).toList());
+        assertEquals(List.of(request), reactiveReport.steps().stream().map(step -> step.request()).toList());
+        assertEquals(1L, jdbcReport.rowsUpdated());
+        assertEquals(1L, reactiveReport.rowsUpdated());
         assertEquals(1, jdbcInvalidations.get());
         assertEquals(1, reactiveInvalidations.get());
 
         Method jdbcEntry = JdbcSchemaClient.class.getMethod(
-                "executeReviewed", ReviewedSchemaPlan.class,
-                JdbcFormMetadataReader.class, SchemaMigrationExecutionOptions.class);
+                "execute", SchemaMigrationPlan.class,
+                JdbcFormMetadataReader.class, SqlExecutionOptions.class);
         Method reactiveEntry = ReactiveSchemaClient.class.getMethod(
-                "executeReviewed", ReviewedSchemaPlan.class,
-                ReactiveFormMetadataReader.class, SchemaMigrationExecutionOptions.class);
-        assertEquals(SchemaExecutionReport.class, jdbcEntry.getReturnType());
+                "execute", SchemaMigrationPlan.class,
+                ReactiveFormMetadataReader.class, SqlExecutionOptions.class);
+        assertEquals(SchemaMigrationResult.class, jdbcEntry.getReturnType());
         assertEquals(Mono.class, reactiveEntry.getReturnType());
     }
 }

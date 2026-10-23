@@ -56,7 +56,7 @@ final class SchemaColumnCommentCodec {
                 && style != SchemaDialect.GeneratedValueStyle.SQL_SERVER) {
             return false;
         }
-        String physicalType = SchemaDefinitionEquality.actualColumnType(dialect, actualColumn);
+        String physicalType = SchemaDefinitionEquality.observedColumnType(dialect, actualColumn);
         return dialect.sameDataType(physicalType, SchemaTypeMapping.preserveCharacterLengthUnit(
                     dialect, physicalType, dialect.dataType("OFFSET_TIME")))
                 || style == SchemaDialect.GeneratedValueStyle.ORACLE

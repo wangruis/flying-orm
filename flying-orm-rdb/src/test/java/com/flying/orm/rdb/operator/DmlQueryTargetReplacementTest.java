@@ -22,7 +22,7 @@ class DmlQueryTargetReplacementTest {
 
     @Test
     void settingPhysicalTargetReplacesPreviouslySelectedForm() {
-        DmlQueryCommand command = new DmlQueryCommand(RENDERER, DataScope.none());
+        PlanningDynamicQuery command = new PlanningDynamicQuery(RENDERER, DataScope.none());
         command.select("id");
         command.from(FORM_A, FieldUsePolicy.unrestricted(), QueryShapeLimits.defaults());
         command.from("table_b");
@@ -33,7 +33,7 @@ class DmlQueryTargetReplacementTest {
 
     @Test
     void targetReplacementPreservesDefaultAndRequestScopes() {
-        DmlQueryCommand command = new DmlQueryCommand(RENDERER, DataScope.tenant("tenant_id", "tenant-a"));
+        PlanningDynamicQuery command = new PlanningDynamicQuery(RENDERER, DataScope.tenant("tenant_id", "tenant-a"));
         command.select("id");
         command.scope(DataScope.self("owner_id", 7));
         command.from(FORM_A, FieldUsePolicy.unrestricted(), QueryShapeLimits.defaults());
@@ -48,7 +48,7 @@ class DmlQueryTargetReplacementTest {
 
     @Test
     void selectingFormAfterPhysicalTargetStillEnablesItsPolicy() {
-        DmlQueryCommand command = new DmlQueryCommand(RENDERER, DataScope.none());
+        PlanningDynamicQuery command = new PlanningDynamicQuery(RENDERER, DataScope.none());
         command.from("table_a");
         command.from(FORM_B, FieldUsePolicy.unrestricted(), QueryShapeLimits.defaults());
         assertTrue(command.governed());
@@ -57,7 +57,7 @@ class DmlQueryTargetReplacementTest {
 
     @Test
     void selectingAnotherFormUsesItsOwnMetadata() {
-        DmlQueryCommand command = new DmlQueryCommand(RENDERER, DataScope.none());
+        PlanningDynamicQuery command = new PlanningDynamicQuery(RENDERER, DataScope.none());
         command.from(FORM_A, FieldUsePolicy.unrestricted(), QueryShapeLimits.defaults());
         command.from(FORM_B, FieldUsePolicy.unrestricted(), QueryShapeLimits.defaults());
         assertTrue(command.governed());

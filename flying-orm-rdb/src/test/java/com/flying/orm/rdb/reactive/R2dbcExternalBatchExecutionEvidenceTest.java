@@ -24,6 +24,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.CancellationException;
+import java.util.concurrent.TimeoutException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -33,12 +34,41 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class R2dbcExternalBatchExecutionEvidenceTest {
 
     @Test
+    void keepsCompletedRowsAndTimeoutClassificationWhenLaterInputTimesOut() {
+        assertCompletedRowThenInputFailure(new TimeoutException("input timed out"), BatchExecutionState.TIMED_OUT);
+    }
+
+    @Test
+    void keepsCompletedRowsAndCancellationClassificationWhenLaterInputIsCancelled() {
+        assertCompletedRowThenInputFailure(new CancellationException("input cancelled"), BatchExecutionState.CANCELLED);
+    }
+
+    private static void assertCompletedRowThenInputFailure(Throwable error, BatchExecutionState expectedState) {
+        AtomicInteger executions = new AtomicInteger();
+        Connection connection = externalConnection(executions, Mono.just(1L));
+        R2dbcSqlExecutor executor = R2dbcSqlExecutor.create(
+                com.flying.orm.rdb.execution.ConnectionAccessTestSupport.borrowed(connection), RdbDialect.h2());
+        BatchWriteRequest request = com.flying.orm.rdb.batch.BatchWriteRequests.request(
+                "insert into sample(value_col) values (?)", 1, List.of(Integer.class),
+                SqlBindMarkerStyle.CANONICAL,
+                Flux.concat(Flux.<Object[]>just(new Object[]{1}), Flux.error(error)), BatchWriteOptions.of(1));
+
+        BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
+                () -> executor.writeBatch(request).block(Duration.ofSeconds(2)));
+
+        assertEquals(expectedState, failure.evidence().state());
+        assertEquals(List.of(0L), failure.evidence().successfulOffsets().boxed().toList());
+        assertEquals(1L, failure.evidence().affectedRows().value());
+        assertEquals(1, executions.get());
+    }
+
+    @Test
     void returnsTwoChunkFactsWithoutOwningOrWaitingForTheExternalTransaction() {
         AtomicInteger executions = new AtomicInteger();
         Connection connection = externalConnection(executions);
         R2dbcSqlExecutor executor = R2dbcSqlExecutor.create(com.flying.orm.rdb.execution.ConnectionAccessTestSupport.borrowed(connection), RdbDialect.h2());
 
-        BatchExecutionEvidence evidence = executor.writeBatchEvidence(request()).block(Duration.ofSeconds(2));
+        BatchExecutionEvidence evidence = executor.writeBatch(request()).block(Duration.ofSeconds(2));
 
         assertEquals(BatchExecutionState.SUCCESS, evidence.state());
         assertEquals(4L, evidence.inputCount());
@@ -54,7 +84,7 @@ class R2dbcExternalBatchExecutionEvidenceTest {
         Connection connection = externalConnection(executions, Mono.empty());
         R2dbcSqlExecutor executor = R2dbcSqlExecutor.create(com.flying.orm.rdb.execution.ConnectionAccessTestSupport.borrowed(connection), RdbDialect.h2());
 
-        BatchExecutionEvidence evidence = executor.writeBatchEvidence(request()).block(Duration.ofSeconds(2));
+        BatchExecutionEvidence evidence = executor.writeBatch(request()).block(Duration.ofSeconds(2));
 
         assertEquals(BatchExecutionState.SUCCESS, evidence.state());
         assertEquals(4L, evidence.inputCount());
@@ -78,7 +108,7 @@ class R2dbcExternalBatchExecutionEvidenceTest {
 
         BatchExecutionEvidenceException failure = assertThrows(
                 BatchExecutionEvidenceException.class,
-                () -> executor.writeBatchEvidence(request).block(Duration.ofSeconds(2)));
+                () -> executor.writeBatch(request).block(Duration.ofSeconds(2)));
 
         assertEquals(BatchExecutionState.PARTIAL, failure.evidence().state());
         assertEquals(2L, failure.evidence().inputCount());
@@ -107,7 +137,7 @@ class R2dbcExternalBatchExecutionEvidenceTest {
 
         BatchExecutionEvidenceException failure = assertThrows(
                 BatchExecutionEvidenceException.class,
-                () -> executor.writeBatchEvidence(request).block(Duration.ofSeconds(2)));
+                () -> executor.writeBatch(request).block(Duration.ofSeconds(2)));
 
         assertEquals(BatchExecutionState.CANCELLED, failure.evidence().state());
         assertEquals(BatchExecutionState.CANCELLED,
@@ -132,7 +162,7 @@ class R2dbcExternalBatchExecutionEvidenceTest {
 
         BatchExecutionEvidenceException failure = assertThrows(
                 BatchExecutionEvidenceException.class,
-                () -> executor.writeBatchEvidence(request).block(Duration.ofSeconds(2)));
+                () -> executor.writeBatch(request).block(Duration.ofSeconds(2)));
 
         assertEquals(0, executions.get());
         assertEquals(0, failure.evidence().successfulCount());
@@ -160,7 +190,7 @@ class R2dbcExternalBatchExecutionEvidenceTest {
                 BatchWriteOptions.of(1), BatchRowCountPolicy.EXACTLY_ONE);
 
         BatchExecutionEvidenceException failure = assertThrows(BatchExecutionEvidenceException.class,
-                () -> executor.writeBatchEvidence(request).block(Duration.ofSeconds(2)));
+                () -> executor.writeBatch(request).block(Duration.ofSeconds(2)));
 
         assertEquals(BatchExecutionState.UNKNOWN, failure.evidence().state());
         assertEquals(1L, failure.evidence().inputCount());

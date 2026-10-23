@@ -27,6 +27,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -39,9 +40,14 @@ class RepositoryEntityWriterReadConvergenceTest {
         SyncFormRepository<CountedEntity> repository = SyncFormRepository.create(
                 client, client.entityModels().metadata(CountedEntity.class).toDynamicForm(), CountedEntity.class);
 
-        Object singleIds = field(field(repository, "entityWriter"), "ids");
-        Object batchIds = field(field(field(repository, "batchCoordinator"), "support"), "ids");
+        assertFalse(java.util.Arrays.stream(repository.getClass().getDeclaredFields())
+                .anyMatch(field -> field.getName().equals("entityWriter")), "single writes must not retain a duplicate owner");
+        Object singleIds = field(repository, "ids");
+        Object batchIds = field(field(repository, "batchCoordinator"), "ids");
         assertSame(batchIds, singleIds);
+        assertEquals(1, java.util.Arrays.stream(repository.getClass().getDeclaredFields())
+                .filter(field -> field.getType() == com.flying.orm.rdb.operator.SyncEntityDmlOperator.class).count(),
+                "the immutable entity entry must be reused across CRUD commands");
     }
 
     @Test
@@ -50,9 +56,14 @@ class RepositoryEntityWriterReadConvergenceTest {
         ReactiveFormRepository<CountedEntity> repository = ReactiveFormRepository.create(
                 client, client.entityModels().metadata(CountedEntity.class).toDynamicForm(), CountedEntity.class);
 
-        Object singleIds = field(field(repository, "entityWriter"), "ids");
-        Object batchIds = field(field(field(repository, "batchOperations"), "coordinator"), "ids");
+        assertFalse(java.util.Arrays.stream(repository.getClass().getDeclaredFields())
+                .anyMatch(field -> field.getName().equals("entityWriter")), "single writes must not retain a duplicate owner");
+        Object singleIds = field(repository, "ids");
+        Object batchIds = field(field(repository, "batchCoordinator"), "ids");
         assertSame(batchIds, singleIds);
+        assertEquals(1, java.util.Arrays.stream(repository.getClass().getDeclaredFields())
+                .filter(field -> field.getType() == com.flying.orm.rdb.operator.EntityDmlOperator.class).count(),
+                "the immutable entity entry must be reused across CRUD commands");
     }
 
     private static Object field(Object owner, String name) throws ReflectiveOperationException {
@@ -71,9 +82,9 @@ class RepositoryEntityWriterReadConvergenceTest {
 
         assertEquals(1L, repository.update(entity, where()));
 
-        assertEquals(1, entity.idReads, "readForUpdate retains its single existing field-read pass");
+        assertEquals(0, entity.idReads, "explicit-condition update must not read the non-writable id");
         assertEquals(1, entity.valueReads);
-        assertEquals(2, executor.request.get().parameters().size());
+        assertEquals(List.of("next", 7L), executor.request.get().parameters());
     }
 
     @Test
@@ -89,9 +100,9 @@ class RepositoryEntityWriterReadConvergenceTest {
         assertEquals(0, entity.valueReads);
         assertEquals(1L, update.block());
 
-        assertEquals(1, entity.idReads, "readForUpdate retains its single existing field-read pass");
+        assertEquals(0, entity.idReads, "explicit-condition update must not read the non-writable id");
         assertEquals(1, entity.valueReads);
-        assertEquals(2, executor.request.get().parameters().size());
+        assertEquals(List.of("next", 7L), executor.request.get().parameters());
     }
 
     @Test
@@ -137,6 +148,74 @@ class RepositoryEntityWriterReadConvergenceTest {
         assertEquals(1L, repository.update(entity, where()));
 
         assertTrue(executor.request.get().parameters().contains(3L));
+        assertEquals(1, entity.versionReads, "the lock version must not be read again for a discarded SET value");
+    }
+
+    @Test
+    void versionedUpdatesReadTheLockOnceAcrossSingleAndBatchPaths() {
+        for (boolean reactive : new boolean[]{false, true}) {
+            for (boolean batch : new boolean[]{false, true}) {
+                VersionedEntity entity = new VersionedEntity(7L, 3L, "next");
+                AtomicReference<List<Object>> parameters = new AtomicReference<>();
+                if (reactive) {
+                    CapturingReactiveExecutor executor = new CapturingReactiveExecutor();
+                    ReactiveFormClient client = ReactiveFormClient.create(executor, renderer());
+                    ReactiveFormRepository<VersionedEntity> repository = ReactiveFormRepository.create(client,
+                            client.entityModels().metadata(VersionedEntity.class).toDynamicForm(), VersionedEntity.class);
+                    if (batch) {
+                        repository.updateBatch(List.of(entity)).block();
+                        parameters.set(java.util.Arrays.asList(executor.batchRows.get().getFirst()));
+                    } else {
+                        repository.update(entity).block();
+                        parameters.set(executor.request.get().parameters());
+                    }
+                } else {
+                    CapturingSyncExecutor executor = new CapturingSyncExecutor();
+                    SyncFormClient client = SyncFormClient.create(executor, (request, completion) -> {
+                        parameters.set(java.util.Arrays.asList(Flux.from(request.rows()).blockFirst()));
+                        return BatchEvidenceFixtures.successful(1);
+                    }, renderer());
+                    SyncFormRepository<VersionedEntity> repository = SyncFormRepository.create(client,
+                            client.entityModels().metadata(VersionedEntity.class).toDynamicForm(), VersionedEntity.class);
+                    if (batch) repository.updateBatch(List.of(entity));
+                    else {
+                        repository.update(entity);
+                        parameters.set(executor.request.get().parameters());
+                    }
+                }
+                assertEquals(List.of("next", 7L, 3L), parameters.get());
+                assertEquals(1, entity.versionReads, "single/batch updates must not read the version as SET input");
+            }
+        }
+    }
+
+    @Test
+    void batchUpdateReadsBusinessValuesOnceInBothExecutionPaths() {
+        for (boolean reactive : new boolean[]{false, true}) {
+            CountedEntity entity = new CountedEntity(7L, "next");
+            AtomicReference<BatchWriteRequest> request = new AtomicReference<>();
+            AtomicReference<List<Object[]>> parameters = new AtomicReference<>();
+            if (reactive) {
+                CapturingReactiveExecutor executor = new CapturingReactiveExecutor();
+                ReactiveFormClient client = ReactiveFormClient.create(executor, renderer());
+                ReactiveFormRepository.create(client, client.entityModels().metadata(CountedEntity.class).toDynamicForm(),
+                        CountedEntity.class).updateBatch(List.of(entity)).block();
+                request.set(executor.batch.get());
+                parameters.set(executor.batchRows.get());
+            } else {
+                SyncFormClient client = SyncFormClient.create(new CapturingSyncExecutor(), (batch, completion) -> {
+                    request.set(batch);
+                    parameters.set(Flux.from(batch.rows()).collectList().block());
+                    return BatchEvidenceFixtures.successful(parameters.get().size());
+                }, renderer());
+                SyncFormRepository.create(client, client.entityModels().metadata(CountedEntity.class).toDynamicForm(),
+                        CountedEntity.class).updateBatch(List.of(entity));
+            }
+            assertEquals("update \"counted_entities\" set \"value\" = ? where \"id\" = ?", request.get().sql());
+            assertEquals(List.of("next", 7L), java.util.Arrays.asList(parameters.get().getFirst()));
+            assertEquals(1, entity.valueReads, "identity planning must not take a second full entity snapshot");
+            assertEquals(1, entity.idReads, "identity is read once and is not part of the SET snapshot");
+        }
     }
 
     private static ConditionGroup where() {
@@ -204,7 +283,7 @@ class RepositoryEntityWriterReadConvergenceTest {
         }
     }
 
-    private static final class CapturingSyncExecutor implements SyncSqlExecutor {
+    private static final class CapturingSyncExecutor implements com.flying.orm.rdb.support.ListQueryFixture {
         private final AtomicReference<com.flying.orm.core.sql.render.SqlRequest> request = new AtomicReference<>();
 
         @Override
@@ -220,13 +299,24 @@ class RepositoryEntityWriterReadConvergenceTest {
 
         @Override
         public SqlWriteResult rowsUpdatedReturningKeys(
-                com.flying.orm.core.sql.render.SqlRequest request, SqlExecutionOptions options) {
+                com.flying.orm.core.sql.render.SqlRequest request, SqlExecutionOptions options, String generatedKeyColumn) {
             throw new UnsupportedOperationException();
         }
     }
 
     private static final class CapturingReactiveExecutor implements ReactiveSqlExecutor {
         private final AtomicReference<com.flying.orm.core.sql.render.SqlRequest> request = new AtomicReference<>();
+        private final AtomicReference<BatchWriteRequest> batch = new AtomicReference<>();
+        private final AtomicReference<List<Object[]>> batchRows = new AtomicReference<>();
+
+        @Override
+        public Mono<BatchExecutionEvidence> writeBatch(BatchWriteRequest batch, java.util.function.LongFunction<? extends org.reactivestreams.Publisher<Void>> completion) {
+            this.batch.set(batch);
+            return Flux.from(batch.rows()).collectList().map(rows -> {
+                batchRows.set(rows);
+                return BatchEvidenceFixtures.successful(rows.size());
+            });
+        }
 
         @Override
         public Flux<DynamicRow> query(com.flying.orm.core.sql.render.SqlRequest request) {

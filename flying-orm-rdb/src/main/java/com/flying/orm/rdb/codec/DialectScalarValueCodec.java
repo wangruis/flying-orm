@@ -7,6 +7,7 @@ import com.flying.orm.rdb.type.DatabaseTypes;
 
 import java.time.LocalTime;
 import java.time.OffsetDateTime;
+import java.time.OffsetTime;
 import java.time.ZoneOffset;
 import java.util.Objects;
 import java.util.UUID;
@@ -66,7 +67,11 @@ public final class DialectScalarValueCodec {
         }
         ValueCodecRegistry codecs = Objects.requireNonNull(valueCodecs, "value codec registry must not be null");
         LogicalType logicalType = DatabaseTypes.effectiveLogicalType(dataType, dialectName);
-        Class<?> targetType = DatabaseTypes.parameterType(dataType, dialectName, nativeBoolean);
+        // These write paths retain the codec result without converting to the driver's Java type.
+        Class<?> targetType = switch (logicalType) {
+            case SMALL_INTEGER, INTEGER, BIG_INTEGER, DECIMAL, FLOAT, DATE, TIMESTAMP, OFFSET_TIMESTAMP -> Object.class;
+            default -> DatabaseTypes.parameterType(dataType, dialectName, nativeBoolean);
+        };
         if (logicalType == LogicalType.INTERVAL
                 && targetType != Object.class
                 && targetType.isInstance(value)) {
@@ -81,6 +86,10 @@ public final class DialectScalarValueCodec {
         if (logicalType == LogicalType.BOOLEAN) {
             Boolean bool = codecs.read(encoded, Boolean.class);
             return targetType == Integer.class ? (bool ? 1 : 0) : bool;
+        }
+        if (logicalType == LogicalType.OFFSET_TIME) {
+            OffsetTime time = codecs.read(encoded, OffsetTime.class);
+            return targetType == String.class ? time.toString() : time;
         }
         if (logicalType == LogicalType.OFFSET_TIMESTAMP) {
             OffsetDateTime absolute = JdbcLegacyTemporalAdapter.read(
@@ -115,6 +124,9 @@ public final class DialectScalarValueCodec {
         }
         ValueCodecRegistry codecs = Objects.requireNonNull(valueCodecs, "value codec registry must not be null");
         LogicalType logicalType = DatabaseTypes.effectiveLogicalType(dataType, "GENERIC");
+        if (logicalType == LogicalType.OFFSET_TIME) {
+            return codecs.read(value, OffsetTime.class);
+        }
         Class<?> targetType = DatabaseTypes.parameterType(dataType, "GENERIC", true);
         if (targetType == Object.class) {
             return value;

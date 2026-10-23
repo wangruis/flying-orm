@@ -23,15 +23,17 @@ final class BatchMemoryLimitedReactiveSqlExecutor extends ForwardingReactiveSqlE
 
     private BatchMemoryLimitedReactiveSqlExecutor(ReactiveSqlExecutor delegate, BatchMemoryLimits limits) {
         super(delegate);
-        this.limits = Objects.requireNonNull(limits, "batch memory limits must not be null");
+        this.limits = limits;
     }
 
     static ReactiveSqlExecutor create(ReactiveSqlExecutor delegate, BatchMemoryLimits limits) {
+        Objects.requireNonNull(limits, "batch memory limits must not be null");
         ReactiveSqlExecutor safeDelegate = Objects.requireNonNull(
                 delegate, "reactive sql executor must not be null");
         safeDelegate = ForwardingReactiveSqlExecutor.withoutPolicy(
                 safeDelegate, BatchMemoryLimitedReactiveSqlExecutor.class, ignored -> {
                 });
+        if (limits.maxBufferSize() == Integer.MAX_VALUE && limits.maxBufferedBytes() == Long.MAX_VALUE) return safeDelegate;
         return ForwardingReactiveSqlExecutor.preservingScopedCapability(
                 safeDelegate, new BatchMemoryLimitedReactiveSqlExecutor(safeDelegate, limits));
     }

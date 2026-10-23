@@ -40,7 +40,7 @@ record RelationExistsTermHandler(String id,
                                  String relationKeyColumn,
                                  String relationValueColumn,
                                  boolean negated,
-                                 TermExtensionDescriptor extension) implements SqlTermHandler {
+                                 TermExtensionDescriptor extension) implements CorrelatedSqlTermHandler {
 
     @Override
     public ConditionValueShape shape() {
@@ -57,7 +57,7 @@ record RelationExistsTermHandler(String id,
      */
     public RelationExistsTermHandler {
         id = Names.key(id, "sql term id");
-        relationTable = SqlIdentifiers.requireIdentifier(relationTable, "relation table");
+        relationTable = SqlIdentifiers.requireIdentifier(relationTable);
         relationAlias = requireIdentifierPart(relationAlias);
         relationKeyColumn = requireIdentifierPart(relationKeyColumn);
         relationValueColumn = requireIdentifierPart(relationValueColumn);
@@ -137,6 +137,13 @@ record RelationExistsTermHandler(String id,
         return render(term, context, context.identifier(term.field()), null);
     }
 
+    @Override
+    public SqlFragment render(TermCondition term, SqlRenderContext context,
+                              java.util.function.UnaryOperator<String> outerFields,
+                              java.util.function.UnaryOperator<String> outerQualifiers) {
+        return render(term, context, outerFields.apply(term.field()), outerQualifiers.apply(term.field()));
+    }
+
     SqlFragment render(TermCondition term, SqlRenderContext context,
                        String outerField, String outerQualifier) {
         TermCondition safeTerm = Objects.requireNonNull(term, "term condition must not be null");
@@ -191,7 +198,7 @@ record RelationExistsTermHandler(String id,
     }
 
     private static String requireIdentifierPart(String value) {
-        String identifier = SqlIdentifiers.requireIdentifier(value, "relation identifier");
+        String identifier = SqlIdentifiers.requireIdentifier(value);
         if (identifier.indexOf('.') >= 0) {
             throw new IllegalArgumentException("relation alias and columns must be single identifiers");
         }

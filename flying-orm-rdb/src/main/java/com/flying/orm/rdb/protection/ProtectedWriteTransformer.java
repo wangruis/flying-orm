@@ -12,6 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.function.Consumer;
 
 /**
  * 把一行逻辑写入值转换为密文和声明过的盲索引列。
@@ -28,15 +29,6 @@ final class ProtectedWriteTransformer {
     ProtectedWriteTransformer(ProtectedFieldCipher cipher, ProtectedSearchTokenService tokens) {
         this.cipher = Objects.requireNonNull(cipher, "protected field cipher must not be null");
         this.tokens = Objects.requireNonNull(tokens, "protected search token service must not be null");
-    }
-
-    /** 转换单行，保留调用方字段顺序并把每个隐藏列紧邻其业务列。 */
-    ProtectedFieldRuntime.PreparedWrite prepare(DynamicForm form,
-                                                 DynamicForm physicalForm,
-                                                 Map<String, Object> values,
-                                                 DataScope scope,
-                                                 ValueCodecRegistry codecs) {
-        return plan(form, physicalForm, scope, codecs).prepare(values);
     }
 
     Plan plan(DynamicForm form,
@@ -76,26 +68,36 @@ final class ProtectedWriteTransformer {
             this.fields = fields;
         }
 
-        ProtectedFieldRuntime.PreparedWrite prepare(Map<String, Object> values) {
+        ProtectedFieldRuntime.PreparedWrite prepare(
+                Map<String, Object> values, Consumer<ProtectedFieldRuntime.ContainsFieldTokens> contains) {
             Map<String, Object> safeValues = Objects.requireNonNull(
                     values, "dynamic form values must not be null");
             Map<String, Object> protectedValues = new LinkedHashMap<>();
             for (Map.Entry<String, Object> entry : safeValues.entrySet()) {
                 DynamicField field = form.field(entry.getKey());
+                if (protectedValues.containsKey(field.name())) {
+                    throw new IllegalArgumentException("duplicate normalized protected write field");
+                }
                 FieldPlan fieldPlan = fields.get(field.name());
                 if (fieldPlan == null) {
                     protectedValues.put(
-                            field.name(), PreparedWriteValues.snapshotValue(field, entry.getValue()));
+                            field.name(), ProtectedFieldRuntime.PreparedWrite.snapshotValue(field, entry.getValue()));
                     continue;
                 }
                 Object value = entry.getValue();
                 if (value == null) {
                     protectedValues.put(field.name(), null);
                     fieldPlan.addNullTokens(protectedValues);
+                    if (contains != null && fieldPlan.containsFieldTag() != null) {
+                        contains.accept(containsTokens(field.name(), fieldPlan, null));
+                    }
                     continue;
                 }
                 String text = ProtectedFieldValues.encodedText(codecs, value);
                 protectedValues.put(field.name(), cipher.encrypt(text, fieldPlan.context()));
+                if (contains != null && fieldPlan.containsFieldTag() != null) {
+                    contains.accept(containsTokens(field.name(), fieldPlan, text));
+                }
                 if (fieldPlan.exactColumn() != null) {
                     protectedValues.put(fieldPlan.exactColumn(), tokens.currentExactToken(
                             text, fieldPlan.definition(), fieldPlan.context(), field.unique()));
@@ -120,27 +122,18 @@ final class ProtectedWriteTransformer {
                 if (fieldPlan == null || fieldPlan.containsFieldTag() == null) {
                     continue;
                 }
-                if (entry.getValue() == null) {
-                    result.add(new ProtectedFieldRuntime.ContainsFieldTokens(
-                            field.name(), fieldPlan.containsFieldTag(), List.of()));
-                    continue;
-                }
-                String text = ProtectedFieldValues.encodedText(codecs, entry.getValue());
-                result.add(new ProtectedFieldRuntime.ContainsFieldTokens(
-                        field.name(),
-                        fieldPlan.containsFieldTag(),
-                        tokens.currentContainsTokens(text, fieldPlan.definition(), fieldPlan.context())));
+                String text = entry.getValue() == null ? null
+                        : ProtectedFieldValues.encodedText(codecs, entry.getValue());
+                result.add(containsTokens(field.name(), fieldPlan, text));
             }
             return List.copyOf(result);
         }
-    }
 
-    /** 为本行已声明 CONTAINS 的非空字段生成独立令牌快照。 */
-    List<ProtectedFieldRuntime.ContainsFieldTokens> containsTokens(DynamicForm form,
-                                                                   Map<String, Object> values,
-                                                                   DataScope scope,
-                                                                   ValueCodecRegistry codecs) {
-        return plan(form, ProtectedFormLayout.physical(form), scope, codecs).containsTokens(values);
+        private ProtectedFieldRuntime.ContainsFieldTokens containsTokens(
+                String name, FieldPlan field, String text) {
+            return new ProtectedFieldRuntime.ContainsFieldTokens(name, field.containsFieldTag(), text == null
+                    ? List.of() : tokens.currentContainsTokens(text, field.definition(), field.context()));
+        }
     }
 
     private record FieldPlan(EncryptedFieldDefinition definition,

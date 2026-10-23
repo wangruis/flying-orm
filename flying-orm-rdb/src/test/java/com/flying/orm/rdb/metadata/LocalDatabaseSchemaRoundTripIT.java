@@ -5,7 +5,6 @@ import com.flying.orm.rdb.execution.ConnectionAccessTestSupport;
 import com.flying.orm.core.annotation.IdType;
 import com.flying.orm.core.annotation.TableCheck;
 import com.flying.orm.core.annotation.TableColumn;
-import com.flying.orm.core.annotation.TableComment;
 import com.flying.orm.core.annotation.TableForeignKey;
 import com.flying.orm.core.annotation.TableId;
 import com.flying.orm.core.annotation.TableIndex;
@@ -14,6 +13,7 @@ import com.flying.orm.core.annotation.TableName;
 import com.flying.orm.core.annotation.TablePrimaryKey;
 import com.flying.orm.core.annotation.TableUnique;
 import com.flying.orm.core.metadata.ReferentialAction;
+import com.flying.orm.core.metadata.ColumnDefault;
 import com.flying.orm.core.metadata.RelationalTableDefinition;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
 import com.flying.orm.rdb.dialect.DatabaseDescriptor;
@@ -21,14 +21,13 @@ import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.jdbc.JdbcSqlExecutor;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
 import com.flying.orm.rdb.mapping.EntitySchemaDescriptor;
-import com.flying.orm.rdb.schema.EntityRelationalSchemaSyncReport;
+import com.flying.orm.rdb.schema.EntitySchemaSyncReport;
 import com.flying.orm.rdb.schema.EntitySchemaSyncMode;
 import com.flying.orm.rdb.schema.EntitySchemaSynchronizer;
 import com.flying.orm.rdb.schema.JdbcSchemaClient;
 import com.flying.orm.rdb.schema.RelationalSchemaSqlRenderer;
-import com.flying.orm.rdb.schema.ReviewedSchemaPlan;
+import com.flying.orm.rdb.schema.SchemaMigrationPlan;
 import com.flying.orm.rdb.schema.SchemaCompatibilityMode;
-import com.flying.orm.rdb.schema.SchemaMigrationApproval;
 import com.flying.orm.rdb.schema.SchemaSnapshot;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
@@ -55,6 +54,7 @@ import java.util.UUID;
 import java.util.logging.Logger;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -72,7 +72,7 @@ class LocalDatabaseSchemaRoundTripIT {
     }
 
     @Test
-    void postgresqlRejectsDatabaseFactsOutsideTheClosedEntityModel() throws Exception {
+    void postgresqlPreservesNativeDefaultsAndRejectsUnsupportedFacts() throws Exception {
         Properties configuration = configuration();
         String url = required(configuration, "postgresql.url");
         String user = required(configuration, "postgresql.user");
@@ -95,7 +95,9 @@ class LocalDatabaseSchemaRoundTripIT {
             JdbcSqlExecutor executor = JdbcSqlExecutor.create(ConnectionAccessTestSupport.jdbc(scoped), RdbDialect.postgresql());
             JdbcFormMetadataReader reader = JdbcFormMetadataReaders.create(executor, RdbDialect.postgresql());
 
-            assertThrows(IllegalStateException.class, () -> reader.readSnapshot("fo32_rt_bad_default"));
+            assertEquals(ColumnDefault.nativeExpression("'x'::text || 'y'::text"),
+                    reader.readSnapshot("fo32_rt_bad_default").completeTable().orElseThrow()
+                            .columns().getFirst().defaultValue());
             assertThrows(IllegalStateException.class, () -> reader.readSnapshot("fo32_rt_bad_sequence"));
             assertThrows(IllegalStateException.class, () -> reader.readSnapshot("fo32_rt_bad_unique"));
         } finally {
@@ -202,7 +204,7 @@ class LocalDatabaseSchemaRoundTripIT {
             for (RelationalTableDefinition table : desired) {
                 SchemaSnapshot actual = reader.readSnapshot(table.identity().table());
                 assertTrue(actual.completeTable().isPresent(), table.identity().table());
-                ReviewedSchemaPlan exact = schemaClient.reviewRelational(
+                SchemaMigrationPlan exact = schemaClient.reviewRelational(
                         descriptor, table, reader, SchemaCompatibilityMode.EXACT);
                 assertTrue(exact.steps().isEmpty(), table.identity().table());
             }
@@ -228,59 +230,34 @@ class LocalDatabaseSchemaRoundTripIT {
             DatabaseDescriptor database,
             RdbDialect dialect,
             List<Class<?>> entityTypes) {
-        Map<String, SchemaMigrationApproval> approvals = new LinkedHashMap<>();
         List<String> reviewedSql = new ArrayList<>();
         for (Class<?> entityType : entityTypes) {
             RelationalTableDefinition desired = entityTable(entityType);
-            ReviewedSchemaPlan plan = schemaClient.reviewRelational(
+            SchemaMigrationPlan plan = schemaClient.reviewRelational(
                     database, desired, reader, SchemaCompatibilityMode.EXACT);
-            for (var step : plan.steps()) {
-                if (!step.executable()) {
-                    try {
-                        RelationalSchemaSqlRenderer.create(dialect.schema()).render(step.operation());
-                    } catch (UnsupportedOperationException unsupported) {
-                        throw new AssertionError("manual schema step " + step.operation().kind() + "/"
-                                + step.operation().objectName() + ": " + unsupported.getMessage(), unsupported);
-                    }
-                }
-            }
-            assertTrue(!plan.requiresManualAction(), () -> "manual schema steps: "
-                    + plan.steps().stream()
-                            .filter(step -> !step.executable())
-                            .map(step -> step.operation().kind() + "/" + step.operation().objectName())
-                            .toList());
-            plan.steps().forEach(step -> step.request().ifPresent(
-                    request -> reviewedSql.add(desired.identity().table() + ": " + request.sql())));
-            approvals.put(desired.identity().table(),
-                          SchemaMigrationApproval.approve(plan, "local real-database certification"));
+            plan.requests().forEach(request -> reviewedSql.add(desired.identity().table() + ": " + request.sql()));
         }
-        EntityRelationalSchemaSyncReport updated = synchronizer.synchronizeRelational(
-                database, EntitySchemaSyncMode.FULL_UPDATE, approvals, entityTypes);
+        EntitySchemaSyncReport updated = synchronizer.synchronize(
+                database, EntitySchemaSyncMode.FULL_UPDATE, entityTypes);
         if (!updated.successful()) {
             for (Class<?> entityType : entityTypes) {
                 reader.readSnapshot(entityTable(entityType).identity().table());
             }
         }
         assertTrue(updated.successful(), () -> executionEvidence(updated) + "; reviewedSql=" + reviewedSql);
-        EntityRelationalSchemaSyncReport validated = synchronizer.synchronizeRelational(
+        EntitySchemaSyncReport validated = synchronizer.synchronize(
                 database, EntitySchemaSyncMode.VALIDATE, entityTypes);
         assertTrue(validated.successful(), () -> executionEvidence(validated));
     }
 
-    private static String executionEvidence(EntityRelationalSchemaSyncReport report) {
+    private static String executionEvidence(EntitySchemaSyncReport report) {
         StringBuilder evidence = new StringBuilder("mode=").append(report.mode());
         for (int resultIndex = 0; resultIndex < report.results().size(); resultIndex++) {
             var result = report.results().get(resultIndex);
-            evidence.append("; result[").append(resultIndex).append("]=").append(result.status());
+            evidence.append("; result[").append(resultIndex).append("] rows=").append(result.rowsUpdated());
             for (var step : result.steps()) {
-                evidence.append(" step[").append(step.order()).append("]=").append(step.status());
-                step.failureSummary().ifPresent(summary -> evidence.append('(').append(summary).append(')'));
+                evidence.append(" step[").append(step.stepIndex()).append("] rows=").append(step.rowsUpdated());
             }
-            result.verification().ifPresent(verification -> evidence.append(" verification=")
-                    .append(verification.status()).append(':')
-                    .append(verification.operations().stream()
-                            .map(operation -> operation.kind() + "/" + operation.objectName())
-                            .toList()));
         }
         return evidence.toString();
     }
@@ -463,8 +440,7 @@ class LocalDatabaseSchemaRoundTripIT {
         }
     }
 
-    @TableName("fo32_rt_customers")
-    @TableComment("往返认证客户表")
+    @TableName(value = "fo32_rt_customers", comment = "往返认证客户表")
     @TablePrimaryKey(name = "pk_fo32_rt_customers", properties = "id")
     @TableUnique(id = "customer-code", name = "uk_fo32_rt_customers_code", properties = "code")
     @TableIndex(id = "customer-created", name = "ix_fo32_rt_customers_created",
@@ -484,8 +460,7 @@ class LocalDatabaseSchemaRoundTripIT {
         private LocalDateTime createdAt;
     }
 
-    @TableName("fo32_rt_orders")
-    @TableComment("往返认证订单表")
+    @TableName(value = "fo32_rt_orders", comment = "往返认证订单表")
     @TablePrimaryKey(name = "pk_fo32_rt_orders", properties = "id")
     @TableForeignKey(id = "order-customer", name = "fk_fo32_rt_orders_customer",
             localProperties = "customerId", targetEntity = RoundTripCustomer.class,
@@ -506,8 +481,7 @@ class LocalDatabaseSchemaRoundTripIT {
         private BigDecimal amount;
     }
 
-    @TableName("fo32_rt_evolution")
-    @TableComment("往返认证演进表")
+    @TableName(value = "fo32_rt_evolution", comment = "往返认证演进表")
     @TablePrimaryKey(name = "pk_fo32_rt_evolution", properties = "id")
     private static final class RoundTripEvolutionV1 {
 
@@ -519,8 +493,7 @@ class LocalDatabaseSchemaRoundTripIT {
         private String name;
     }
 
-    @TableName("fo32_rt_evolution")
-    @TableComment("往返认证演进表")
+    @TableName(value = "fo32_rt_evolution", comment = "往返认证演进表")
     @TablePrimaryKey(name = "pk_fo32_rt_evolution", properties = "id")
     @TableIndex(id = "evolution-status", name = "ix_fo32_rt_evolution_status",
             columns = @TableIndexColumn(property = "status"))

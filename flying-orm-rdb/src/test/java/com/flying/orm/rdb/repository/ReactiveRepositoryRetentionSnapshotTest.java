@@ -8,7 +8,7 @@ import com.flying.orm.rdb.batch.BatchMemoryLimitExceededException;
 import com.flying.orm.rdb.batch.BatchWriteOptions;
 import com.flying.orm.rdb.batch.BatchExecutionEvidence;
 import com.flying.orm.rdb.cache.CacheRegionPolicy;
-import com.flying.orm.rdb.form.BatchOptimisticUpdate;
+import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.rdb.lifecycle.EntityLifecyclePhase;
 import com.flying.orm.rdb.lifecycle.ReactiveEntityListener;
 import com.flying.orm.rdb.mapping.EntityModelRegistry;
@@ -20,6 +20,8 @@ import java.time.Duration;
 import java.sql.Timestamp;
 import java.nio.ByteBuffer;
 import java.util.List;
+import java.util.function.Consumer;
+import com.flying.orm.rdb.form.ReactiveFormClient;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -30,48 +32,34 @@ class ReactiveRepositoryRetentionSnapshotTest {
     private static final Duration TIMEOUT = Duration.ofSeconds(3);
 
     @Test
-    void aggregateUpdateEstimatesOwnedValuesWithoutCopyingThem() {
-        verifyNoEstimateCopy(false);
-    }
-
-
-    private static void verifyNoEstimateCopy(boolean chunks) {
-        {
+    void updateEstimatesOwnedValuesWithoutAdditionalCopies() {
+        for (int size : new int[]{4096, 1_048_576}) {
+            int untrackedCopies = -1;
             for (boolean tracked : new boolean[]{false, true}) {
-                for (int size : new int[]{4096, 1_048_576}) {
-                    try (EntityModelRegistry models = models()) {
-                        AtomicInteger postUpdates = new AtomicInteger();
-                        var coordinator = coordinator(models, PayloadEntity.class, tracked, postUpdates);
-                        PayloadEntity entity = new PayloadEntity(size);
-                        AtomicInteger mapperClones = new AtomicInteger();
-                        AtomicInteger writerClones = new AtomicInteger();
-                        CountedTimestamp.COPIES.set(0);
-                        var options = options(4_194_304L);
-                        java.util.function.Function<PayloadEntity, BatchOptimisticUpdate> mapper = item -> {
-                            BatchOptimisticUpdate row = coordinator.optimisticUpdate(item);
-                            mapperClones.set(CountedTimestamp.COPIES.get());
-                            return row;
-                        };
-                        java.util.function.Consumer<BatchOptimisticUpdate> received = row -> {
-                            writerClones.set(CountedTimestamp.COPIES.get());
-                            byte[] exported = (byte[]) row.values().get("payload");
-                            exported[0] = 99;
-                            assertEquals(41, ((byte[]) row.values().get("payload"))[0]);
-                            assertEquals(41, entity.payload[0]);
-                        };
-                        BatchExecutionEvidence result = coordinator.write(Flux.just(entity), mapper,
-                                EntityLifecyclePhase.PRE_UPDATE, EntityLifecyclePhase.POST_UPDATE,
-                                options, false, (rows, completion, keys) -> Flux.from(rows)
-                                        .doOnNext(received)
-                                        .then(Mono.defer(() -> completion == null ? Mono.empty() : Mono.from(completion.apply(0L))))
-                                        .thenReturn(BatchEvidenceFixtures.successful(1)))
-                                .block(TIMEOUT);
-                        assertNotNull(result);
-                        assertEquals(com.flying.orm.rdb.batch.BatchExecutionState.SUCCESS, result.state());
-                        assertEquals(1, mapperClones.get());
-                        assertEquals(mapperClones.get(), writerClones.get(), "retention estimation must not clone values");
-                        assertEquals(tracked ? 1 : 0, postUpdates.get());
-                    }
+                try (EntityModelRegistry models = models()) {
+                    AtomicInteger postUpdates = new AtomicInteger();
+                    PayloadEntity entity = new PayloadEntity(size);
+                    AtomicInteger copiesAtExecution = new AtomicInteger();
+                    ReactiveRepositoryBatchCoordinator<PayloadEntity> coordinator = coordinator(
+                            models, PayloadEntity.class, tracked, postUpdates, row -> {
+                                copiesAtExecution.set(CountedTimestamp.COPIES.get());
+                                byte[] payload = (byte[]) java.util.Arrays.stream(row)
+                                        .filter(byte[].class::isInstance).findFirst().orElseThrow();
+                                assertEquals(41, payload[0]);
+                                payload[0] = 99;
+                                assertEquals(41, entity.payload[0], "bound row must not alias the entity");
+                            });
+                    CountedTimestamp.COPIES.set(0);
+                    BatchExecutionEvidence result = coordinator.write(Flux.just(entity), options(4_194_304L),
+                            DataScope.none(), RepositoryBatchKind.UPDATE, null).block(TIMEOUT);
+                    assertNotNull(result);
+                    assertEquals(com.flying.orm.rdb.batch.BatchExecutionState.SUCCESS, result.state());
+                    org.junit.jupiter.api.Assertions.assertTrue(copiesAtExecution.get() > 0,
+                            "mutable values must be snapshotted before execution");
+                    if (!tracked) untrackedCopies = copiesAtExecution.get();
+                    else assertEquals(untrackedCopies, copiesAtExecution.get(),
+                            "retaining and estimating the entity must not add snapshot copies");
+                    assertEquals(tracked ? 1 : 0, postUpdates.get());
                 }
             }
         }
@@ -83,13 +71,8 @@ class ReactiveRepositoryRetentionSnapshotTest {
             AtomicInteger postUpdates = new AtomicInteger();
             var coordinator = coordinator(models, PayloadEntity.class, true, postUpdates);
             BatchMemoryLimitExceededException error = assertThrows(BatchMemoryLimitExceededException.class,
-                    () -> coordinator.write(Flux.just(new PayloadEntity(4096)), coordinator::optimisticUpdate,
-                            EntityLifecyclePhase.PRE_UPDATE, EntityLifecyclePhase.POST_UPDATE,
-                            options(6000), false,
-                            (rows, completion, keys) -> Flux.from(rows)
-                                    .then(Mono.defer(() -> completion == null ? Mono.empty() : Mono.from(completion.apply(0L))))
-                                    .thenReturn(BatchEvidenceFixtures.successful(1)))
-                            .block(TIMEOUT));
+                    () -> coordinator.write(Flux.just(new PayloadEntity(4096)), options(6000),
+                            DataScope.none(), RepositoryBatchKind.UPDATE, null).block(TIMEOUT));
             assertEquals("combinedRetainedBytes", error.limitName());
             assertEquals(0, postUpdates.get());
         }
@@ -100,13 +83,8 @@ class ReactiveRepositoryRetentionSnapshotTest {
         try (EntityModelRegistry models = models()) {
             var coordinator = coordinator(models, ChangingPayloadEntity.class, true, new AtomicInteger());
             BatchMemoryLimitExceededException error = assertThrows(BatchMemoryLimitExceededException.class,
-                    () -> coordinator.write(Flux.just(new ChangingPayloadEntity()), coordinator::optimisticUpdate,
-                            EntityLifecyclePhase.PRE_UPDATE, EntityLifecyclePhase.POST_UPDATE,
-                            options(4096), false,
-                            (rows, completion, keys) -> Flux.from(rows)
-                                    .then(Mono.defer(() -> completion == null ? Mono.empty() : Mono.from(completion.apply(0L))))
-                                    .thenReturn(BatchEvidenceFixtures.successful(1)))
-                            .block(TIMEOUT));
+                    () -> coordinator.write(Flux.just(new ChangingPayloadEntity()), options(4096),
+                            DataScope.none(), RepositoryBatchKind.UPDATE, null).block(TIMEOUT));
             assertEquals("combinedRetainedBytes", error.limitName());
         }
     }
@@ -116,13 +94,8 @@ class ReactiveRepositoryRetentionSnapshotTest {
         try (EntityModelRegistry models = models()) {
             AtomicInteger postUpdates = new AtomicInteger();
             var coordinator = coordinator(models, SharedPayloadEntity.class, true, postUpdates);
-            BatchExecutionEvidence result = coordinator.write(Flux.just(new SharedPayloadEntity()), coordinator::optimisticUpdate,
-                    EntityLifecyclePhase.PRE_UPDATE, EntityLifecyclePhase.POST_UPDATE,
-                    options(1600), false,
-                    (rows, completion, keys) -> Flux.from(rows)
-                            .then(Mono.defer(() -> completion == null ? Mono.empty() : Mono.from(completion.apply(0L))))
-                                    .thenReturn(BatchEvidenceFixtures.successful(1)))
-                    .block(TIMEOUT);
+            BatchExecutionEvidence result = coordinator.write(Flux.just(new SharedPayloadEntity()), options(1600),
+                    DataScope.none(), RepositoryBatchKind.UPDATE, null).block(TIMEOUT);
             assertNotNull(result);
             assertEquals(com.flying.orm.rdb.batch.BatchExecutionState.SUCCESS, result.state());
             assertEquals(1, postUpdates.get());
@@ -134,27 +107,38 @@ class ReactiveRepositoryRetentionSnapshotTest {
         try (EntityModelRegistry models = models()) {
             var coordinator = coordinator(models, BufferEntity.class, true, new AtomicInteger());
             BatchMemoryLimitExceededException error = assertThrows(BatchMemoryLimitExceededException.class,
-                    () -> coordinator.write(Flux.just(new BufferEntity()), coordinator::optimisticUpdate,
-                            EntityLifecyclePhase.PRE_UPDATE, EntityLifecyclePhase.POST_UPDATE,
-                            options(6000), false,
-                            (rows, completion, keys) -> Flux.from(rows)
-                                    .then(Mono.defer(() -> completion == null ? Mono.empty() : Mono.from(completion.apply(0L))))
-                                    .thenReturn(BatchEvidenceFixtures.successful(1)))
-                            .block(TIMEOUT));
-            assertEquals("lifecycleRetainedBytes", error.limitName());
+                    () -> coordinator.write(Flux.just(new BufferEntity()), options(6000),
+                            DataScope.none(), RepositoryBatchKind.UPDATE, null).block(TIMEOUT));
+            assertEquals("combinedRetainedBytes", error.limitName());
         }
     }
 
     private static <T> ReactiveRepositoryBatchCoordinator<T> coordinator(
             EntityModelRegistry models, Class<T> type, boolean tracked, AtomicInteger postUpdates) {
-        var metadata = models.metadata(type);
+        return coordinator(models, type, tracked, postUpdates, row -> { });
+    }
+
+    private static <T> ReactiveRepositoryBatchCoordinator<T> coordinator(
+            EntityModelRegistry models, Class<T> type, boolean tracked, AtomicInteger postUpdates,
+            Consumer<Object[]> received) {
+        com.flying.orm.rdb.mapping.EntityMetadata<T> metadata = models.metadata(type);
         ReactiveEntityListener<T> listener = tracked ? event -> {
             if (event.phase() == EntityLifecyclePhase.POST_UPDATE) postUpdates.incrementAndGet();
             return Mono.empty();
         } : null;
-        return new ReactiveRepositoryBatchCoordinator<>(metadata, models.entityValues(type),
-                new ReactiveRepositoryLifecycleSupport<>(metadata, listener),
-                RepositoryEntityIdSupport.create(metadata, models.idGenerator()));
+        ReactiveFormClient client = BatchEvidenceFixtures.batchFormClient((request, completed) ->
+                Flux.from(request.rows()).index().concatMap(indexed -> {
+                    received.accept(indexed.getT2());
+                    return completed == null ? Mono.empty() : Mono.from(completed.apply(indexed.getT1()));
+                }).then(Mono.fromSupplier(() -> BatchEvidenceFixtures.successful(1))),
+                com.flying.orm.core.codec.ValueCodecRegistry.standard().withFirst(new com.flying.orm.core.codec.ValueCodec() {
+                    public boolean supports(Class<?> type) { return type == CountedTimestamp.class; }
+                    public Object write(Object value) { return ((Timestamp) value).toLocalDateTime(); }
+                    public Object read(Object value, Class<?> type) { throw new UnsupportedOperationException(); }
+                }));
+        return new ReactiveRepositoryBatchCoordinator<>(client, metadata.toDynamicForm(),
+                metadata, models.entityValues(type), new EntityLifecycleDispatcher<>(metadata, listener),
+                RepositoryEntityIdSupport.create(metadata, models));
     }
 
     private static EntityModelRegistry models() {
@@ -185,7 +169,7 @@ class ReactiveRepositoryRetentionSnapshotTest {
         private int reads;
 
         public byte[] getPayload() {
-            return ++reads == 2 ? new byte[8192] : payload;
+            return ++reads == 1 ? new byte[8192] : payload;
         }
     }
 

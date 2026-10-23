@@ -1,21 +1,24 @@
 package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.condition.StructuredConditionErrorCode;
+import com.flying.orm.core.condition.ConditionGroup;
 import com.flying.orm.core.condition.StructuredConditionException;
 import com.flying.orm.core.condition.StructuredConditionInput;
 import com.flying.orm.core.condition.StructuredConditionPolicy;
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
 import com.flying.orm.core.form.TenantStrategy;
-import com.flying.orm.core.page.CursorPageQuery;
-import com.flying.orm.core.page.CursorSort;
+import com.flying.orm.core.page.KeysetPageQuery;
+import com.flying.orm.core.page.KeysetSort;
 import com.flying.orm.core.page.PageQuery;
+import com.flying.orm.core.page.PageSort;
 import com.flying.orm.core.scope.DataScope;
 import com.flying.orm.core.scope.FieldScope;
 import com.flying.orm.core.sql.render.SqlRenderer;
 import com.flying.orm.core.sql.render.SqlRequest;
 import com.flying.orm.rdb.dialect.RdbDialect;
 import com.flying.orm.rdb.form.spec.QuerySpec;
+import com.flying.orm.rdb.execution.SqlExecutionOptions;
 import com.flying.orm.rdb.reactive.ReactiveSqlExecutor;
 import com.flying.orm.rdb.sync.SyncBatchExecutor;
 import com.flying.orm.rdb.sync.SyncSqlExecutor;
@@ -123,6 +126,42 @@ class FormStructuredPolicyScopeTest {
                 .withStructuredPolicy(policy).withScope(DataScope.none().withFields(fields));
     }
 
+    @Test
+    void frontendProjectionSortAndPageRetainBusinessAndScopeConditions() {
+        String inputValue = "alpha' or 1=1 --";
+        QuerySpec query = QuerySpec.structured(FORM, StructuredConditionInput.or(
+                        StructuredConditionInput.term("a", "=", inputValue),
+                        StructuredConditionInput.term("b", "=", "beta")))
+                .withWhere(ConditionGroup.and().where("a", "!=", "blocked").build())
+                .withScope(DataScope.where(ConditionGroup.and().where("b", "!=", "hidden").build()))
+                .withProjection(List.of("a", "b"), List.of())
+                .withExcludedFields(List.of("b"));
+        FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
+                SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql());
+        FormOperationPlanner planner = new FormOperationPlanner(renderer,
+                new FormScopeSupport(renderer, StructuredConditionResolver.defaults(), DataScope.none()),
+                SqlExecutionOptions.unlimited());
+
+        for (boolean explicitSort : List.of(false, true)) {
+            QuerySpec selected = explicitSort ? query.withSorts(List.of(PageSort.asc("a"))) : query;
+            FormReadPlanner.PlannedQuery plan = planner.reads.page(selected, PageQuery.of(2, 7, PageSort.desc("b")));
+            SqlRequest count = plan.countRequest();
+            SqlRequest data = plan.request();
+            assertEquals(List.of("a"), plan.outputFields());
+            assertEquals(explicitSort ? List.of(PageSort.asc("a")) : List.of(PageSort.desc("b")), plan.page().sorts());
+            assertTrue(data.sql().startsWith("select \"a\" from"), data.sql());
+            assertTrue(count.sql().contains(" and (\"a\" = ? or \"b\" = ?) and "), count.sql());
+            assertEquals(count.sql().substring(count.sql().indexOf(" where ")),
+                    data.sql().substring(data.sql().indexOf(" where "), data.sql().indexOf(" order by ")));
+            assertTrue(data.sql().contains(explicitSort ? "order by \"a\" asc" : "order by \"b\" desc"), data.sql());
+            assertTrue(!count.sql().contains("order by") && !count.sql().contains("limit"), count.sql());
+            assertTrue(!data.sql().contains(inputValue), "frontend text must only be bound");
+            assertEquals(count.parameters(), data.parameters().subList(0, count.parameters().size()));
+            assertEquals(List.of("blocked", inputValue, "beta", "hidden"), count.parameters());
+            assertEquals(List.of(7, 7L), data.parameters().subList(count.parameters().size(), data.parameters().size()));
+        }
+    }
+
     private static void assertBothRejected(QuerySpec query) {
         Clients clients = new Clients();
         assertRejected(() -> clients.sync.select(query));
@@ -145,10 +184,10 @@ class FormStructuredPolicyScopeTest {
                 case REACTIVE_SELECT -> clients.reactive.select(query).collectList().block();
                 case SYNC_PAGE_TYPED -> clients.sync.page(query, PageQuery.of(1, 10), Result.class);
                 case REACTIVE_PAGE_TYPED -> clients.reactive.page(query, PageQuery.of(1, 10), Result.class).block();
-                case SYNC_CURSOR_TYPED -> clients.sync.cursorPage(
-                        query, CursorPageQuery.first(10, CursorSort.asc("a")), Result.class);
-                case REACTIVE_CURSOR_TYPED -> clients.reactive.cursorPage(
-                        query, CursorPageQuery.first(10, CursorSort.asc("a")), Result.class).block();
+                case SYNC_CURSOR_TYPED -> clients.sync.keysetPage(
+                        query, KeysetPageQuery.first(10, KeysetSort.asc("a", com.flying.orm.core.page.NullOrder.LAST)), Result.class);
+                case REACTIVE_CURSOR_TYPED -> clients.reactive.keysetPage(
+                        query, KeysetPageQuery.first(10, KeysetSort.asc("a", com.flying.orm.core.page.NullOrder.LAST)), Result.class).block();
             }
         }
     }
@@ -163,7 +202,7 @@ class FormStructuredPolicyScopeTest {
         private Clients() {
             FormDataSqlRenderer renderer = FormDataSqlRenderer.create(
                     SqlRenderer.builder().addDefaultTerms().build(), RdbDialect.postgresql());
-            sync = SyncFormClient.create(executor(SyncSqlExecutor.class), executor(SyncBatchExecutor.class), renderer);
+            sync = SyncFormClient.create(executor(com.flying.orm.rdb.support.ListQueryFixture.class), executor(SyncBatchExecutor.class), renderer);
             reactive = ReactiveFormClient.create(executor(ReactiveSqlExecutor.class), renderer);
         }
 

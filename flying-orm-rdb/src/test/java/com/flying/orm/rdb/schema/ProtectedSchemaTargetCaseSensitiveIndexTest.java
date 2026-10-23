@@ -2,7 +2,7 @@ package com.flying.orm.rdb.schema;
 
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
-import com.flying.orm.core.metadata.IndexMetadata;
+import com.flying.orm.core.metadata.IndexDefinition;
 import com.flying.orm.core.protection.EncryptedFieldDefinition;
 import org.junit.jupiter.api.Test;
 
@@ -20,13 +20,13 @@ class ProtectedSchemaTargetCaseSensitiveIndexTest {
                                       .addField(DynamicField.of("secret", "VARCHAR"))
                                       .encrypted("secret", EncryptedFieldDefinition.builder().build())
                                       .build();
-        List<IndexMetadata> indexes = List.of(
-                IndexMetadata.builder("CustomerLookup").addColumn("first_value").build(),
-                IndexMetadata.builder("customerlookup").addColumn("second_value").build());
+        List<IndexDefinition> indexes = List.of(
+                IndexDefinition.builder("CustomerLookup").addColumn("first_value").build(),
+                IndexDefinition.builder("customerlookup").addColumn("second_value").build());
 
         ProtectedSchemaTarget target = ProtectedSchemaTarget.resolve(form, indexes, List.of());
 
         assertEquals(List.of("CustomerLookup", "customerlookup"),
-                     target.indexes().stream().map(IndexMetadata::name).toList());
+                     target.indexes().stream().map(IndexDefinition::name).toList());
     }
 }

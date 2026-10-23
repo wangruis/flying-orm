@@ -54,12 +54,6 @@ public enum StructuredConditionErrorCode {
     /** 区间条件没有且只有两个边界值。 */
     VALUE_RANGE_SIZE_INVALID,
 
-    /** 区间的两个边界无法转换成同一种字段类型。 */
-    VALUE_RANGE_TYPE_MISMATCH,
-
-    /** 区间起始值大于结束值。 */
-    VALUE_RANGE_ORDER_INVALID,
-
     /** 输入值的 Java 形态与字段或操作符要求不一致。 */
     VALUE_TYPE_MISMATCH,
 

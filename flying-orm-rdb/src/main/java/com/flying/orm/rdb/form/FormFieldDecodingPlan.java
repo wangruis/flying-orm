@@ -2,13 +2,14 @@ package com.flying.orm.rdb.form;
 
 import com.flying.orm.core.form.DynamicField;
 import com.flying.orm.core.form.DynamicForm;
+import com.flying.orm.core.expression.ValueExpression;
+import com.flying.orm.core.field.FieldIdentity;
 import com.flying.orm.core.join.JoinProjection;
-import com.flying.orm.core.join.JoinQuerySpec;
 import com.flying.orm.core.type.LogicalType;
 import com.flying.orm.rdb.codec.ArrayValueCodec;
 import com.flying.orm.rdb.codec.LargeObjectValueCodec;
-import com.flying.orm.rdb.codec.OffsetTimeValueCodec;
 import com.flying.orm.rdb.mapping.EntityTypeMappingRegistry;
+import com.flying.orm.rdb.form.spec.QuerySpec;
 
 import java.util.HashMap;
 import java.util.List;
@@ -55,18 +56,48 @@ final class FormFieldDecodingPlan {
         return fields.isEmpty();
     }
 
+    /** 直接字段别名保留来源 codec；真正计算结果按表达式声明的结果类型解码。 */
+    static FormFieldDecodingPlan queryProjection(QuerySpec spec, DynamicForm resultForm,
+                                                  FormDataSqlRenderer renderer) {
+        return queryProjection(spec, resultForm, renderer, spec.projections());
+    }
+
+    static FormFieldDecodingPlan queryProjection(QuerySpec spec, DynamicForm resultForm,
+                                                  FormDataSqlRenderer renderer, List<String> fields) {
+        Map<String, Decoding> projected = new HashMap<>();
+        boolean projectedAsync = false;
+        boolean projectedProtectionCpu = false;
+        for (String name : fields) {
+            ValueExpression expression = spec.expressions().get(FieldIdentity.of(name).key());
+            DynamicField resultField = resultForm.field(name);
+            Decoding decoding = expression instanceof ValueExpression.Field source
+                    ? decoding(spec.form(), renderer, spec.form().field(source.identity().name()))
+                    : decoding(resultForm, renderer, resultField);
+            if (decoding != null) {
+                projected.put(resultField.normalizedName(), decoding);
+                projectedAsync |= decoding.kind().requiresAsync();
+                projectedProtectionCpu |= decoding.kind() == Kind.ENCRYPTED;
+            }
+        }
+        return projected.isEmpty() ? EMPTY
+                : new FormFieldDecodingPlan(projected, projectedAsync, projectedProtectionCpu);
+    }
+
     /** JOIN 别名只改变结果标签，解码规则仍归属于原始字段身份。 */
-    static FormFieldDecodingPlan joinProjection(JoinQuerySpec spec,
+    static FormFieldDecodingPlan joinProjection(List<JoinProjection> projections,
                                                  DynamicForm resultForm,
                                                  FormDataSqlRenderer renderer) {
         Map<DynamicForm, FormFieldDecodingPlan> sources = new HashMap<>();
         Map<String, Decoding> projected = new HashMap<>();
         boolean projectedAsync = false;
         boolean projectedProtectionCpu = false;
-        for (JoinProjection projection : spec.projections()) {
-            DynamicForm source = projection.field().source().form();
-            FormFieldDecodingPlan sourcePlan = sources.computeIfAbsent(source, renderer::resultDecodingPlan);
-            Decoding decoding = sourcePlan.decoding(source.field(projection.field().field()));
+        for (JoinProjection projection : projections) {
+            Decoding decoding;
+            if (projection.expression() == null) {
+                DynamicForm source = projection.field().source().form();
+                FormFieldDecodingPlan sourcePlan = sources.computeIfAbsent(source, renderer::resultDecodingPlan);
+                decoding = sourcePlan.decoding(source.field(projection.field().field()));
+            } else decoding = decoding(resultForm, renderer, resultForm.field(projection.alias()));
             if (decoding != null) {
                 projected.put(resultForm.field(projection.alias()).normalizedName(), decoding);
                 projectedAsync |= decoding.kind().requiresAsync();
@@ -137,9 +168,6 @@ final class FormFieldDecodingPlan {
         if (field.databaseType().logicalType() == LogicalType.VECTOR) {
             return Decoding.of(Kind.VECTOR);
         }
-        if (OffsetTimeValueCodec.isOffsetTimeDataType(field.databaseType())) {
-            return Decoding.of(Kind.OFFSET_TIME);
-        }
         FormScalarReadPlan scalar = renderer.scalarReadPlan(field);
         if (scalar != null) {
             return Decoding.scalar(scalar);
@@ -153,7 +181,6 @@ final class FormFieldDecodingPlan {
         JSON,
         ARRAY,
         VECTOR,
-        OFFSET_TIME,
         SCALAR,
         LARGE_OBJECT,
         CUSTOM,

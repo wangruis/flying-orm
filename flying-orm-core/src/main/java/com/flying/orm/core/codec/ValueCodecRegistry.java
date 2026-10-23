@@ -45,7 +45,7 @@ public final class ValueCodecRegistry {
                         .integer("DESCRIPTOR_COUNT", 0)
                         .finishHex());
 
-    private static final ValueCodecRegistry STANDARD = new ValueCodecRegistry(List.of(
+    private static final List<ValueCodec> STANDARD_CODECS = List.of(
             new EnumValueCodec(),
             new BooleanValueCodec(),
             new NumberValueCodec(),
@@ -54,11 +54,26 @@ public final class ValueCodecRegistry {
             new BinaryValueCodec(),
             new TextValueCodec(),
             new ArrayIdentityValueCodec(),
-            new IdentityValueCodec()));
+            new IdentityValueCodec());
+
+    /** 内建匹配规则只依赖类型；业务 codec 的 supports 仍在每次调用时按优先级执行。 */
+    private static final ClassValue<ValueCodec> STANDARD_LOOKUP = new ClassValue<>() {
+        @Override
+        protected ValueCodec computeValue(Class<?> type) {
+            for (ValueCodec codec : STANDARD_CODECS) {
+                if (codec.supports(type)) return codec;
+            }
+            return null;
+        }
+    };
+
+    private static final ValueCodecRegistry STANDARD = new ValueCodecRegistry(List.of(), List.of(), true);
 
     private final List<ValueCodec> codecs;
 
     private final List<DriverValueAdapter> driverAdapters;
+
+    private final boolean standardFallback;
 
     private final boolean hasDescriptors;
 
@@ -66,13 +81,16 @@ public final class ValueCodecRegistry {
 
     /** 创建按声明顺序匹配的只读 codec 注册表。 */
     public ValueCodecRegistry(List<ValueCodec> codecs) {
-        this(codecs, List.of());
+        this(codecs, List.of(), false);
     }
 
-    private ValueCodecRegistry(List<ValueCodec> codecs, List<DriverValueAdapter> driverAdapters) {
+    private ValueCodecRegistry(List<ValueCodec> codecs,
+                               List<DriverValueAdapter> driverAdapters,
+                               boolean standardFallback) {
         this.codecs = List.copyOf(Objects.requireNonNull(codecs, "value codecs must not be null"));
         this.driverAdapters = List.copyOf(Objects.requireNonNull(driverAdapters,
                                                                   "driver value adapters must not be null"));
+        this.standardFallback = standardFallback;
         DescriptorState descriptorState = descriptorState(this.codecs);
         this.hasDescriptors = descriptorState.present();
         this.descriptorFingerprint = descriptorState.fingerprint();
@@ -96,14 +114,15 @@ public final class ValueCodecRegistry {
     }
 
     /**
-     * 把业务 codec 放在最前面并返回新注册表。第一个匹配项生效，原注册表保持不变，可安全并发共享。
+     * 按参数顺序把业务 codec 放在最前面，一次生成新注册表。第一个匹配项生效，原注册表保持不变。
      */
-    public ValueCodecRegistry withFirst(ValueCodec codec) {
-        ValueCodec safeCodec = Objects.requireNonNull(codec, "value codec must not be null");
-        List<ValueCodec> combined = new ArrayList<>(codecs.size() + 1);
-        combined.add(safeCodec);
+    public ValueCodecRegistry withFirst(ValueCodec... additions) {
+        List<ValueCodec> first = List.of(additions);
+        if (first.isEmpty()) return this;
+        List<ValueCodec> combined = new ArrayList<>(codecs.size() + first.size());
+        combined.addAll(first);
         combined.addAll(codecs);
-        return new ValueCodecRegistry(combined, driverAdapters);
+        return new ValueCodecRegistry(combined, driverAdapters, standardFallback);
     }
 
     /** 在标准转换前增加驱动值解包器。新的 adapter 优先匹配，原注册表不受影响。 */
@@ -112,7 +131,7 @@ public final class ValueCodecRegistry {
         List<DriverValueAdapter> combined = new ArrayList<>(driverAdapters.size() + 1);
         combined.add(safeAdapter);
         combined.addAll(driverAdapters);
-        return new ValueCodecRegistry(codecs, combined);
+        return new ValueCodecRegistry(codecs, combined, standardFallback);
     }
 
     /** 把 Java 值整理为数据库驱动可绑定的形态，空值保持为空。 */
@@ -160,7 +179,8 @@ public final class ValueCodecRegistry {
     }
 
     private Object adapt(Object value) {
-        for (DriverValueAdapter adapter : driverAdapters) {
+        for (int index = 0; index < driverAdapters.size(); index++) {
+            DriverValueAdapter adapter = driverAdapters.get(index);
             if (adapter.supports(value)) {
                 return Objects.requireNonNull(adapter.unwrap(value),
                                               "driver value adapter must not return null for non-null input");
@@ -184,12 +204,13 @@ public final class ValueCodecRegistry {
 
     private ValueCodec findOrNull(Class<?> targetType) {
         // 第一个匹配项获胜，扩展注册表时具体类型必须排在通用类型前。
-        for (ValueCodec codec : codecs) {
+        for (int index = 0; index < codecs.size(); index++) {
+            ValueCodec codec = codecs.get(index);
             if (codec.supports(targetType)) {
                 return codec;
             }
         }
-        return null;
+        return standardFallback ? STANDARD_LOOKUP.get(targetType) : null;
     }
 
     private static DescriptorState descriptorState(List<ValueCodec> codecs) {
@@ -562,26 +583,16 @@ public final class ValueCodecRegistry {
         }
     }
 
-    /** String、Object 和 Character 的通用兜底转换。 */
+    /** Object 精确类型的透传；文本转换由前面的 TextValueCodec 统一负责。 */
     private static final class IdentityValueCodec implements ValueCodec {
 
         @Override
         public boolean supports(Class<?> targetType) {
-            return targetType == String.class || targetType == Object.class || targetType == Character.class;
+            return targetType == Object.class;
         }
 
         @Override
         public Object read(Object value, Class<?> targetType) {
-            if (targetType == String.class) {
-                return value.toString();
-            }
-            if (targetType == Character.class) {
-                String text = ValueCodecTypeSupport.text(value);
-                if (text.length() == 1) {
-                    return text.charAt(0);
-                }
-                throw new IllegalArgumentException("character value must contain exactly one character");
-            }
             return value;
         }
     }

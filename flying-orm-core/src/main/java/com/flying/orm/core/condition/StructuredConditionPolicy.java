@@ -10,6 +10,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.function.UnaryOperator;
 
 /**
  * 前端条件白名单策略，把“外部可以表达什么”和“内部真正执行什么”明确分开。
@@ -24,11 +25,6 @@ import java.util.Set;
  */
 public final class StructuredConditionPolicy {
 
-    private static final int DEFAULT_MAX_DEPTH = 8;
-    private static final int DEFAULT_MAX_NODES = 100;
-    private static final int DEFAULT_MAX_COLLECTION_SIZE = 1_000;
-    private static final int DEFAULT_MAX_STRING_LENGTH = 4_096;
-
     private final Map<String, String> operators;
     private final Set<FieldIdentity> allowedFields;
     /** false 表示调用方从未设置字段白名单；true 时空集合明确表示一个字段都不允许。 */
@@ -40,6 +36,7 @@ public final class StructuredConditionPolicy {
     private final int maxCollectionSize;
     private final int maxStringLength;
     private final TermRegistry terms;
+    private final StructuredConditionValueMapper valueMapper;
 
     private StructuredConditionPolicy(Map<String, String> operators,
                                       Set<FieldIdentity> allowedFields,
@@ -50,7 +47,8 @@ public final class StructuredConditionPolicy {
                                       int maxNodes,
                                       int maxCollectionSize,
                                       int maxStringLength,
-                                      TermRegistry terms) {
+                                      TermRegistry terms,
+                                      StructuredConditionValueMapper valueMapper) {
         this.operators = Objects.requireNonNull(operators, "condition operators must not be null");
         this.allowedFields = Objects.requireNonNull(allowedFields, "allowed fields must not be null");
         this.allowedFieldsRestricted = allowedFieldsRestricted;
@@ -61,10 +59,11 @@ public final class StructuredConditionPolicy {
         this.maxCollectionSize = maxCollectionSize;
         this.maxStringLength = maxStringLength;
         this.terms = Objects.requireNonNull(terms, "term registry must not be null");
+        this.valueMapper = valueMapper;
     }
 
     /**
-     * 默认只开放常用参数化条件，自定义条件需要调用方显式放行。
+     * 默认只开放常用参数化条件，自定义条件需要调用方显式放行；容量限制由调用方按需设置。
      *
      * @return 默认策略
      */
@@ -74,11 +73,11 @@ public final class StructuredConditionPolicy {
                                              false,
                                              Set.of(),
                                              Map.of(),
-                                             DEFAULT_MAX_DEPTH,
-                                             DEFAULT_MAX_NODES,
-                                             DEFAULT_MAX_COLLECTION_SIZE,
-                                             DEFAULT_MAX_STRING_LENGTH,
-                                             TermRegistry.empty());
+                                             Integer.MAX_VALUE,
+                                             Integer.MAX_VALUE,
+                                             Integer.MAX_VALUE,
+                                             Integer.MAX_VALUE,
+                                             TermRegistry.empty(), null);
     }
 
     /**
@@ -133,7 +132,7 @@ public final class StructuredConditionPolicy {
                                              maxNodes,
                                              maxCollectionSize,
                                              maxStringLength,
-                                             terms);
+                                             terms, valueMapper);
     }
 
     /**
@@ -254,7 +253,7 @@ public final class StructuredConditionPolicy {
                                              maxNodes,
                                              maxCollectionSize,
                                              maxStringLength,
-                                             Objects.requireNonNull(terms, "term registry must not be null"));
+                                             Objects.requireNonNull(terms, "term registry must not be null"), valueMapper);
     }
 
     /**
@@ -275,17 +274,9 @@ public final class StructuredConditionPolicy {
         return Optional.ofNullable(operators.get(Names.key(externalOperator, "condition operator")));
     }
 
-    boolean allowsField(String field) {
-        return allowsField(FieldIdentity.of(field));
-    }
-
     boolean allowsField(FieldIdentity identity) {
         return !deniedFields.contains(identity)
                 && (!allowedFieldsRestricted || allowedFields.contains(identity));
-    }
-
-    boolean allowsFieldOperator(String field, String externalOperator) {
-        return allowsFieldOperator(FieldIdentity.of(field), externalOperator);
     }
 
     boolean allowsFieldOperator(FieldIdentity identity, String externalOperator) {
@@ -302,7 +293,8 @@ public final class StructuredConditionPolicy {
         return maxNodes;
     }
 
-    int maxCollectionSize() {
+    /** 返回调用方配置的集合预算，供扩展适配器在包装值前校验实际集合。 */
+    public int maxCollectionSize() {
         return maxCollectionSize;
     }
 
@@ -334,10 +326,58 @@ public final class StructuredConditionPolicy {
 
     /**
      * 结构化外部条件把扩展声明的复杂度折算进既有 node budget，不再建立第二套请求预算。
-     * 标准 term 仍固定只计一个节点；自定义 term 必须来自带 descriptor 的受控注册表。
+     * 未声明额外成本的 term 只计一个节点；外部操作符仍需显式放行。
      */
     int termComplexityCost(String internalOperator) {
-        return terms.governedComplexityCost(internalOperator);
+        return terms.complexityCost(internalOperator);
+    }
+
+    /**
+     * 用可信映射统一字段策略的命名，例如实体属性名转换成数据库列名。
+     * 拒绝规则保留；多个别名映射到同一字段时，字段操作符规则取交集，不能放宽授权。
+     */
+    public StructuredConditionPolicy mapFields(UnaryOperator<String> mapper) {
+        Objects.requireNonNull(mapper, "structured field mapper must not be null");
+        if (allowedFields.isEmpty() && deniedFields.isEmpty() && fieldOperators.isEmpty()) {
+            return this;
+        }
+        Set<FieldIdentity> allowed = mapFields(allowedFields, mapper);
+        Set<FieldIdentity> denied = mapFields(deniedFields, mapper);
+        Map<FieldIdentity, Set<String>> rules = new LinkedHashMap<>();
+        fieldOperators.forEach((field, operators) -> rules.merge(
+                FieldIdentity.of(mapper.apply(field.name())), operators, (left, right) -> {
+                    Set<String> intersection = new LinkedHashSet<>(left);
+                    intersection.retainAll(right);
+                    return Set.copyOf(intersection);
+                }));
+        return copy(operators, allowed, denied, Map.copyOf(rules),
+                maxDepth, maxNodes, maxCollectionSize, maxStringLength);
+    }
+
+    /**
+     * 追加可信服务端的逐值映射，按注册顺序执行，供实体等适配层复用统一条件编译流程。
+     * 映射不改变字段或操作符授权；策略的其他派生方法会保留该映射。
+     */
+    public StructuredConditionPolicy mapValues(StructuredConditionValueMapper mapper) {
+        Objects.requireNonNull(mapper, "structured value mapper must not be null");
+        StructuredConditionValueMapper previous = valueMapper;
+        StructuredConditionValueMapper combined = previous == null ? mapper
+                : (field, operator, value) -> mapper.map(field, operator, previous.map(field, operator, value));
+        return new StructuredConditionPolicy(operators, allowedFields, allowedFieldsRestricted, deniedFields,
+                fieldOperators, maxDepth, maxNodes, maxCollectionSize, maxStringLength, terms, combined);
+    }
+
+    Object mapValue(String field, String operator, Object value) {
+        return valueMapper == null ? value : valueMapper.map(field, operator, value);
+    }
+
+    private static Set<FieldIdentity> mapFields(Set<FieldIdentity> fields, UnaryOperator<String> mapper) {
+        if (fields.isEmpty()) {
+            return fields;
+        }
+        Set<FieldIdentity> mapped = new LinkedHashSet<>();
+        fields.forEach(field -> mapped.add(FieldIdentity.of(mapper.apply(field.name()))));
+        return Set.copyOf(mapped);
     }
 
     private StructuredConditionPolicy copy(Map<String, String> operators,
@@ -357,7 +397,7 @@ public final class StructuredConditionPolicy {
                                              maxNodes,
                                              maxCollectionSize,
                                              maxStringLength,
-                                             terms);
+                                             terms, valueMapper);
     }
 
     private static int requirePositive(int value, String name) {

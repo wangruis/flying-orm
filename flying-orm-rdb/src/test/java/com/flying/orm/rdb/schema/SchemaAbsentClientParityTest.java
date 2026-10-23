@@ -43,24 +43,24 @@ class SchemaAbsentClientParityTest {
         JdbcSchemaClient jdbc = JdbcSchemaClient.create(jdbcExecutor, dialect);
         ReactiveSchemaClient reactive = ReactiveSchemaClient.create(reactiveExecutor, dialect);
 
-        ReviewedSchemaPlan jdbcPlan = jdbc.reviewRelationalAbsent(
+        SchemaMigrationPlan jdbcPlan = jdbc.reviewRelationalAbsent(
                 database,
                 target,
                 JdbcFormMetadataReaders.create(jdbcExecutor, dialect));
-        ReviewedSchemaPlan reactivePlan = reactive.reviewRelationalAbsent(
+        SchemaMigrationPlan reactivePlan = reactive.reviewRelationalAbsent(
                 database,
                 target,
                 ReactiveFormMetadataReaders.create(reactiveExecutor, dialect)).block();
 
         assertNotNull(reactivePlan);
         assertEquals(SchemaCompatibilityMode.EXACT, jdbcPlan.compatibilityMode());
-        assertEquals(ReviewedSchemaPlan.TargetState.ABSENT, jdbcPlan.targetState().orElseThrow());
+        assertEquals(SchemaMigrationPlan.TargetState.ABSENT, jdbcPlan.targetState().orElseThrow());
         assertEquals(target, jdbcPlan.targetIdentity().orElseThrow());
         assertTrue(jdbcPlan.steps().isEmpty());
-        assertEquals(jdbcPlan.fingerprint(), reactivePlan.fingerprint());
+        assertEquals(jdbcPlan.requests(), reactivePlan.requests());
     }
 
-    private static final class EmptyMetadataExecutor implements SyncSqlExecutor {
+    private static final class EmptyMetadataExecutor implements com.flying.orm.rdb.support.ListQueryFixture {
 
         @Override
         public List<DynamicRow> query(SqlRequest request) {
@@ -74,7 +74,7 @@ class SchemaAbsentClientParityTest {
 
         @Override
         public SqlWriteResult rowsUpdatedReturningKeys(SqlRequest request,
-                                                       SqlExecutionOptions options) {
+                                                       SqlExecutionOptions options, String generatedKeyColumn) {
             throw new AssertionError("review must not request generated keys");
         }
     }

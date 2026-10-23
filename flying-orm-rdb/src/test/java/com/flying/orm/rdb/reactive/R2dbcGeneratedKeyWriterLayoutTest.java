@@ -51,7 +51,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class R2dbcGeneratedKeyWriterLayoutTest {
 
-    private static final SqlExecutionOptions OPTIONS = SqlExecutionOptions.safeDefaults();
+    private static final SqlExecutionOptions OPTIONS = SqlExecutionOptions.unlimited();
 
     @Test
     void readsCountAndKeyFromTheSameSegmentOnEverySubscription() {

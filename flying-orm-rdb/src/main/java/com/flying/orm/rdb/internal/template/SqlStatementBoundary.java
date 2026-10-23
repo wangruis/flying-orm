@@ -1,39 +1,55 @@
 package com.flying.orm.rdb.internal.template;
 
+import com.flying.orm.rdb.internal.dialect.DatabaseProduct;
+
 import java.util.Locale;
 
 /**
- * SQL 单语句语法边界。引用、注释和方言文本区域统一由 {@link SqlLexicalScanner} 识别；这里仅判断顶层
- * 分号和 SQL Server 无分号批处理是否仍属于同一条语句。
+ * SQL 单语句语法边界及参数标记。二者消费同一次词法扫描，引用和注释中的问号不参与绑定。
  */
 final class SqlStatementBoundary {
 
     private SqlStatementBoundary() {
     }
 
-    static void validate(String sql,
+    static String compile(String sql,
                          SqlLexicalScanner.Rules lexicalRules,
-                         boolean sqlServerDialect,
-                         boolean oracleDialect) {
-        if (oracleDialect && OracleAnonymousBlockBoundary.startsWithBlock(sql)) {
+                         DatabaseProduct product,
+                         int parameterCount,
+                         boolean templateSlots) {
+        boolean oracleBlock = product == DatabaseProduct.ORACLE && OracleAnonymousBlockBoundary.startsWithBlock(sql);
+        if (oracleBlock) {
             OracleAnonymousBlockBoundary.validate(sql);
-            return;
+            if (parameterCount < 0) {
+                return sql;
+            }
         }
-        BoundaryValidator validator = new BoundaryValidator(sql, sqlServerDialect);
-        SqlLexicalScanner.scan(sql, lexicalRules, true, validator::accept);
-        validator.finish();
+        BoundaryValidator validator = new BoundaryValidator(sql, product, parameterCount, oracleBlock);
+        SqlLexicalScanner.scan(sql, lexicalRules, templateSlots, validator::accept);
+        return validator.finish();
     }
 
     private static final class BoundaryValidator {
         private final String sql;
         private final SqlStatementBoundaryState state;
+        private final int parameterCount;
+        private final boolean oracleBlock;
+        private final boolean postgresql;
+        private final StringBuilder adapted;
+        private int markerIndex;
+        private int literalStart;
         private int depth;
         private boolean terminated;
         private boolean hasContent;
 
-        private BoundaryValidator(String sql, boolean sqlServerDialect) {
+        private BoundaryValidator(String sql, DatabaseProduct product, int parameterCount, boolean oracleBlock) {
             this.sql = sql;
-            this.state = sqlServerDialect ? new SqlStatementBoundaryState() : null;
+            this.state = product == DatabaseProduct.SQL_SERVER ? new SqlStatementBoundaryState() : null;
+            this.parameterCount = parameterCount;
+            this.oracleBlock = oracleBlock;
+            this.postgresql = product == DatabaseProduct.POSTGRESQL;
+            this.adapted = parameterCount > 0 && (postgresql || product == DatabaseProduct.SQL_SERVER)
+                    ? new StringBuilder(sql.length() + parameterCount * 2) : null;
         }
 
         private void accept(SqlLexicalScanner.SegmentKind kind, int start, int end) {
@@ -52,6 +68,13 @@ final class SqlStatementBoundary {
         }
 
         private void acceptCode(int start, int end) {
+            if (oracleBlock) {
+                for (int index = sql.indexOf('?', start); index >= 0 && index < end;
+                     index = sql.indexOf('?', index + 1)) {
+                    marker(index);
+                }
+                return;
+            }
             for (int index = start; index < end;) {
                 char current = sql.charAt(index);
                 if (terminated) {
@@ -59,6 +82,9 @@ final class SqlStatementBoundary {
                         throw multipleStatements();
                     }
                     index++;
+                } else if (current == '?') {
+                    hasContent = true;
+                    marker(index++);
                 } else if ((current == ':' || current == '@') && index + 1 < end
                         && isWordStart(sql.charAt(index + 1))) {
                     hasContent = true;
@@ -88,7 +114,7 @@ final class SqlStatementBoundary {
                     int wordEnd = wordEnd(sql, index, end);
                     hasContent = true;
                     if (state != null) {
-                        state.accept(sql.substring(index, wordEnd).toUpperCase(Locale.ROOT), false, true);
+                        state.accept(sql.substring(index, wordEnd).toUpperCase(Locale.ROOT));
                     }
                     index = wordEnd;
                 } else {
@@ -108,8 +134,27 @@ final class SqlStatementBoundary {
             }
         }
 
-        private void finish() {
-            requireContent();
+        private void marker(int offset) {
+            if (adapted != null) {
+                adapted.append(sql, literalStart, offset);
+                if (postgresql) {
+                    adapted.append('$').append(markerIndex + 1);
+                } else {
+                    adapted.append("@P").append(markerIndex);
+                }
+                literalStart = offset + 1;
+            }
+            markerIndex++;
+        }
+
+        private String finish() {
+            if (!oracleBlock) {
+                requireContent();
+            }
+            if (parameterCount >= 0 && markerIndex != parameterCount) {
+                throw new IllegalArgumentException("sql parameter marker count does not match parameter count");
+            }
+            return adapted == null ? sql : adapted.append(sql, literalStart, sql.length()).toString();
         }
     }
 
@@ -151,23 +196,17 @@ final class SqlStatementBoundary {
         };
     }
 
-    static boolean isStatementStart(String word, boolean sqlServerDialect) {
-        if (sqlServerDialect && switch (word) {
-            case "ADD", "BREAK", "CONTINUE", "DUMP", "GOTO", "IF", "LOAD", "READTEXT", "RECEIVE", "REVERT",
-                    "SEND", "SETUSER", "UPDATETEXT", "WHILE", "WRITETEXT" -> true;
-            default -> false;
-        }) {
-            return true;
-        }
+    static boolean isStatementStart(String word) {
         return switch (word) {
-            case "SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "CALL",
+            case "ADD", "BREAK", "CONTINUE", "DUMP", "GOTO", "IF", "LOAD", "READTEXT", "RECEIVE", "REVERT",
+                    "SEND", "SETUSER", "UPDATETEXT", "WHILE", "WRITETEXT",
+                    "SELECT", "WITH", "INSERT", "UPDATE", "DELETE", "MERGE", "UPSERT", "CALL",
                     "CREATE", "ALTER", "DROP", "TRUNCATE", "GRANT", "REVOKE", "COMMENT", "EXPLAIN", "SHOW",
                     "DESCRIBE", "SET", "VALUES", "EXEC", "EXECUTE", "BEGIN", "COMMIT", "ROLLBACK",
                     "WAITFOR", "USE", "DECLARE", "BACKUP", "BULK", "CHECKPOINT", "DBCC", "DENY", "KILL",
                     "PRINT", "RAISERROR", "RECONFIGURE", "RESTORE", "RETURN", "SAVE", "SHUTDOWN", "THROW",
                     "OPEN", "CLOSE", "DEALLOCATE", "FETCH", "ENABLE", "DISABLE" -> true;
             // SQL Server 的 REPLACE 是函数，DESC 是排序方向，都不是独立语句起点。
-            case "DESC", "REPLACE" -> !sqlServerDialect;
             default -> false;
         };
     }
